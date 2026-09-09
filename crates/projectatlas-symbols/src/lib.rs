@@ -1,6 +1,7 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
 mod configured_modules;
+mod documents;
 mod languages;
 mod markdown;
 mod resolution_keys;
@@ -11,6 +12,15 @@ pub use configured_modules::{
     EcmaScriptModuleConfig, EcmaScriptPathMapping, MAX_CONFIGURED_MODULE_CONFIGS,
     MAX_CONFIGURED_MODULE_IDENTITY_BYTES, MAX_CONFIGURED_MODULE_MAPPINGS,
     MAX_CONFIGURED_MODULE_TARGETS,
+};
+pub use documents::{
+    DOCX_DOCUMENT_PART, DocumentCompleteness, DocumentExtractionError, DocumentFact, DocumentFacts,
+    DocumentFormat, DocumentLimit, DocumentLocator, DocumentParserProvenance, LOPDF_VERSION,
+    MAX_DOCUMENT_COMPRESSED_BYTES, MAX_DOCUMENT_ENTRIES, MAX_DOCUMENT_EXPANDED_BYTES,
+    MAX_DOCUMENT_FACTS, MAX_DOCUMENT_MEMORY_BYTES, MAX_DOCUMENT_OUTPUT_BYTES,
+    MAX_DOCUMENT_RECURSION_DEPTH, PDF_EXTRACT_VERSION, QUICK_XML_VERSION, document_format_for_path,
+    extract_document_graph_controlled, extract_document_symbol_facts_controlled,
+    extract_document_text_controlled,
 };
 pub use markdown::{
     DocumentLinkCandidate, DocumentLinkSource, MAX_DOCUMENT_LINK_CANDIDATES,
@@ -150,6 +160,15 @@ fn extract_symbol_graph_with_source_checked<E>(
             let facts = markdown::extract_markdown_facts_checked(parse_content.as_ref(), check)?;
             let graph = facts.symbol_graph(path, language);
             return Ok((graph.parser, graph));
+        }
+        SymbolParserOwner::Document => {
+            // Binary documents enter through the bytes-aware adapter in the
+            // CLI runtime; a text-only caller cannot safely reinterpret them.
+            check()?;
+            return Ok((
+                ParserKind::Structural,
+                empty_graph(path, language, ParserKind::Structural),
+            ));
         }
         SymbolParserOwner::Unavailable => {
             check()?;

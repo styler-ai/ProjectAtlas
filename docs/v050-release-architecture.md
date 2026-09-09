@@ -204,12 +204,103 @@ flowchart LR
     file[Repository file bytes] --> admit{PDF or DOCX magic and policy?}
     admit -->|no| unsupported[Typed unsupported coverage]
     admit -->|yes| limits[Compressed, expanded, time, memory, entry, recursion limits]
-    limits --> parser[Approved in-process Rust parser]
-    parser --> evidence[Text plus exact format locator and provenance]
+    limits --> format{Admitted format}
+    format -->|PDF| pdf[Fixed WASI guest in-process: memory and fuel ceilings]
+    format -->|DOCX| docx[Bounded ZIP read and streaming XML]
+    pdf --> evidence[Text plus exact format locator and provenance]
+    docx --> evidence
+    pdf -->|malformed, limited or canceled| bounded
+    docx -->|malformed, limited or canceled| bounded
     evidence --> publish[(Atomic indexed-text and graph publication)]
     publish --> navigate[Search, summary, graph, exact evidence]
     limits -->|exceeded or canceled| bounded[Typed bounded failure; no complete claim]
 ```
+
+The same extraction result supplies bounded literal content summaries and suggested
+purposes before its sparse graph is published; authored purposes remain unchanged.
+The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
+with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
+`0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).
+The PDF guest is embedded build-owned code; callers cannot select modules.
+Linux x86-64 with the repository-pinned Rust toolchain and locked WASI dependency
+tree is its canonical builder. `packaging/pdf-parser/build.py --install-target
+--validate` rebuilds and requires exact equality with the checked-in bytes in CI;
+`--write` is an explicit artifact update on that builder. Other hosts reject byte
+production and use `--validate --source-only` for guest format, Clippy, native
+tests, and locked dependency checks. All native platform jobs test the same
+embedded canonical guest through extraction, CLI/MCP navigation, and measurements.
+The build resolves dependency sources before canonical source-path remapping and
+uses one release code-generation unit. Cross-host compiler output equality is
+not an artifact claim.
+One process-local admission lease covers both document formats and observes caller
+cancellation and deadlines while queued, preventing source-worker parallelism from
+multiplying parser memory envelopes. Each parse has 64 MiB linear memory, a 1 MiB
+interpreter value stack, 256 call depth, 500 million total instruction fuel,
+and a ten-second ceiling that respects an earlier caller deadline. Fuel
+suspensions check cancellation; real allocation denial remains a typed limit.
+The host supplies bounded entropy and an empty environment, with no filesystem,
+network, clock, or process capabilities. Page-tree validation and bounded
+stream decoding precede exact-page formatting, including Form text with inherited graphics state, composed caller/Form
+matrices, and scoped fonts. A structure-root child-link preflight refuses ActualText
+replacements before formatting, including replacements on ancestors of marked content.
+Ordinary tagged content remains admitted; malformed or cyclic child links fail closed.
+The preflight neither interprets logical order nor follows ParentTree mappings.
+Image pixels remain opaque. Local dependency patches and retained
+attribution are documented in `packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md`.
+PDF admission requires a `%PDF-` header and extracts only page text; DOCX
+admission requires a ZIP header, admits only stored or DEFLATE entries, rejects
+unsafe, duplicate, encrypted, or otherwise unsupported package input, and passes
+only `word/document.xml` to the parser. Nested WordprocessingML text boxes retain
+and resume their outer paragraph/run context, emitting interrupted run fragments
+in document order with their original decoded byte offsets. Complex-field code
+and deleted-text carriers are validated without execution or publication;
+enclosing deleted/moved-from revisions also suppress every text leaf, separator,
+and field-state mutation while retaining source paragraph/run numbering;
+cached field results and instruction-text leaves outside field-code regions
+remain literal document text. Each complete decoded text leaf honors inherited
+`xml:space`, trimming only XML edge whitespace in default mode and retaining it
+in preserve mode before logical run offsets are published; invalid modes fail
+as malformed input. Live page-number and date blocks and footnote/endnote reference
+markers return typed unsupported input because their text requires evaluation;
+note parts are not traversed. Field nesting has its own 64-level bound and is
+isolated across text-box contexts. Markup Compatibility alternatives select only
+the first choice whose required namespaces are understood WordprocessingML, or
+the fallback. Root `mc:Ignorable` policies retain at most 64 distinct namespace
+URIs and skip unknown extension subtrees; aliases follow URI identity. Nested
+policies and nonempty `mc:ProcessContent` or `mc:MustUnderstand` return typed
+unsupported input. Unselected branches cannot alter text, locators, or field context;
+they retain XML depth, well-formedness, and declaration checks. Explicit language overrides take precedence
+over a PDF/DOCX extension. Explicit nonbreaking and soft hyphens retain their
+Unicode characters and count toward decoded byte offsets. Positional tabs and
+saved page breaks use the existing tab/newline separators. Font-coded `w:sym`
+glyphs return typed unsupported input instead of guessed or omitted text.
+Each result carries a page/text-span or
+part/paragraph/run/text-span locator plus its actual emitted-text line range
+for symbol slicing, parser provenance, and a complete
+coverage marker. Normal text, symbol, and summary admission uses the document
+parser's 8 MiB raw-input ceiling; ordinary source retains its configured ceiling.
+The boundary caps input/compressed package bytes at 8 MiB,
+expanded package bytes at 32 MiB, the native source/parser staging envelope at 96 MiB,
+retained output at 4 MiB, and package entries and evidence facts at 256 and
+4,096 respectively; embedded-document recursion is limited to zero (the outer
+document depth is one). It never executes macros,
+scripts, external references, OCR, or embedded documents. Valid text is reused
+by the existing `file_texts` FTS projection and locator-bearing blocks by the
+existing graph publication transaction; no document-specific SQLite schema is
+needed. Any malformed, mismatched, encrypted, over-limit, canceled, or
+source-changed operation fails before publication, preserving the last complete
+generation. The staging envelope excludes shared interpreter translation and allocator
+overhead; process RSS is measured separately in platform proof. `.github/scripts/measure-bounded-documents.py`
+scans three fresh isolated repositories, each with 64 sixteen-page PDFs and 64
+sixty-four-paragraph DOCX files, using the optimized native CLI. It checks the
+exact indexed file count and records CPU time, peak RSS, wall time, database and
+output bytes, and native I/O counters. Windows reports process read/write
+operations and transferred bytes; Linux/macOS report `wait4` filesystem block
+operations, without claiming byte-equivalence across platforms. CI retains each
+platform's report with the measured binary SHA-256. Per-run acceptance ceilings
+are 120 seconds wall time, 90 seconds CPU, 768 MiB peak RSS, 64 MiB database,
+1 MiB captured output, and two million native I/O operations. These are fixed-case
+regression ceilings; hostile per-document limits remain enforced by the parser.
 
 ## Invalid graph identity admission
 

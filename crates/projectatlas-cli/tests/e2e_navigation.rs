@@ -83,6 +83,8 @@ use support::{
     run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
+use zip::ZipWriter;
+use zip::write::FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
 
@@ -9576,4 +9578,1066 @@ fn require_json_contains_from_value(
         ))
         .into())
     }
+}
+
+#[test]
+fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Error>> {
+    const PDF_FILE: &str = "guide.pdf";
+    const DOCX_FILE: &str = "guide.docx";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("bounded-document-navigation");
+    let docs = repo.join("docs");
+    fs::create_dir_all(&docs)?;
+
+    let make_pdf_with_replacement = |page_content: &str, structure_replacement: bool| {
+        let page_content = format!(
+            "10 20 30 40 re s 10 20 30 40 re f* 10 20 30 40 re B 10 20 30 40 re B* 10 20 30 40 re b 10 20 30 40 re b* 10 20 m 30 40 l h 50 60 70 80 v S 10 20 30 40 re 50 60 70 80 v S /Image Do /Ps Do /LegacyPs Do /CalGray cs /CalGray CS /CalRGB cs /CalRGB CS /Lab cs /Lab CS\n{page_content}"
+        );
+        let page_object = format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n",
+            page_content.len()
+        );
+        let pdf_objects = [
+            if structure_replacement {
+                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 36 0 R >>\nendobj\n"
+                    .as_slice()
+            } else {
+                b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice()
+            },
+            b"2 0 obj\n<< /Type 29 0 R /Kids 25 0 R /Count 26 0 R /Rotate 90 >>\nendobj\n"
+                .as_slice(),
+            if structure_replacement {
+                b"3 0 obj\n<< /Type 30 0 R /StructParents 0 /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Type 28 0 R /Font [5 0 R 12] >> /MissingState << /Type 999 0 R >> /WrongState << /Type 26 0 R >> >> /XObject << /Image 6 0 R /MissingSubtype 34 0 R /WrongSubtype 35 0 R /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
+            } else {
+                b"3 0 obj\n<< /Type 30 0 R /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 8 0 R /F3 13 0 R /F4 15 0 R /F5 17 0 R /F6 18 0 R /F7 19 0 R /F8 21 0 R /F9 22 0 R >> /ColorSpace << /CS1 /DeviceCMYK /IndexedAlias [/Indexed /DeviceRGB 1 <000000ffffff>] /CalGray [/CalGray 27 0 R] /CalRGB [/CalRGB 27 0 R] /Lab [/Lab 27 0 R] /MissingColor [/CalRGB 999 0 R] /WrongColor [/CalRGB 26 0 R] >> /ExtGState << /GS << /Type 28 0 R /Font [5 0 R 12] >> /MissingState << /Type 999 0 R >> /WrongState << /Type 26 0 R >> >> /XObject << /Image 6 0 R /MissingSubtype 34 0 R /WrongSubtype 35 0 R /Fm 7 0 R /Ps 23 0 R /LegacyPs 24 0 R >> >> >>\nendobj\n".as_slice()
+            },
+            page_object.as_bytes(),
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".as_slice(),
+        ];
+        let mut pdf = b"%PDF-2.0\n".to_vec();
+        let mut offsets = Vec::new();
+        for object in pdf_objects {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(object);
+        }
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"6 0 obj\n<< /Length 2000001 /Subtype 32 0 R /Filter /DCTDecode >>\nstream\n",
+        );
+        pdf.extend(std::iter::repeat_n(b' ', 2_000_001));
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"7 0 obj\n<< /Type /XObject /Subtype 31 0 R /BBox [0 0 612 792] /Matrix [1 0 0 1 0 600] /Length 41 >>\nstream\nBT /F1 12 Tf 72 0 Td (Runtime Form) ' ET\nendstream\nendobj\n");
+        let custom_encoding = "/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def
+/CMapName /FixtureEncoding def /CMapType 1 def /WMode 0 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 begincidrange <0000> <FFFF> 0 endcidrange
+endcmap CMapName currentdict /CMap defineresource pop end end";
+        let encoding_object = format!(
+            "9 0 obj\n<< /Length {} >>\nstream\n{custom_encoding}\nendstream\nendobj\n",
+            custom_encoding.len()
+        );
+        let unicode = "/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /FixtureUnicode def /CMapType 2 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfchar <0001> <005A> endbfchar
+endcmap CMapName currentdict /CMap defineresource pop end end";
+        let unicode_object = format!(
+            "11 0 obj\n<< /Length {} >>\nstream\n{unicode}\nendstream\nendobj\n",
+            unicode.len()
+        );
+
+        let partial_unicode = unicode
+            .replace("<0000> <FFFF>", "<00> <FF>")
+            .replace("<0001> <005A>", "<41> <005A>");
+        let partial_unicode_object = format!(
+            "16 0 obj\n<< /Length {} >>\nstream\n{partial_unicode}\nendstream\nendobj\n",
+            partial_unicode.len()
+        );
+        for object in [
+            "8 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding 9 0 R /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
+            encoding_object.as_str(),
+            "10 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 12 0 R /CIDToGIDMap /Identity /DW 1500.5 >>\nendobj\n",
+            unicode_object.as_str(),
+            "12 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 4 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>\nendobj\n",
+            "13 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /Encoding /WinAnsiEncoding /FontDescriptor 14 0 R /FirstChar 65 /LastChar 65 /Widths [600] >>\nendobj\n",
+            "14 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 32 /FontBBox [0 -200 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /MissingWidth 600 >>\nendobj\n",
+            "15 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /FirstChar 65 /LastChar 66 /Widths [600 600] /ToUnicode 16 0 R >>\nendobj\n",
+            partial_unicode_object.as_str(),
+            "17 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Fixture /Encoding << >> /FirstChar 65 /LastChar 66 /Widths [600 600] /ToUnicode 16 0 R >>\nendobj\n",
+            "18 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-H /DescendantFonts [10 0 R] /ToUnicode 11 0 R >>\nendobj\n",
+            "19 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 600] /FontMatrix [.002 0 0 .002 0 0] /CharProcs << /A 20 0 R /B 20 0 R >> /Encoding << /Differences [65 /A /B] >> /FirstChar 65 /LastChar 66 /Widths [600 600] >>\nendobj\n",
+            "20 0 obj\n<< /Length 8 >>\nstream\n600 0 d0\nendstream\nendobj\n",
+            "21 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 600 600] /FontMatrix [.002] /CharProcs << /A 20 0 R /B 20 0 R >> /Encoding << /Differences [65 /A /B] >> /FirstChar 65 /LastChar 66 /Widths [600 600] >>\nendobj\n",
+            "22 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << >> >>\nendobj\n",
+            "23 0 obj\n<< /Type /XObject /Subtype 33 0 R /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
+            "24 0 obj\n<< /Type /XObject /Subtype 31 0 R /Subtype2 33 0 R /Length 58 >>\nstream\n/Helvetica findfont 12 scalefont setfont (Print only) show\nendstream\nendobj\n",
+            "25 0 obj\n[3 0 R]\nendobj\n",
+            "26 0 obj\n1\nendobj\n",
+            "27 0 obj\n<< /WhitePoint [1 1 1] >>\nendobj\n",
+            "28 0 obj\n/ExtGState\nendobj\n",
+            "29 0 obj\n/Pages\nendobj\n",
+            "30 0 obj\n/Page\nendobj\n",
+            "31 0 obj\n/Form\nendobj\n",
+            "32 0 obj\n/Image\nendobj\n",
+            "33 0 obj\n/PS\nendobj\n",
+            "34 0 obj\n<< /Type /XObject /Subtype 999 0 R /Length 0 >>\nstream\n\nendstream\nendobj\n",
+            "35 0 obj\n<< /Type /XObject /Subtype 26 0 R /Length 0 >>\nstream\n\nendstream\nendobj\n",
+        ] {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(object.as_bytes());
+        }
+        if structure_replacement {
+            for object in [
+                "36 0 obj\n<< /Type /StructTreeRoot /K 37 0 R /ParentTree 38 0 R >>\nendobj\n",
+                "37 0 obj\n<< /Type /StructElem /S /Span /P 36 0 R /Pg 3 0 R /K 0 /ActualText (replacement) >>\nendobj\n",
+                "38 0 obj\n<< /Nums [0 [37 0 R]] >>\nendobj\n",
+            ] {
+                offsets.push(pdf.len());
+                pdf.extend_from_slice(object.as_bytes());
+            }
+        }
+        let object_count = offsets.len() + 1;
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {object_count}\n").as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size {object_count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n")
+                .as_bytes(),
+        );
+        pdf
+    };
+    let make_pdf = |page_content: &str| make_pdf_with_replacement(page_content, false);
+    let pdf_path = docs.join(PDF_FILE);
+    let original_page_content = "0 1 -1 0 612 0 cm\n/GS gs BT 400 Tz 72 720 Td 3 2 (Runtime P) \" (DF) Tj ET\nq 1 0 0 1 0 100 cm /Fm Do Q\nq 1 0 0 1 0 -100 cm /Fm Do Q";
+    fs::write(&pdf_path, make_pdf(original_page_content))?;
+
+    let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
+        let docx_file = fs::File::create(path)?;
+        let mut docx = ZipWriter::new(docx_file);
+        docx.start_file("word/document.xml", FileOptions::default())?;
+        write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
+        write!(
+            docx,
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\" mc:Ignorable=\"future\"><w:body><future:wrapper><w:p><w:r><w:t>Ignored extension text</w:t></w:r></w:p></future:wrapper><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t> {text} </w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:del><w:r><w:delText>Removed</w:delText><w:noBreakHyphen/><w:br/></w:r></w:del><w:moveFrom><w:r><w:t>Moved source</w:t><w:tab/><w:softHyphen/></w:r></w:moveFrom><w:r xml:space=\"preserve\"><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t><w:ptab w:alignment=\"left\" w:relativeTo=\"margin\" w:leader=\"none\"/><w:t>tabbed</w:t><w:lastRenderedPageBreak/><w:t>next page</w:t></w:r></w:p></w:body></w:document>"
+        )?;
+        docx.finish()?;
+        Ok(())
+    };
+    let docx_path = docs.join(DOCX_FILE);
+    write_docx(&docx_path, "DOCX evidence marker")?;
+
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "// Runtime PDF and DOCX evidence marker are shared words, not links.\npub fn unrelated() {}\n",
+    )?;
+
+    fs::write(
+        repo.join("src/oversized.rs"),
+        " ".repeat(2_000_001) + "pub fn oversized_source() {}",
+    )?;
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&atlas)?;
+    let config_path = atlas.join("config.toml");
+    let legacy_config = format!(
+        "[project]\nroot = \".\"\n[scan]\nsource_extensions = {}\n",
+        serde_json::to_string(BROAD_SOURCE_EXTENSIONS)?,
+    );
+    fs::write(&config_path, &legacy_config)?;
+    let database = atlas.join("projectatlas.db");
+    run_scan(&repo, &database)?;
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .args(["map", "--force"])
+        .assert()
+        .success();
+    let map = fs::read_to_string(atlas.join("projectatlas.toon"))?;
+    for document in ["docs/guide.pdf", "docs/guide.docx"] {
+        if !map.contains(document) {
+            return Err(io::Error::other(format!("map omitted document {document}")).into());
+        }
+    }
+    if fs::read_to_string(&config_path)? != legacy_config {
+        return Err(io::Error::other("document upgrade rewrote the existing configuration").into());
+    }
+    let persisted = Connection::open(&database)?;
+    let oversized_symbols: i64 = persisted.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE path = 'src/oversized.rs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if oversized_symbols != 0 {
+        return Err(
+            io::Error::other("document admission raised the ordinary source ceiling").into(),
+        );
+    }
+    drop(persisted);
+    let executable = mcp_contract_executable();
+
+    let files = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "files".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let files_text = serde_json::to_string(&files)?;
+    for expected_path in ["docs/guide.pdf", "docs/guide.docx"] {
+        if !files_text.contains(expected_path) {
+            return Err(io::Error::other(format!(
+                "CLI files navigation omitted {expected_path}: {files_text}"
+            ))
+            .into());
+        }
+    }
+
+    let cases = [
+        (
+            "docs/guide.pdf",
+            "Runtime PDF",
+            "pdf document",
+            "pdf:page=1;text-span=0..11",
+        ),
+        (
+            "docs/guide.docx",
+            "DOCX evidence marker",
+            "docx document",
+            "docx:part=word/document.xml;paragraph=2;run=1;text-span=0..20",
+        ),
+    ];
+    for (path, marker, description, locator) in cases {
+        let search = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "search".to_owned(),
+                marker.to_owned(),
+                "--file-pattern".to_owned(),
+                path.to_owned(),
+                "--content-selection".to_owned(),
+                "documentation".to_owned(),
+            ],
+        )?;
+        let search_text = serde_json::to_string(&search)?;
+        if !search_text.contains(path) || !search_text.contains(marker) {
+            return Err(io::Error::other(format!(
+                "CLI document search omitted {path}: {search_text}"
+            ))
+            .into());
+        }
+        let summary = json_summary_command(&repo, &database, path)?;
+        require_json_string(&summary, &["parser_kind"], "structural-symbol-graph")?;
+        require_json_contains(&summary, &["content_summary"], description)?;
+        require_json_contains(&summary, &["content_summary"], marker)?;
+        if json_at(&summary, &["content_summary"])?
+            .as_str()
+            .unwrap_or_default()
+            .contains("document-block-")
+        {
+            return Err(io::Error::other("document summary exposed graph identities").into());
+        }
+        let persisted = Connection::open(&database)?;
+        let purpose: String = persisted.query_row(
+            "SELECT p.purpose FROM purposes p JOIN nodes n ON n.id = p.node_id WHERE n.path = ?1",
+            [path],
+            |row| row.get(0),
+        )?;
+        if !purpose.contains(marker) || purpose.contains("document-block-") {
+            return Err(
+                io::Error::other(format!("document purpose lost literal text: {purpose}")).into(),
+            );
+        }
+        drop(persisted);
+        require_json_usize(
+            &summary,
+            &["symbol_count"],
+            if path == "docs/guide.docx" { 5 } else { 3 },
+        )?;
+        let symbols = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "symbols".to_owned(),
+                "list".to_owned(),
+                "--file".to_owned(),
+                path.to_owned(),
+                "--content-selection".to_owned(),
+                "documentation".to_owned(),
+                "--limit".to_owned(),
+                "10".to_owned(),
+            ],
+        )?;
+        let symbols_text = serde_json::to_string(&symbols)?;
+        if !symbols_text.contains("document-block-1") || !symbols_text.contains(locator) {
+            return Err(io::Error::other(format!(
+                "CLI symbols omitted exact {path} evidence: {symbols_text}"
+            ))
+            .into());
+        }
+        let relations = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "symbols".to_owned(),
+                "relations".to_owned(),
+                "--view".to_owned(),
+                "detailed".to_owned(),
+                "--file".to_owned(),
+                path.to_owned(),
+                "--relation".to_owned(),
+                "documents".to_owned(),
+                "--direction".to_owned(),
+                "outbound".to_owned(),
+            ],
+        )?;
+        require_json_usize(&relations, &["symbol_relations", "returned"], 0)?;
+        require_json_usize(&relations, &["symbol_relations", "total", "value"], 0)?;
+    }
+
+    let slice_cases = [
+        ("docs/guide.pdf", "document-block-1", 1, 1, "Runtime PDF"),
+        ("docs/guide.pdf", "document-block-2", 2, 2, "Runtime Form"),
+        ("docs/guide.pdf", "document-block-3", 3, 3, "Runtime Form"),
+        (
+            "docs/guide.docx",
+            "document-block-2",
+            1,
+            1,
+            "DOCX evidence marker joined run",
+        ),
+        (
+            "docs/guide.docx",
+            "document-block-3",
+            3,
+            4,
+            "After empty\ncontinued",
+        ),
+        ("docs/guide.docx", "document-block-4", 6, 6, "Inside box"),
+        (
+            "docs/guide.docx",
+            "document-block-5",
+            7,
+            8,
+            "After\u{2011}box\u{00ad}end\ttabbed\nnext page",
+        ),
+    ];
+    for (path, symbol, start, end, content) in slice_cases {
+        let slice = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "symbols".to_owned(),
+                "slice".to_owned(),
+                path.to_owned(),
+                symbol.to_owned(),
+                "--content-selection".to_owned(),
+                "documentation".to_owned(),
+            ],
+        )?;
+        require_json_usize(&slice, &["start_line"], start)?;
+        require_json_usize(&slice, &["end_line"], end)?;
+        require_json_string(&slice, &["content"], content)?;
+    }
+
+    Connection::open(&database)?.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    let wrong_root = temp.path().join("wrong-document-root");
+    let wrong_atlas = wrong_root.join(ATLAS_DIR_NAME);
+    fs::create_dir_all(&wrong_atlas)?;
+    fs::write(wrong_atlas.join("config.toml"), "[project]\nroot = \".\"\n")?;
+    let wrong_database = wrong_atlas.join("projectatlas.db");
+    fs::copy(&database, &wrong_database)?;
+    let wrong_before = mcp_database_snapshot(&wrong_database)?;
+    let wrong_cli = StdCommand::new(&executable)
+        .current_dir(&wrong_root)
+        .arg("--config")
+        .arg(wrong_atlas.join("config.toml"))
+        .arg("--db")
+        .arg(&wrong_database)
+        .args([
+            "search",
+            "DOCX evidence marker",
+            "--file-pattern",
+            "docs/guide.docx",
+        ])
+        .output()?;
+    if wrong_cli.status.success()
+        || !String::from_utf8_lossy(&wrong_cli.stderr).contains("project_mismatch")
+    {
+        return Err(
+            io::Error::other(format!("wrong-root document CLI search lost typed identity refusal: status={} stdout={} stderr={}", wrong_cli.status, String::from_utf8_lossy(&wrong_cli.stdout), String::from_utf8_lossy(&wrong_cli.stderr))).into(),
+        );
+    }
+
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        let files = session.call_tool(
+            "atlas_files",
+            &json!({
+                "project_path": repo.as_path(),
+                "file_pattern": "docs/*",
+                "content_selection": "documentation",
+                "limit": 10
+            }),
+        )?;
+        if !files.contains("docs/guide.pdf") || !files.contains("docs/guide.docx") {
+            return Err(io::Error::other(format!(
+                "MCP files navigation omitted bounded documents: {files}"
+            ))
+            .into());
+        }
+        let wrong_mcp = session.call_tool("atlas_search", &json!({
+            "project_path": wrong_root, "pattern": "DOCX evidence marker", "file_pattern": "docs/guide.docx"
+        }))?;
+        if !wrong_mcp.contains("project_mismatch")
+            || mcp_database_snapshot(&wrong_database)?.authoritative != wrong_before.authoritative
+        {
+            return Err(io::Error::other(
+                "wrong-root MCP document search lost identity or no-mutation behavior",
+            )
+            .into());
+        }
+        for (path, marker, description, locator) in cases {
+            let summary = session.call_tool(
+                "atlas_file_summary",
+                &json!({
+                    "project_path": repo.as_path(), "file": path,
+                    "content_selection": "documentation", "limit": 10
+                }),
+            )?;
+            if !summary.contains(description) {
+                return Err(
+                    io::Error::other(format!("MCP summary omitted {path}: {summary}")).into(),
+                );
+            }
+            let payload: Value = toon_format::decode_default(&summary)?;
+            require_json_contains(&payload, &["file_summary", "content_summary"], marker)?;
+            if json_at(&payload, &["file_summary", "content_summary"])?
+                .as_str()
+                .unwrap_or_default()
+                .contains("document-block-")
+            {
+                return Err(
+                    io::Error::other("MCP document summary exposed graph identities").into(),
+                );
+            }
+            let symbols = session.call_tool(
+                "atlas_symbols",
+                &json!({
+                    "project_path": repo.as_path(), "file": path,
+                    "content_selection": "documentation", "limit": 10
+                }),
+            )?;
+            if !symbols.contains("document-block-1") || !symbols.contains(locator) {
+                return Err(io::Error::other(format!(
+                    "MCP symbols omitted exact {path} evidence: {symbols}"
+                ))
+                .into());
+            }
+            let search = session.call_tool(
+                "atlas_search",
+                &json!({
+                    "project_path": repo.as_path(), "pattern": marker, "file_pattern": path,
+                    "content_selection": "documentation", "limit": 10
+                }),
+            )?;
+            if !search.contains(path) || !search.contains(marker) {
+                return Err(
+                    io::Error::other(format!("MCP search omitted {path}: {search}")).into(),
+                );
+            }
+            let relations: Value = toon_format::decode_default(&session.call_tool(
+                "atlas_symbol_relations",
+                &json!({
+                    "project_path": repo.as_path(), "view": "detailed", "file": path,
+                    "relation": "documents", "direction": "outbound", "limit": 10
+                }),
+            )?)?;
+            require_json_usize(&relations, &["symbol_relations", "returned"], 0)?;
+            require_json_usize(&relations, &["symbol_relations", "total", "value"], 0)?;
+        }
+        for (path, symbol, start, end, content) in slice_cases {
+            let slice: Value = toon_format::decode_default(&session.call_tool(
+                "atlas_slice",
+                &json!({"project_path": repo.as_path(), "file": path, "symbol": symbol,
+                        "content_selection": "documentation"}),
+            )?)?;
+            require_json_usize(&slice, &["slice", "start_line"], start)?;
+            require_json_usize(&slice, &["slice", "end_line"], end)?;
+            require_json_string(&slice, &["slice", "content"], content)?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())?;
+
+    fs::write(
+        &pdf_path,
+        make_pdf(
+            "BT /F1 12 Tf 72 500 Td (First) Tj 108 0 Td (Second) Tj -108 -100 Td (Next) Tj ET",
+        ),
+    )?;
+    run_scan(&repo, &database)?;
+    let rotated_slice = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "symbols".to_owned(),
+            "slice".to_owned(),
+            "docs/guide.pdf".to_owned(),
+            "document-block-1".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    require_json_string(&rotated_slice, &["content"], "First Second")?;
+    let mcp_pdf_slice = || -> Result<Value, Box<dyn Error>> {
+        let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+        let result = session.call_tool(
+            "atlas_slice",
+            &json!({
+                "project_path": repo.as_path(), "file": "docs/guide.pdf",
+                "symbol": "document-block-2", "content_selection": "documentation"
+            }),
+        );
+        let shutdown = session.shutdown();
+        let text = result?;
+        shutdown?;
+        Ok(toon_format::decode_default(&text)?)
+    };
+    require_json_string(&mcp_pdf_slice()?, &["slice", "content"], "Next")?;
+    for (content, expected) in [
+        (
+            "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F6 12 Tf 72 500 Td <0001> Tj 18.006 0 Td <0001> Tj ET",
+            "ZZ",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\nBT /F3 12 Tf 20 TL 72 500 Td q 100 -100 Td (A) Tj Q T* (StateB) Tj 1 0 0 1 115.2 480 Tm (C) Tj ET",
+            "StateBC",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F4 12 Tf 72 500 Td (AB) Tj ET",
+            "Z\u{0392}",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\n/CS1 cs 0 0 0 1 sc /CS1 CS 0 0 0 1 SC BT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F7 12 Tf 72 500 Td (A) Tj 14.4 0 Td (B) Tj ET",
+            "AB",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\nBT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F3 12 Tf 72 500 Td <4181> Tj ET",
+            "A\u{2022}",
+        ),
+        (
+            "0 1 -1 0 612 0 cm\n/IndexedAlias cs 1 sc /IndexedAlias CS 1 SC BT /F1 12 Tf 72 600 Td (Prefix) Tj ET BT /F9 12 Tf 72 500 Td <27> Tj ET",
+            "\u{2019}",
+        ),
+    ] {
+        fs::write(&pdf_path, make_pdf(content))?;
+        run_scan(&repo, &database)?;
+        let slice = run_mcp_contract_json(
+            &executable,
+            &repo,
+            &[
+                "--db".to_owned(),
+                database.display().to_string(),
+                "symbols".to_owned(),
+                "slice".to_owned(),
+                "docs/guide.pdf".to_owned(),
+                "document-block-2".to_owned(),
+                "--content-selection".to_owned(),
+                "documentation".to_owned(),
+            ],
+        )?;
+        require_json_string(&slice, &["content"], expected)?;
+        require_json_string(&mcp_pdf_slice()?, &["slice", "content"], expected)?;
+    }
+    let before_unsupported_pdf = mcp_database_snapshot(&database)?;
+    for (unsupported_content, diagnostic, structure_replacement) in [
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /MissingSubtype Do",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /WrongSubtype Do",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /MissingState gs",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /WrongState gs",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /MissingColor cs",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj ET /WrongColor CS",
+            "malformed pdf",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars BMC (desrever) Tj EMC ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /ReversedChars << /MCID 0 >> BDC (desrever) Tj EMC ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /ActualText (replacement) >> BDC (glyph) Tj EMC ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F2 12 Tf <0001> Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F5 12 Tf (AB) Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F6 12 Tf <00010002> Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F3 12 Tf <4101> Tj ET",
+            "unsupported PDF text semantics",
+        ),
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /F8 12 Tf (AB) Tj ET",
+            "malformed pdf",
+        ),
+    ].into_iter().map(|(content, diagnostic)| (content, diagnostic, false)).chain([
+        (
+            "BT /F1 12 Tf 72 500 Td (Prefix) Tj /Span << /MCID 0 >> BDC (glyph) Tj EMC ET",
+            "unsupported PDF text semantics",
+            true,
+        ),
+    ]) {
+        fs::write(&pdf_path, make_pdf_with_replacement(unsupported_content, structure_replacement))?;
+        let unsupported_pdf = StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .args(["scan", "."])
+            .output()?;
+        if unsupported_pdf.status.success()
+            || !String::from_utf8_lossy(&unsupported_pdf.stderr).contains(diagnostic)
+            || before_unsupported_pdf.authoritative
+                != mcp_database_snapshot(&database)?.authoritative
+        {
+            return Err(
+                io::Error::other("unsupported PDF replaced the complete publication").into(),
+            );
+        }
+        require_json_contains(&mcp_pdf_slice()?, &["error", "message"], diagnostic)?;
+        if before_unsupported_pdf.authoritative != mcp_database_snapshot(&database)?.authoritative {
+            return Err(
+                io::Error::other("unsupported PDF navigation changed authoritative state").into(),
+            );
+        }
+    }
+    fs::write(&pdf_path, make_pdf(original_page_content))?;
+    run_scan(&repo, &database)?;
+
+    write_docx(&docx_path, "DOCX replacement marker")?;
+    run_scan(&repo, &database)?;
+    let replacement_search = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "search".to_owned(),
+            "DOCX replacement marker".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*.docx".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let replacement_text = serde_json::to_string(&replacement_search)?;
+    if !replacement_text.contains("docs/guide.docx")
+        || !replacement_text.contains("DOCX replacement marker")
+        || replacement_text.contains("DOCX evidence marker")
+    {
+        return Err(io::Error::other(format!(
+            "incremental DOCX replacement did not replace indexed text: {replacement_text}"
+        ))
+        .into());
+    }
+
+    let authored_purpose = "Authored document responsibility survives empty replacement.";
+    for path in ["docs/guide.pdf", "docs/guide.docx"] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .args(["purpose", "set", path, authored_purpose])
+            .assert()
+            .success();
+    }
+    // Equal-length page-tree replacement preserves the fixture's xref offsets.
+    let empty_pdf = String::from_utf8(make_pdf(""))?
+        .replace("25 0 obj\n[3 0 R]\nendobj\n", "25 0 obj\n[     ]\nendobj\n")
+        .replace("26 0 obj\n1\nendobj\n", "26 0 obj\n0\nendobj\n");
+    fs::write(&pdf_path, &empty_pdf)?;
+    let mut empty_docx = ZipWriter::new(fs::File::create(&docx_path)?);
+    empty_docx.start_file("word/document.xml", FileOptions::default())?;
+    empty_docx.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#)?;
+    empty_docx.finish()?;
+    run_scan(&repo, &database)?;
+    for path in ["docs/guide.pdf", "docs/guide.docx"] {
+        let summary = json_summary_command(&repo, &database, path)?;
+        require_json_usize(&summary, &["symbol_count"], 0)?;
+        let current_summary = json_at(&summary, &["content_summary"])?;
+        if current_summary
+            .as_str()
+            .is_none_or(|summary| summary.trim().is_empty() || summary.contains("document-block-"))
+        {
+            return Err(io::Error::other("empty document summary was not regenerated").into());
+        }
+        let persisted = Connection::open(&database)?;
+        let text: String = persisted.query_row(
+            "SELECT content FROM file_texts WHERE path = ?1",
+            [path],
+            |row| row.get(0),
+        )?;
+        let purpose: (String, String, String) = persisted.query_row(
+            "SELECT p.purpose, p.status, p.source FROM purposes p JOIN nodes n ON n.id = p.node_id WHERE n.path = ?1",
+            [path], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if !text.is_empty()
+            || purpose
+                != (
+                    authored_purpose.to_owned(),
+                    "approved".to_owned(),
+                    "agent".to_owned(),
+                )
+        {
+            return Err(io::Error::other(format!(
+                "empty {path} retained text or changed authored purpose: {purpose:?}"
+            ))
+            .into());
+        }
+        drop(persisted);
+        let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+        let result = session.call_tool(
+            "atlas_file_summary",
+            &json!({
+                "project_path": repo.as_path(), "file": path,
+                "content_selection": "documentation", "limit": 10
+            }),
+        );
+        let shutdown = session.shutdown();
+        let payload: Value = toon_format::decode_default(&result?)?;
+        shutdown?;
+        require_json_usize(&payload, &["file_summary", "symbol_count"], 0)?;
+        if json_at(&payload, &["file_summary", "content_summary"])?
+            .as_str()
+            .is_none_or(|summary| summary.trim().is_empty() || summary.contains("document-block-"))
+        {
+            return Err(io::Error::other("MCP empty document summary was not regenerated").into());
+        }
+    }
+    let before_bad_count = mcp_database_snapshot(&database)?;
+    fs::write(
+        &pdf_path,
+        empty_pdf.replace("26 0 obj\n0\nendobj\n", "26 0 obj\n1\nendobj\n"),
+    )?;
+    let bad_count = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if bad_count.status.success()
+        || !String::from_utf8_lossy(&bad_count.stderr).contains("malformed pdf document")
+        || before_bad_count.authoritative != mcp_database_snapshot(&database)?.authoritative
+    {
+        return Err(io::Error::other(
+            "malformed empty page tree replaced the complete publication",
+        )
+        .into());
+    }
+    fs::write(&pdf_path, &empty_pdf)?;
+    write_docx(&docx_path, "DOCX replacement marker")?;
+    run_scan(&repo, &database)?;
+
+    fs::remove_file(&pdf_path)?;
+    run_scan(&repo, &database)?;
+    let files_after_delete = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "files".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let files_after_delete_text = serde_json::to_string(&files_after_delete)?;
+    if files_after_delete_text.contains("docs/guide.pdf")
+        || !files_after_delete_text.contains("docs/guide.docx")
+    {
+        return Err(io::Error::other(format!(
+            "incremental document delete left stale navigation rows: {files_after_delete_text}"
+        ))
+        .into());
+    }
+
+    let mcp_docx_search =
+        |marker: &str| -> Result<String, Box<dyn Error>> {
+            let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+            let result = session.call_tool("atlas_search", &json!({
+            "project_path": repo.as_path(), "pattern": marker,
+            "file_pattern": "docs/guide.docx", "content_selection": "documentation", "limit": 10
+        }));
+            let shutdown = session.shutdown();
+            let text = result?;
+            shutdown?;
+            Ok(text)
+        };
+
+    let before_failed_refresh = mcp_database_snapshot(&database)?;
+    for (xml, message) in [
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:t xml:space="invalid">bad</w:t></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "xml:space must be default or preserve",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:pgNum/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "dynamic DOCX text blocks",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "dynamic DOCX text blocks",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:endnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "dynamic DOCX text blocks",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "font-specific symbols",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "foreign-namespace text",
+        ),
+        (
+            std::iter::once(0xfeff).chain(r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>UTF16 text</w:t></w:r></w:p></w:body></w:document>"#.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
+            "DOCX XML encoding is not supported",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><w:altChunk r:id="html"/></w:body></w:document>"#.as_bytes().to_vec(),
+            "alternate-format DOCX chunks",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><w:subDoc r:id="child"/></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "referenced DOCX subdocuments",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><future:wrapper mc:ProcessContent="future:wrapper"><w:p><w:r><w:t>Unsupported policy</w:t></w:r></w:p></future:wrapper></w:body></w:document>"#.as_bytes().to_vec(),
+            "DOCX compatibility policy",
+        ),
+        (
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:ruby><w:rt><w:r><w:t>Reading</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>Base</w:t></w:r></w:rubyBase></w:ruby></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
+            "ruby annotations",
+        ),
+    ] {
+        {
+            let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
+            archive.start_file("word/document.xml", FileOptions::default())?;
+            archive.write_all(&xml)?;
+            archive.finish()?;
+        }
+        let unsupported_refresh = StdCommand::new(&executable)
+            .current_dir(&repo)
+            .arg("--db")
+            .arg(&database)
+            .args(["scan", "."])
+            .output()?;
+        if unsupported_refresh.status.success()
+            || !String::from_utf8_lossy(&unsupported_refresh.stderr).contains(message)
+            || before_failed_refresh.authoritative
+                != mcp_database_snapshot(&database)?.authoritative
+        {
+            return Err(io::Error::other(
+                "unsupported DOCX content changed the complete publication",
+            )
+            .into());
+        }
+        let unsupported: Value =
+            toon_format::decode_default(&mcp_docx_search("DOCX replacement marker")?)?;
+        require_json_contains(&unsupported, &["error", "message"], message)?;
+        if before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative {
+            return Err(io::Error::other(
+                "unsupported DOCX navigation changed authoritative state",
+            )
+            .into());
+        }
+    }
+
+    fs::write(
+        &docx_path,
+        vec![b' '; projectatlas_symbols::MAX_DOCUMENT_COMPRESSED_BYTES + 1],
+    )?;
+    let oversized_refresh = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if oversized_refresh.status.success()
+        || before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative
+    {
+        return Err(
+            io::Error::other("oversized DOCX replaced the last complete publication").into(),
+        );
+    }
+    fs::write(&docx_path, b"PK\x03\x04truncated-document")?;
+    let failed_refresh = StdCommand::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["scan", "."])
+        .output()?;
+    if failed_refresh.status.success() {
+        return Err(io::Error::other("malformed DOCX refresh was published").into());
+    }
+    let after_failed_refresh = mcp_database_snapshot(&database)?;
+    if before_failed_refresh.authoritative != after_failed_refresh.authoritative {
+        return Err(io::Error::other(
+            "malformed DOCX refresh changed the last complete SQLite publication",
+        )
+        .into());
+    }
+    // MCP refreshes stale input before navigation; the malformed replacement must
+    // fail without advertising stale evidence or replacing the stored generation.
+    let retained: Value =
+        toon_format::decode_default(&mcp_docx_search("DOCX replacement marker")?)?;
+    require_json_string(&retained, &["error", "kind"], "error")?;
+    require_json_contains(
+        &retained,
+        &["error", "message"],
+        "document extraction failed for docs/guide.docx",
+    )?;
+    if before_failed_refresh.authoritative != mcp_database_snapshot(&database)?.authoritative {
+        return Err(io::Error::other(
+            "post-failure navigation changed authoritative document state",
+        )
+        .into());
+    }
+    write_docx(&docx_path, "DOCX repaired marker")?;
+    run_scan(&repo, &database)?;
+    let repaired_search = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "search".to_owned(),
+            "DOCX repaired marker".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/*.docx".to_owned(),
+            "--content-selection".to_owned(),
+            "documentation".to_owned(),
+        ],
+    )?;
+    let repaired_text = serde_json::to_string(&repaired_search)?;
+    if !repaired_text.contains("docs/guide.docx")
+        || !repaired_text.contains("DOCX repaired marker")
+        || repaired_text.contains("DOCX replacement marker")
+    {
+        return Err(io::Error::other(format!(
+            "DOCX repair/retry did not publish the repaired text: {repaired_text}"
+        ))
+        .into());
+    }
+    let repaired_mcp = mcp_docx_search("DOCX repaired marker")?;
+    if !repaired_mcp.contains("docs/guide.docx")
+        || !repaired_mcp.contains("DOCX repaired marker")
+        || repaired_mcp.contains("DOCX replacement marker")
+    {
+        return Err(io::Error::other(format!(
+            "MCP repair/retry lost repaired document evidence: {repaired_mcp}"
+        ))
+        .into());
+    }
+    let override_repo = temp.path().join("document-language-overrides");
+    fs::create_dir_all(&override_repo)?;
+    fs::write(override_repo.join(PDF_FILE), "pub fn overridden_pdf() {}\n")?;
+    fs::write(override_repo.join(DOCX_FILE), "# Overridden document\n")?;
+    fs::write(
+        override_repo.join("projectatlas.toml"),
+        "[project]\nroot = \".\"\n[scan.language_overrides]\n\".pdf\" = \"rust\"\n\".docx\" = \"markdown\"\n",
+    )?;
+    let override_db = override_repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&override_repo, &override_db)?;
+    for (path, name) in [
+        (PDF_FILE, "overridden_pdf"),
+        (DOCX_FILE, "Overridden document"),
+    ] {
+        let symbols = run_mcp_contract_json(
+            &executable,
+            &override_repo,
+            &[
+                "--db".to_owned(),
+                override_db.display().to_string(),
+                "symbols".to_owned(),
+                "list".to_owned(),
+                "--file".to_owned(),
+                path.to_owned(),
+            ],
+        )?;
+        if !serde_json::to_string(&symbols)?.contains(name) {
+            return Err(
+                io::Error::other("explicit document language override lost its symbols").into(),
+            );
+        }
+        let mut session = McpContractSession::spawn(&executable, &override_repo, &override_db)?;
+        let result = session.call_tool(
+            "atlas_search",
+            &json!({
+                "project_path": override_repo.as_path(), "pattern": name, "file_pattern": path,
+            }),
+        );
+        let shutdown = session.shutdown();
+        let result = result?;
+        shutdown?;
+        if !result.contains(name) || !result.contains(path) {
+            return Err(
+                io::Error::other("explicit document language override lost indexed text").into(),
+            );
+        }
+    }
+    Ok(())
 }

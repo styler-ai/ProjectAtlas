@@ -126,6 +126,10 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
 
+      - name: Verify fixed PDF parser
+        timeout-minutes: 10
+        run: python3 packaging/pdf-parser/build.py --install-target --validate
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -286,6 +290,7 @@ jobs:
           mkdir -p "dist/projectatlas"
           cp target/release/projectatlas "dist/projectatlas/"
           cp README.md LICENSE "dist/projectatlas/"
+          cp packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md "dist/projectatlas/PDF-PARSER.md"
           tar -czf "$archive" -C dist projectatlas
           mkdir -p release-assets
           mv "$archive" release-assets/
@@ -409,6 +414,7 @@ jobs:
           Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
           Copy-Item "README.md" "dist/projectatlas/"
           Copy-Item "LICENSE" "dist/projectatlas/"
+          Copy-Item "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md" "dist/projectatlas/PDF-PARSER.md"
           Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
           Move-Item -LiteralPath $archive -Destination "release-assets/"

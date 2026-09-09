@@ -10967,6 +10967,8 @@ public static class Program
 #[cfg(windows)]
 fn windows_installer_obsolete_mcp_handoff_preserves_unready_and_ambiguous_processes()
 -> Result<(), Box<dyn Error>> {
+    use std::os::windows::fs::OpenOptionsExt;
+
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
@@ -11049,7 +11051,7 @@ public static class Program
 
     let runtime_source = assert_cmd::cargo::cargo_bin("projectatlas");
     let runtime = temp.path().join("projectatlas-current.exe");
-    fs::copy(&runtime_source, &runtime)?;
+    let runtime_byte_count = fs::copy(&runtime_source, &runtime)?;
     let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
     let plugin_manifest = plugin_cache
         .join(CODEX_PLUGIN_MANIFEST_DIR)
@@ -11117,8 +11119,35 @@ public static class Program
     let fake_codex = isolated_home.join("codex.cmd");
     fs::write(
         &fake_codex,
-        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_RUNTIME_DRIFT_TRIGGER%\" (\r\n    echo invalid>\"%PROJECTATLAS_FAKE_CODEX_RUNTIME_TO_DRIFT%\"\r\n    del /q \"%PROJECTATLAS_FAKE_CODEX_RUNTIME_DRIFT_TRIGGER%\"\r\n  )\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\" (\r\n    echo {}>\"%PROJECTATLAS_FAKE_CODEX_CONFIG_TO_DRIFT%\"\r\n    del /q \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\"\r\n  )\r\n  type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\" exit /b 1\r\n  type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\"\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_RUNTIME_DRIFT_TRIGGER%\" (\r\n    echo invalid>\"%PROJECTATLAS_FAKE_CODEX_RUNTIME_TO_DRIFT%\"\r\n    if errorlevel 1 exit /b 86\r\n    for %%I in (\"%PROJECTATLAS_FAKE_CODEX_RUNTIME_TO_DRIFT%\") do if not %%~zI==9 exit /b 87\r\n    del /q \"%PROJECTATLAS_FAKE_CODEX_RUNTIME_DRIFT_TRIGGER%\"\r\n  )\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\" (\r\n    echo {}>\"%PROJECTATLAS_FAKE_CODEX_CONFIG_TO_DRIFT%\"\r\n    if errorlevel 1 exit /b 88\r\n    del /q \"%PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER%\"\r\n  )\r\n  type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\" exit /b 1\r\n  type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\"\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n",
     )?;
+    // An exclusive handle must fail the injector without consuming its trigger.
+    fs::write(&runtime_drift_trigger, b"drift")?;
+    let locked_runtime = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&runtime)?;
+    let blocked_injection = StdCommand::new("cmd")
+        .args(["/D", "/C"])
+        .arg(&fake_codex)
+        .args(["plugin", "list"])
+        .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_RUNTIME_DRIFT_TRIGGER",
+            &runtime_drift_trigger,
+        )
+        .env("PROJECTATLAS_FAKE_CODEX_RUNTIME_TO_DRIFT", &runtime)
+        .env(
+            "PROJECTATLAS_FAKE_CODEX_CONFIG_DRIFT_TRIGGER",
+            &config_drift_trigger,
+        )
+        .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &plugin_list)
+        .output()?;
+    drop(locked_runtime);
+    if !runtime_drift_trigger.exists() || fs::metadata(&runtime)?.len() != runtime_byte_count {
+        return Err(io::Error::other(format!("runtime fault injector concealed a failed overwrite: status={:?} trigger={} stdout={} stderr={}", blocked_injection.status, runtime_drift_trigger.exists(), String::from_utf8_lossy(&blocked_injection.stdout), String::from_utf8_lossy(&blocked_injection.stderr))).into());
+    }
+    fs::remove_file(&runtime_drift_trigger)?;
     let stable_runtime_dir = stable_runtime
         .parent()
         .ok_or_else(|| io::Error::other("stable runtime parent missing"))?;
@@ -11238,6 +11267,15 @@ public static class Program
         normalize_native_path_display(fs::canonicalize(&runtime)?).replace('/', "\\");
     fs::write(&runtime_drift_trigger, b"drift")?;
     let no_handoff_runtime_drift_output = run_installer(&[])?;
+    if runtime_drift_trigger.exists()
+        || fs::metadata(&runtime)?.len() != 9
+        || fs::read(&runtime)? != b"invalid\r\n"
+    {
+        return Err(io::Error::other(
+            "runtime drift injection was not applied before readiness assertion",
+        )
+        .into());
+    }
     let no_handoff_runtime_drift_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&no_handoff_runtime_drift_output.stdout),
@@ -11566,6 +11604,15 @@ public static class Program
         fs::write(&runtime_drift_trigger, b"drift")?;
         let runtime_drift_output =
             run_installer(&[first_obsolete_mcp_pid.process_id, first_owner.id()])?;
+        if runtime_drift_trigger.exists()
+            || fs::metadata(&runtime)?.len() != 9
+            || fs::read(&runtime)? != b"invalid\r\n"
+        {
+            return Err(io::Error::other(
+                "runtime drift injection was not applied before handoff assertion",
+            )
+            .into());
+        }
         let runtime_drift_text = format!(
             "{}\n{}",
             String::from_utf8_lossy(&runtime_drift_output.stdout),
@@ -30989,10 +31036,10 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         drop(install_a.wait());
         return Err(error);
     }
+    // Keep unique ready markers until fixture teardown: their Windows writer may
+    // still be closing after the waiter observes the pathname. Only gates release children.
     fs::remove_file(&discovery_a)?;
     fs::remove_file(&discovery_b)?;
-    fs::remove_file(&discovery_a_ready)?;
-    fs::remove_file(&discovery_b_ready)?;
     let migration_started = Instant::now();
     let output_a = match wait_for_plugin_installer_output(
         install_a,
@@ -31113,7 +31160,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         return Err(error);
     }
     fs::remove_file(&recovery_discovery_a)?;
-    fs::remove_file(&recovery_discovery_a_ready)?;
     if let Err(error) = wait_for_ready(
         &mut interrupted_a,
         &recovery_acquired_a_ready,
@@ -31128,9 +31174,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     interrupted_a.kill()?;
     let interrupted_output = interrupted_a.wait_with_output()?;
     fs::remove_file(&recovery_acquired_a)?;
-    fs::remove_file(&recovery_acquired_a_ready)?;
     fs::remove_file(&recovery_discovery_b)?;
-    fs::remove_file(&recovery_discovery_b_ready)?;
     let recovering_output = wait_for_plugin_installer_output(
         recovering_b,
         "recovering opposite installer B",
@@ -31229,14 +31273,12 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         "repair-race repair owner did not publish the candidate capability state",
     )?;
     fs::remove_file(&repair_state)?;
-    fs::remove_file(&repair_state_ready)?;
     let repair_b_output = wait_for_plugin_installer_output(
         repair_b,
         "repair-race installer B",
         Duration::from_secs(35),
     )?;
     fs::remove_file(&repair_discovery)?;
-    fs::remove_file(&repair_discovery_ready)?;
     let repair_a_output = wait_for_plugin_installer_output(
         repair_a,
         "repair-race installer A",
@@ -31384,9 +31426,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     // Reaping the interrupted owner also drains its descendants' output pipes;
     // that cleanup is independent of the contender's shared lock deadline.
     let held_first_output = held_first.child.wait_with_output()?;
-    fs::remove_file(&timed_first_attempt_ready)?;
     fs::remove_file(&held_first_gate)?;
-    fs::remove_file(&held_first_ready)?;
     require(
         !held_first_output.status.success() && state_snapshot()? == deadline_state_before_first,
         format!(
@@ -31453,7 +31493,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         ),
     )?;
     fs::remove_file(&held_second_gate)?;
-    fs::remove_file(&held_second_ready)?;
     let held_second_output = wait_for_plugin_installer_output(
         held_second,
         "deadline held-second owner release",
@@ -31528,7 +31567,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         }
     };
     fs::remove_file(&held_second_gate)?;
-    fs::remove_file(&held_second_ready)?;
     let held_second_output = wait_for_plugin_installer_output(
         held_second,
         "deadline held-second owner release",

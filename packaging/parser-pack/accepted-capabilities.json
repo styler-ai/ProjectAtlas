@@ -24,10 +24,10 @@
     "maximum_abi": 15
   },
   "registry": {
-    "registry_version": 4,
-    "registry_digest": "63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1",
-    "accepted_set_version": 13,
-    "accepted_set_digest": "63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1"
+    "registry_version": 5,
+    "registry_digest": "323321adb18b8f7c9ddc045949fc097bd0e6933422228c2c25a8ee5b07daeac9",
+    "accepted_set_version": 14,
+    "accepted_set_digest": "323321adb18b8f7c9ddc045949fc097bd0e6933422228c2c25a8ee5b07daeac9"
   },
   "required_platforms": [
     "x86_64-unknown-linux-gnu",
@@ -7597,5 +7597,5 @@
       "capability_digest": "d11ac33f63f87c732d6bcac6b300eace2a4eba4775097f03c0f835f5fa2db4e9"
     }
   ],
-  "capability_set_digest": "88ea3aac2bd74833e6eb5fb07e5c11a6b9fd56c8f03b349d3e1c0a2454c4791b"
+  "capability_set_digest": "4d3ffe6d939050bb494ecdb33fb01fa5ba29d711ece016e8e894fc6de66d4c52"
 }

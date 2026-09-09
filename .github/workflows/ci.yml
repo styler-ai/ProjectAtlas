@@ -273,13 +273,26 @@ jobs:
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Install cargo-deny
-        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency')
+        if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency') || contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
         with:
           tool: cargo-deny@0.20.2
 
+      - name: Verify fixed PDF parser
+        if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        timeout-minutes: 10
+        run: python3 packaging/pdf-parser/build.py --install-target --validate
+
+      - name: Retain mismatched PDF guest for comparison
+        if: failure() && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mismatched-pdf-guest-linux
+          path: .tmp/pdf-parser-build/wasm32-wasip1/release/projectatlas_pdf_parser.wasm
+          if-no-files-found: ignore
+
       - name: Selected Rust proof
-        timeout-minutes: 15
+        timeout-minutes: 20
         env:
           PLAN: ${{ needs.plan.outputs.plan }}
         run: |
@@ -304,10 +317,9 @@ jobs:
               *) echo "planner emitted unknown Rust package: $package" >&2; exit 1 ;;
             esac
           done
-          filtered_custom_harness=false
           for target in "${targets[@]}"; do
             case "$target" in
-              parser_supervisor_adversarial) filtered_custom_harness=true ;;
+              parser_supervisor_adversarial) ;;
               e2e_delivery|e2e_lifecycle|e2e_maintenance|e2e_navigation|e2e_worktrees|installer_trust_boundaries|language_runtime_compatibility|lint_diagnostics|optional_parser_worker_failure|optional_parser_worker_platform|parser_launch_authority) ;;
               *) echo "planner emitted unknown Rust test target: $target" >&2; exit 1 ;;
             esac
@@ -356,9 +368,11 @@ jobs:
               fi
             fi
           fi
-          if [[ "$filtered_custom_harness" == "true" ]]; then
-            cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
-          fi
+
+      - name: Filtered parser supervisor proof
+        if: contains(fromJSON(needs.plan.outputs.plan).test_targets, 'parser_supervisor_adversarial')
+        timeout-minutes: 2
+        run: cargo test --locked -p projectatlas-cli --all-features --test parser_supervisor_adversarial task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Dependency policy
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency')
@@ -448,12 +462,51 @@ jobs:
       - name: Built-in PHP parser platform regression
         if: contains(matrix.contracts, 'compile')
         # Includes cold compilation of the symbol, CLI, and navigation test targets.
-        timeout-minutes: 15
+        timeout-minutes: 20
         shell: bash
         run: |
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
+
+      - name: Install cargo-deny for PDF source validation
+        if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Fixed PDF parser source validation
+        if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        timeout-minutes: 10
+        run: python3 packaging/pdf-parser/build.py --validate --source-only
+
+      - name: Fixed PDF parser platform proof
+        if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo test --locked -p projectatlas-symbols documents:: -- --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact
+
+      - name: Document resource proof
+        if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          cargo build --locked --release -p projectatlas-cli
+          binary="target/release/projectatlas"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          python3 .github/scripts/measure-bounded-documents.py --binary "$binary" --output .tmp/document-resources.json
+
+      - name: Upload document resource measurements
+        if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: document-resources-${{ matrix.label }}
+          path: .tmp/document-resources.json
+          if-no-files-found: error
 
       - name: Install exact real host CLIs for native reader proof
         if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'

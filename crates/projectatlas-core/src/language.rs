@@ -11,13 +11,13 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 /// Version of the generated language registry contract.
-pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 4;
+pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 5;
 
 /// Version of the direct and embedded semantic-provider projection.
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 13;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 14;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -109,6 +109,10 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST: &str =
 /// Acceptance seal for the built-in PHP grammar capability set.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST: &str =
     "63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1";
+
+/// Acceptance seal for PDF and DOCX alongside the built-in PHP grammar.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST: &str =
+    "323321adb18b8f7c9ddc045949fc097bd0e6933422228c2c25a8ee5b07daeac9";
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -354,6 +358,8 @@ pub enum SymbolParserOwner {
     PowerShell,
     /// `ProjectAtlas` Markdown heading and explicit-reference extraction.
     Markdown,
+    /// Bounded PDF and DOCX text and evidence extraction.
+    Document,
     /// Conservative `ProjectAtlas` fallback extraction.
     Fallback,
     /// No definition or relationship extractor is available.
@@ -1074,6 +1080,8 @@ define_language_registry! {
         "cargo-lock" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Manifest, symbol_parser: SymbolParserOwner::CargoManifest, structural_summary: None, support: SUPPORTED_NATIVE, positive: "Cargo.lock", negative: "Cargo.lock.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "vue" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Vue, structural_summary: None, support: SUPPORTED_NATIVE, embedded_language: EmbeddedLanguageCapability { host_kind: EmbeddedHostKind::Component, semantic_provider: SemanticProviderOwner::EcmaScript }, positive: "Fixture.vue", negative: "Fixture.vue.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "markdown" => { aliases: ["md"], classification: ContentClassification::Documentation, parser_support: Structural, symbol_parser: SymbolParserOwner::Markdown, structural_summary: Some(StructuralSummaryOwner::Markdown), support: SUPPORTED_NATIVE, positive: "fixture.md", negative: "fixture.md.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "pdf" => { aliases: [], classification: ContentClassification::Documentation, parser_support: Structural, symbol_parser: SymbolParserOwner::Document, structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.pdf", negative: "fixture.pdf.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "docx" => { aliases: [], classification: ContentClassification::Documentation, parser_support: Structural, symbol_parser: SymbolParserOwner::Document, structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.docx", negative: "fixture.docx.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "json" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Json), support: SUPPORTED_STRUCTURAL, positive: "fixture.json", negative: "fixture.json.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "yaml" => { aliases: ["yml"], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Yaml), support: SUPPORTED_STRUCTURAL, positive: "fixture.yml", negative: "fixture.yml.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "css" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Css), support: SUPPORTED_STRUCTURAL, positive: "fixture.css", negative: "fixture.css.bak", provenance: CapabilityProvenance::ProjectAtlas },
@@ -1340,7 +1348,7 @@ define_language_registry! {
         ".py" => "python", ".pyw" => "python", ".js" => "javascript", ".jsx" => "javascript", ".ts" => "typescript", ".tsx" => "tsx", ".mjs" => "javascript", ".cjs" => "javascript", ".d.ts" => "typescript", ".java" => "java", ".c" => "c", ".cpp" => "cpp", ".h" => "h", ".hpp" => "hpp", ".cxx" => "cpp", ".cc" => "cpp", ".hxx" => "hpp", ".hh" => "hpp", ".cs" => "csharp", ".go" => "go", ".m" => "objective-c", ".mm" => "objective-c", ".rb" => "ruby", ".php" => "php", ".swift" => "swift", ".kt" => "kotlin", ".kts" => "kotlin", ".rs" => "rust", ".scala" => "scala", ".sh" => "shell", ".bash" => "shell", ".zsh" => "shell", ".ps1" => "powershell", ".psm1" => "powershell", ".psd1" => "powershell", ".bat" => "batch", ".cmd" => "batch", ".r" => "r", ".R" => "r", ".pl" => "perl", ".pm" => "perl", ".lua" => "lua", ".dart" => "dart", ".hs" => "haskell", ".ml" => "ocaml", ".mli" => "ocaml", ".fs" => "fsharp", ".fsx" => "fsharp", ".clj" => "clojure", ".cljs" => "clojure", ".vim" => "vim", ".zig" => "zig", ".zon" => "zig", ".html" => "html", ".htm" => "html", ".css" => "css", ".scss" => "css", ".sass" => "css", ".less" => "css", ".stylus" => "css", ".styl" => "css", ".md" => "markdown", ".mdx" => "markdown", ".json" => "json", ".jsonc" => "json", ".xml" => "xml", ".yml" => "yaml", ".yaml" => "yaml", ".toml" => "toml", ".toon" => "toon", ".txt" => "text", ".ini" => "config", ".cfg" => "config", ".conf" => "config", ".vue" => "vue", ".svelte" => "svelte", ".astro" => "astro", ".jsp" => "jsp", ".jspx" => "jsp", ".jspf" => "jsp", ".tag" => "jsp-tag", ".tagx" => "jsp-tag", ".gsp" => "gsp", ".properties" => "config", ".gradle" => "groovy", ".groovy" => "groovy", ".proto" => "protobuf", ".hbs" => "handlebars", ".handlebars" => "handlebars", ".ejs" => "ejs", ".pug" => "pug", ".ftl" => "freemarker", ".mustache" => "mustache", ".liquid" => "liquid", ".erb" => "erb", ".sql" => "sql", ".ddl" => "sql", ".dml" => "sql", ".mysql" => "sql", ".postgresql" => "sql", ".psql" => "sql", ".sqlite" => "sql", ".mssql" => "sql", ".oracle" => "sql", ".ora" => "sql", ".db2" => "sql", ".proc" => "sql", ".procedure" => "sql", ".func" => "sql", ".function" => "sql", ".view" => "sql", ".trigger" => "sql", ".index" => "sql", ".migration" => "sql", ".seed" => "sql", ".fixture" => "sql", ".schema" => "sql", ".cql" => "sql", ".cypher" => "sql", ".sparql" => "sql", ".gql" => "graphql", ".liquibase" => "sql", ".flyway" => "sql"
     }
     additional_extensions {
-        ".env" => "config", ".gitignore" => "config", ".dockerignore" => "config", ".editorconfig" => "config"
+        ".env" => "config", ".gitignore" => "config", ".dockerignore" => "config", ".editorconfig" => "config", ".pdf" => "pdf", ".docx" => "docx"
     }
     content_interpreters {
         "python" => { language: "python", version_suffix: true },
@@ -1423,6 +1431,7 @@ pub fn tree_sitter_grammar(language: &str) -> Option<TreeSitterGrammar> {
         | SymbolParserOwner::Vue
         | SymbolParserOwner::PowerShell
         | SymbolParserOwner::Markdown
+        | SymbolParserOwner::Document
         | SymbolParserOwner::Fallback
         | SymbolParserOwner::Unavailable => None,
     }
@@ -1916,6 +1925,7 @@ fn symbol_parser_label(owner: SymbolParserOwner) -> String {
         SymbolParserOwner::Vue => "projectatlas:vue".to_string(),
         SymbolParserOwner::PowerShell => "projectatlas:powershell".to_string(),
         SymbolParserOwner::Markdown => "projectatlas:markdown".to_string(),
+        SymbolParserOwner::Document => "projectatlas:documents".to_string(),
         SymbolParserOwner::Fallback => "projectatlas:fallback".to_string(),
         SymbolParserOwner::Unavailable => "unavailable".to_string(),
     }
@@ -2217,7 +2227,8 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
                 | SymbolParserOwner::CargoManifest
                 | SymbolParserOwner::Vue
                 | SymbolParserOwner::PowerShell
-                | SymbolParserOwner::Markdown,
+                | SymbolParserOwner::Markdown
+                | SymbolParserOwner::Document,
             ) => {}
             (support, owner) => {
                 return Err(LanguageRegistryError::new(format!(
@@ -2342,6 +2353,7 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         11 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST,
         12 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST,
         13 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST,
+        14 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST,
         version => {
             return Err(LanguageRegistryError::new(format!(
                 "accepted language capability-set version {version} lacks a historical digest seal"

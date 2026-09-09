@@ -8,10 +8,16 @@ homepage.workspace = true
 
 [dependencies]
 blake3.workspace = true
+getrandom.workspace = true
+wasmi.workspace = true
+wasmi_core.workspace = true
 projectatlas-core.workspace = true
 pulldown-cmark.workspace = true
+quick-xml.workspace = true
 regex.workspace = true
 toml.workspace = true
+thiserror.workspace = true
+zip.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-c-sharp.workspace = true
@@ -28,6 +34,7 @@ tree-sitter-typescript.workspace = true
 tree-sitter-zig.workspace = true
 
 [dev-dependencies]
+lopdf.workspace = true
 projectatlas-core.workspace = true
 
 [lints]

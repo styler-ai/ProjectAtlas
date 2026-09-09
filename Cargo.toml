@@ -94,7 +94,12 @@ nix = { version = "=0.31.3", default-features = false, features = [
 notify = "8.2"
 object = { version = "=0.40.0", default-features = false, features = ["read"] }
 pulldown-cmark = "0.13"
+lopdf = { version = "=0.44.0", default-features = false }
+wasmi = { version = "=2.0.0", default-features = false, features = ["stable", "std", "validate", "portable-dispatch"] }
+# ResourceLimiter uses LimiterError without re-exporting it from wasmi.
+wasmi_core = { version = "=2.0.0", default-features = false, features = ["std"] }
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
+quick-xml = { version = "=0.42.0", default-features = false }
 predicates = "3.1"
 regex = "1.11"
 rayon = "1.10"
@@ -114,6 +119,7 @@ tiktoken = "4.1.2"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "0.8"
 toml_edit = "0.22"
+zip = { version = "=0.6.6", default-features = false, features = ["deflate"] }
 toon-format = { version = "0.5.0", default-features = false, features = ["json_stream"] }
 tree-sitter = "=0.26.9"
 tree-sitter-c = "=0.24.2"
