@@ -2725,26 +2725,34 @@ $shortBoundedJsonDefinition = $boundedJsonDefinition.Replace(
     '$probeTimeoutMs = 100'
 )
 Invoke-Expression $shortBoundedJsonDefinition
+$script:cleanupFailureProbe = $null
 function Remove-Item {
     [CmdletBinding()]
     param(
         [string[]]$LiteralPath,
         [switch]$Force
     )
+    if (-not $cleanupFailureProbe) {
+        $script:cleanupFailureProbe = [Diagnostics.Stopwatch]::StartNew()
+    }
 }
-$cleanupFailureProbe = [Diagnostics.Stopwatch]::StartNew()
 try {
     $cleanupFailurePayload = Invoke-ProjectAtlasBoundedJsonCommand `
         $env:PROJECTATLAS_TEST_UNICODE_JSON_RUNTIME `
         ([string[]]@("runtime-info"))
 }
 finally {
-    $cleanupFailureProbe.Stop()
+    if ($cleanupFailureProbe) {
+        $cleanupFailureProbe.Stop()
+    }
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -Force
     Invoke-Expression $boundedJsonDefinition
 }
 if ($null -ne $cleanupFailurePayload) {
     throw "Bounded JSON command emitted a payload after cleanup could not be verified."
+}
+if (-not $cleanupFailureProbe) {
+    throw "Bounded JSON command did not attempt injected cleanup."
 }
 if ($cleanupFailureProbe.Elapsed -gt [TimeSpan]::FromSeconds(2)) {
     throw "Cleanup failure probe exceeded its bounded tolerance: $($cleanupFailureProbe.Elapsed)"
@@ -2766,15 +2774,18 @@ if (Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) `
     throw "Bounded JSON cleanup regression left temporary files."
 }
 Invoke-Expression $shortBoundedJsonDefinition
+$script:cleanupExceptionProbe = $null
 function Remove-Item {
     [CmdletBinding()]
     param(
         [string[]]$LiteralPath,
         [switch]$Force
     )
+    if (-not $cleanupExceptionProbe) {
+        $script:cleanupExceptionProbe = [Diagnostics.Stopwatch]::StartNew()
+    }
     throw "Injected bounded-probe cleanup failure."
 }
-$cleanupExceptionProbe = [Diagnostics.Stopwatch]::StartNew()
 $cleanupException = $null
 $cleanupExceptionPayload = $null
 try {
@@ -2786,7 +2797,9 @@ catch {
     $cleanupException = $_
 }
 finally {
-    $cleanupExceptionProbe.Stop()
+    if ($cleanupExceptionProbe) {
+        $cleanupExceptionProbe.Stop()
+    }
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath Function:\Remove-Item -Force
     Invoke-Expression $boundedJsonDefinition
     $cleanupExceptionFiles = @(
@@ -2808,6 +2821,9 @@ if ($null -ne $cleanupExceptionPayload) {
 }
 if ($cleanupExceptionFiles.Count -ne 2) {
     throw "Injected cleanup exception did not preserve both bounded-probe files: $($cleanupExceptionFiles.FullName -join ', ')"
+}
+if (-not $cleanupExceptionProbe) {
+    throw "Bounded JSON command did not attempt injected cleanup."
 }
 if ($cleanupExceptionProbe.Elapsed -gt [TimeSpan]::FromSeconds(2)) {
     throw "Cleanup exception probe exceeded its bounded tolerance: $($cleanupExceptionProbe.Elapsed)"
