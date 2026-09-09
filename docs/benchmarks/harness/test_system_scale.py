@@ -1719,6 +1719,7 @@ time.sleep(60)
                     env=dict(os.environ),
                     timeout_seconds=10,
                 )
+                self.assertIn("private_commit_bytes", measured["sampled_peak_metrics"])
                 self.assertGreater(measured["peak_private_commit_bytes"], 0)
                 self.assertTrue(measured["terminal_io_complete"])
                 self.assertEqual(measured["exact_total_processes"], 2)

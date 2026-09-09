@@ -427,6 +427,7 @@ class ProcessTreeSampler:
             "interval_seconds": MEASURE_INTERVAL_SECONDS,
             "sampled_peak_metrics": [
                 "rss_bytes",
+                "private_commit_bytes",
                 "processes",
                 "threads",
                 "storage",
@@ -1865,6 +1866,17 @@ def run_case(
         if incremental
         else None
     )
+    queries = mcp_queries(
+        runtime, root, env, query,
+        request_timeout_seconds=mcp_request_timeout_seconds,
+        required_version=required_version,
+    )
+    final_settings = settings
+    if preregistration["candidate"].get("telemetry", "disabled") == "enabled":
+        _, final_settings = measured_json(
+            runtime, ["settings"], cwd=root, env=env,
+            timeout_seconds=timeout_seconds, required_version=required_version,
+        )
     database = root / ".projectatlas/projectatlas.db"
     result = {
         "scale": scale,
@@ -1883,14 +1895,8 @@ def run_case(
         "persistent": persistent_sizes(root),
         "database_profile": database_profile(database),
         "graph_digest": database_graph_digest(database),
-        "queries": mcp_queries(
-            runtime,
-            root,
-            env,
-            query,
-            request_timeout_seconds=mcp_request_timeout_seconds,
-            required_version=required_version,
-        ),
+        "queries": queries,
+        "telemetry_after_queries": final_settings["telemetry"],
     }
     result["checks"] = evaluate_case(result, preregistration)
     return result
@@ -1984,6 +1990,7 @@ def evaluate_case(
     database_settings = settings["database"]
     operating_profile = database_settings["operating_profile"]
     telemetry = settings["telemetry"]
+    final_telemetry = result.get("telemetry_after_queries", telemetry)
     profile = result["database_profile"]
     corpus_limits = preregistration["corpora"][result["scale"]]
     logical_cpus = os.cpu_count() or 1
@@ -2326,14 +2333,16 @@ def evaluate_case(
             "preregistered telemetry state",
             {
                 "raw_rows": telemetry["raw_rows"],
+                "raw_rows_after_queries": final_telemetry["raw_rows"],
                 "writes_since_checkpoint": telemetry["writes_since_checkpoint"],
                 "checkpoint_state": telemetry["checkpoint_state"],
             },
             "matches",
             preregistration["candidate"].get("telemetry", "disabled"),
             (
-                0 < telemetry["raw_rows"] <= telemetry["max_raw_rows"]
-                and 0 <= telemetry["writes_since_checkpoint"] < telemetry["checkpoint_write_interval"]
+                0 <= telemetry["raw_rows"] <= telemetry["max_raw_rows"]
+                and 0 < final_telemetry["raw_rows"] <= final_telemetry["max_raw_rows"]
+                and 0 <= final_telemetry["writes_since_checkpoint"] < final_telemetry["checkpoint_write_interval"]
             ) if preregistration["candidate"].get("telemetry", "disabled") == "enabled" else (
                 telemetry["raw_rows"] == 0
                 and telemetry["writes_since_checkpoint"] == 0
