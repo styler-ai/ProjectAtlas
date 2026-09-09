@@ -193,7 +193,7 @@ overhead and failed the frozen one-second cell in both binaries.
 After the production writer-availability probe was added, the exact-head
 runtime was replayed only for same-root contention. This bounded replay is a
 causal refusal check, not a complete eligible resource matrix and does not
-check OpenSpec tasks 5.1â€“5.4.
+check OpenSpec tasks 5.1–5.4.
 
 | Runtime scope | Blocked wall (s) | Error | Complete generation/snapshot unchanged | Retry generation | Staging residue | Result |
 | --- | ---: | --- | --- | ---: | --- | --- |
@@ -262,7 +262,7 @@ parser-worker accounting, and successful writer/cancellation/recovery proof.
 It preserves the historical no-adoption decision and diagnostic failures.
 Exact allocator-event counts and per-stage transaction/checkpoint frame timing
 remain unavailable; no new instrumentation framework is needed to retain the
-existing worker design. OpenSpec tasks 5.1â€“5.4 remain unchecked until independent
+existing worker design. OpenSpec tasks 5.1–5.4 remain unchecked until independent
 review and required hosted functional platform proof complete. Windows resource
 accounting does not substitute for Linux/macOS execution of the real scan/watch
 and publication regressions.
