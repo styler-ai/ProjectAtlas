@@ -24649,12 +24649,23 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let descendant_started = Instant::now();
-    let owner_result = wait_for_plugin_installer_output(
+    let mut descendant_cleanup_started = None;
+    let owner_result = wait_for_plugin_installer_output_with_test_delay_and_kill_and_handoff(
         spawn_plugin_installer_process(&mut descendant_command)?,
         "fixture-descendant-timeout",
         Duration::from_millis(250),
+        None,
+        None,
+        None,
+        &mut |child| {
+            descendant_cleanup_started.get_or_insert_with(Instant::now);
+            terminate_plugin_installer_process_tree(child)
+        },
+        None,
     );
+    let descendant_cleanup_elapsed = descendant_cleanup_started
+        .ok_or_else(|| io::Error::other("descendant installer did not attempt tree termination"))?
+        .elapsed();
     let owner_error = match owner_result {
         Err(error) => error,
         Ok(output) => {
@@ -24680,7 +24691,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         .into());
     }
     require(
-        descendant_started.elapsed() < Duration::from_secs(3),
+        descendant_cleanup_elapsed < Duration::from_secs(3),
         "descendant installer retained output pipes after tree termination",
     )?;
 
