@@ -42,9 +42,9 @@ class SystemScaleHarnessTests(unittest.TestCase):
             "graph_entities": "entity_key canonical_identity entity_kind repository_path package_manager package_name manifest_path symbol_name symbol_kind symbol_parent symbol_signature external_system external_identity",
             "graph_relations": "relation_key canonical_identity source_entity_key relation_scope relation_kind resolution_status target_entity_key reference_text candidate_count document_unresolved_reason confidence completeness",
             "graph_relation_occurrences": "relation_key file_path start_line start_column end_line end_column",
-            "graph_resolution_keys": "resolution_domain canonical_identity",
-            "graph_entity_exports": "entity_key owner_path resolution_domain",
-            "graph_relation_dependencies": "relation_key owner_path resolution_domain",
+            "graph_resolution_keys": "resolution_domain canonical_identity key_digest",
+            "graph_entity_exports": "entity_key owner_path resolution_domain key_digest",
+            "graph_relation_dependencies": "relation_key owner_path resolution_domain key_digest",
             "graph_coverage": "scope_kind scope_path relation_scope relation_kind state total covered omitted reason reached_limit",
             "graph_identity_rejections": "file_path start_line start_column end_line end_column parser field reason fact_index",
         }
@@ -52,6 +52,9 @@ class SystemScaleHarnessTests(unittest.TestCase):
             return "projectatlas.graph." + domain + ".v1" + "".join(
                 f"|{len(value.encode('utf-8'))}:{value}" for value in fields
             )
+
+        def resolution_digest(project, name):
+            return hashlib.sha256((project + name).encode("utf-8")).digest()
 
         def fixture(database, project):
             with closing(sqlite3.connect(database)) as connection, connection:
@@ -74,9 +77,12 @@ class SystemScaleHarnessTests(unittest.TestCase):
                         (key, identity, b"s", "symbol", "calls", state, target_key, reference, None, None, "exact", "complete"),
                     )
                     connection.execute("INSERT INTO graph_relation_occurrences VALUES (?,?,?,?,?,?)", (key, "src/ä.rs", 1, 1, 1, 2))
-                    connection.execute("INSERT INTO graph_relation_dependencies VALUES (?,?,?)", (key, "src/ä.rs", "symbol"))
-                connection.execute("INSERT INTO graph_entity_exports VALUES (?,?,?)", (b"s", "src/ä.rs", "symbol"))
-                connection.execute("INSERT INTO graph_resolution_keys VALUES (?,?)", ("symbol", canonical("resolution", project, "symbol", "c" * 32)))
+                    digest = resolution_digest(project, "ka" if key == b"r" else "kb")
+                    connection.execute("INSERT INTO graph_relation_dependencies VALUES (?,?,?,?)", (key, "src/ä.rs", "symbol", digest))
+                for entity, name, reference in [(b"s", "ka", "c" * 32), (b"t", "kb", "d" * 32)]:
+                    key = resolution_digest(project, name)
+                    connection.execute("INSERT INTO graph_entity_exports VALUES (?,?,?,?)", (entity, "src/ä.rs", "symbol", key))
+                    connection.execute("INSERT INTO graph_resolution_keys VALUES (?,?,?)", ("symbol", canonical("resolution", project, "symbol", reference), key))
 
         with tempfile.TemporaryDirectory() as temporary:
             first, second = [Path(temporary) / name for name in ("first.db", "second.db")]
@@ -84,6 +90,27 @@ class SystemScaleHarnessTests(unittest.TestCase):
             fixture(second, "f" * 32)
             original = system_scale.database_graph_digest(first)
             self.assertEqual(original, system_scale.database_graph_digest(second))
+            key_a, key_b = [resolution_digest("f" * 32, name) for name in ("ka", "kb")]
+            for table in ("graph_entity_exports", "graph_relation_dependencies"):
+                with self.subTest(association=table):
+                    swap = f"UPDATE {table} SET key_digest = CASE key_digest WHEN ? THEN ? ELSE ? END"
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(swap, (key_a, key_b, key_a))
+                    self.assertNotEqual(original, system_scale.database_graph_digest(second))
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(swap, (key_a, key_b, key_a))
+            for table, owner_column, owner in (
+                ("graph_entity_exports", "entity_key", b"s"),
+                ("graph_relation_dependencies", "relation_key", b"r"),
+            ):
+                with self.subTest(missing_binding=table):
+                    update = f"UPDATE {table} SET key_digest = ? WHERE {owner_column} = ?"
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(update, (b"missing", owner))
+                    with self.assertRaises(KeyError):
+                        system_scale.database_graph_digest(second)
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(update, (key_a, owner))
             for key, before, after in (
                 (b"u", "b" * 32, "e" * 32),
                 (b"r", "src/target.rs", "src/change.rs"),
@@ -109,6 +136,11 @@ class SystemScaleHarnessTests(unittest.TestCase):
                 identity.replace("|32:" + "f" * 32, "|31:" + "f" * 32, 1),
                 identity.replace("|8:resolved", "|8:resolvez"),
                 identity.replace("entity.v1", "entitx.v1", 1),
+                identity.replace("entity.v1|32:" + "f" * 32, "entity.v1|32:" + "a" * 32, 1),
+                identity.replace(
+                    canonical("entity", "f" * 32, "file", "src/target.rs"),
+                    canonical("entity", "a" * 32, "file", "src/target.rs"),
+                ),
                 identity[:-1],
             ):
                 with self.subTest(malformed=malformed):
@@ -569,6 +601,13 @@ class SystemScaleHarnessTests(unittest.TestCase):
                         ):
                             system_scale.run_benchmark(args)
                         validate.assert_not_called()
+                args.only = "medium"
+                args.preflight_only = False
+                for caller_files in (0, -1):
+                    with self.subTest(bounded_caller_files=caller_files):
+                        args.caller_files = caller_files
+                        with self.assertRaisesRegex(ValueError, "must be positive"):
+                            system_scale.run_benchmark(args)
 
     def test_huge_failure_retains_preregistered_external_input(self) -> None:
         corpus = {

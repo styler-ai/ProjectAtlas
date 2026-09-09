@@ -39,11 +39,15 @@ Their harness inputs remain frozen at source revision
 focused measurement paths. Full publication runs must include every small
 fixture variant and the preregistered medium cardinality.
 
-The frozen harness omitted relation canonical identities from graph digests.
+The frozen harness omitted relation canonical identities and the resolution-key
+associations of exports and dependencies from graph digests.
 The results retain those originally measured `graph_digest` values and add
 a separate `graph_digest_recomputation` from the unchanged retained databases.
 That read-only correction includes relation identities and their typed nested
-project fields; it does not rerun or relock any resource observation.
+project fields, including each export/dependency resolution binding. Nested
+entity ownership must agree with its relation. This does not rerun or relock
+any resource observation. Bounded runs reject nonpositive caller counts; only
+an omitted count selects the preregistered default.
 
 | Shape | Cold wall / CPU (s) | Peak RSS / private commit (bytes) | Cold read / write (bytes) | Unchanged watch (s) | Narrow watch (s) | Rebuild (s) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -236,8 +240,8 @@ ignored or special-cased to turn this extra corpus green.
 ## Graph equivalence and SQLite profile
 
 These hashes are a current read-only recomputation of the six retained SQLite
-databases including canonical relation identities and normalizing only typed
-outer and nested entity project fields. The historical emitted hashes remain
+databases including canonical relation identities, export/dependency resolution
+bindings, and validated nested ownership, normalizing only typed project fields. The historical emitted hashes remain
 separate in the results JSON. All three pairs and the three current profile
 databases remain equal, including their record counts. Authored hexadecimal
 text and unresolved references remain literal; malformed relation identities
@@ -245,9 +249,9 @@ fail explicitly. Resource measurements and preregistration locks are unchanged.
 
 | Shape | Baseline digest | Candidate digest | Digest records | Equal |
 | --- | --- | --- | ---: | --- |
-| Small clean | `1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168` | `1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168` | 245 | yes |
-| Synthetic high-degree (1,024 callers) | `2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500` | `2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500` | 30,772 | yes |
-| Synthetic high-edge (4,096 callers) | `b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9` | `b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9` | 122,253 | yes |
+| Small clean | `c43e83ea82ce07e8a2af7aaa0b5896db14ffc051c612f0bf2eb098db06ec612d` | `c43e83ea82ce07e8a2af7aaa0b5896db14ffc051c612f0bf2eb098db06ec612d` | 245 | yes |
+| Synthetic high-degree (1,024 callers) | `d9a51ff16f9cdca80e971ab8fc9f15b012ff65ae3089cddb7cfa5093991a0624` | `d9a51ff16f9cdca80e971ab8fc9f15b012ff65ae3089cddb7cfa5093991a0624` | 30,772 | yes |
+| Synthetic high-edge (4,096 callers) | `c6d74d40c87b09b76bc55fb435fdf83daf605d34ee73248f2b8d3a222984fd9e` | `c6d74d40c87b09b76bc55fb435fdf83daf605d34ee73248f2b8d3a222984fd9e` | 122,253 | yes |
 
 Both sides retained the existing SQLite profile: WAL journal mode, full
 synchronous mode, 4,096-byte pages, clean quick-check, zero final WAL/SHM,

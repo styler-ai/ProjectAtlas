@@ -1601,7 +1601,7 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
 
     def normalized_identity(value: str, domain: str) -> str:
         prefix = re.match(
-            rf"^(projectatlas\.graph\.{domain}\.v1\|)32:[0-9a-f]{{32}}\|",
+            rf"^(projectatlas\.graph\.{domain}\.v1\|)32:([0-9a-f]{{32}})\|",
             value,
         )
         if prefix is None:
@@ -1636,7 +1636,10 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
             raise ValueError("unknown canonical relation resolution status")
         for index in (0, 3) if state in (b"resolved", b"external") else (0,):
             start, end = fields[index]
-            nested = normalized_identity(encoded[start:end].decode("utf-8"), "entity")
+            nested = encoded[start:end].decode("utf-8")
+            if not nested.startswith(f"projectatlas.graph.entity.v1|32:{prefix[2]}|"):
+                raise ValueError("nested entity identity must belong to the relation project")
+            nested = normalized_identity(nested, "entity")
             encoded = encoded[:start] + nested.encode("utf-8") + encoded[end:]
         return encoded.decode("utf-8")
 
@@ -1689,17 +1692,24 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
                 "end_line, end_column FROM graph_relation_occurrences"
             )
         )
-        records.extend(
-            ["resolution", row[0], normalized_identity(str(row[1]), "resolution")]
+        resolutions = {
+            (row[0], bytes(row[1])): normalized_identity(str(row[2]), "resolution")
             for row in connection.execute(
-                "SELECT resolution_domain, canonical_identity "
+                "SELECT resolution_domain, key_digest, canonical_identity "
                 "FROM graph_resolution_keys"
             )
+        }
+        records.extend(
+            ["resolution", domain, identity]
+            for (domain, _), identity in resolutions.items()
         )
         records.extend(
-            ["export", entities[bytes(row[0]).hex()][0], *row[1:]]
+            [
+                "export", entities[bytes(row[0]).hex()][0], row[1], row[2],
+                resolutions[(row[2], bytes(row[3]))],
+            ]
             for row in connection.execute(
-                "SELECT entity_key, owner_path, resolution_domain "
+                "SELECT entity_key, owner_path, resolution_domain, key_digest "
                 "FROM graph_entity_exports"
             )
         )
@@ -1707,10 +1717,10 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
             [
                 "dependency",
                 relation_records[bytes(row[0]).hex()],
-                *row[1:],
+                row[1], row[2], resolutions[(row[2], bytes(row[3]))],
             ]
             for row in connection.execute(
-                "SELECT relation_key, owner_path, resolution_domain "
+                "SELECT relation_key, owner_path, resolution_domain, key_digest "
                 "FROM graph_relation_dependencies"
             )
         )
@@ -4088,7 +4098,7 @@ def run_benchmark(
             "required_version", ""
         )
     )
-    caller_files = args.caller_files or int(
+    caller_files = args.caller_files if args.caller_files is not None else int(
         preregistration.get("corpora", {}).get("medium", {}).get("caller_files", 0)
     )
     if caller_files <= 0:

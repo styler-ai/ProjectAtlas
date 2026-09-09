@@ -2777,11 +2777,11 @@
   ],
   "graph_digest_recomputation": {
     "scope": "Read-only recomputation from retained SQLite databases; measurement observations and frozen inputs unchanged",
-    "harness_sha256": "10a1e4717d152984792551f468200a6469a36a6f7284b7fd1f3f4c9f39335f24",
-    "normalization": "Retain canonical relation identities; normalize only typed outer and nested entity project fields, preserving authored reference bytes",
+    "harness_sha256": "d1c5ff41b917d1e181fb4f486383a1b9ea8f8380c7fb908dd2c54a30325446eb",
+    "normalization": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields",
     "cases": {
       "small": {
-        "sha256": "1710ccd95d3eedad78721ddb3d699c350eceb3eeb1abc83f43e880d20e27f168",
+        "sha256": "c43e83ea82ce07e8a2af7aaa0b5896db14ffc051c612f0bf2eb098db06ec612d",
         "record_count": 245,
         "table_rows": {
           "entities": 29,
@@ -2795,7 +2795,7 @@
         }
       },
       "medium": {
-        "sha256": "2b1c469f22385b90f492e57b7c819d093bf73d5fcb17c00fa3f3020aa1e92500",
+        "sha256": "d9a51ff16f9cdca80e971ab8fc9f15b012ff65ae3089cddb7cfa5093991a0624",
         "record_count": 30772,
         "table_rows": {
           "entities": 3082,
@@ -2809,7 +2809,7 @@
         }
       },
       "large": {
-        "sha256": "b0fa61d466df72243a1d855b2600772880698bda61a3655238515315efeb0bd9",
+        "sha256": "c6d74d40c87b09b76bc55fb435fdf83daf605d34ee73248f2b8d3a222984fd9e",
         "record_count": 122253,
         "table_rows": {
           "entities": 12201,
