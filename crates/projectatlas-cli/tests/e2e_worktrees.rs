@@ -3266,8 +3266,7 @@ fn incremental_refreshes_converge_with_clean_scan_results() -> Result<(), Box<dy
 }
 
 #[test]
-fn resource_measurement_baseline_pipeline_preserves_atomic_graph_publication()
--> Result<(), Box<dyn Error>> {
+fn scan_and_watch_preserve_atomic_publication_across_roots() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let executable = mcp_contract_executable();
     let write_fixture = |root: &Path, marker: &str| -> Result<(), Box<dyn Error>> {
@@ -3363,9 +3362,14 @@ fn resource_measurement_baseline_pipeline_preserves_atomic_graph_publication()
         )?;
     }
     thread::scope(|scope| -> Result<(), Box<dyn Error>> {
-        let workers = databases.iter().map(|(root, database)| {
-            scope.spawn(move || run_watch_once(root, database).map_err(|error| error.to_string()))
-        });
+        let workers = databases
+            .iter()
+            .map(|(root, database)| {
+                scope.spawn(move || {
+                    run_watch_once(root, database).map_err(|error| error.to_string())
+                })
+            })
+            .collect::<Vec<_>>();
         for worker in workers {
             let result = worker.join().map_err(|error| {
                 io::Error::other(format!("cross-root watch panicked: {error:?}"))

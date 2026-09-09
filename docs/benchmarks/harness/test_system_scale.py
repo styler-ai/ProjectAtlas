@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from contextlib import closing
 from unittest import mock
 
 import system_scale
@@ -19,6 +20,68 @@ import mcp_composition
 
 
 class SystemScaleHarnessTests(unittest.TestCase):
+    def test_measurement_telemetry_is_preregistered_and_isolated(self) -> None:
+        with mock.patch.dict(os.environ, {"PROJECTATLAS_NO_TELEMETRY": "1"}):
+            self.assertNotIn("PROJECTATLAS_NO_TELEMETRY", system_scale.measurement_environment("enabled"))
+            self.assertEqual(system_scale.measurement_environment("disabled")["PROJECTATLAS_NO_TELEMETRY"], "1")
+            self.assertEqual(os.environ["PROJECTATLAS_NO_TELEMETRY"], "1")
+            with self.assertRaises(ValueError):
+                system_scale.measurement_environment("invalid")
+
+    def test_graph_digest_preserves_authored_hex_and_normalizes_project_ownership(self) -> None:
+        schemas = {
+            "graph_entities": "entity_key canonical_identity entity_kind repository_path package_manager package_name manifest_path symbol_name symbol_kind symbol_parent symbol_signature external_system external_identity",
+            "graph_relations": "relation_key canonical_identity source_entity_key relation_scope relation_kind resolution_status target_entity_key reference_text candidate_count document_unresolved_reason confidence completeness",
+            "graph_relation_occurrences": "relation_key file_path start_line start_column end_line end_column",
+            "graph_resolution_keys": "resolution_domain canonical_identity",
+            "graph_entity_exports": "entity_key owner_path resolution_domain",
+            "graph_relation_dependencies": "relation_key owner_path resolution_domain",
+            "graph_coverage": "scope_kind scope_path relation_scope relation_kind state total covered omitted reason reached_limit",
+            "graph_identity_rejections": "file_path start_line start_column end_line end_column parser field reason fact_index",
+        }
+        def canonical(domain, *fields):
+            return "projectatlas.graph." + domain + ".v1" + "".join(
+                f"|{len(value.encode('utf-8'))}:{value}" for value in fields
+            )
+
+        def fixture(database, project):
+            with closing(sqlite3.connect(database)) as connection, connection:
+                for table, columns in schemas.items():
+                    connection.execute(f"CREATE TABLE {table} ({', '.join(columns.split())})")
+                source = canonical("entity", project, "file", "src/ä.rs")
+                target = canonical("entity", project, "file", "src/target.rs")
+                for key, identity, file in [(b"s", source, "src/ä.rs"), (b"t", target, "src/target.rs")]:
+                    connection.execute(
+                        "INSERT INTO graph_entities VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (key, identity, "file", file, *([None] * 9)),
+                    )
+                for key, state, target_key, reference in [
+                    (b"r", "resolved", b"t", None),
+                    (b"u", "unresolved", None, "b" * 32),
+                ]:
+                    identity = canonical("relation", project, source, "calls", state, target if target_key else reference)
+                    connection.execute(
+                        "INSERT INTO graph_relations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (key, identity, b"s", "symbol", "calls", state, target_key, reference, None, None, "exact", "complete"),
+                    )
+                    connection.execute("INSERT INTO graph_relation_occurrences VALUES (?,?,?,?,?,?)", (key, "src/ä.rs", 1, 1, 1, 2))
+                    connection.execute("INSERT INTO graph_relation_dependencies VALUES (?,?,?)", (key, "src/ä.rs", "symbol"))
+                connection.execute("INSERT INTO graph_entity_exports VALUES (?,?,?)", (b"s", "src/ä.rs", "symbol"))
+                connection.execute("INSERT INTO graph_resolution_keys VALUES (?,?)", ("symbol", canonical("resolution", project, "symbol", "c" * 32)))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            first, second = [Path(temporary) / name for name in ("first.db", "second.db")]
+            fixture(first, "a" * 32)
+            fixture(second, "f" * 32)
+            original = system_scale.database_graph_digest(first)
+            self.assertEqual(original, system_scale.database_graph_digest(second))
+            with closing(sqlite3.connect(second)) as connection, connection:
+                connection.execute("UPDATE graph_resolution_keys SET canonical_identity = ?", (canonical("resolution", "f" * 32, "symbol", "d" * 32),))
+            self.assertNotEqual(original, system_scale.database_graph_digest(second))
+            with closing(sqlite3.connect(first)) as connection, connection:
+                connection.execute("UPDATE graph_relations SET reference_text = ? WHERE relation_key = ?", ("e" * 32, b"u"))
+            self.assertNotEqual(original, system_scale.database_graph_digest(first))
+
     def test_generated_medium_variant_reports_actual_shape(self) -> None:
         self.assertEqual(
             system_scale.medium_corpus_variant(1024, 1024), "high-degree"
@@ -654,7 +717,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=root, text=True
         )
 
-    def test_runtime_artifact_identity_captures_runtime_and_source_revision(
+    def test_runtime_artifact_identity_labels_checkout_observation(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -682,8 +745,8 @@ class SystemScaleHarnessTests(unittest.TestCase):
             identity,
             {
                 "runtime": str(runtime.resolve()),
-                "source_revision": "c" * 40,
-                "source_revision_method": "git-rev-parse-head-from-runtime-checkout",
+                "checkout_head": "c" * 40,
+                "checkout_head_method": "git-rev-parse-enclosing-checkout-not-build-provenance",
                 "runtime_sha256": hashlib.sha256(payload).hexdigest(),
                 "runtime_bytes": len(payload),
             },
@@ -740,7 +803,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     runtime
                 )
 
-        self.assertIsNone(identity["source_revision"])
+        self.assertIsNone(identity["checkout_head"])
         self.assertEqual(identity["runtime_sha256"], hashlib.sha256(payload).hexdigest())
         self.assertEqual(identity["runtime_bytes"], len(payload))
         self.assertIn("not a Git checkout", identity["error"])
@@ -1313,6 +1376,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from contextlib import closing
 
 server_pid_path, child_pid_path = map(Path, sys.argv[1:3])
 server_pid_path.write_text(str(os.getpid()), encoding="utf-8")
@@ -1460,7 +1524,7 @@ time.sleep(60)
                     }
                 ),
             )
-            self.assertIsNone(result["candidate"]["source_revision"])
+            self.assertIsNone(result["candidate"]["checkout_head"])
             self.assertIsNone(result["candidate"]["runtime_sha256"])
             self.assertIn("FileNotFoundError", result["candidate"]["error"])
 
@@ -1600,17 +1664,16 @@ time.sleep(60)
             },
             {"returncode": 1, "stdout": ""},
         ]
-        self.assertTrue(
-            system_scale.reported_parser_workers_within_budget(runs, 8)
-        )
+        self.assertEqual(system_scale.reported_parser_worker_counts(runs), [8])
         runs[0]["stdout"] = json.dumps({"last_symbols": {"max_workers": 9}})
-        self.assertFalse(
-            system_scale.reported_parser_workers_within_budget(runs, 8)
-        )
+        self.assertEqual(system_scale.reported_parser_worker_counts(runs), [9])
+        runs.append({"returncode": 0, "stdout": '{"last_symbols": null}'})
+        self.assertEqual(system_scale.reported_parser_worker_counts(runs), [9, 0])
 
     def test_concurrent_resource_envelope_sums_process_peaks(self) -> None:
         run = {
             "peak_rss_bytes": 10,
+            "peak_private_commit_bytes": 14,
             "peak_worker_processes": 2,
             "worker_process_bound": 3,
             "peak_threads": 3,
@@ -1623,6 +1686,7 @@ time.sleep(60)
             [run, {**run, "terminal_io_complete": False}]
         )
         self.assertEqual(aggregate["peak_rss_bytes"], 20)
+        self.assertEqual(aggregate["peak_private_commit_bytes"], 28)
         self.assertEqual(aggregate["peak_worker_processes"], 4)
         self.assertEqual(aggregate["worker_process_bound"], 6)
         self.assertEqual(aggregate["peak_threads"], 6)
@@ -1655,6 +1719,7 @@ time.sleep(60)
                     env=dict(os.environ),
                     timeout_seconds=10,
                 )
+                self.assertGreater(measured["peak_private_commit_bytes"], 0)
                 self.assertTrue(measured["terminal_io_complete"])
                 self.assertEqual(measured["exact_total_processes"], 2)
                 self.assertEqual(measured["worker_process_bound"], 1)

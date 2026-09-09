@@ -107,7 +107,7 @@ failed cell is retained and is part of the no-adoption decision.
 
 The existing Rust E2E cancellation helper additionally reopens the canceled
 database and compares its bounded logical SQLite snapshot. The
-`resource_measurement_baseline_pipeline_preserves_atomic_graph_publication`
+`scan_and_watch_preserve_atomic_publication_across_roots`
 test exercises the real CLI scan/watch, timeout rollback, MCP watch, two-root
 watch, same-root writer lock, retry, and that cancellation helper in one
 bounded fixture. The historical writer-lock rows above include process/setup

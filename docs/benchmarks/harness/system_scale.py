@@ -60,6 +60,18 @@ SYSTEM_SCALE_MEASUREMENT_INPUTS = (
 )
 
 
+def measurement_environment(telemetry: str) -> dict[str, str]:
+    """Apply the preregistered telemetry mode to isolated measured children."""
+    env = os.environ.copy()
+    if telemetry == "enabled":
+        env.pop("PROJECTATLAS_NO_TELEMETRY", None)
+    elif telemetry == "disabled":
+        env["PROJECTATLAS_NO_TELEMETRY"] = "1"
+    else:
+        raise ValueError("measurement telemetry must be enabled or disabled")
+    return env
+
+
 def medium_corpus_variant(caller_files: int, default_caller_files: int) -> str:
     """Name generated medium fixtures by their actual caller cardinality."""
 
@@ -362,6 +374,7 @@ class ProcessTreeSampler:
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._sample_until_stopped, daemon=True)
         self.peak_rss_bytes = 0
+        self.peak_private_commit_bytes = 0 if os.name == "nt" else None
         self.peak_processes = 0
         self.peak_threads = 0
         self.peak_storage = {
@@ -419,6 +432,9 @@ class ProcessTreeSampler:
                 "storage",
             ],
             "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_private_commit_bytes": self.peak_private_commit_bytes,
+            "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events"
+            if self.peak_private_commit_bytes is not None else "unavailable",
             "peak_processes": self.peak_processes,
             "peak_worker_processes": max(0, self.peak_processes - 1),
             "peak_threads": self.peak_threads,
@@ -442,11 +458,15 @@ class ProcessTreeSampler:
             self.stop_event.set()
             return
         rss = 0
+        private_commit = 0
         threads = 0
         for process in processes:
             try:
                 self.observed_pids.add(process.pid)
-                rss += process.memory_info().rss
+                memory = process.memory_info()
+                rss += memory.rss
+                if self.peak_private_commit_bytes is not None:
+                    private_commit += memory.private
                 threads += process.num_threads()
                 if os.name != "nt":
                     cpu = process.cpu_times()
@@ -481,6 +501,10 @@ class ProcessTreeSampler:
                 self.stop_event.set()
                 return
         self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+        if self.peak_private_commit_bytes is not None:
+            self.peak_private_commit_bytes = max(
+                self.peak_private_commit_bytes, private_commit
+            )
         self.peak_processes = max(self.peak_processes, len(processes))
         self.peak_threads = max(self.peak_threads, threads)
         if self.storage_root is not None:
@@ -1575,7 +1599,13 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
     """Digest logical graph rows without project-instance or row identifiers."""
 
     def normalized_identity(value: str) -> str:
-        return re.sub(r"32:[0-9a-f]{32}", "32:PROJECT_INSTANCE", value)
+        prefix = re.match(
+            r"^(projectatlas\.graph\.(?:entity|resolution)\.v1\|)32:[0-9a-f]{32}\|",
+            value,
+        )
+        if prefix is None:
+            raise ValueError("graph identity lacks its typed leading project field")
+        return prefix[1] + "32:" + "0" * 32 + "|" + value[prefix.end():]
 
     connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
     try:
@@ -1605,29 +1635,17 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
         records: list[list[Any]] = [
             ["entity", *value] for value in entities.values()
         ]
-        for row in relations.values():
+        relation_records = {}
+        for key, row in relations.items():
             source = entities[bytes(row[2]).hex()][0]
-            target = (
-                entities[bytes(row[6]).hex()][0]
-                if row[6] is not None
-                else None
-            )
-            records.append(
-                [
-                    "relation",
-                    normalized_identity(str(row[1])),
-                    source,
-                    row[3],
-                    row[4],
-                    row[5],
-                    target,
-                    *row[7:12],
-                ]
-            )
+            target = entities[bytes(row[6]).hex()][0] if row[6] is not None else None
+            record = ["relation", source, row[3], row[4], row[5], target, *row[7:12]]
+            relation_records[key] = record
+            records.append(record)
         records.extend(
             [
                 "occurrence",
-                normalized_identity(str(relations[bytes(row[0]).hex()][1])),
+                relation_records[bytes(row[0]).hex()],
                 *row[1:],
             ]
             for row in connection.execute(
@@ -1652,7 +1670,7 @@ def database_graph_digest(database: Path) -> dict[str, Any]:
         records.extend(
             [
                 "dependency",
-                normalized_identity(str(relations[bytes(row[0]).hex()][1])),
+                relation_records[bytes(row[0]).hex()],
                 *row[1:],
             ]
             for row in connection.execute(
@@ -2305,21 +2323,22 @@ def evaluate_case(
             telemetry["wal_autocheckpoint_pages"] == 1000,
         ),
         (
-            "telemetry-disabled checkpoint state",
+            "preregistered telemetry state",
             {
                 "raw_rows": telemetry["raw_rows"],
                 "writes_since_checkpoint": telemetry["writes_since_checkpoint"],
                 "checkpoint_state": telemetry["checkpoint_state"],
             },
-            "==",
-            {
-                "raw_rows": 0,
-                "writes_since_checkpoint": 0,
-                "checkpoint_state": "not_due",
-            },
-            telemetry["raw_rows"] == 0
-            and telemetry["writes_since_checkpoint"] == 0
-            and telemetry["checkpoint_state"] == "not_due",
+            "matches",
+            preregistration["candidate"].get("telemetry", "disabled"),
+            (
+                0 < telemetry["raw_rows"] <= telemetry["max_raw_rows"]
+                and 0 <= telemetry["writes_since_checkpoint"] < telemetry["checkpoint_write_interval"]
+            ) if preregistration["candidate"].get("telemetry", "disabled") == "enabled" else (
+                telemetry["raw_rows"] == 0
+                and telemetry["writes_since_checkpoint"] == 0
+                and telemetry["checkpoint_state"] == "not_due"
+            ),
         ),
         (
             "SQLite statistics policy",
@@ -2993,16 +3012,14 @@ def concurrent_worker_allocation(
     )
 
 
-def reported_parser_workers_within_budget(
-    runs: list[dict[str, Any]], workers_per_process: int
-) -> bool:
-    """Check successful watch reports without treating them as scan evidence."""
-    return all(
-        run["returncode"] != 0
-        or json.loads(run["stdout"])["last_symbols"]["max_workers"]
-        <= workers_per_process
-        for run in runs
-    )
+def reported_parser_worker_counts(runs: list[dict[str, Any]]) -> list[int]:
+    """Read configured parser threads; successful no-op watches start no pool."""
+    counts = []
+    for run in runs:
+        if run["returncode"] == 0:
+            symbols = json.loads(run["stdout"])["last_symbols"]
+            counts.append(0 if symbols is None else symbols["max_workers"])
+    return counts
 
 
 def aggregate_process_metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3010,6 +3027,8 @@ def aggregate_process_metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "method": "sum-of-per-process-peaks-conservative-upper-bound",
         "peak_rss_bytes": sum(run["peak_rss_bytes"] for run in runs),
+        "peak_private_commit_bytes": sum(run["peak_private_commit_bytes"] for run in runs)
+        if all(run["peak_private_commit_bytes"] is not None for run in runs) else None,
         "peak_worker_processes": sum(
             run["peak_worker_processes"] for run in runs
         ),
@@ -3170,12 +3189,18 @@ def concurrent_isolation(
         for run in concurrent_runs
     )
     configured_worker_budget_passed = configured_worker_budget <= worker_budget
-    reported_parser_worker_budget_passed = reported_parser_workers_within_budget(
-        concurrent_runs, workers_per_process
+    reported_parser_worker_budget_passed = all(
+        type(count) is int and 0 <= count <= workers_per_process
+        for count in reported_parser_worker_counts(concurrent_runs)
     )
+    for resources, runs in (
+        (cross_root_resources, results), (same_root_resources, same_runs)
+    ):
+        resources["reported_parser_worker_bound"] = sum(reported_parser_worker_counts(runs))
     resource_envelope_passed = all(
         resources["terminal_io_complete"]
         and resources["worker_process_bound"] <= worker_budget
+        and resources["reported_parser_worker_bound"] <= worker_budget
         and resources["peak_rss_bytes"]
         <= thresholds["maximum_concurrent_peak_rss_bytes"]
         for resources in (cross_root_resources, same_root_resources)
@@ -3711,7 +3736,7 @@ def candidate_source_identity(preregistration_path: Path) -> dict[str, str]:
 
 
 def runtime_artifact_identity(runtime: Path) -> dict[str, Any]:
-    """Capture executable bytes and the Git revision containing that executable."""
+    """Capture executable bytes and enclosing checkout HEAD, not build provenance."""
 
     resolved = runtime.resolve(strict=True)
     payload = resolved.read_bytes()
@@ -3747,8 +3772,8 @@ def runtime_artifact_identity(runtime: Path) -> dict[str, Any]:
         raise RuntimeError("candidate runtime source revision was malformed")
     return {
         "runtime": str(resolved),
-        "source_revision": source_revision,
-        "source_revision_method": "git-rev-parse-head-from-runtime-checkout",
+        "checkout_head": source_revision,
+        "checkout_head_method": "git-rev-parse-enclosing-checkout-not-build-provenance",
         "runtime_sha256": hashlib.sha256(payload).hexdigest(),
         "runtime_bytes": len(payload),
     }
@@ -3762,8 +3787,8 @@ def runtime_artifact_identity_or_unavailable(runtime: Path) -> dict[str, Any]:
     except (OSError, RuntimeError) as error:
         identity: dict[str, Any] = {
             "runtime": str(runtime),
-            "source_revision": None,
-            "source_revision_method": None,
+            "checkout_head": None,
+            "checkout_head_method": None,
             "runtime_sha256": None,
             "runtime_bytes": None,
             "error": f"{type(error).__name__}: {error}",
@@ -4070,8 +4095,8 @@ def run_benchmark(
     if work_root.exists():
         remove_tree(work_root, allowed_parent=allowed)
     work_root.mkdir(parents=True)
-    env = os.environ.copy()
-    env["PROJECTATLAS_NO_TELEMETRY"] = "1"
+    telemetry_mode = preregistration["candidate"].get("telemetry", "disabled")
+    env = measurement_environment(telemetry_mode)
 
     cases = []
     small = prepare_small(work_root)
@@ -4250,7 +4275,7 @@ def run_benchmark(
             "python": platform.python_version(),
             "psutil": psutil.__version__,
             "logical_cpus": os.cpu_count(),
-            "telemetry": "disabled",
+            "telemetry": telemetry_mode,
         },
         "cases": cases,
         "concurrent_isolation": concurrency,
