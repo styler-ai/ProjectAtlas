@@ -3277,6 +3277,8 @@ pub(crate) fn run_scan_pipeline_controlled(
 ) -> Result<ScanReport, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
+    control.check(IndexWorkStage::Publication)?;
+    store.probe_index_publication_writer()?;
     let batch = stage_full_index_publication(store, plan, symbol_options, false, true, control)?;
     revalidate_staged_publication_inputs_with_purpose_snapshot(
         plan,
@@ -3375,6 +3377,8 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     control.check(IndexWorkStage::SymbolParsing)?;
     verify_index_project_root(store, &plan.root)?;
     verify_index_publication(store, plan)?;
+    control.check(IndexWorkStage::Publication)?;
+    store.probe_index_publication_writer()?;
     let base_generation = publication_base_generation(store)?;
     let nodes = store
         .load_nodes()?
@@ -7993,6 +7997,8 @@ pub(crate) fn refresh_index_controlled(
         graph_projection::cleanup_abandoned_repository_graph_staging(store, &plan.root, control)?;
         return Ok(empty_index_refresh_report(plan.text_options));
     }
+    control.check(IndexWorkStage::Publication)?;
+    store.probe_index_publication_writer()?;
     let batch = stage_full_index_publication(
         store,
         plan,
@@ -8223,6 +8229,8 @@ pub(crate) fn refresh_index_for_changes_controlled(
         revalidate_staged_publication_inputs_controlled(plan, &baseline_nodes, None, control)?;
         return Ok(empty_index_refresh_report(plan.text_options));
     }
+    control.check(IndexWorkStage::Publication)?;
+    store.probe_index_publication_writer()?;
     drop(existing_nodes);
     drop(baseline_by_path);
     let previous_hashes = indexed_file_hashes_for_paths(store, &changed_paths)?;
@@ -11624,6 +11632,7 @@ mod tests {
             .ok_or_else(|| io::Error::other("initial publication missing"))?
             .generation;
         let contract_fingerprint = plan.publication_contract_fingerprint();
+        store.probe_index_publication_writer()?;
         let contended_batch =
             stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
         revalidate_staged_publication_inputs_controlled(

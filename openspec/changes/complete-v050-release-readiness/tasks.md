@@ -28,10 +28,10 @@
 
 ## 5. Graph-construction scale and parallelism (#358)
 
-- [ ] 5.1 Profile current cold scan and incremental watch across symbol parsing, structural summaries, graph derivation, staging, SQLite replacement, and cleanup on representative small/medium/large and high-edge repositories; record wall/CPU/RSS/allocations, filesystem bytes, rows, plans, transaction/WAL/checkpoint behavior, persistent bytes, cancellation, and exact graph digest.
-- [ ] 5.2 Define one process-level indexing budget passed through existing `SymbolBuildOptions` and downstream stages; compare sequential reuse/batching or one shared Rayon pool with the current separate-pool lifecycle, including concurrent repositories and same-root writer contention.
-- [ ] 5.3 Adopt only a measured improvement or retain current behavior; preserve exact graph equivalence, generation atomicity, deterministic ordering, bounded queues/intermediates, cancellation, late-failure cleanup, and Windows/Linux/macOS behavior.
-- [ ] 5.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 5.1 Profile current cold scan and incremental watch across symbol parsing, structural summaries, graph derivation, staging, SQLite replacement, and cleanup on representative small/medium/large and high-edge repositories; record wall/CPU/RSS/allocations, filesystem bytes, rows, plans, transaction/WAL/checkpoint behavior, persistent bytes, cancellation, and exact graph digest.
+- [x] 5.2 Define one process-level indexing budget passed through existing `SymbolBuildOptions` and downstream stages; compare sequential reuse/batching or one shared Rayon pool with the current separate-pool lifecycle, including concurrent repositories and same-root writer contention.
+- [x] 5.3 Adopt only a measured improvement or retain current behavior; preserve exact graph equivalence, generation atomicity, deterministic ordering, bounded queues/intermediates, cancellation, late-failure cleanup, and Windows/Linux/macOS behavior.
+- [x] 5.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 6. Filtered custom-harness timeout (#372)
 

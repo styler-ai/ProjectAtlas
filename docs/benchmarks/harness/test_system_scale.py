@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import inspect
 import json
@@ -11,6 +12,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from contextlib import closing
 from unittest import mock
 
 import system_scale
@@ -18,6 +20,157 @@ import mcp_composition
 
 
 class SystemScaleHarnessTests(unittest.TestCase):
+    def test_focused_profile_rejects_wrong_runtime_build_witness(self) -> None:
+        witness = {"runtime_sha256": "a" * 64, "runtime_bytes": 42}
+        system_scale.validate_runtime_build_witness(witness, dict(witness))
+        for actual in ({**witness, "runtime_sha256": "b" * 64}, {**witness, "runtime_bytes": 43}):
+            with self.assertRaises(ValueError):
+                system_scale.validate_runtime_build_witness(witness, actual)
+        with self.assertRaises(ValueError):
+            system_scale.validate_runtime_build_witness({**witness, "runtime_bytes": True}, witness)
+
+    def test_measurement_telemetry_is_preregistered_and_isolated(self) -> None:
+        with mock.patch.dict(os.environ, {"PROJECTATLAS_NO_TELEMETRY": "1"}):
+            self.assertNotIn("PROJECTATLAS_NO_TELEMETRY", system_scale.measurement_environment("enabled"))
+            self.assertEqual(system_scale.measurement_environment("disabled")["PROJECTATLAS_NO_TELEMETRY"], "1")
+            self.assertEqual(os.environ["PROJECTATLAS_NO_TELEMETRY"], "1")
+            with self.assertRaises(ValueError):
+                system_scale.measurement_environment("invalid")
+
+    def test_graph_digest_preserves_authored_hex_and_normalizes_project_ownership(self) -> None:
+        schemas = {
+            "graph_entities": "entity_key canonical_identity entity_kind repository_path package_manager package_name manifest_path symbol_name symbol_kind symbol_parent symbol_signature external_system external_identity",
+            "graph_relations": "relation_key canonical_identity source_entity_key relation_scope relation_kind resolution_status target_entity_key reference_text candidate_count document_unresolved_reason confidence completeness",
+            "graph_relation_occurrences": "relation_key file_path start_line start_column end_line end_column",
+            "graph_resolution_keys": "resolution_domain canonical_identity key_digest",
+            "graph_entity_exports": "entity_key owner_path resolution_domain key_digest",
+            "graph_relation_dependencies": "relation_key owner_path resolution_domain key_digest",
+            "graph_coverage": "scope_kind scope_path relation_scope relation_kind state total covered omitted reason reached_limit",
+            "graph_identity_rejections": "file_path start_line start_column end_line end_column parser field reason fact_index",
+        }
+        def canonical(domain, *fields):
+            return "projectatlas.graph." + domain + ".v1" + "".join(
+                f"|{len(value.encode('utf-8'))}:{value}" for value in fields
+            )
+
+        def resolution_digest(project, name):
+            return hashlib.sha256((project + name).encode("utf-8")).digest()
+
+        def fixture(database, project):
+            with closing(sqlite3.connect(database)) as connection, connection:
+                for table, columns in schemas.items():
+                    connection.execute(f"CREATE TABLE {table} ({', '.join(columns.split())})")
+                source = canonical("entity", project, "file", "src/ä.rs")
+                target = canonical("entity", project, "file", "src/target.rs")
+                for key, identity, file in [(b"s", source, "src/ä.rs"), (b"t", target, "src/target.rs")]:
+                    connection.execute(
+                        "INSERT INTO graph_entities VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (key, identity, "file", file, *([None] * 9)),
+                    )
+                for key, state, target_key, reference in [
+                    (b"r", "resolved", b"t", None),
+                    (b"u", "unresolved", None, "32:" + "b" * 32),
+                ]:
+                    identity = canonical("relation", project, source, "calls", state, target if target_key else reference)
+                    connection.execute(
+                        "INSERT INTO graph_relations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (key, identity, b"s", "symbol", "calls", state, target_key, reference, None, None, "exact", "complete"),
+                    )
+                    connection.execute("INSERT INTO graph_relation_occurrences VALUES (?,?,?,?,?,?)", (key, "src/ä.rs", 1, 1, 1, 2))
+                    digest = resolution_digest(project, "ka" if key == b"r" else "kb")
+                    connection.execute("INSERT INTO graph_relation_dependencies VALUES (?,?,?,?)", (key, "src/ä.rs", "symbol", digest))
+                for entity, name, reference in [(b"s", "ka", "c" * 32), (b"t", "kb", "d" * 32)]:
+                    key = resolution_digest(project, name)
+                    connection.execute("INSERT INTO graph_entity_exports VALUES (?,?,?,?)", (entity, "src/ä.rs", "symbol", key))
+                    connection.execute("INSERT INTO graph_resolution_keys VALUES (?,?,?)", ("symbol", canonical("resolution", project, "symbol", reference), key))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            first, second = [Path(temporary) / name for name in ("first.db", "second.db")]
+            fixture(first, "a" * 32)
+            fixture(second, "f" * 32)
+            original = system_scale.database_graph_digest(first)
+            self.assertEqual(original, system_scale.database_graph_digest(second))
+            key_a, key_b = [resolution_digest("f" * 32, name) for name in ("ka", "kb")]
+            for table in ("graph_entity_exports", "graph_relation_dependencies"):
+                with self.subTest(association=table):
+                    swap = f"UPDATE {table} SET key_digest = CASE key_digest WHEN ? THEN ? ELSE ? END"
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(swap, (key_a, key_b, key_a))
+                    self.assertNotEqual(original, system_scale.database_graph_digest(second))
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(swap, (key_a, key_b, key_a))
+            for table, owner_column, owner in (
+                ("graph_entity_exports", "entity_key", b"s"),
+                ("graph_relation_dependencies", "relation_key", b"r"),
+            ):
+                with self.subTest(missing_binding=table):
+                    update = f"UPDATE {table} SET key_digest = ? WHERE {owner_column} = ?"
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(update, (b"missing", owner))
+                    with self.assertRaises(KeyError):
+                        system_scale.database_graph_digest(second)
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(update, (key_a, owner))
+            for key, before, after in (
+                (b"u", "b" * 32, "e" * 32),
+                (b"r", "src/target.rs", "src/change.rs"),
+            ):
+                with self.subTest(canonical_change=before):
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        identity = connection.execute(
+                            "SELECT canonical_identity FROM graph_relations WHERE relation_key = ?", (key,)
+                        ).fetchone()[0]
+                        connection.execute(
+                            "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                            (identity.replace(before, after), key),
+                        )
+                    self.assertNotEqual(original, system_scale.database_graph_digest(second))
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(
+                            "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                            (identity, key),
+                        )
+            for malformed in (
+                identity + "|",
+                identity.replace("relation.v1", "relation.v2"),
+                identity.replace("|32:" + "f" * 32, "|31:" + "f" * 32, 1),
+                identity.replace("|8:resolved", "|8:resolvez"),
+                identity.replace("entity.v1", "entitx.v1", 1),
+                identity.replace("entity.v1|32:" + "f" * 32, "entity.v1|32:" + "a" * 32, 1),
+                identity.replace(
+                    canonical("entity", "f" * 32, "file", "src/target.rs"),
+                    canonical("entity", "a" * 32, "file", "src/target.rs"),
+                ),
+                identity[:-1],
+            ):
+                with self.subTest(malformed=malformed):
+                    with closing(sqlite3.connect(second)) as connection, connection:
+                        connection.execute(
+                            "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                            (malformed, b"r"),
+                        )
+                    with self.assertRaises(ValueError):
+                        system_scale.database_graph_digest(second)
+            with closing(sqlite3.connect(second)) as connection, connection:
+                connection.execute(
+                    "UPDATE graph_relations SET canonical_identity = ? WHERE relation_key = ?",
+                    (identity, b"r"),
+                )
+            with closing(sqlite3.connect(second)) as connection, connection:
+                connection.execute("UPDATE graph_resolution_keys SET canonical_identity = ?", (canonical("resolution", "f" * 32, "symbol", "d" * 32),))
+            self.assertNotEqual(original, system_scale.database_graph_digest(second))
+            with closing(sqlite3.connect(first)) as connection, connection:
+                connection.execute("UPDATE graph_relations SET reference_text = ? WHERE relation_key = ?", ("e" * 32, b"u"))
+            self.assertNotEqual(original, system_scale.database_graph_digest(first))
+
+    def test_generated_medium_variant_reports_actual_shape(self) -> None:
+        self.assertEqual(
+            system_scale.medium_corpus_variant(1024, 1024), "high-degree"
+        )
+        self.assertEqual(
+            system_scale.medium_corpus_variant(4096, 1024), "high-edge-4096"
+        )
+
     def test_remove_tree_tolerates_entry_disappearing_during_permission_retry(
         self,
     ) -> None:
@@ -224,6 +377,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
+            required_version="0.4.0",
             runtime_sha256="other-runtime",
             mcp_tools_sha256="other-tools",
             skill_sha256="other-skill",
@@ -287,6 +441,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
         }
         errors = system_scale.publication_identity_errors(
             preregistration,
+            required_version="0.4.0",
             runtime_sha256="runtime",
             mcp_tools_sha256="tools",
             skill_sha256="skill",
@@ -302,6 +457,207 @@ class SystemScaleHarnessTests(unittest.TestCase):
             measurement_errors=[],
         )
         self.assertEqual(errors, [])
+
+    def test_all_route_preflight_binds_locked_version_to_cli_and_mcp(
+        self,
+    ) -> None:
+        effective_version = "0.4.5"
+        tools = [{"name": "atlas_runtime_info"}]
+        tool_digest = hashlib.sha256(
+            json.dumps(tools, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "projectatlas.exe"
+            runtime.write_bytes(b"runtime")
+            runtime_digest = hashlib.sha256(runtime.read_bytes()).hexdigest()
+            preregistration = {
+                "status": "locked_for_final_measurement",
+                "candidate": {
+                    "required_version": effective_version,
+                    "runtime_sha256": runtime_digest,
+                    "mcp_tools_sha256": tool_digest,
+                    "skill_path": "plugins/projectatlas/skills/projectatlas/SKILL.md",
+                    "skill_sha256": "skill",
+                    "skill_bytes": 5,
+                },
+                "thresholds": {"all": {"mcp_request_timeout_seconds": 1}},
+            }
+            process = mock.Mock(
+                returncode=0,
+                stderr="",
+                stdout=json.dumps(
+                    {
+                        "project": "ProjectAtlas",
+                        "version": effective_version,
+                        "capabilities": ["mcp", "sqlite", "toon"],
+                        "text_format": "TOON",
+                        "mcp_tools": [f"tool-{index}" for index in range(43)],
+                    }
+                ),
+            )
+            client = mock.Mock()
+            client.tools.return_value = (tools, 1.0)
+            with (
+                mock.patch.object(
+                    system_scale,
+                    "candidate_file_identity",
+                    return_value={"path": "skill", "sha256": "skill", "bytes": 5},
+                ),
+                mock.patch.object(
+                    system_scale.subprocess,
+                    "run",
+                    return_value=process,
+                ) as run,
+                mock.patch.object(
+                    system_scale.subprocess,
+                    "check_output",
+                    side_effect=lambda command, **_: "head\n" if command[1] == "rev-parse" else "",
+                ),
+                mock.patch.object(
+                    system_scale,
+                    "measurement_input_errors",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    system_scale,
+                    "McpClient",
+                    return_value=client,
+                ) as mcp_client,
+            ):
+                identity, source = system_scale.validate_publication_identity(
+                    runtime,
+                    preregistration,
+                    Path(system_scale.ROOT) / "preregistration.json",
+                    required_version=effective_version,
+                )
+                with self.assertRaisesRegex(RuntimeError, "requested compatibility version"):
+                    system_scale.validate_publication_identity(
+                        runtime, preregistration,
+                        Path(system_scale.ROOT) / "preregistration.json",
+                        required_version="0.4.0",
+                    )
+                for locked_version in ("0.4.0", "", None, 5):
+                    with self.subTest(locked_version=locked_version):
+                        preregistration["candidate"]["required_version"] = locked_version
+                        with self.assertRaisesRegex(RuntimeError, "preregistered candidate version"):
+                            system_scale.validate_publication_identity(
+                                runtime, preregistration,
+                                Path(system_scale.ROOT) / "preregistration.json",
+                                required_version=effective_version,
+                            )
+
+            self.assertEqual(
+                run.call_args.args[0][1:3], ["--require-version", effective_version]
+            )
+            self.assertEqual(
+                mcp_client.call_args.kwargs["required_version"], effective_version
+            )
+            self.assertEqual(identity["runtime_info"]["version"], effective_version)
+            self.assertEqual(source["checkout_head"], "head")
+
+    def test_all_route_preflight_preserves_version_and_rejects_corpus_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime.exe"
+            runtime.touch()
+            preregistration = root / "preregistration.json"
+            preregistration.write_text(
+                '{"candidate":{"required_version":"0.4.5"},"corpora":{"medium":{"caller_files":1024}}}\n', encoding="utf-8"
+            )
+            args = argparse.Namespace(
+                runtime=runtime,
+                preregistration=preregistration,
+                work_root=root / "target/benchmarks/system-scale/issue-358-preflight-test",
+                output=root / "target/benchmarks/system-scale/issue-358-preflight-test.json",
+                corpus_cache=root / "target/benchmarks/system-scale/corpus-cache",
+                required_version=None,
+                caller_files=None,
+                small_variant=None,
+                only="all",
+                preflight_only=True,
+            )
+            with (
+                mock.patch.object(system_scale, "runtime_artifact_identity", return_value={}),
+                mock.patch.object(
+                    system_scale, "final_measurement_eligibility",
+                    return_value={"requested": True, "final_platform_eligible": True},
+                ),
+                mock.patch.object(
+                    system_scale, "validate_publication_identity",
+                    return_value=(
+                        {"runtime_info": {"version": "0.4.5"}},
+                        {"checkout_head": "head"},
+                    ),
+                ) as validate,
+            ):
+                system_scale.run_benchmark(args)
+                self.assertEqual(validate.call_args.kwargs["required_version"], "0.4.5")
+                result = json.loads(args.output.read_text(encoding="utf-8"))
+                self.assertTrue(result["preflight"]["passed"])
+                self.assertFalse(result["publication_eligible"])
+                for variant in ("clean", "dirty", "non-git"):
+                    with self.subTest(variant=variant):
+                        args.small_variant = variant
+                        validate.reset_mock()
+                        with self.assertRaisesRegex(
+                            ValueError, "--small-variant cannot be used with --only all"
+                        ):
+                            system_scale.run_benchmark(args)
+                        validate.assert_not_called()
+                args.small_variant = None
+                for caller_files in (0, -1, 1024, 4096):
+                    with self.subTest(caller_files=caller_files):
+                        args.caller_files = caller_files
+                        validate.reset_mock()
+                        with self.assertRaisesRegex(
+                            ValueError, "--caller-files cannot be used with --only all"
+                        ):
+                            system_scale.run_benchmark(args)
+                        validate.assert_not_called()
+                args.only = "medium"
+                args.preflight_only = False
+                for caller_files in (0, -1):
+                    with self.subTest(bounded_caller_files=caller_files):
+                        args.caller_files = caller_files
+                        with self.assertRaisesRegex(ValueError, "must be positive"):
+                            system_scale.run_benchmark(args)
+                args.only = "all"
+                args.preflight_only = True
+                args.caller_files = None
+                args.required_version = ""
+                with self.assertRaisesRegex(ValueError, "version is required"):
+                    system_scale.run_benchmark(args)
+
+    def test_huge_failure_retains_preregistered_external_input(self) -> None:
+        corpus = {
+            "repository": "https://github.com/example/repository.git",
+            "tag": "1.0.0",
+            "commit": "a" * 40,
+            "minimum_indexed_files": 5_000,
+            "minimum_tracked_bytes": 20 * 1024 * 1024,
+            "target_file": "src/entry.ts",
+            "unrelated": "not retained",
+        }
+        preregistration = {"corpora": {"huge": corpus}}
+        self.assertEqual(
+            system_scale.preregistered_external_corpus(preregistration, "huge"),
+            {
+                key: corpus[key]
+                for key in (
+                    "repository",
+                    "tag",
+                    "commit",
+                    "minimum_indexed_files",
+                    "minimum_tracked_bytes",
+                    "target_file",
+                )
+            },
+        )
+        self.assertIsNone(
+            system_scale.preregistered_external_corpus(preregistration, "medium")
+        )
 
     def test_termination_recovery_requires_reopen_integrity_and_cleanup(
         self,
@@ -371,6 +727,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     root / "work",
                     {},
                     5,
+                    required_version="0.4.0",
                 )
 
             self.assertEqual(popen.call_args.args[0][-2:], ["scan", str(source_root)])
@@ -496,6 +853,97 @@ class SystemScaleHarnessTests(unittest.TestCase):
         check_output.assert_called_once_with(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True
         )
+
+    def test_runtime_artifact_identity_labels_checkout_observation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "target/debug/projectatlas.exe"
+            runtime.parent.mkdir(parents=True)
+            payload = b"candidate runtime"
+            runtime.write_bytes(payload)
+            source_checkout = root / "candidate-checkout"
+            source_checkout.mkdir()
+            responses = [
+                subprocess.CompletedProcess(
+                    ["git"], 0, stdout=f"{source_checkout}\n", stderr=""
+                ),
+                subprocess.CompletedProcess(
+                    ["git"], 0, stdout=("c" * 40) + "\n", stderr=""
+                ),
+            ]
+            with mock.patch.object(
+                system_scale.subprocess, "run", side_effect=responses
+            ) as run:
+                identity = system_scale.runtime_artifact_identity(runtime)
+
+        self.assertEqual(
+            identity,
+            {
+                "runtime": str(runtime.resolve()),
+                "checkout_head": "c" * 40,
+                "checkout_head_method": "git-rev-parse-enclosing-checkout-not-build-provenance",
+                "runtime_sha256": hashlib.sha256(payload).hexdigest(),
+                "runtime_bytes": len(payload),
+            },
+        )
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [
+                "git",
+                "-C",
+                str(runtime.resolve().parent),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["git", "-C", str(source_checkout), "rev-parse", "HEAD"],
+        )
+
+    def test_execution_provenance_retains_exact_command_and_result(self) -> None:
+        argv = ["system_scale.py", "--runtime", "candidate.exe", "--only", "small"]
+        self.assertEqual(
+            system_scale.execution_provenance(argv, passed=True),
+            {
+                "command": [sys.executable, *argv],
+                "result": {"status": "passed", "exit_code": 0},
+            },
+        )
+        self.assertEqual(
+            system_scale.execution_provenance(
+                argv, passed=False, failure="RuntimeError: scan failed"
+            ),
+            {
+                "command": [sys.executable, *argv],
+                "result": {
+                    "status": "failed",
+                    "exit_code": 1,
+                    "failure": "RuntimeError: scan failed",
+                },
+            },
+        )
+
+    def test_unavailable_runtime_source_keeps_observed_binary_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "projectatlas.exe"
+            payload = b"candidate runtime"
+            runtime.write_bytes(payload)
+            with mock.patch.object(
+                system_scale,
+                "runtime_artifact_identity",
+                side_effect=RuntimeError("not a Git checkout"),
+            ):
+                identity = system_scale.runtime_artifact_identity_or_unavailable(
+                    runtime
+                )
+
+        self.assertIsNone(identity["checkout_head"])
+        self.assertEqual(identity["runtime_sha256"], hashlib.sha256(payload).hexdigest())
+        self.assertEqual(identity["runtime_bytes"], len(payload))
+        self.assertIn("not a Git checkout", identity["error"])
 
     def test_database_profile_uses_real_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -863,6 +1311,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     edit=lambda: None,
                     readiness_file=root / "ready.rs",
                     writer_probe_database=root / "projectatlas.db",
+                    required_version="0.4.0",
                 )
         cleanup.assert_called_once_with(process, job)
 
@@ -996,7 +1445,9 @@ class SystemScaleHarnessTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(RuntimeError, "sampler failed"),
         ):
-            system_scale.mcp_queries(Path("runtime"), Path("."), {}, {}, 1)
+            system_scale.mcp_queries(
+                Path("runtime"), Path("."), {}, {}, 1, required_version="0.4.0"
+            )
         self.assertTrue(client.closed)
         sampler.stop.assert_not_called()
 
@@ -1046,6 +1497,7 @@ class SystemScaleHarnessTests(unittest.TestCase):
                     {},
                     threshold_seconds=1,
                     request_timeout_seconds=1,
+                    required_version="0.4.0",
                 )
         self.assertTrue(client.closed)
 
@@ -1061,6 +1513,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from contextlib import closing
 
 server_pid_path, child_pid_path = map(Path, sys.argv[1:3])
 server_pid_path.write_text(str(os.getpid()), encoding="utf-8")
@@ -1195,6 +1648,70 @@ time.sleep(60)
             result = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(result["publication_eligible"])
             self.assertEqual(result["failure"]["type"], "TimeoutError")
+            self.assertEqual(
+                result["execution"],
+                system_scale.redact_local_paths(
+                    {
+                        "command": [sys.executable, *argv],
+                        "result": {
+                            "status": "failed",
+                            "exit_code": 1,
+                            "failure": "TimeoutError: stalled MCP",
+                        },
+                    }
+                ),
+            )
+            self.assertIsNone(result["candidate"]["checkout_head"])
+            self.assertIsNone(result["candidate"]["runtime_sha256"])
+            self.assertIn("FileNotFoundError", result["candidate"]["error"])
+
+    def test_main_persists_external_input_when_huge_run_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            preregistration = root / "preregistration.json"
+            preregistration.write_text(
+                json.dumps(
+                    {
+                        "corpora": {
+                            "huge": {
+                                "repository": "https://github.com/example/repo.git",
+                                "commit": "b" * 40,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "result.json"
+            argv = [
+                "system_scale.py",
+                "--runtime",
+                str(root / "runtime"),
+                "--preregistration",
+                str(preregistration),
+                "--output",
+                str(output),
+                "--only",
+                "huge",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    system_scale,
+                    "run_benchmark",
+                    side_effect=RuntimeError("scan failed"),
+                ),
+                self.assertRaisesRegex(SystemExit, "1"),
+            ):
+                system_scale.main()
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                result["external_corpus"],
+                {
+                    "repository": "https://github.com/example/repo.git",
+                    "commit": "b" * 40,
+                },
+            )
 
     def test_main_persists_invalid_benchmark_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1238,11 +1755,28 @@ time.sleep(60)
                 {},
                 30,
                 max_workers=8,
+                required_version="0.4.0",
             )
         self.assertEqual(result, {"passed": True})
         self.assertEqual(
             measured.call_args.args[0][-5:],
             ["watch", "--once", "--max-workers", "8", "."],
+        )
+
+    def test_watch_once_uses_the_requested_runtime_version(self) -> None:
+        with mock.patch.object(
+            system_scale, "run_measured", return_value={"passed": True}
+        ) as measured:
+            system_scale.run_watch_once(
+                Path("projectatlas.exe"),
+                Path("fixture"),
+                {},
+                30,
+                required_version="0.4.5",
+            )
+        self.assertEqual(
+            measured.call_args.args[0][1:4],
+            ["--require-version", "0.4.5", "--format"],
         )
 
     def test_concurrent_worker_allocation_fails_closed_on_small_hosts(self) -> None:
@@ -1267,17 +1801,16 @@ time.sleep(60)
             },
             {"returncode": 1, "stdout": ""},
         ]
-        self.assertTrue(
-            system_scale.reported_parser_workers_within_budget(runs, 8)
-        )
+        self.assertEqual(system_scale.reported_parser_worker_counts(runs), [8])
         runs[0]["stdout"] = json.dumps({"last_symbols": {"max_workers": 9}})
-        self.assertFalse(
-            system_scale.reported_parser_workers_within_budget(runs, 8)
-        )
+        self.assertEqual(system_scale.reported_parser_worker_counts(runs), [9])
+        runs.append({"returncode": 0, "stdout": '{"last_symbols": null}'})
+        self.assertEqual(system_scale.reported_parser_worker_counts(runs), [9, 0])
 
     def test_concurrent_resource_envelope_sums_process_peaks(self) -> None:
         run = {
             "peak_rss_bytes": 10,
+            "peak_private_commit_bytes": 14,
             "peak_worker_processes": 2,
             "worker_process_bound": 3,
             "peak_threads": 3,
@@ -1290,6 +1823,7 @@ time.sleep(60)
             [run, {**run, "terminal_io_complete": False}]
         )
         self.assertEqual(aggregate["peak_rss_bytes"], 20)
+        self.assertEqual(aggregate["peak_private_commit_bytes"], 28)
         self.assertEqual(aggregate["peak_worker_processes"], 4)
         self.assertEqual(aggregate["worker_process_bound"], 6)
         self.assertEqual(aggregate["peak_threads"], 6)
@@ -1322,6 +1856,8 @@ time.sleep(60)
                     env=dict(os.environ),
                     timeout_seconds=10,
                 )
+                self.assertIn("private_commit_bytes", measured["sampled_peak_metrics"])
+                self.assertGreater(measured["peak_private_commit_bytes"], 0)
                 self.assertTrue(measured["terminal_io_complete"])
                 self.assertEqual(measured["exact_total_processes"], 2)
                 self.assertEqual(measured["worker_process_bound"], 1)

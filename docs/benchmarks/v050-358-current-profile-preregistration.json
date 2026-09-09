@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "benchmark": "graph-construction-resource-profile",
+  "issue": 358,
+  "status": "locked_before_current_measurement",
+  "scope": "Current normal-telemetry resource profile; historical rejected shared-pool comparison remains separate. This is not a v0.4 all-route system-scale publication.",
+  "candidate": {
+    "required_version": "0.4.5",
+    "telemetry": "enabled",
+    "build_profile": "release-default-features",
+    "build_command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "-p",
+      "projectatlas-cli"
+    ],
+    "build_checkout_head": "52bc7b12a8946cc07ad237b298198328280c7964",
+    "build_result": {
+      "exit_code": 0,
+      "elapsed_seconds": 143
+    },
+    "runtime_sha256": "7734bc465af75157e2ddaeb4c2e32677349285193ccadda8a04a5c63dad132e8",
+    "runtime_bytes": 58554368,
+    "runtime_version": "projectatlas 0.4.5"
+  },
+  "measurement_inputs": {
+    "docs/benchmarks/harness/system_scale.py": "434aa891487e783e9dfc546a579b6551d13a0ac17e8ea16b366e2002a645feec",
+    "docs/benchmarks/harness/mcp_composition.py": "e602209ba4cb04363074cb7d336374b1decf4dd63952f2524856b18eb8519a03",
+    "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
+    "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
+  },
+  "corpora": {
+    "small": {
+      "source": "docs/benchmarks/fixtures/mcp-composition",
+      "variants": [
+        "clean",
+        "dirty",
+        "non-git"
+      ],
+      "minimum_indexed_files": 5,
+      "maximum_indexed_files": 100
+    },
+    "medium": {
+      "source": "deterministic-rust-high-degree-v1",
+      "caller_files": 1024,
+      "minimum_indexed_files": 1000,
+      "narrow_edit": "append one comment to src/caller_0000.rs",
+      "expanded_edit": "rename the src/hub.rs shared export while retaining inbound references"
+    },
+    "huge": {
+      "repository": "https://github.com/microsoft/vscode.git",
+      "tag": "1.130.0",
+      "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+      "minimum_indexed_files": 5000,
+      "minimum_tracked_bytes": 20971520,
+      "target_file": "src/vs/platform/instantiation/common/instantiation.ts"
+    }
+  },
+  "thresholds": {
+    "all": {
+      "command_timeout_seconds": 900,
+      "mcp_request_timeout_seconds": 60,
+      "maximum_worker_processes": 20,
+      "maximum_process_tree_threads": 32,
+      "maximum_worker_processes_per_logical_cpu": 1,
+      "maximum_process_tree_threads_per_logical_cpu": 1.25,
+      "maximum_concurrent_peak_rss_bytes": 536870912,
+      "maximum_retained_thread_growth": 2,
+      "maximum_mcp_startup_milliseconds": 250,
+      "maximum_bounded_output_bytes": 262144,
+      "maximum_bounded_query_process_read_bytes": 67108864,
+      "maximum_fallback_selected_text_bytes": 134217728,
+      "maximum_fallback_search_seconds": 10,
+      "maximum_relation_database_requested_rows": 128,
+      "maximum_relation_database_returned_rows": 256,
+      "maximum_relation_database_decoded_bytes": 262144,
+      "maximum_relation_hydrated_entities": 64,
+      "maximum_relation_hydrated_purpose_paths": 128,
+      "maximum_database_adjusted_read_transfer_ratio": 40,
+      "maximum_database_adjusted_write_transfer_ratio": 32,
+      "maximum_narrow_refresh_process_read_transfer_bytes": 8388608,
+      "maximum_narrow_refresh_process_write_transfer_bytes": 2097152,
+      "maximum_expanded_guidance_process_read_transfer_bytes": 67108864,
+      "maximum_expanded_guidance_process_write_transfer_bytes": 2097152,
+      "maximum_freelist_ratio": 0.05,
+      "maximum_publication_writer_unavailable_seconds": 1,
+      "maximum_contention_failure_seconds": 1,
+      "maximum_retained_rss_growth_bytes": 134217728,
+      "maximum_cancellation_quiescence_seconds": 5
+    },
+    "small": {
+      "maximum_full_scan_seconds": 30,
+      "maximum_unchanged_refresh_seconds": 10,
+      "maximum_query_p95_milliseconds": 250,
+      "maximum_peak_rss_bytes": 268435456,
+      "maximum_full_process_read_transfer_bytes": 67108864,
+      "maximum_full_process_write_transfer_bytes": 67108864,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 1048576,
+      "maximum_database_bytes": 67108864,
+      "maximum_persistent_bytes": 67108864
+    },
+    "medium": {
+      "maximum_full_scan_seconds": 180,
+      "maximum_unchanged_refresh_seconds": 30,
+      "maximum_query_p95_milliseconds": 500,
+      "maximum_peak_rss_bytes": 268435456,
+      "maximum_full_process_read_transfer_bytes": 134217728,
+      "maximum_full_process_write_transfer_bytes": 536870912,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 4194304,
+      "minimum_scan_one_core_cpu_percent": 60,
+      "maximum_database_bytes": 536870912,
+      "maximum_persistent_bytes": 536870912
+    },
+    "huge": {
+      "maximum_full_scan_seconds": 900,
+      "maximum_unchanged_refresh_seconds": 120,
+      "maximum_query_p95_milliseconds": 2000,
+      "maximum_peak_rss_bytes": 3221225472,
+      "maximum_full_process_read_transfer_bytes": 137438953472,
+      "maximum_full_process_write_transfer_bytes": 137438953472,
+      "maximum_unchanged_refresh_process_read_transfer_bytes": 536870912,
+      "minimum_scan_one_core_cpu_percent": 80,
+      "maximum_database_bytes": 4294967296,
+      "maximum_persistent_bytes": 4294967296
+    }
+  },
+  "threshold_disposition": "Historical v0.4 diagnostics retained unchanged, including red cells. They do not authorize adoption of the rejected shared pool; required correctness, atomicity, cancellation, worker bounds, and cleanup remain mandatory.",
+  "commands": [
+    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only small --small-variant clean --work-root target/benchmarks/system-scale/issue-358-verified-small --output target/benchmarks/system-scale/issue-358-verified-small.json",
+    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only medium --caller-files 1024 --work-root target/benchmarks/system-scale/issue-358-verified-medium --output target/benchmarks/system-scale/issue-358-verified-medium.json",
+    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-verified-large --output target/benchmarks/system-scale/issue-358-verified-large.json"
+  ],
+  "measurement_checkout_head": "4342b874e1eae28684fd6dae1b3cb08065148d66",
+  "measurement_amendments": [
+    {
+      "prior_run": "Initial normal-telemetry small profile (retained locally and summarized in final report)",
+      "finding": "Initial scan/settings correctly had zero telemetry rows; later MCP queries had26. The initial nonzero assertion observed the wrong lifecycle point.",
+      "correction": "Read telemetry and final persistent footprint after measured queries; retain all historical performance thresholds unchanged."
+    },
+    {
+      "prior_run": "Initial current small, medium and large profiles retained locally",
+      "finding": "Focused modes recorded runtime identity without enforcing the declared build witness. The observed binary matched, but future wrong binaries were not refused.",
+      "correction": "Enforce declared hash-and-size build witnesses before all focused runs; retain thresholds and runtime binary unchanged."
+    }
+  ]
+}

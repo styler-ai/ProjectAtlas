@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +58,55 @@ SYSTEM_SCALE_MEASUREMENT_INPUTS = (
     "docs/benchmarks/harness/requirements.txt",
     "docs/benchmarks/fixtures/mcp-composition",
 )
+
+
+def measurement_environment(telemetry: str) -> dict[str, str]:
+    """Apply the preregistered telemetry mode to isolated measured children."""
+    env = os.environ.copy()
+    if telemetry == "enabled":
+        env.pop("PROJECTATLAS_NO_TELEMETRY", None)
+    elif telemetry == "disabled":
+        env["PROJECTATLAS_NO_TELEMETRY"] = "1"
+    else:
+        raise ValueError("measurement telemetry must be enabled or disabled")
+    return env
+
+
+def medium_corpus_variant(caller_files: int, default_caller_files: int) -> str:
+    """Name generated medium fixtures by their actual caller cardinality."""
+
+    return (
+        "high-degree"
+        if caller_files == default_caller_files
+        else f"high-edge-{caller_files}"
+    )
+
+
+def preregistered_external_corpus(
+    preregistration: dict[str, Any], mode: str
+) -> dict[str, Any] | None:
+    """Retain the locked external input when a huge run fails before a case result."""
+
+    if mode not in {"huge", "all"}:
+        return None
+    corpora = preregistration.get("corpora")
+    if not isinstance(corpora, dict):
+        return None
+    corpus = corpora.get("huge")
+    if not isinstance(corpus, dict):
+        return None
+    return {
+        key: corpus[key]
+        for key in (
+            "repository",
+            "tag",
+            "commit",
+            "minimum_indexed_files",
+            "minimum_tracked_bytes",
+            "target_file",
+        )
+        if key in corpus
+    }
 
 
 def committed_git_object_sha256(
@@ -324,6 +374,7 @@ class ProcessTreeSampler:
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._sample_until_stopped, daemon=True)
         self.peak_rss_bytes = 0
+        self.peak_private_commit_bytes = 0 if os.name == "nt" else None
         self.peak_processes = 0
         self.peak_threads = 0
         self.peak_storage = {
@@ -376,11 +427,15 @@ class ProcessTreeSampler:
             "interval_seconds": MEASURE_INTERVAL_SECONDS,
             "sampled_peak_metrics": [
                 "rss_bytes",
+                "private_commit_bytes",
                 "processes",
                 "threads",
                 "storage",
             ],
             "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_private_commit_bytes": self.peak_private_commit_bytes,
+            "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events"
+            if self.peak_private_commit_bytes is not None else "unavailable",
             "peak_processes": self.peak_processes,
             "peak_worker_processes": max(0, self.peak_processes - 1),
             "peak_threads": self.peak_threads,
@@ -404,11 +459,15 @@ class ProcessTreeSampler:
             self.stop_event.set()
             return
         rss = 0
+        private_commit = 0
         threads = 0
         for process in processes:
             try:
                 self.observed_pids.add(process.pid)
-                rss += process.memory_info().rss
+                memory = process.memory_info()
+                rss += memory.rss
+                if self.peak_private_commit_bytes is not None:
+                    private_commit += memory.private
                 threads += process.num_threads()
                 if os.name != "nt":
                     cpu = process.cpu_times()
@@ -443,6 +502,10 @@ class ProcessTreeSampler:
                 self.stop_event.set()
                 return
         self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+        if self.peak_private_commit_bytes is not None:
+            self.peak_private_commit_bytes = max(
+                self.peak_private_commit_bytes, private_commit
+            )
         self.peak_processes = max(self.peak_processes, len(processes))
         self.peak_threads = max(self.peak_threads, threads)
         if self.storage_root is not None:
@@ -844,9 +907,17 @@ def measured_json(
     cwd: Path,
     env: dict[str, str],
     timeout_seconds: float,
+    required_version: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     run = run_measured(
-        [str(runtime), "--require-version", "0.4.0", "--format", "json", *arguments],
+        [
+            str(runtime),
+            "--require-version",
+            required_version,
+            "--format",
+            "json",
+            *arguments,
+        ],
         cwd=cwd,
         env=env,
         timeout_seconds=timeout_seconds,
@@ -869,6 +940,7 @@ def measured_watch_edit(
     readiness_file: Path,
     writer_probe_database: Path,
     expected_refresh_reason: str | None = None,
+    required_version: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     readiness_path = readiness_file.relative_to(cwd).as_posix()
     readiness_marker = f"projectatlas-watch-ready-{time.time_ns()}"
@@ -877,7 +949,7 @@ def measured_watch_edit(
     arguments = [
         str(runtime),
         "--require-version",
-        "0.4.0",
+        required_version,
         "--format",
         "json",
         "watch",
@@ -1211,12 +1283,14 @@ def mcp_queries(
     env: dict[str, str],
     query: dict[str, Any],
     request_timeout_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     client = McpClient(
         runtime,
         root,
         env,
         request_timeout_seconds=request_timeout_seconds,
+        required_version=required_version,
     )
     sampler = ProcessTreeSampler(client.process.pid, root)
     sampler_started = False
@@ -1441,6 +1515,13 @@ def database_profile(database: Path) -> dict[str, Any]:
         page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
         page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
         freelist_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        journal_mode = str(
+            connection.execute("PRAGMA journal_mode").fetchone()[0]
+        ).lower()
+        synchronous = int(connection.execute("PRAGMA synchronous").fetchone()[0])
+        wal_autocheckpoint = int(
+            connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+        )
         quick_check = str(connection.execute("PRAGMA quick_check(1)").fetchone()[0])
         stat1_present = (
             connection.execute(
@@ -1452,6 +1533,49 @@ def database_profile(database: Path) -> dict[str, Any]:
         project_root = connection.execute(
             "SELECT value FROM metadata WHERE key = 'project_root'"
         ).fetchone()
+        query_plan_cases = {
+            "entity_path_lookup": (
+                "graph_entities",
+                "SELECT entity_key FROM graph_entities "
+                "WHERE project_instance_id = zeroblob(16) "
+                "AND repository_path = 'src/Äuth.rs' "
+                "ORDER BY entity_kind, entity_key LIMIT 11"
+            ),
+            "outbound_relation_lookup": (
+                "graph_relations",
+                "SELECT relation_key FROM graph_relations "
+                "WHERE source_entity_key = zeroblob(32) "
+                "ORDER BY relation_scope, relation_kind, relation_key LIMIT 11"
+            ),
+            "relation_occurrence_lookup": (
+                "graph_relation_occurrences",
+                "SELECT file_path FROM graph_relation_occurrences "
+                "WHERE relation_key = zeroblob(32) "
+                "ORDER BY file_path, start_line, start_column, end_line, end_column "
+                "LIMIT 11"
+            ),
+        }
+        existing_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
+            )
+        }
+        query_plans = {}
+        for name, (table, sql) in query_plan_cases.items():
+            if table not in existing_tables:
+                continue
+            details = [
+                str(row[3])
+                for row in connection.execute(f"EXPLAIN QUERY PLAN {sql}")
+            ]
+            query_plans[name] = {
+                "details": details,
+                "uses_temporary_btree": any(
+                    "USE TEMP B-TREE" in detail for detail in details
+                ),
+                "uses_index": any("INDEX" in detail for detail in details),
+            }
         return {
             "page_size": page_size,
             "page_count": page_count,
@@ -1461,8 +1585,190 @@ def database_profile(database: Path) -> dict[str, Any]:
                 round(freelist_pages / page_count, 6) if page_count else 0.0
             ),
             "quick_check": quick_check,
+            "journal_mode": journal_mode,
+            "synchronous": synchronous,
+            "wal_autocheckpoint": wal_autocheckpoint,
             "sqlite_stat1_present": stat1_present,
             "project_root": project_root[0] if project_root else None,
+            "query_plans": query_plans,
+        }
+    finally:
+        connection.close()
+
+
+def database_graph_digest(database: Path) -> dict[str, Any]:
+    """Digest logical graph rows without project-instance or row identifiers."""
+
+    def normalized_identity(value: str, domain: str) -> str:
+        prefix = re.match(
+            rf"^(projectatlas\.graph\.{domain}\.v1\|)32:([0-9a-f]{{32}})\|",
+            value,
+        )
+        if prefix is None:
+            raise ValueError("graph identity lacks its typed leading project field")
+        normalized = prefix[1] + "32:" + "0" * 32 + "|" + value[prefix.end():]
+        if domain != "relation":
+            return normalized
+
+        # Relation fields contain nested entity identities or opaque authored text.
+        # Only typed entity positions may have their project witness normalized.
+        encoded = normalized.encode("utf-8")
+        position = prefix.end()  # The leading project field is entirely ASCII.
+        fields = []
+        for _ in range(4):
+            length = re.match(rb"([0-9]+):", encoded[position:])
+            if length is None:
+                raise ValueError("malformed canonical relation field length")
+            start = position + length.end()
+            end = start + int(length[1])
+            if end > len(encoded):
+                raise ValueError("truncated canonical relation field")
+            fields.append((start, end))
+            position = end
+            if position < len(encoded):
+                if encoded[position:position + 1] != b"|" or position + 1 == len(encoded):
+                    raise ValueError("malformed canonical relation field boundary")
+                position += 1
+        if position != len(encoded):
+            raise ValueError("canonical relation requires four fields after its project")
+        state = encoded[slice(*fields[2])]
+        if state not in (b"resolved", b"external", b"ambiguous", b"unresolved"):
+            raise ValueError("unknown canonical relation resolution status")
+        for index in (0, 3) if state in (b"resolved", b"external") else (0,):
+            start, end = fields[index]
+            nested = encoded[start:end].decode("utf-8")
+            if not nested.startswith(f"projectatlas.graph.entity.v1|32:{prefix[2]}|"):
+                raise ValueError("nested entity identity must belong to the relation project")
+            nested = normalized_identity(nested, "entity")
+            encoded = encoded[:start] + nested.encode("utf-8") + encoded[end:]
+        return encoded.decode("utf-8")
+
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        entities = {
+            bytes(row[0]).hex(): (
+                normalized_identity(str(row[1]), "entity"),
+                *row[2:],
+            )
+            for row in connection.execute(
+                "SELECT entity_key, canonical_identity, entity_kind, "
+                "repository_path, package_manager, package_name, manifest_path, "
+                "symbol_name, symbol_kind, symbol_parent, symbol_signature, "
+                "external_system, external_identity FROM graph_entities"
+            )
+        }
+        relations = {
+            bytes(row[0]).hex(): row
+            for row in connection.execute(
+                "SELECT relation_key, canonical_identity, source_entity_key, "
+                "relation_scope, relation_kind, resolution_status, "
+                "target_entity_key, reference_text, candidate_count, "
+                "document_unresolved_reason, confidence, completeness "
+                "FROM graph_relations"
+            )
+        }
+        records: list[list[Any]] = [
+            ["entity", *value] for value in entities.values()
+        ]
+        relation_records = {}
+        for key, row in relations.items():
+            source = entities[bytes(row[2]).hex()][0]
+            target = entities[bytes(row[6]).hex()][0] if row[6] is not None else None
+            record = [
+                "relation", normalized_identity(str(row[1]), "relation"),
+                source, row[3], row[4], row[5], target, *row[7:12],
+            ]
+            relation_records[key] = record
+            records.append(record)
+        records.extend(
+            [
+                "occurrence",
+                relation_records[bytes(row[0]).hex()],
+                *row[1:],
+            ]
+            for row in connection.execute(
+                "SELECT relation_key, file_path, start_line, start_column, "
+                "end_line, end_column FROM graph_relation_occurrences"
+            )
+        )
+        resolutions = {
+            (row[0], bytes(row[1])): normalized_identity(str(row[2]), "resolution")
+            for row in connection.execute(
+                "SELECT resolution_domain, key_digest, canonical_identity "
+                "FROM graph_resolution_keys"
+            )
+        }
+        records.extend(
+            ["resolution", domain, identity]
+            for (domain, _), identity in resolutions.items()
+        )
+        records.extend(
+            [
+                "export", entities[bytes(row[0]).hex()][0], row[1], row[2],
+                resolutions[(row[2], bytes(row[3]))],
+            ]
+            for row in connection.execute(
+                "SELECT entity_key, owner_path, resolution_domain, key_digest "
+                "FROM graph_entity_exports"
+            )
+        )
+        records.extend(
+            [
+                "dependency",
+                relation_records[bytes(row[0]).hex()],
+                row[1], row[2], resolutions[(row[2], bytes(row[3]))],
+            ]
+            for row in connection.execute(
+                "SELECT relation_key, owner_path, resolution_domain, key_digest "
+                "FROM graph_relation_dependencies"
+            )
+        )
+        records.extend(
+            ["coverage", *row]
+            for row in connection.execute(
+                "SELECT scope_kind, scope_path, relation_scope, relation_kind, "
+                "state, total, covered, omitted, reason, reached_limit "
+                "FROM graph_coverage"
+            )
+        )
+        records.extend(
+            ["rejection", *row]
+            for row in connection.execute(
+                "SELECT file_path, start_line, start_column, end_line, "
+                "end_column, parser, field, reason, fact_index "
+                "FROM graph_identity_rejections"
+            )
+        )
+        records.sort(key=lambda record: json.dumps(record, ensure_ascii=False))
+        payload = json.dumps(
+            records, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "record_count": len(records),
+            "table_rows": {
+                "entities": len(entities),
+                "relations": len(relations),
+                "occurrences": connection.execute(
+                    "SELECT COUNT(*) FROM graph_relation_occurrences"
+                ).fetchone()[0],
+                "resolution_keys": connection.execute(
+                    "SELECT COUNT(*) FROM graph_resolution_keys"
+                ).fetchone()[0],
+                "exports": connection.execute(
+                    "SELECT COUNT(*) FROM graph_entity_exports"
+                ).fetchone()[0],
+                "dependencies": connection.execute(
+                    "SELECT COUNT(*) FROM graph_relation_dependencies"
+                ).fetchone()[0],
+                "coverage": connection.execute(
+                    "SELECT COUNT(*) FROM graph_coverage"
+                ).fetchone()[0],
+                "identity_rejections": connection.execute(
+                    "SELECT COUNT(*) FROM graph_identity_rejections"
+                ).fetchone()[0],
+            },
         }
     finally:
         connection.close()
@@ -1473,6 +1779,7 @@ def run_incremental(
     root: Path,
     env: dict[str, str],
     timeout_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -1490,6 +1797,7 @@ def run_incremental(
         edit=narrow_edit,
         readiness_file=root / "src/caller_0001.rs",
         writer_probe_database=database,
+        required_version=required_version,
     )
     after_narrow = database_counts(database)
     hub = root / "src/hub.rs"
@@ -1509,6 +1817,7 @@ def run_incremental(
         edit=expanded_edit,
         readiness_file=root / "src/caller_0002.rs",
         writer_probe_database=database,
+        required_version=required_version,
         expected_refresh_reason="dependency_closure_limit",
     )
     after_guidance = database_counts(database)
@@ -1519,6 +1828,7 @@ def run_incremental(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     after_rebuild = database_counts(database)
     return {
@@ -1553,13 +1863,17 @@ def run_case(
     variant: str,
     preregistration: dict[str, Any],
     query: dict[str, Any],
+    required_version: str,
     incremental: bool = False,
+    caller_files: int | None = None,
 ) -> dict[str, Any]:
     timeout_seconds = preregistration["thresholds"]["all"]["command_timeout_seconds"]
     mcp_request_timeout_seconds = preregistration["thresholds"]["all"][
         "mcp_request_timeout_seconds"
     ]
     facts = corpus_facts(root)
+    if caller_files is not None:
+        facts["caller_files"] = caller_files
     pre_scan_database_bytes = storage_state(root)["database_bytes"]
     scan_run, scan = measured_json(
         runtime,
@@ -1567,6 +1881,7 @@ def run_case(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     post_scan_database_bytes = storage_state(root)["database_bytes"]
     settings_run, settings = measured_json(
@@ -1575,6 +1890,7 @@ def run_case(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     unchanged_run, unchanged = measured_json(
         runtime,
@@ -1582,6 +1898,7 @@ def run_case(
         cwd=root,
         env=env,
         timeout_seconds=timeout_seconds,
+        required_version=required_version,
     )
     incremental_result = (
         run_incremental(
@@ -1589,10 +1906,22 @@ def run_case(
             root,
             env,
             timeout_seconds,
+            required_version=required_version,
         )
         if incremental
         else None
     )
+    queries = mcp_queries(
+        runtime, root, env, query,
+        request_timeout_seconds=mcp_request_timeout_seconds,
+        required_version=required_version,
+    )
+    final_settings = settings
+    if preregistration["candidate"].get("telemetry", "disabled") == "enabled":
+        _, final_settings = measured_json(
+            runtime, ["settings"], cwd=root, env=env,
+            timeout_seconds=timeout_seconds, required_version=required_version,
+        )
     database = root / ".projectatlas/projectatlas.db"
     result = {
         "scale": scale,
@@ -1610,13 +1939,9 @@ def run_case(
         "incremental": incremental_result,
         "persistent": persistent_sizes(root),
         "database_profile": database_profile(database),
-        "queries": mcp_queries(
-            runtime,
-            root,
-            env,
-            query,
-            request_timeout_seconds=mcp_request_timeout_seconds,
-        ),
+        "graph_digest": database_graph_digest(database),
+        "queries": queries,
+        "telemetry_after_queries": final_settings["telemetry"],
     }
     result["checks"] = evaluate_case(result, preregistration)
     return result
@@ -1710,6 +2035,7 @@ def evaluate_case(
     database_settings = settings["database"]
     operating_profile = database_settings["operating_profile"]
     telemetry = settings["telemetry"]
+    final_telemetry = result.get("telemetry_after_queries", telemetry)
     profile = result["database_profile"]
     corpus_limits = preregistration["corpora"][result["scale"]]
     logical_cpus = os.cpu_count() or 1
@@ -1734,6 +2060,7 @@ def evaluate_case(
         ),
     )
     process_io = evaluate_process_io_contract(result, preregistration)
+    query_plans = profile.get("query_plans", {})
     full_read_ratio = process_io["full_source_input_read_ratio"]
     full_write_ratio = process_io["full_source_input_write_ratio"]
     full_output_efficiency_read_ratio = process_io[
@@ -2048,21 +2375,24 @@ def evaluate_case(
             telemetry["wal_autocheckpoint_pages"] == 1000,
         ),
         (
-            "telemetry-disabled checkpoint state",
+            "preregistered telemetry state",
             {
                 "raw_rows": telemetry["raw_rows"],
+                "raw_rows_after_queries": final_telemetry["raw_rows"],
                 "writes_since_checkpoint": telemetry["writes_since_checkpoint"],
                 "checkpoint_state": telemetry["checkpoint_state"],
             },
-            "==",
-            {
-                "raw_rows": 0,
-                "writes_since_checkpoint": 0,
-                "checkpoint_state": "not_due",
-            },
-            telemetry["raw_rows"] == 0
-            and telemetry["writes_since_checkpoint"] == 0
-            and telemetry["checkpoint_state"] == "not_due",
+            "matches",
+            preregistration["candidate"].get("telemetry", "disabled"),
+            (
+                0 <= telemetry["raw_rows"] <= telemetry["max_raw_rows"]
+                and 0 < final_telemetry["raw_rows"] <= final_telemetry["max_raw_rows"]
+                and 0 <= final_telemetry["writes_since_checkpoint"] < final_telemetry["checkpoint_write_interval"]
+            ) if preregistration["candidate"].get("telemetry", "disabled") == "enabled" else (
+                telemetry["raw_rows"] == 0
+                and telemetry["writes_since_checkpoint"] == 0
+                and telemetry["checkpoint_state"] == "not_due"
+            ),
         ),
         (
             "SQLite statistics policy",
@@ -2087,6 +2417,28 @@ def evaluate_case(
             "==",
             "ok",
             profile["quick_check"] == "ok",
+        ),
+        (
+            "representative SQLite query plans",
+            {
+                "shape_count": len(query_plans),
+                "all_use_index": all(
+                    details.get("uses_index", False)
+                    for details in query_plans.values()
+                ),
+                "temporary_btree": any(
+                    details.get("uses_temporary_btree", True)
+                    for details in query_plans.values()
+                ),
+            },
+            "==",
+            {"shape_count": 3, "all_use_index": True, "temporary_btree": False},
+            len(query_plans) == 3
+            and all(
+                details.get("uses_index", False)
+                and not details.get("uses_temporary_btree", True)
+                for details in query_plans.values()
+            ),
         ),
         (
             "database page bytes",
@@ -2308,7 +2660,9 @@ def evaluate_case(
         expanded = incremental["expanded"]
         guidance = expanded["guidance"]
         rebuild = incremental["expanded"]["rebuild"]
-        caller_files = preregistration["corpora"]["medium"]["caller_files"]
+        caller_files = result["corpus"].get(
+            "caller_files", preregistration["corpora"]["medium"]["caller_files"]
+        )
         guidance_report = guidance["report"]
         guidance_changed = guidance_report.get("changed")
         guidance_sample_paths = guidance_report.get("sample_paths")
@@ -2664,6 +3018,8 @@ def run_watch_once(
     env: dict[str, str],
     timeout_seconds: float,
     max_workers: int | None = None,
+    *,
+    required_version: str,
 ) -> dict[str, Any]:
     worker_arguments = (
         ["--max-workers", str(max_workers)] if max_workers is not None else []
@@ -2672,7 +3028,7 @@ def run_watch_once(
         [
             str(runtime),
             "--require-version",
-            "0.4.0",
+            required_version,
             "--format",
             "json",
             "watch",
@@ -2710,16 +3066,14 @@ def concurrent_worker_allocation(
     )
 
 
-def reported_parser_workers_within_budget(
-    runs: list[dict[str, Any]], workers_per_process: int
-) -> bool:
-    """Check successful watch reports without treating them as scan evidence."""
-    return all(
-        run["returncode"] != 0
-        or json.loads(run["stdout"])["last_symbols"]["max_workers"]
-        <= workers_per_process
-        for run in runs
-    )
+def reported_parser_worker_counts(runs: list[dict[str, Any]]) -> list[int]:
+    """Read configured parser threads; successful no-op watches start no pool."""
+    counts = []
+    for run in runs:
+        if run["returncode"] == 0:
+            symbols = json.loads(run["stdout"])["last_symbols"]
+            counts.append(0 if symbols is None else symbols["max_workers"])
+    return counts
 
 
 def aggregate_process_metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2727,6 +3081,8 @@ def aggregate_process_metrics(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "method": "sum-of-per-process-peaks-conservative-upper-bound",
         "peak_rss_bytes": sum(run["peak_rss_bytes"] for run in runs),
+        "peak_private_commit_bytes": sum(run["peak_private_commit_bytes"] for run in runs)
+        if all(run["peak_private_commit_bytes"] is not None for run in runs) else None,
         "peak_worker_processes": sum(
             run["peak_worker_processes"] for run in runs
         ),
@@ -2754,6 +3110,7 @@ def concurrent_isolation(
     timeout_seconds: float,
     caller_files: int,
     thresholds: dict[str, Any],
+    required_version: str,
 ) -> dict[str, Any]:
     roots = [work_root / "concurrent-a", work_root / "concurrent-b"]
     logical_cpus = os.cpu_count() or 1
@@ -2770,6 +3127,7 @@ def concurrent_isolation(
             cwd=root,
             env=env,
             timeout_seconds=timeout_seconds,
+            required_version=required_version,
         )
     databases = [root / ".projectatlas/projectatlas.db" for root in roots]
     before = [database_counts(database) for database in databases]
@@ -2790,6 +3148,7 @@ def concurrent_isolation(
                     env,
                     timeout_seconds,
                     max_workers=workers_per_process,
+                    required_version=required_version,
                 ),
                 roots,
             )
@@ -2843,6 +3202,7 @@ def concurrent_isolation(
                     env,
                     timeout_seconds,
                     max_workers=workers_per_process,
+                    required_version=required_version,
                 ),
                 range(2),
             )
@@ -2883,12 +3243,18 @@ def concurrent_isolation(
         for run in concurrent_runs
     )
     configured_worker_budget_passed = configured_worker_budget <= worker_budget
-    reported_parser_worker_budget_passed = reported_parser_workers_within_budget(
-        concurrent_runs, workers_per_process
+    reported_parser_worker_budget_passed = all(
+        type(count) is int and 0 <= count <= workers_per_process
+        for count in reported_parser_worker_counts(concurrent_runs)
     )
+    for resources, runs in (
+        (cross_root_resources, results), (same_root_resources, same_runs)
+    ):
+        resources["reported_parser_worker_bound"] = sum(reported_parser_worker_counts(runs))
     resource_envelope_passed = all(
         resources["terminal_io_complete"]
         and resources["worker_process_bound"] <= worker_budget
+        and resources["reported_parser_worker_bound"] <= worker_budget
         and resources["peak_rss_bytes"]
         <= thresholds["maximum_concurrent_peak_rss_bytes"]
         for resources in (cross_root_resources, same_root_resources)
@@ -2944,6 +3310,7 @@ def publication_contention(
     env: dict[str, str],
     timeout_seconds: float,
     maximum_failure_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -2954,12 +3321,24 @@ def publication_contention(
     blocker = sqlite3.connect(database)
     try:
         blocker.execute("BEGIN IMMEDIATE")
-        failed = run_watch_once(runtime, root, env, maximum_failure_seconds)
+        failed = run_watch_once(
+            runtime,
+            root,
+            env,
+            maximum_failure_seconds,
+            required_version=required_version,
+        )
         after_failure = database_counts(database)
     finally:
         blocker.rollback()
         blocker.close()
-    retry = run_watch_once(runtime, root, env, timeout_seconds)
+    retry = run_watch_once(
+        runtime,
+        root,
+        env,
+        timeout_seconds,
+        required_version=required_version,
+    )
     after_retry = database_counts(database)
     diagnostic = (failed["stdout"] + failed["stderr"]).lower()
     typed_busy = any(
@@ -2994,6 +3373,7 @@ def cooperative_cancellation_reopen(
     env: dict[str, str],
     threshold_seconds: float,
     request_timeout_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     database = root / ".projectatlas/projectatlas.db"
     before = database_counts(database)
@@ -3013,6 +3393,7 @@ def cooperative_cancellation_reopen(
         root,
         env,
         request_timeout_seconds=rpc_timeout_seconds,
+        required_version=required_version,
     )
     known = {client.process.pid}
     started_text = ""
@@ -3126,12 +3507,14 @@ def cooperative_cancellation_reopen(
         cwd=root,
         env=env,
         timeout_seconds=threshold_seconds,
+        required_version=required_version,
     )
     reopened = McpClient(
         runtime,
         root,
         env,
         request_timeout_seconds=request_timeout_seconds,
+        required_version=required_version,
     )
     try:
         reopened_settings, _ = reopened.call("atlas_settings", {})
@@ -3212,6 +3595,7 @@ def forced_termination_quiescence(
     work_root: Path,
     env: dict[str, str],
     threshold_seconds: float,
+    required_version: str,
 ) -> dict[str, Any]:
     recovery_root = work_root / "default-core-parent-termination"
     database = recovery_root / ".projectatlas/projectatlas.db"
@@ -3220,7 +3604,7 @@ def forced_termination_quiescence(
         [
             str(runtime),
             "--require-version",
-            "0.4.0",
+            required_version,
             "--format",
             "json",
             "--db",
@@ -3270,6 +3654,7 @@ def forced_termination_quiescence(
                     cwd=source_root,
                     env=env,
                     timeout_seconds=threshold_seconds,
+                    required_version=required_version,
                 )
                 connection = sqlite3.connect(
                     database, timeout=threshold_seconds
@@ -3345,6 +3730,7 @@ def forced_termination_quiescence(
 def publication_identity_errors(
     preregistration: dict[str, Any],
     *,
+    required_version: str,
     runtime_sha256: str,
     mcp_tools_sha256: str,
     skill_sha256: str,
@@ -3367,8 +3753,15 @@ def publication_identity_errors(
         errors.append("packaged skill size does not match the candidate")
     if runtime_info.get("project") != "ProjectAtlas":
         errors.append("runtime identity is not ProjectAtlas")
-    if runtime_info.get("version") != candidate.get("required_version"):
-        errors.append("runtime version does not match the preregistered candidate")
+    locked_version = candidate.get("required_version")
+    if not isinstance(locked_version, str) or not locked_version or required_version != locked_version:
+        errors.append(
+            "requested compatibility version does not match the preregistered candidate version"
+        )
+    if runtime_info.get("version") != locked_version:
+        errors.append(
+            "runtime version does not match the preregistered candidate version"
+        )
     capabilities = set(runtime_info.get("capabilities", []))
     if not {"mcp", "sqlite", "toon"}.issubset(capabilities):
         errors.append("runtime omitted required MCP, SQLite, or TOON capability")
@@ -3401,10 +3794,118 @@ def candidate_source_identity(preregistration_path: Path) -> dict[str, str]:
     }
 
 
+def runtime_artifact_identity(runtime: Path) -> dict[str, Any]:
+    """Capture executable bytes and enclosing checkout HEAD, not build provenance."""
+
+    resolved = runtime.resolve(strict=True)
+    payload = resolved.read_bytes()
+    source_root = subprocess.run(
+        ["git", "-C", str(resolved.parent), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if source_root.returncode != 0:
+        raise RuntimeError(
+            "candidate runtime source checkout could not be resolved: "
+            + source_root.stderr.strip()
+        )
+    source_checkout = source_root.stdout.strip()
+    if not source_checkout:
+        raise RuntimeError("candidate runtime source checkout was empty")
+    revision = subprocess.run(
+        ["git", "-C", source_checkout, "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if revision.returncode != 0:
+        raise RuntimeError(
+            "candidate runtime source revision could not be resolved: "
+            + revision.stderr.strip()
+        )
+    source_revision = revision.stdout.strip()
+    if not source_revision or any(character.isspace() for character in source_revision):
+        raise RuntimeError("candidate runtime source revision was malformed")
+    return {
+        "runtime": str(resolved),
+        "checkout_head": source_revision,
+        "checkout_head_method": "git-rev-parse-enclosing-checkout-not-build-provenance",
+        "runtime_sha256": hashlib.sha256(payload).hexdigest(),
+        "runtime_bytes": len(payload),
+    }
+
+
+def validate_runtime_build_witness(candidate: dict[str, Any], actual: dict[str, Any]) -> None:
+    """Enforce explicit hash-and-size build witnesses in every profile mode."""
+    if "runtime_bytes" in candidate:
+        if type(candidate["runtime_bytes"]) is not int or candidate["runtime_bytes"] <= 0:
+            raise ValueError("candidate runtime byte count is malformed")
+        if any(candidate.get(key) != actual.get(key) for key in ("runtime_sha256", "runtime_bytes")):
+            raise ValueError("runtime bytes do not match the preregistered build witness")
+
+
+def runtime_artifact_identity_or_unavailable(runtime: Path) -> dict[str, Any]:
+    """Retain an explicit unavailable identity when failure precedes execution."""
+
+    try:
+        return runtime_artifact_identity(runtime)
+    except (OSError, RuntimeError) as error:
+        identity: dict[str, Any] = {
+            "runtime": str(runtime),
+            "checkout_head": None,
+            "checkout_head_method": None,
+            "runtime_sha256": None,
+            "runtime_bytes": None,
+            "error": f"{type(error).__name__}: {error}",
+        }
+        try:
+            resolved = runtime.resolve(strict=True)
+            payload = resolved.read_bytes()
+        except OSError as read_error:
+            identity["error"] += (
+                f"; runtime bytes unavailable: {type(read_error).__name__}: "
+                f"{read_error}"
+            )
+        else:
+            identity.update(
+                {
+                    "runtime": str(resolved),
+                    "runtime_sha256": hashlib.sha256(payload).hexdigest(),
+                    "runtime_bytes": len(payload),
+                }
+            )
+        return identity
+
+
+def execution_provenance(
+    command_argv: list[str] | None,
+    *,
+    passed: bool,
+    failure: str | None = None,
+) -> dict[str, Any]:
+    """Retain exact process arguments and the harness result/exit contract."""
+
+    command = None
+    if command_argv is not None:
+        command = [sys.executable, *command_argv]
+    result: dict[str, Any] = {
+        "status": "passed" if passed else "failed",
+        "exit_code": 0 if passed else 1,
+    }
+    if failure is not None:
+        result["failure"] = failure
+    return {"command": command, "result": result}
+
+
 def validate_publication_identity(
     runtime: Path,
     preregistration: dict[str, Any],
     preregistration_path: Path,
+    *,
+    required_version: str,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     candidate = preregistration["candidate"]
     runtime_sha256 = hashlib.sha256(runtime.read_bytes()).hexdigest()
@@ -3418,7 +3919,7 @@ def validate_publication_identity(
         [
             str(runtime),
             "--require-version",
-            str(preregistration["candidate"]["required_version"]),
+            required_version,
             "--format",
             "json",
             "runtime-info",
@@ -3444,6 +3945,7 @@ def validate_publication_identity(
         request_timeout_seconds=preregistration["thresholds"]["all"][
             "mcp_request_timeout_seconds"
         ],
+        required_version=required_version,
     )
     try:
         mcp_tools, _ = mcp_client.tools()
@@ -3466,6 +3968,7 @@ def validate_publication_identity(
     ]
     errors = publication_identity_errors(
         preregistration,
+        required_version=required_version,
         runtime_sha256=runtime_sha256,
         mcp_tools_sha256=mcp_tools_sha256,
         skill_sha256=skill_sha256,
@@ -3516,25 +4019,65 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--corpus-cache", type=Path, default=DEFAULT_CORPUS_CACHE)
     parser.add_argument(
+        "--required-version",
+        help="Runtime compatibility version; defaults to the preregistration candidate version.",
+    )
+    parser.add_argument(
+        "--caller-files",
+        type=int,
+        help="Override the generated medium corpus size for a bounded scale run.",
+    )
+    parser.add_argument(
+        "--small-variant",
+        choices=("clean", "dirty", "non-git"),
+        help="Select one existing small fixture instead of running all variants.",
+    )
+    parser.add_argument(
         "--only",
         choices=("small", "medium", "huge", "all"),
         default="all",
         help="Use small or medium only for harness smoke; publication requires all.",
     )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help=(
+            "Validate the complete all-route publication identity without "
+            "running corpora."
+        ),
+    )
     args = parser.parse_args()
+    external_corpus = None
+    if args.only in {"huge", "all"}:
+        try:
+            external_preregistration = json.loads(
+                args.preregistration.read_text(encoding="utf-8")
+            )
+            if isinstance(external_preregistration, dict):
+                external_corpus = preregistered_external_corpus(
+                    external_preregistration, args.only
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
     try:
-        run_benchmark(args)
+        run_benchmark(args, command_argv=list(sys.argv))
     except Exception as error:
+        failure = f"{type(error).__name__}: {error}"
         write_result(
             {
                 "schema_version": 1,
                 "preregistration": str(args.preregistration.resolve()),
                 "mode": args.only,
+                "external_corpus": external_corpus,
                 "final_measurement_eligibility": final_measurement_eligibility(
                     args.only
                 ),
                 "publication_eligible": False,
                 "passed": False,
+                "candidate": runtime_artifact_identity_or_unavailable(args.runtime),
+                "execution": execution_provenance(
+                    list(sys.argv), passed=False, failure=failure
+                ),
                 "failure": {
                     "type": type(error).__name__,
                     "message": str(error),
@@ -3544,39 +4087,89 @@ def main() -> None:
         )
 
 
-def run_benchmark(args: argparse.Namespace) -> None:
+def run_benchmark(
+    args: argparse.Namespace, *, command_argv: list[str] | None = None
+) -> None:
+    if args.only == "all" and args.small_variant is not None:
+        raise ValueError("--small-variant cannot be used with --only all")
+    if args.only == "all" and args.caller_files is not None:
+        raise ValueError("--caller-files cannot be used with --only all")
     clear_git_repository_environment()
     runtime = args.runtime.resolve(strict=True)
     preregistration_path = args.preregistration.resolve(strict=True)
     preregistration = json.loads(preregistration_path.read_text(encoding="utf-8"))
+    required_version = args.required_version if args.required_version is not None else str(
+        preregistration.get("candidate", {}).get(
+            "required_version", ""
+        )
+    )
+    caller_files = args.caller_files if args.caller_files is not None else int(
+        preregistration.get("corpora", {}).get("medium", {}).get("caller_files", 0)
+    )
+    if caller_files <= 0:
+        raise ValueError("--caller-files and the preregistered medium corpus must be positive")
+    if not required_version:
+        raise ValueError("--required-version or a preregistered candidate version is required")
+    preflight_only = bool(getattr(args, "preflight_only", False))
+    if preflight_only and args.only != "all":
+        raise ValueError("--preflight-only requires --only all")
     measurement_eligibility = final_measurement_eligibility(args.only)
     if (
         measurement_eligibility["requested"]
         and not measurement_eligibility["final_platform_eligible"]
     ):
         raise RuntimeError(measurement_eligibility["ineligible_reason"])
+    work_root = args.work_root.resolve()
+    allowed = (ROOT / "target/benchmarks/system-scale").resolve()
+    corpus_cache = args.corpus_cache.resolve()
+    if not preflight_only:
+        if work_root == allowed or allowed not in work_root.parents:
+            raise ValueError(f"--work-root must be a child of {allowed}")
+        if corpus_cache != allowed and allowed not in corpus_cache.parents:
+            raise ValueError(
+                f"--corpus-cache must be {allowed} or one of its children"
+            )
+        if corpus_cache == work_root or work_root in corpus_cache.parents:
+            raise ValueError("--corpus-cache must not be inside --work-root")
+    runtime_identity = runtime_artifact_identity(runtime)
+    validate_runtime_build_witness(preregistration.get("candidate", {}), runtime_identity)
     if args.only == "all":
         publication_identity, source_identity = validate_publication_identity(
-            runtime, preregistration, preregistration_path
+            runtime,
+            preregistration,
+            preregistration_path,
+            required_version=required_version,
         )
     else:
         publication_identity, source_identity = None, None
-    work_root = args.work_root.resolve()
-    allowed = (ROOT / "target/benchmarks/system-scale").resolve()
-    if work_root == allowed or allowed not in work_root.parents:
-        raise ValueError(f"--work-root must be a child of {allowed}")
-    corpus_cache = args.corpus_cache.resolve()
-    if corpus_cache != allowed and allowed not in corpus_cache.parents:
-        raise ValueError(
-            f"--corpus-cache must be {allowed} or one of its children"
+    if preflight_only:
+        write_result(
+            {
+                "schema_version": 1,
+                "preregistration": str(preregistration_path),
+                "mode": args.only,
+                "required_version": required_version,
+                "final_measurement_eligibility": measurement_eligibility,
+                "publication_eligible": False,
+                "preflight_only": True,
+                "candidate": runtime_identity,
+                "preflight": {
+                    "scope": "all-route publication identity and MCP routing",
+                    "passed": True,
+                    "publication_identity": publication_identity,
+                    "candidate_source_identity": source_identity,
+                },
+                "passed": True,
+                "execution": execution_provenance(command_argv, passed=True),
+            },
+            args.output,
         )
-    if corpus_cache == work_root or work_root in corpus_cache.parents:
-        raise ValueError("--corpus-cache must not be inside --work-root")
+        return
     if work_root.exists():
         remove_tree(work_root, allowed_parent=allowed)
     work_root.mkdir(parents=True)
-    env = os.environ.copy()
-    env["PROJECTATLAS_NO_TELEMETRY"] = "1"
+    telemetry_mode = preregistration["candidate"].get("telemetry", "disabled")
+    env = measurement_environment(telemetry_mode)
 
     cases = []
     small = prepare_small(work_root)
@@ -3601,7 +4194,12 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 "file_pattern": "src/**/*.rs",
             },
         }
-        for variant, root in small.items():
+        variants = (
+            [(args.small_variant, small[args.small_variant])]
+            if args.small_variant is not None
+            else small.items()
+        )
+        for variant, root in variants:
             cases.append(
                 run_case(
                     runtime,
@@ -3611,19 +4209,26 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     variant=variant,
                     preregistration=preregistration,
                     query=small_queries[variant],
+                    required_version=required_version,
                 )
             )
 
     medium = work_root / "medium"
-    prepare_medium(medium, preregistration["corpora"]["medium"]["caller_files"])
+    prepare_medium(medium, caller_files)
     if args.only in {"medium", "all"}:
+        default_caller_files = int(
+            preregistration.get("corpora", {})
+            .get("medium", {})
+            .get("caller_files", caller_files)
+        )
+        medium_variant = medium_corpus_variant(caller_files, default_caller_files)
         cases.append(
             run_case(
                 runtime,
                 medium,
                 env,
                 scale="medium",
-                variant="high-degree",
+                variant=medium_variant,
                 preregistration=preregistration,
                 query={
                     "target_file": "src/hub.rs",
@@ -3632,6 +4237,8 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     "file_pattern": "src/**/*.rs",
                 },
                 incremental=True,
+                required_version=required_version,
+                caller_files=caller_files,
             )
         )
 
@@ -3652,6 +4259,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     "regex": r"class\s+[A-Za-z_]+",
                     "file_pattern": "src/**/*.ts",
                 },
+                required_version=required_version,
             )
         )
 
@@ -3662,8 +4270,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
             work_root,
             env,
             timeout,
-            preregistration["corpora"]["medium"]["caller_files"],
+            caller_files,
             preregistration["thresholds"]["all"],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3677,6 +4286,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             preregistration["thresholds"]["all"][
                 "maximum_contention_failure_seconds"
             ],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3692,6 +4302,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             preregistration["thresholds"]["all"][
                 "mcp_request_timeout_seconds"
             ],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3705,6 +4316,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             preregistration["thresholds"]["all"][
                 "maximum_cancellation_quiescence_seconds"
             ],
+            required_version=required_version,
         )
         if args.only == "all"
         else None
@@ -3714,13 +4326,19 @@ def run_benchmark(args: argparse.Namespace) -> None:
         "preregistration": str(preregistration_path),
         "effective_preregistration": preregistration,
         "mode": args.only,
+        "required_version": required_version,
+        "external_corpus": preregistered_external_corpus(
+            preregistration, args.only
+        ),
+        "corpus_overrides": {
+            "medium.caller_files": caller_files,
+            "small.variant": args.small_variant or "all",
+        },
         "final_measurement_eligibility": measurement_eligibility,
         "publication_eligible": False,
         "candidate": {
             "version": subprocess.check_output([runtime, "--version"], text=True).strip(),
-            "runtime": str(runtime),
-            "runtime_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
-            "runtime_bytes": runtime.stat().st_size,
+            **runtime_identity,
             "publication_identity": publication_identity,
         },
         "candidate_source_identity": source_identity,
@@ -3730,7 +4348,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
             "python": platform.python_version(),
             "psutil": psutil.__version__,
             "logical_cpus": os.cpu_count(),
-            "telemetry": "disabled",
+            "telemetry": telemetry_mode,
         },
         "cases": cases,
         "concurrent_isolation": concurrency,
@@ -3759,6 +4377,9 @@ def run_benchmark(args: argparse.Namespace) -> None:
         args.only == "all"
         and measurement_eligibility["final_platform_eligible"]
         and result["passed"]
+    )
+    result["execution"] = execution_provenance(
+        command_argv, passed=result["passed"]
     )
     write_result(result, args.output)
 

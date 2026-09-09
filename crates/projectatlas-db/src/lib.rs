@@ -2693,6 +2693,23 @@ impl AtlasStore {
         )
     }
 
+    /// Check publication-writer availability without changing durable state.
+    ///
+    /// The probe uses the same fail-fast acquisition policy as a real
+    /// publication and immediately rolls back a successful transaction. It
+    /// lets callers reject a contended writer before doing expensive staging,
+    /// while preserving the complete generation for every connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exclusive writer cannot be acquired or the
+    /// probe transaction cannot be rolled back.
+    pub fn probe_index_publication_writer(&mut self) -> DbResult<()> {
+        begin_immediate_publication(&self.connection)?;
+        self.connection.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
     /// Begin one exclusive symbol/projection refresh without replacing the
     /// established full-index contract.
     ///
@@ -9147,6 +9164,31 @@ mod tests {
             let mut publication = writer_a.begin_index_publication("contract")?;
             write_test_projection(&mut publication, "new")?;
             require_test_projection(&old_reader, 1, "old")?;
+
+            let probe_started = std::time::Instant::now();
+            let Err(probe_contention) = writer_b.probe_index_publication_writer() else {
+                return Err(io::Error::other(
+                    "writer availability probe entered an active publication transaction",
+                )
+                .into());
+            };
+            require_eq(
+                &matches!(
+                    probe_contention,
+                    DbError::Sqlite(ref error)
+                        if matches!(
+                            error.sqlite_error_code(),
+                            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                        )
+                ),
+                &true,
+                "same-database writer availability probe",
+            )?;
+            require_eq(
+                &(probe_started.elapsed() < Duration::from_secs(2)),
+                &true,
+                "fail-fast same-database writer availability probe",
+            )?;
 
             let started = std::time::Instant::now();
             let Err(contention) = writer_b.begin_index_publication("contract") else {

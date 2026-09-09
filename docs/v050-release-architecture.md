@@ -82,17 +82,34 @@ flowchart LR
 ## Graph-construction worker and publication ownership
 
 ```mermaid
-flowchart LR
-    budget[One process indexing budget] --> parse[Symbol parsing]
+flowchart TB
+    probe[Advisory writer probe] -->|available; release probe| parse
+    probe -->|busy| cleanup
+    budget[Existing bounded stage worker ceilings] --> parse[Symbol parsing]
+    budget --> derive[Graph derivation]
+    budget --> admission[Graph-identity admission]
     budget --> summaries[Structural summaries]
-    budget --> relations[Graph derivation]
-    parse --> staged[Prepared generation]
-    summaries --> staged
-    relations --> staged
+    parse --> derive
+    derive --> admission
+    admission --> summaries
+    summaries --> staged[Prepared generation]
     staged --> tx[(Short SQLite publication transaction)]
     tx --> current[One current generation]
     cancel[Cancellation or failure] --> cleanup[Discard staging; retain last complete generation]
 ```
+
+The arrows show owning stage order in the publication pipeline, not a claim that
+structural summaries consume graph rows; summaries reuse parser inputs after
+graph projection. For #358, the existing bounded stage worker ceilings remain in
+place because the measured shared-pool candidate did not produce a material
+full-envelope improvement. Graph derivation and graph-identity admission remain
+the existing sequential owning stages, and publication keeps its current atomic
+transaction. The advisory writer probe refuses existing contention before
+expensive staging and immediately releases its transaction. It reserves no
+writer lease: final publication still revalidates inputs and acquires the
+authoritative writer transaction, rolling back on late contention or failure.
+The reproducible baseline/candidate evidence is recorded in
+[`docs/benchmarks/v050-358-resource-measurement.md`](benchmarks/v050-358-resource-measurement.md).
 
 ## Filtered custom-harness timeout ownership
 
