@@ -26,7 +26,7 @@
     "runtime_version": "projectatlas 0.4.5"
   },
   "measurement_inputs": {
-    "docs/benchmarks/harness/system_scale.py": "472753c44f56519e99a522ece3272f3717b741a1d04955116e1538f11891d74f",
+    "docs/benchmarks/harness/system_scale.py": "434aa891487e783e9dfc546a579b6551d13a0ac17e8ea16b366e2002a645feec",
     "docs/benchmarks/harness/mcp_composition.py": "e602209ba4cb04363074cb7d336374b1decf4dd63952f2524856b18eb8519a03",
     "docs/benchmarks/harness/requirements.txt": "b6c8d86768d07e1dae4fb734c2e93997445a318d43290b307bfc1c800a0b1e52",
     "docs/benchmarks/fixtures/mcp-composition": "498cccec02061a12330b738fd0e3094063627934979b0277c493d90564e02553"
@@ -128,16 +128,21 @@
   },
   "threshold_disposition": "Historical v0.4 diagnostics retained unchanged, including red cells. They do not authorize adoption of the rejected shared pool; required correctness, atomicity, cancellation, worker bounds, and cleanup remain mandatory.",
   "commands": [
-    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only small --small-variant clean --work-root target/benchmarks/system-scale/issue-358-current-small --output target/benchmarks/system-scale/issue-358-current-small.json",
-    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only medium --caller-files 1024 --work-root target/benchmarks/system-scale/issue-358-current-medium --output target/benchmarks/system-scale/issue-358-current-medium.json",
-    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-current-large --output target/benchmarks/system-scale/issue-358-current-large.json"
+    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only small --small-variant clean --work-root target/benchmarks/system-scale/issue-358-verified-small --output target/benchmarks/system-scale/issue-358-verified-small.json",
+    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only medium --caller-files 1024 --work-root target/benchmarks/system-scale/issue-358-verified-medium --output target/benchmarks/system-scale/issue-358-verified-medium.json",
+    "python docs/benchmarks/harness/system_scale.py --runtime target/release/projectatlas.exe --preregistration docs/benchmarks/v050-358-current-profile-preregistration.json --only medium --caller-files 4096 --work-root target/benchmarks/system-scale/issue-358-verified-large --output target/benchmarks/system-scale/issue-358-verified-large.json"
   ],
-  "measurement_checkout_head": "00474e7b11ae28dfdc024b223a42c9adabeb3b1f",
+  "measurement_checkout_head": "4342b874e1eae28684fd6dae1b3cb08065148d66",
   "measurement_amendments": [
     {
       "prior_run": "Initial normal-telemetry small profile (retained locally and summarized in final report)",
       "finding": "Initial scan/settings correctly had zero telemetry rows; later MCP queries had26. The initial nonzero assertion observed the wrong lifecycle point.",
       "correction": "Read telemetry and final persistent footprint after measured queries; retain all historical performance thresholds unchanged."
+    },
+    {
+      "prior_run": "Initial current small, medium and large profiles retained locally",
+      "finding": "Focused modes recorded runtime identity without enforcing the declared build witness. The observed binary matched, but future wrong binaries were not refused.",
+      "correction": "Enforce declared hash-and-size build witnesses before all focused runs; retain thresholds and runtime binary unchanged."
     }
   ]
 }
