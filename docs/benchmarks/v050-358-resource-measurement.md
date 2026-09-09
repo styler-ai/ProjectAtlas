@@ -284,7 +284,7 @@ parser-worker accounting, and successful writer/cancellation/recovery proof.
 It preserves the historical no-adoption decision and diagnostic failures.
 Exact allocator-event counts and per-stage transaction/checkpoint frame timing
 remain unavailable; no new instrumentation framework is needed to retain the
-existing worker design. OpenSpec tasks 5.1–5.4 remain unchecked until independent
-review and required hosted functional platform proof complete. Windows resource
-accounting does not substitute for Linux/macOS execution of the real scan/watch
-and publication regressions.
+existing worker design. Independent review and hosted functional proof passed
+on Windows, Linux, Intel macOS, and ARM macOS. Each platform executed the real
+scan/watch atomic-publication, late revalidation, and cancellation/retry regressions.
+This platform proof complements the Windows resource accounting.
