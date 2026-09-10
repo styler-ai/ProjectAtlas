@@ -448,6 +448,10 @@ const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
+const SKILL_REFERENCES_DIR: &str = "references";
+
+const LANGUAGE_SUPPORT_FILE_NAME: &str = "language-support.md";
+
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
 const MCP_TOOLS_SHA256: &str = "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12f49d956a18ad6fcd";
@@ -13164,10 +13168,10 @@ fn write_fake_codex_projectatlas_integration(
         let references = root
             .join(PROJECTATLAS_SKILL_DIR)
             .join(PROJECTATLAS_SKILL_NAME)
-            .join("references");
+            .join(SKILL_REFERENCES_DIR);
         fs::create_dir_all(&references)?;
         fs::write(
-            references.join("language-support.md"),
+            references.join(LANGUAGE_SUPPORT_FILE_NAME),
             include_bytes!(
                 "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
             ),
@@ -13876,8 +13880,8 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     let plugin_reference = fake_plugin_source
         .join(PROJECTATLAS_SKILL_DIR)
         .join(PROJECTATLAS_SKILL_NAME)
-        .join("references")
-        .join("language-support.md");
+        .join(SKILL_REFERENCES_DIR)
+        .join(LANGUAGE_SUPPORT_FILE_NAME);
     let fake_plugin_source_json =
         serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -19601,8 +19605,8 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         plugin_root
             .join(PROJECTATLAS_SKILL_DIR)
             .join(PROJECTATLAS_SKILL_NAME)
-            .join("references")
-            .join("language-support.md"),
+            .join(SKILL_REFERENCES_DIR)
+            .join(LANGUAGE_SUPPORT_FILE_NAME),
     )?;
     if language_support != projectatlas_core::language::render_language_support_markdown()? {
         return Err(io::Error::other(
@@ -28251,16 +28255,16 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
                     .join("projectatlas")
                     .join(PROJECTATLAS_SKILL_DIR)
                     .join(PROJECTATLAS_SKILL_NAME)
-                    .join("references")
-                    .join("language-support.md"),
+                    .join(SKILL_REFERENCES_DIR)
+                    .join(LANGUAGE_SUPPORT_FILE_NAME),
             )
             .env(
                 "PROJECTATLAS_FAKE_PLUGIN_REFERENCE",
                 fake_plugin_source
                     .join(PROJECTATLAS_SKILL_DIR)
                     .join(PROJECTATLAS_SKILL_NAME)
-                    .join("references")
-                    .join("language-support.md"),
+                    .join(SKILL_REFERENCES_DIR)
+                    .join(LANGUAGE_SUPPORT_FILE_NAME),
             )
             .env(
                 "PROJECTATLAS_PACKAGED_SKILL",
