@@ -19553,6 +19553,19 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
             .join(PROJECTATLAS_SKILL_NAME)
             .join(SKILL_FILE_NAME),
     )?;
+    let language_support = fs::read_to_string(
+        plugin_root
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join("references")
+            .join("language-support.md"),
+    )?;
+    if language_support != projectatlas_core::language::render_language_support_markdown()? {
+        return Err(io::Error::other(
+            "installed skill language support disagrees with the runtime capability registry",
+        )
+        .into());
+    }
     for route in [
         "atlas_worktree_list",
         "atlas_worktree_add",

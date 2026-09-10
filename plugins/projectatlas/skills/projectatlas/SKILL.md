@@ -51,6 +51,20 @@ Use the returned typed recovery state rather than switching to paths: `ambiguous
 - Submit the returned `next_call` unchanged. It preserves the exact file or heading selector, content selection, generation, and bounds; finish at current source evidence before making an implementation claim.
 - In linked-worktree or shared-host sessions, pass the exact checkout `project_path` on every call. Each checkout owns its ignored writable database and classified graph; never substitute a sibling database or combine sibling graph generations.
 
+## PHP Navigation
+
+Use this profile only when the selected runtime's language capabilities report built-in PHP support and its version matches the installed plugin. Read the PHP row in the bundled [generated language-support reference](references/language-support.md) for capability and parser identities; do not infer support from the `.php` extension or a release label alone. Regenerate that reference with the existing `render_language_support` example when the registry changes; its bytes must match the repository's generated language-support document.
+
+1. Start with the normal compact session brief for the PHP task. Follow its ranked file recommendation; use overview, folders, and files when the repository layout or ownership is still unclear. In a Composer repository, inspect the actual source roots and ignore policy before selecting application code. Composer autoload declarations are configuration evidence, not proof that a runtime class or framework binding resolves.
+2. Read the selected file summary with `content_selection: "source"`. Inspect `parser_kind`, `summary_status`, and coverage together. PHP grammar-produced facts can retain Tree-sitter provenance while unsupported or dynamic regions make the summary fallback and coverage partial. A rescued declaration with fallback provenance has weaker evidence. Neither state makes omitted declarations or calls absent at runtime.
+3. Use outline for declaration ownership and bounded search for exact names or source syntax. Named namespaces, types, functions, and members provide navigation anchors where returned; copy the exact file, kind, parent, and span selector to distinguish duplicate names. A declaration's presence does not prove conditional code executed.
+4. For a dependency or caller question, request detailed graph evidence and inspect each relation's resolution, coverage, and source context. Static include/require paths and namespace imports have different meanings even when represented by the same import relation family. An extracted call is not necessarily a resolved target. Follow returned continuations and exact resolved selectors; inspect an unresolved call's source instead of inventing a destination.
+5. Finish with an exact slice and check the current bytes. Refresh after edits using the normal freshness route, then repeat only the affected query. Keep the same worktree or project selector on every call.
+
+Abstain from claims about variable calls, object dispatch, runtime include expressions, `eval`, framework containers, Composer autoload execution, or generated runtime behavior unless separate evidence establishes them. Mixed HTML/PHP and malformed recovery trees may leave valid PHP spans navigable while other regions remain partial or fallback; a PHP graph does not prove HTML or template semantics. Search and exact slices can establish literal text in these cases, not runtime execution or complete reachability.
+
+For generated or vendored source, verify the repository's ownership and ignore policy and locate the authored input before proposing a change. A generated file's static symbols do not establish its generator, regeneration command, or safe edit target. If the authored source or relation evidence is unavailable, state that limit and stop the unsupported inference.
+
 ## Indexing Strategy
 
 - **First use for each project root:** `atlas_init` or `projectatlas init`. This is the normal per-project setup and initial-index path.
@@ -146,7 +160,7 @@ Use `atlas_runtime_info` first. CLI fallback:
 
 `projectatlas --format json runtime-info`
 
-The runtime must report ProjectAtlas major version 3+, MCP, SQLite, TOON, and a runtime `version` matching the selected plugin release. Verify the installed plugin version and shipped skill artifact separately through the installer and harness plugin inventory. If the runtime is missing or stale, resolve the installer from the installed, version-matched ProjectAtlas plugin root or a checked-out matching ProjectAtlas release, then pass the target project root separately:
+The runtime must report MCP, SQLite, TOON, and a runtime `version` matching the selected plugin release. Verify the installed plugin version and shipped skill artifact separately through the installer and harness plugin inventory. If the runtime is missing or stale, resolve the installer from the installed, version-matched ProjectAtlas plugin root or a checked-out matching ProjectAtlas release, then pass the target project root separately:
 
 - Windows: `& "<projectatlas-plugin-root>\scripts\install-runtime.ps1" -ProjectRoot "<target-project-root>"`
 - Linux/macOS: `bash "<projectatlas-plugin-root>/scripts/install-runtime.sh" "<target-project-root>"`
