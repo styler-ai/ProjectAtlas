@@ -17,7 +17,7 @@ dependency, status writer, or additional source execution for metadata activity.
 
 Keep `verify` as the native required job on every CI event. Source events execute
 the existing exact planner, selected jobs, and aggregate. Metadata only fetches
-the verification helper at the exact head and reads native Actions results. It does not execute a
+the verification helper at the captured accepted base and reads native Actions results. It does not execute a
 source plan, build, test, or aggregate, or rerun an earlier job.
 
 For PR source events, `run-name` captures the PR number and full base/head SHAs from
@@ -55,7 +55,12 @@ run in the existing CI owner instead.
 
 ## Migration Plan
 
-Deliver the minimal workflow/test change through one normally protected PR.
+First deliver the verifier command and its failure-path tests through normal
+protected source CI, keeping the owning issue open. Then refresh the existing
+worktree onto that accepted base and activate metadata verification in a second
+PR for the same issue. The activation must fetch only the captured base helper;
+missing support fails closed without executing the submitted head helper.
+This ordering establishes trusted code before it decides metadata readiness.
 Read back source checks, metadata checks, and base/head bindings on actual events.
 No data migration or branch-protection update is needed. A source revert restores
 the prior event behavior; do not compensate with bypass statuses or relaxed gates.

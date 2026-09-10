@@ -3728,45 +3728,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     let verify_job = workflow_job_block(&ci, "verify")?;
     for required in [
-        "    name: verify\n",
-        "    if: always()\n",
-        "      actions: read\n",
+        "name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}",
+        &format!("if: always() && ({source_event})"),
     ] {
         if !verify_job.contains(required) {
             return Err(io::Error::other(format!(
-                "native verification must revalidate source proof on metadata: {required:?}"
-            ))
-            .into());
-        }
-    }
-    let metadata_event = "github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null";
-    let metadata_step =
-        workflow_job_step(&ci, "verify", "Verify existing source proof for metadata")?;
-    if metadata_step["if"].as_str() != Some(metadata_event) {
-        return Err(
-            io::Error::other("metadata proof lookup must not run for source events").into(),
-        );
-    }
-    for required in [
-        "format('{0}-pr-{1}-base-{2}-head-{3}'",
-        "&& 'source' || 'metadata'",
-        "github.event.pull_request.number, github.event.pull_request.base.sha, github.event.pull_request.head.sha",
-        "verify-metadata",
-        "--run-id \"$GITHUB_RUN_ID\"",
-        "affected-ci-proof.py?ref=$EVENT_HEAD",
-    ] {
-        if !ci.contains(required) {
-            return Err(io::Error::other(format!(
-                "metadata proof omitted native event binding {required:?}"
-            ))
-            .into());
-        }
-    }
-    for name in ["Checkout exact source", "Aggregate selected proof"] {
-        let step = workflow_job_step(&ci, "verify", name)?;
-        if step["if"].as_str() != Some(source_event) {
-            return Err(io::Error::other(format!(
-                "metadata-only edits must not execute source step {name:?}"
+                "metadata-only edits must not emit or satisfy source aggregate {required:?}"
             ))
             .into());
         }

@@ -8,6 +8,18 @@ job SHALL accept only an actual successful source run for the exact current PR,
 base, head, and workflow. Native conversation resolution SHALL remain authoritative
 for review threads.
 
+#### Scenario: A pull request changes the verifier
+- **WHEN** submitted code changes the metadata verifier, including a version that
+  would return success after failed source proof
+- **THEN** metadata executes only the captured accepted-base verifier, never the
+  submitted-head version, and missing accepted-base support fails closed
+
+#### Scenario: The verifier is introduced for the first time
+- **WHEN** the accepted base does not yet contain metadata verification support
+- **THEN** the verifier and its failure-path tests are delivered through normal
+  protected source checks before a later PR activates metadata verification;
+  the owning issue stays open until activation and hosted acceptance complete
+
 #### Scenario: Title or body changes after passing source proof
 - **WHEN** an open pull request changes only its title or body
 - **THEN** current issue and milestone validation runs, `verify` revalidates existing

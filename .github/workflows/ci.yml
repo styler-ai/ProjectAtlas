@@ -1,7 +1,6 @@
 # Purpose: Verify ProjectAtlas Rust quality gates and multi-OS behavior tests.
 
 name: 01-CI
-run-name: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}-base-{2}-head-{3}', (github.event.action != 'edited' || github.event.changes.base != null) && 'source' || 'metadata', github.event.pull_request.number, github.event.pull_request.base.sha, github.event.pull_request.head.sha) || format('ci-{0}-{1}', github.event_name, github.sha) }}
 
 # /**
 #  * Purpose: Run Rust source, test, and build checks.
@@ -881,46 +880,18 @@ jobs:
         run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture
 
   verify:
-    name: verify
-    # Every native CI suite supplies verify; metadata must validate real source proof.
-    if: always()
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-edit' || 'verify' }}
+    if: always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null)
     needs: [plan, repository, rust, e2e-smoke]
     runs-on: ubuntu-latest
-    timeout-minutes: 125
-    permissions:
-      actions: read
-      contents: read
-      pull-requests: read
     steps:
-      - name: Verify existing source proof for metadata
-        if: github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null
-        timeout-minutes: 121
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_BASE: ${{ github.event.pull_request.base.sha }}
-          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          helper="$RUNNER_TEMP/affected-ci-proof.py"
-          gh api -H 'Accept: application/vnd.github.raw+json' \
-            "repos/$GITHUB_REPOSITORY/contents/.github/scripts/affected-ci-proof.py?ref=$EVENT_HEAD" > "$helper"
-          python3 "$helper" verify-metadata \
-            --repo "$GITHUB_REPOSITORY" \
-            --pull-request "$PR_NUMBER" \
-            --run-id "$GITHUB_RUN_ID" \
-            --base "$EVENT_BASE" \
-            --head "$EVENT_HEAD"
-
       - name: Checkout exact source
-        if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.plan.outputs.head || github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           fetch-depth: 2
 
       - name: Aggregate selected proof
-        if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN: ${{ needs.plan.outputs.plan }}

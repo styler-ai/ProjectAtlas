@@ -11,6 +11,8 @@ without rebuilding source or accepting incomplete base-retarget proof.
 - Keep issue validation in PR-state. Let the existing required `verify` job
   revalidate a real successful source run for metadata events, without planning,
   building, testing, or rerunning the source aggregate.
+- Establish the verifier on the accepted base before workflow activation. Metadata
+  must never execute a submitted-head verifier to decide required-check success.
 - Capture the source event's PR number and base in its native run name; combine
   that immutable binding with the native run's head, workflow, and conclusion.
   Never use the mutable PR association on an old workflow run as historical proof.
