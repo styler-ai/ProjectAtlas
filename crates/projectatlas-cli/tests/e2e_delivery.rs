@@ -19566,7 +19566,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         )
         .into());
     }
-    for route in [
+    for requirement in [
         "atlas_worktree_list",
         "atlas_worktree_add",
         "atlas_worktree_remove",
@@ -19576,10 +19576,16 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         "atlas_symbol_relations",
         "atlas_slice",
         "atlas_token_report",
+        "## PHP Navigation",
+        "references/language-support.md",
+        "language capabilities report built-in PHP support",
+        "version matches the installed plugin",
+        "Abstain from claims about variable calls",
+        "locate the authored input before proposing a change",
     ] {
-        if !skill.contains(route) {
+        if !skill.contains(requirement) {
             return Err(io::Error::other(format!(
-                "release-candidate ProjectAtlas skill omitted {route}"
+                "release-candidate ProjectAtlas skill omitted {requirement}"
             ))
             .into());
         }
