@@ -10517,6 +10517,17 @@ public static class Program
         serde_json::to_vec(&json!({ "version": env!("CARGO_PKG_VERSION") }))?,
     )?;
     fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
+    let plugin_references = plugin_cache
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join(SKILL_REFERENCES_DIR);
+    fs::create_dir_all(&plugin_references)?;
+    fs::write(
+        plugin_references.join(LANGUAGE_SUPPORT_FILE_NAME),
+        include_bytes!(
+            "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+        ),
+    )?;
     let fake_plugin_list = isolated_home.join(FAKE_CODEX_PLUGIN_LIST_FILE_NAME);
     fs::write(
         &fake_plugin_list,
@@ -11140,6 +11151,17 @@ public static class Program
         serde_json::to_vec(&json!({ "version": env!("CARGO_PKG_VERSION") }))?,
     )?;
     fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
+    let plugin_references = plugin_cache
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join(SKILL_REFERENCES_DIR);
+    fs::create_dir_all(&plugin_references)?;
+    fs::write(
+        plugin_references.join(LANGUAGE_SUPPORT_FILE_NAME),
+        include_bytes!(
+            "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+        ),
+    )?;
     let plugin_list = isolated_home.join(FAKE_CODEX_PLUGIN_LIST_FILE_NAME);
     fs::write(
         &plugin_list,
