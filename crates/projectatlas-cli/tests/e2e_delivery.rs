@@ -19547,12 +19547,21 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         plugin_root.join(".codex-plugin").join("plugin.json"),
     )?)?;
     require_json_string(&manifest, &["version"], env!("CARGO_PKG_VERSION"))?;
-    let skill = fs::read_to_string(
+    let skill_bytes = fs::read(
         plugin_root
             .join(PROJECTATLAS_SKILL_DIR)
             .join(PROJECTATLAS_SKILL_NAME)
             .join(SKILL_FILE_NAME),
     )?;
+    if skill_bytes.as_slice()
+        != include_bytes!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md")
+    {
+        return Err(io::Error::other(
+            "installed ProjectAtlas skill differs from the release-candidate skill",
+        )
+        .into());
+    }
+    let skill = String::from_utf8(skill_bytes)?;
     let language_support = fs::read_to_string(
         plugin_root
             .join(PROJECTATLAS_SKILL_DIR)
@@ -19577,11 +19586,6 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         "atlas_slice",
         "atlas_token_report",
         "## PHP Navigation",
-        "references/language-support.md",
-        "language capabilities report built-in PHP support",
-        "version matches the installed plugin",
-        "Abstain from claims about variable calls",
-        "locate the authored input before proposing a change",
     ] {
         if !skill.contains(requirement) {
             return Err(io::Error::other(format!(
