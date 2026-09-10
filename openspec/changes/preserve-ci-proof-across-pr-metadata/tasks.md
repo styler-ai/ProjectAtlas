@@ -5,8 +5,8 @@
 ## 2. Implementation and proof
 
 - [x] 2.1 Establish the bounded native source-run verifier and its failure-path tests on the accepted base through normal protected source checks.
-- [ ] 2.2 Activate metadata verification using only the captured accepted-base verifier without rebuilding source, and update causal routing checks and guidance.
-- [ ] 2.3 Prove metadata edits preserve source-check identity and readiness, base retargets execute exact comparison proof, and incomplete retarget proof cannot be accepted by later metadata; pass required local and hosted gates.
+- [x] 2.2 Activate metadata verification using only the captured accepted-base verifier without rebuilding source, and update causal routing checks and guidance.
+- [x] 2.3 Prove metadata edits preserve source-check identity and readiness, base retargets execute exact comparison proof, and incomplete retarget proof cannot be accepted by later metadata; pass required local and hosted gates.
 
 Verification: `cargo test --locked -p projectatlas-cli --test e2e_delivery issueops_and_workflows_use_behavior_focused_quality_gates -- --exact --nocapture`;
 `python .github/scripts/affected-ci-proof.py --self-test`;
