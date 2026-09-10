@@ -11851,6 +11851,7 @@ foreach ($functionName in @(
         "Get-ProjectAtlasCodexPluginSourcePath",
         "Get-ProjectAtlasCodexPluginSourceManifestVersion",
         "Test-ProjectAtlasCodexPluginSourceManifest",
+        "Test-ProjectAtlasCodexSkillArtifacts",
         "Test-ProjectAtlasCodexPluginReady"
     )) {
     $functionMatch = [regex]::Match(
@@ -13160,6 +13161,17 @@ fn write_fake_codex_projectatlas_integration(
                 .join(SKILL_FILE_NAME),
             skill_content,
         )?;
+        let references = root
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join("references");
+        fs::create_dir_all(&references)?;
+        fs::write(
+            references.join("language-support.md"),
+            include_bytes!(
+                "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+            ),
+        )?;
     }
     Ok((marketplace_root, plugin_source, installed_cache))
 }
@@ -13861,6 +13873,11 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         .join(PROJECTATLAS_SKILL_DIR)
         .join(PROJECTATLAS_SKILL_NAME)
         .join(SKILL_FILE_NAME);
+    let plugin_reference = fake_plugin_source
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join("references")
+        .join("language-support.md");
     let fake_plugin_source_json =
         serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -13871,11 +13888,11 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     );
     let fake_codex_script = if cfg!(windows) {
         format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"add\" (\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"add\" (\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_REFERENCE%\" \"%PROJECTATLAS_FAKE_PLUGIN_REFERENCE%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
         )
     } else {
         format!(
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  cp \"$PROJECTATLAS_PACKAGED_SKILL\" \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  cp \"$PROJECTATLAS_PACKAGED_SKILL\" \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\"\n  if [ $? -ne 0 ]; then exit 1; fi\n  cp \"$PROJECTATLAS_PACKAGED_REFERENCE\" \"$PROJECTATLAS_FAKE_PLUGIN_REFERENCE\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
         )
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
@@ -13917,54 +13934,72 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
             .into());
         }
     }
-    for (label, skill_bytes) in [("missing", None), ("stale", Some(&b"stale skill"[..]))] {
-        if let Some(skill_bytes) = skill_bytes {
-            fs::write(&plugin_skill, skill_bytes)?;
-        } else {
-            fs::remove_file(&plugin_skill)?;
-        }
-        fs::write(&fake_codex_log, b"")?;
-        let repair_output = run_plugin_installer_with_codex_fixture(
-            &workspace_root,
-            &repo,
-            &runtime,
-            &fake_path,
-            &isolated_home,
-        )?;
-        let repair_output_text = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&repair_output.stdout),
-            String::from_utf8_lossy(&repair_output.stderr)
-        );
-        if !repair_output_text.contains("Codex ProjectAtlas plugin skill artifact does not match")
-            || fs::read_to_string(&plugin_skill)? != FAKE_CODEX_SKILL_CONTENT
-        {
-            return Err(io::Error::other(format!(
+    for (plugin_asset, expected_bytes) in [
+        (&plugin_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
+        (
+            &plugin_reference,
+            include_bytes!(
+                "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+            )
+            .as_slice(),
+        ),
+    ] {
+        for (label, skill_bytes) in [("missing", None), ("stale", Some(&b"stale skill"[..]))] {
+            if let Some(skill_bytes) = skill_bytes {
+                fs::write(plugin_asset, skill_bytes)?;
+            } else {
+                fs::remove_file(plugin_asset)?;
+            }
+            fs::write(&fake_codex_log, b"")?;
+            let repair_output = run_plugin_installer_with_codex_fixture(
+                &workspace_root,
+                &repo,
+                &runtime,
+                &fake_path,
+                &isolated_home,
+            )?;
+            let repair_output_text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&repair_output.stdout),
+                String::from_utf8_lossy(&repair_output.stderr)
+            );
+            if !repair_output_text
+                .contains("Codex ProjectAtlas plugin skill artifact does not match")
+                || fs::read(plugin_asset).map_err(|error| {
+                    io::Error::other(format!(
+                        "could not read repaired {label} skill asset {}: {error}\n{repair_output_text}",
+                        plugin_asset.display()
+                    ))
+                })? != expected_bytes
+                || !repair_output_text.contains("Codex ProjectAtlas plugin skill verified at")
+            {
+                return Err(io::Error::other(format!(
                 "installer did not repair the current-version {label} Codex skill artifact:\n{repair_output_text}"
             ))
             .into());
-        }
-        let repair_calls = fs::read_to_string(&fake_codex_log)?;
-        for required in [
-            "plugin remove projectatlas --marketplace projectatlas",
-            "plugin add projectatlas --marketplace projectatlas",
-        ] {
-            if !repair_calls.contains(required) {
-                return Err(io::Error::other(format!(
-                    "{label} skill repair omitted {required:?}:\n{repair_calls}"
-                ))
-                .into());
             }
-        }
-        for forbidden in [
-            "plugin marketplace remove projectatlas",
-            "plugin marketplace add styler-ai/ProjectAtlas",
-        ] {
-            if repair_calls.contains(forbidden) {
-                return Err(io::Error::other(format!(
+            let repair_calls = fs::read_to_string(&fake_codex_log)?;
+            for required in [
+                "plugin remove projectatlas --marketplace projectatlas",
+                "plugin add projectatlas --marketplace projectatlas",
+            ] {
+                if !repair_calls.contains(required) {
+                    return Err(io::Error::other(format!(
+                        "{label} skill repair omitted {required:?}:\n{repair_calls}"
+                    ))
+                    .into());
+                }
+            }
+            for forbidden in [
+                "plugin marketplace remove projectatlas",
+                "plugin marketplace add styler-ai/ProjectAtlas",
+            ] {
+                if repair_calls.contains(forbidden) {
+                    return Err(io::Error::other(format!(
                     "{label} skill repair mutated the current marketplace with {forbidden:?}:\n{repair_calls}"
                 ))
                 .into());
+                }
             }
         }
     }
@@ -28208,6 +28243,24 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
             .env(
                 "PROJECTATLAS_FAKE_CLEANUP_SNAPSHOT_TARGET",
                 home.join(FAKE_CODEX_CLEANUP_SNAPSHOT_TARGET_DIR),
+            )
+            .env(
+                "PROJECTATLAS_PACKAGED_REFERENCE",
+                workspace_root
+                    .join("plugins")
+                    .join("projectatlas")
+                    .join(PROJECTATLAS_SKILL_DIR)
+                    .join(PROJECTATLAS_SKILL_NAME)
+                    .join("references")
+                    .join("language-support.md"),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_PLUGIN_REFERENCE",
+                fake_plugin_source
+                    .join(PROJECTATLAS_SKILL_DIR)
+                    .join(PROJECTATLAS_SKILL_NAME)
+                    .join("references")
+                    .join("language-support.md"),
             )
             .env(
                 "PROJECTATLAS_PACKAGED_SKILL",

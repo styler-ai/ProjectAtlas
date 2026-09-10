@@ -304,15 +304,15 @@ The `legacy-modernization` tag identifies source where trustworthy dependency an
 
 ### Architecture paths
 
-- [Canonical Mermaid architecture views](projectatlas-3-architecture.md#architecture-views)
-- [System and component ownership](projectatlas-3-architecture.md#system-and-component-architecture)
-- [Crate dependency and ownership](projectatlas-3-architecture.md#crate-dependency-and-ownership)
-- [Database authority](projectatlas-3-architecture.md#database-authority-and-responsibility)
-- [Graph physical model](projectatlas-3-architecture.md#normalized-graph-physical-model)
-- [Bounded graph read](projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection)
-- [MCP read communication](projectatlas-3-architecture.md#mcp-read-communication-sequence)
-- [Transactional publication](projectatlas-3-architecture.md#index-and-transactional-publication-flow)
-- [Language registry to agent navigation](projectatlas-3-architecture.md#language-registry-to-agent-navigation)
+- [Canonical Mermaid architecture views](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#architecture-views)
+- [System and component ownership](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#system-and-component-architecture)
+- [Crate dependency and ownership](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#crate-dependency-and-ownership)
+- [Database authority](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#database-authority-and-responsibility)
+- [Graph physical model](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#normalized-graph-physical-model)
+- [Bounded graph read](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection)
+- [MCP read communication](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#mcp-read-communication-sequence)
+- [Transactional publication](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#index-and-transactional-publication-flow)
+- [Language registry to agent navigation](https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#language-registry-to-agent-navigation)
 
 ### Backend
 

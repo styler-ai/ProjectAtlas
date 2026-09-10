@@ -4383,6 +4383,10 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$manifestVersion' does not match $runtimeVersion."
         return
     }
+    if (-not (Test-ProjectAtlasCodexSkillArtifacts $pluginSourcePath)) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: installed skill assets do not match the installer at $pluginSourcePath."
+        return
+    }
     Write-Output "Codex ProjectAtlas plugin skill verified at $skillPath for $runtimeVersion."
     Write-Output "Codex does not expose the active in-process ProjectAtlas skill path; restart Codex if this session still advertises an older ProjectAtlas skill."
 }
@@ -4714,6 +4718,26 @@ function Test-ProjectAtlasCodexMcpRegistryEntry {
     return Test-ProjectAtlasExactArguments $actualArguments $expected
 }
 
+function Test-ProjectAtlasCodexSkillArtifacts {
+    param([string]$PluginSourcePath)
+    try {
+        $installerPluginRoot = Split-Path -Parent $PSScriptRoot
+        foreach ($skillAsset in @("SKILL.md", "references\language-support.md")) {
+            $skillPath = Join-Path $PluginSourcePath "skills\projectatlas\$skillAsset"
+            $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\$skillAsset"
+            if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf) `
+                -or -not (Test-Path -LiteralPath $installerSkillPath -PathType Leaf) `
+                -or (Get-ProjectAtlasSha256 $skillPath) -ne (Get-ProjectAtlasSha256 $installerSkillPath)) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-ProjectAtlasCodexPluginReady {
     param(
         [string]$ExpectedVersion
@@ -4745,15 +4769,10 @@ function Test-ProjectAtlasCodexPluginReady {
             return $false
         }
         $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
-        $skillPath = Join-Path $pluginSourcePath "skills\projectatlas\SKILL.md"
-        $installerPluginRoot = Split-Path -Parent $PSScriptRoot
-        $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\SKILL.md"
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) `
-            -or -not (Test-Path -LiteralPath $skillPath -PathType Leaf) `
-            -or -not (Test-Path -LiteralPath $installerSkillPath -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             return $false
         }
-        return (Get-ProjectAtlasSha256 $skillPath) -eq (Get-ProjectAtlasSha256 $installerSkillPath)
+        return Test-ProjectAtlasCodexSkillArtifacts $pluginSourcePath
     }
     catch {
         return $false

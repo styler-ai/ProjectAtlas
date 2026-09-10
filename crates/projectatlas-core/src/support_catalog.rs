@@ -1694,7 +1694,7 @@ pub fn append_support_catalog_markdown(output: &mut String) -> fmt::Result {
     );
     output.push_str("### Architecture paths\n\n");
     for link in ARCHITECTURE_LINKS {
-        writeln!(output, "- [{}]({})", link.label, link.markdown_href)?;
+        writeln!(output, "- [{}]({})", link.label, link.href)?;
     }
     for category in PresentationCategory::ALL {
         writeln!(output, "\n### {}\n", category.label())?;
@@ -1743,7 +1743,7 @@ pub fn render_language_support_html() -> Result<String, fmt::Error> {
         write!(
             output,
             "<li><a href=\"{}\">{}</a></li>",
-            link.pages_href, link.label
+            link.href, link.label
         )?;
     }
     output.push_str("</ul>");
@@ -1824,58 +1824,47 @@ fn tags_label(tags: &[PresentationTag]) -> String {
 struct ArchitectureLink {
     /// Human-facing link label.
     label: &'static str,
-    /// Repository-relative Markdown target.
-    markdown_href: &'static str,
-    /// Absolute GitHub target used by Pages.
-    pages_href: &'static str,
+    /// Absolute GitHub target usable from every packaged projection.
+    href: &'static str,
 }
 
 /// Architecture links required by the catalog contract.
 const ARCHITECTURE_LINKS: &[ArchitectureLink] = &[
     ArchitectureLink {
         label: "Canonical Mermaid architecture views",
-        markdown_href: "projectatlas-3-architecture.md#architecture-views",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#architecture-views",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#architecture-views",
     },
     ArchitectureLink {
         label: "System and component ownership",
-        markdown_href: "projectatlas-3-architecture.md#system-and-component-architecture",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#system-and-component-architecture",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#system-and-component-architecture",
     },
     ArchitectureLink {
         label: "Crate dependency and ownership",
-        markdown_href: "projectatlas-3-architecture.md#crate-dependency-and-ownership",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#crate-dependency-and-ownership",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#crate-dependency-and-ownership",
     },
     ArchitectureLink {
         label: "Database authority",
-        markdown_href: "projectatlas-3-architecture.md#database-authority-and-responsibility",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#database-authority-and-responsibility",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#database-authority-and-responsibility",
     },
     ArchitectureLink {
         label: "Graph physical model",
-        markdown_href: "projectatlas-3-architecture.md#normalized-graph-physical-model",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#normalized-graph-physical-model",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#normalized-graph-physical-model",
     },
     ArchitectureLink {
         label: "Bounded graph read",
-        markdown_href: "projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#bounded-graph-read-with-purpose-projection",
     },
     ArchitectureLink {
         label: "MCP read communication",
-        markdown_href: "projectatlas-3-architecture.md#mcp-read-communication-sequence",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#mcp-read-communication-sequence",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#mcp-read-communication-sequence",
     },
     ArchitectureLink {
         label: "Transactional publication",
-        markdown_href: "projectatlas-3-architecture.md#index-and-transactional-publication-flow",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#index-and-transactional-publication-flow",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#index-and-transactional-publication-flow",
     },
     ArchitectureLink {
         label: "Language registry to agent navigation",
-        markdown_href: "projectatlas-3-architecture.md#language-registry-to-agent-navigation",
-        pages_href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#language-registry-to-agent-navigation",
+        href: "https://github.com/styler-ai/ProjectAtlas/blob/main/docs/projectatlas-3-architecture.md#language-registry-to-agent-navigation",
     },
 ];
 
@@ -2142,16 +2131,17 @@ mod tests {
         }
         for link in ARCHITECTURE_LINKS {
             require_test(
-                markdown.contains(&format!("[{}]({})", link.label, link.markdown_href)),
+                markdown.contains(&format!("[{}]({})", link.label, link.href)),
                 "architecture link missing from Markdown projection",
             )?;
             require_test(
-                html.contains(&format!("href=\"{}\">{}", link.pages_href, link.label)),
+                html.contains(&format!("href=\"{}\">{}", link.href, link.label)),
                 "architecture link missing from Pages projection",
             )?;
             let anchor = link
-                .markdown_href
-                .strip_prefix("projectatlas-3-architecture.md#")
+                .href
+                .split_once('#')
+                .map(|(_, anchor)| anchor)
                 .ok_or_else(|| std::io::Error::other("invalid architecture Markdown link"))?;
             require_test(
                 architecture.lines().any(|line| {

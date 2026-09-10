@@ -2047,8 +2047,10 @@ codex_projectatlas_plugin_source_manifest_matches() {
 codex_projectatlas_plugin_source_ready() {
   expected_version=$1
   plugin_source_path=$2
-  codex_projectatlas_plugin_source_manifest_matches "$expected_version" "$plugin_source_path" &&
-    cmp -s "$plugin_root/skills/projectatlas/SKILL.md" "$plugin_source_path/skills/projectatlas/SKILL.md"
+  codex_projectatlas_plugin_source_manifest_matches "$expected_version" "$plugin_source_path" || return 1
+  for skill_asset in SKILL.md references/language-support.md; do
+    cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$plugin_source_path/skills/projectatlas/$skill_asset" || return 1
+  done
 }
 
 verify_codex_projectatlas_skill_artifact() {
@@ -2086,6 +2088,10 @@ verify_codex_projectatlas_skill_artifact() {
   fi
   if ! grep -E '"version"[[:space:]]*:[[:space:]]*"'"$runtime_version"'"' "$manifest_path" >/dev/null; then
     printf 'warning: Codex ProjectAtlas plugin skill verification failed: manifest version does not match %s.\n' "$runtime_version" >&2
+    return 0
+  fi
+  if ! codex_projectatlas_plugin_source_ready "$runtime_version" "$plugin_source_path"; then
+    printf 'warning: Codex ProjectAtlas plugin skill verification failed: installed skill assets do not match the installer at %s.\n' "$plugin_source_path" >&2
     return 0
   fi
   printf 'Codex ProjectAtlas plugin skill verified at %s for %s.\n' "$skill_path" "$runtime_version"
