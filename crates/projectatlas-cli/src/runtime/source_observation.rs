@@ -348,7 +348,7 @@ struct SourceObservationEntry {
     /// One event injected after an acceptance drain for owning race tests.
     acceptance_event: Mutex<Option<Event>>,
     #[cfg(test)]
-    /// Continuity loss injected between the drain fast check and lock for owning race tests.
+    /// Continuity loss injected during the next locked event drain for owning race tests.
     drain_continuity_invalidations: AtomicU64,
 }
 
@@ -487,16 +487,6 @@ impl SourceObservationEntry {
         &self,
         scan_options: &projectatlas_fs::ScanOptions,
     ) -> Result<bool, CliError> {
-        #[cfg(test)]
-        if self
-            .drain_continuity_invalidations
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
-            self.continuity_lost.store(true, Ordering::Release);
-        }
         let receiver = self
             .receiver
             .lock()
@@ -510,6 +500,16 @@ impl SourceObservationEntry {
         receiver: &Receiver<Event>,
         scan_options: &projectatlas_fs::ScanOptions,
     ) -> Result<bool, CliError> {
+        #[cfg(test)]
+        if self
+            .drain_continuity_invalidations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.continuity_lost.store(true, Ordering::Release);
+        }
         if self.continuity_lost.load(Ordering::Acquire) {
             self.invalidate();
             return Ok(true);
@@ -554,6 +554,25 @@ impl SourceObservationEntry {
             }
         }
         Ok(changed)
+    }
+
+    /// Consume events only while the sampled epoch still owns their selection policy.
+    fn drain_epoch_events(
+        &self,
+        receiver: &Receiver<Event>,
+        epoch: &VerifiedSourceEpoch,
+        scan_options: &projectatlas_fs::ScanOptions,
+    ) -> Result<ObservedAcceptance, CliError> {
+        let Some(current) = self.current_epoch()? else {
+            return Ok(ObservedAcceptance::Invalidated);
+        };
+        if current.stamp != epoch.stamp {
+            return Ok(ObservedAcceptance::Superseded);
+        }
+        if self.drain_source_events(receiver, scan_options)? {
+            return Ok(ObservedAcceptance::Invalidated);
+        }
+        Ok(ObservedAcceptance::Accepted)
     }
 
     /// Install a new verified epoch after exact source and policy reconciliation.
@@ -1122,8 +1141,15 @@ impl SourceObservationRegistry {
             .map_err(|source| publication_input_error(&entry.binding.root, source))?;
             let contract = plan.publication_contract_fingerprint();
             let policy = source_policy_witness(&plan, control)?;
-            if entry.changed_since_exact_verification(&plan.scan_options)? {
-                return Ok(ObservedAcceptance::Invalidated);
+            {
+                let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                    lock_error(&entry.binding.root, "source observation receiver")
+                })?;
+                match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+                    ObservedAcceptance::Accepted => {}
+                    ObservedAcceptance::Superseded => continue,
+                    ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
+                }
             }
             #[cfg(test)]
             if let Some(event) = entry
@@ -1137,8 +1163,10 @@ impl SourceObservationRegistry {
             let receiver = entry.receiver.lock().map_err(|_poisoned| {
                 lock_error(&entry.binding.root, "source observation receiver")
             })?;
-            if entry.drain_source_events(&receiver, &plan.scan_options)? {
-                return Ok(ObservedAcceptance::Invalidated);
+            match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+                ObservedAcceptance::Accepted => {}
+                ObservedAcceptance::Superseded => continue,
+                ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
             }
             let mut state = entry
                 .state
@@ -1947,8 +1975,27 @@ mod tests {
             "Rejected concurrent purpose",
             PurposeSource::Agent,
         )?;
-        entry
-            .publish_test_event(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source))?;
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source);
+        let previous_options = projectatlas_fs::ScanOptions {
+            exclude_path_prefixes: vec!["source.rs".to_owned()],
+            ..projectatlas_fs::ScanOptions::default()
+        };
+        let ignored = observer_event_changes(&entry.binding, &previous_options, &event);
+        require(
+            ignored.paths.is_empty() && !ignored.requires_full_scan,
+            "previous policy did not exclude the event in the regression fixture",
+        )?;
+        entry.publish_test_event(event)?;
+        {
+            let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                std::io::Error::other("source observation receiver lock poisoned")
+            })?;
+            require(
+                entry.drain_epoch_events(&receiver, &old_epoch, &previous_options)?
+                    == ObservedAcceptance::Superseded,
+                "older policy consumed an event belonging to a successor epoch",
+            )?;
+        }
         require(
             SourceObservationRegistry::accepts_observed_result(&entry, &old_epoch, &control)?
                 == ObservedAcceptance::Invalidated,
