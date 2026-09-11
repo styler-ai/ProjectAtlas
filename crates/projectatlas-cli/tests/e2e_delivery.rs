@@ -13944,17 +13944,19 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         }
     }
     let ready_state = repository_filesystem_snapshot(&codex_dir)?;
-    for (plugin_asset, expected_bytes) in [
-        (&plugin_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
+    for (artifact_label, plugin_asset, expected_bytes) in [
+        ("source", &plugin_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
         (
+            "source",
             &plugin_reference,
             include_bytes!(
                 "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
             )
             .as_slice(),
         ),
-        (&cached_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
+        ("cache", &cached_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
         (
+            "cache",
             &cached_reference,
             include_bytes!(
                 "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
@@ -14004,11 +14006,19 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
             }
             let repair_calls = fs::read_to_string(&fake_codex_log)?;
             let mut previous_call = None;
-            for required in [
-                "plugin marketplace upgrade projectatlas --json",
-                "plugin remove projectatlas --marketplace projectatlas",
-                "plugin add projectatlas --marketplace projectatlas",
-            ] {
+            let required_calls = if artifact_label == "source" {
+                vec![
+                    "plugin marketplace upgrade projectatlas --json",
+                    "plugin remove projectatlas --marketplace projectatlas",
+                    "plugin add projectatlas --marketplace projectatlas",
+                ]
+            } else {
+                vec![
+                    "plugin remove projectatlas --marketplace projectatlas",
+                    "plugin add projectatlas --marketplace projectatlas",
+                ]
+            };
+            for required in required_calls {
                 let current_call = repair_calls.find(required);
                 if current_call.is_none()
                     || previous_call.is_some_and(|previous| current_call <= Some(previous))
@@ -14019,6 +14029,14 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
                     .into());
                 }
                 previous_call = current_call;
+            }
+            if artifact_label == "cache"
+                && repair_calls.contains("plugin marketplace upgrade projectatlas --json")
+            {
+                return Err(io::Error::other(format!(
+                    "{label} cache repair refreshed the marketplace source unnecessarily:\n{repair_calls}"
+                ))
+                .into());
             }
             for forbidden in [
                 "plugin marketplace remove projectatlas",
@@ -14032,6 +14050,49 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
                 }
             }
         }
+    }
+    fs::write(
+        installed_cache
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        format!(
+            "garbage {{\"name\":\"projectatlas\",\"version\":\"{}\"}}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    fs::write(&fake_codex_log, b"")?;
+    let malformed_manifest_output = run_plugin_installer_with_codex_fixture(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let malformed_manifest_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&malformed_manifest_output.stdout),
+        String::from_utf8_lossy(&malformed_manifest_output.stderr)
+    );
+    let malformed_manifest_calls = fs::read_to_string(&fake_codex_log)?;
+    if !malformed_manifest_output_text
+        .contains("Codex ProjectAtlas plugin skill artifact does not match")
+        || malformed_manifest_output_text
+            .contains("Codex ProjectAtlas plugin source manifest version")
+        || fs::read(
+            installed_cache
+                .join(CODEX_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+        )? != format!(
+            r#"{{"name":"projectatlas","version":"{}"}}"#,
+            env!("CARGO_PKG_VERSION")
+        )
+        .as_bytes()
+        || malformed_manifest_calls.contains("plugin marketplace upgrade projectatlas --json")
+    {
+        return Err(io::Error::other(format!(
+            "malformed cache manifest was accepted or refreshed the marketplace source:\n{malformed_manifest_output_text}\ncalls:\n{malformed_manifest_calls}"
+        ))
+        .into());
     }
     Ok(())
 }

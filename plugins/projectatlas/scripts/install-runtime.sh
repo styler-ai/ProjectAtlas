@@ -2030,7 +2030,11 @@ codex_projectatlas_plugin_source_manifest_version() {
     printf '%s\n' ""
     return 0
   fi
-  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest_path" | head -n 1
+  if ! command -v jq >/dev/null 2>&1; then
+    printf '%s\n' ""
+    return 0
+  fi
+  jq -r -s 'if length == 1 and (.[0] | type == "object") and (.[0].version | type == "string") then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
 }
 
 codex_projectatlas_plugin_source_manifest_matches() {
@@ -2043,6 +2047,16 @@ codex_projectatlas_plugin_source_manifest_matches() {
   [ -n "$plugin_source_path" ] || return 1
   [ "$(codex_projectatlas_plugin_source_manifest_version "$plugin_source_path")" = "$expected_version" ]
 }
+
+codex_projectatlas_plugin_artifact_ready() (
+  artifact_version=$1
+  artifact_root=$2
+  [ -n "$artifact_root" ] || return 1
+  codex_projectatlas_plugin_source_manifest_matches "$artifact_version" "$artifact_root" || return 1
+  for skill_asset in SKILL.md references/language-support.md; do
+    cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$artifact_root/skills/projectatlas/$skill_asset" || return 1
+  done
+)
 
 codex_projectatlas_plugin_artifacts_ready() (
   artifact_version=$1
@@ -2057,10 +2071,7 @@ codex_projectatlas_plugin_artifacts_ready() (
   [ ! -L "$artifact_cache_path" ] || return 1
   [ "$(CDPATH= cd -P -- "$artifact_cache_path" 2>/dev/null && pwd -P)" = "$artifact_cache_path" ] || return 1
   for artifact_root in "$artifact_source_path" "$artifact_cache_path"; do
-    codex_projectatlas_plugin_source_manifest_matches "$artifact_version" "$artifact_root" || return 1
-    for skill_asset in SKILL.md references/language-support.md; do
-      cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$artifact_root/skills/projectatlas/$skill_asset" || return 1
-    done
+    codex_projectatlas_plugin_artifact_ready "$artifact_version" "$artifact_root" || return 1
   done
 )
 
@@ -2180,6 +2191,10 @@ update_codex_plugin_locked() {
   fi
   current_plugin_version=$codex_projectatlas_inventory_version
   current_plugin_source_path=$codex_projectatlas_inventory_source_path
+  source_artifacts_ready=false
+  if codex_projectatlas_plugin_artifact_ready "$runtime_version" "$current_plugin_source_path"; then
+    source_artifacts_ready=true
+  fi
   if [ "$previous_ref" = "$release_tag" ] &&
     [ "$current_plugin_version" = "$runtime_version" ] &&
     codex_projectatlas_plugin_artifacts_ready "$runtime_version" "$current_plugin_source_path"; then
@@ -2193,7 +2208,7 @@ update_codex_plugin_locked() {
       source_manifest_version=$(codex_projectatlas_plugin_source_manifest_version "$current_plugin_source_path")
       printf "Codex ProjectAtlas plugin source manifest version '%s' does not match %s; refreshing official projectatlas plugin cache.\n" "$source_manifest_version" "$runtime_version"
     elif [ "$current_plugin_version" = "$runtime_version" ]; then
-      printf 'Codex ProjectAtlas plugin skill artifact does not match %s; refreshing official projectatlas plugin cache.\n' "$runtime_version"
+      printf 'Codex ProjectAtlas plugin skill artifact does not match %s; repairing the installed plugin cache.\n' "$runtime_version"
     fi
     if ! stage_codex_projectatlas_snapshot "$current_plugin_version" "$current_plugin_source_path" "$runtime_version"; then
       codex_plugin_update_preserved_prior_state=true
@@ -2201,7 +2216,12 @@ update_codex_plugin_locked() {
     fi
     update_succeeded=false
     restore_succeeded=false
-    if "$codex_bin" plugin marketplace upgrade projectatlas --json >/dev/null 2>&1; then
+    refresh_succeeded=true
+    if [ "$source_artifacts_ready" != true ] &&
+      ! "$codex_bin" plugin marketplace upgrade projectatlas --json >/dev/null 2>&1; then
+      refresh_succeeded=false
+    fi
+    if [ "$refresh_succeeded" = true ]; then
       "$codex_bin" plugin remove projectatlas --marketplace projectatlas --json >/dev/null 2>&1 || true
       if "$codex_bin" plugin add projectatlas --marketplace projectatlas --json >/dev/null 2>&1; then
         if load_codex_projectatlas_plugin_inventory && [ -n "$codex_projectatlas_inventory_version" ]; then
