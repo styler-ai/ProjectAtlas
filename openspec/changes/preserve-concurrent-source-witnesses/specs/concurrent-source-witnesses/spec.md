@@ -8,6 +8,10 @@ The source-observation owner SHALL distinguish a superseded read from invalid so
 - **WHEN** a read captures an epoch, a mutation exactly reconciles unchanged source and obtains a newer witness, and the old read reaches acceptance
 - **THEN** the old read discards its provisional result and retries within existing bounds while the mutation witness remains valid
 
+#### Scenario: Invalid purpose target arrives during an admitted mutation
+- **WHEN** another purpose-set request names an absolute, empty, or unindexed path
+- **THEN** read-only target preflight rejects it before source admission can supersede the valid mutation witness, while indexed existence is rechecked inside any admitted write transaction
+
 ### Requirement: Actual invalidation prevents purpose publication
 
 Real source changes, policy changes, observer continuity loss, identity changes, cancellation, and invalid publication state MUST retain their existing refusal and rollback behavior. An event consumed by a superseded reader MUST NOT leave a newer invalid witness usable.

@@ -7409,16 +7409,24 @@ impl ProjectAtlasMcpServer {
         }
     }
 
-    /// Validate an MCP purpose path as an indexed folder or file key.
-    fn validated_indexed_node_key(store: &AtlasStore, path: &str) -> Result<String, CliError> {
+    /// Reject invalid purpose targets before admission can supersede another source witness.
+    fn preflight_purpose_path(state: &McpProjectState, path: &str) -> Result<String, CliError> {
         let node_key = validated_repo_node_key(std::path::Path::new(path))
             .map_err(Self::selected_project_path_error)?;
-        if store.load_node_by_path(&node_key)?.is_none() {
+        let store = Self::open_read_store(state)?;
+        Self::require_indexed_purpose_path(&store, &node_key)?;
+        store.finish_index_read_snapshot()?;
+        Ok(node_key)
+    }
+
+    /// Require a purpose target in the captured index, including inside its write transaction.
+    fn require_indexed_purpose_path(store: &AtlasStore, node_key: &str) -> Result<(), CliError> {
+        if store.load_node_by_path(node_key)?.is_none() {
             return Err(CliError::InvalidInput(format!(
                 "path {node_key:?} is not indexed in the MCP-bound project"
             )));
         }
-        Ok(node_key)
+        Ok(())
     }
 
     /// Add selected-project guidance to repository-relative path errors.
@@ -10006,8 +10014,9 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_target(params.project_path, params.worktree)?;
+            let node_key = Self::preflight_purpose_path(&state, &params.path)?;
             self.with_admitted_purpose_mutation(&state, Some(context), |store| {
-                let node_key = Self::validated_indexed_node_key(store, &params.path)?;
+                Self::require_indexed_purpose_path(store, &node_key)?;
                 store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
                 let classification = if store
                     .load_node_by_path(&node_key)?
@@ -10501,6 +10510,60 @@ mod tests {
             canceled,
             "RMCP cancellation probe did not reach the shared index work control",
         )
+    }
+
+    #[test]
+    fn rejected_purpose_paths_preserve_an_admitted_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join(".projectatlas"))?;
+        fs::write(root.join("source.rs"), "fn current() {}\n")?;
+        let db_path = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )?;
+        drop(store);
+        let server = ProjectAtlasMcpServer::new(
+            db_path.clone(),
+            None,
+            "purpose-preflight".to_owned(),
+            false,
+        );
+        let state = server.state_for_target(Some(normalize_native_path_display(root)), None)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let admission = server.source_observations.admit_mutation(
+            &state.db_path,
+            &state.root,
+            state.config_path.as_deref(),
+            &control,
+        )?;
+        let store = ProjectAtlasMcpServer::open_existing_mut_store(&state, &server.control_state)?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(".", "Accepted repository purpose", PurposeSource::Agent)?;
+        let absolute = normalize_native_path_display(&root.join("source.rs"));
+        for path in [absolute.as_str(), "", "missing.rs"] {
+            require(
+                matches!(
+                    ProjectAtlasMcpServer::preflight_purpose_path(&state, path),
+                    Err(CliError::InvalidInput(_))
+                ),
+                "invalid purpose path passed admission preflight",
+            )?;
+            admission.verify()?;
+        }
+        transaction.commit()?;
+        require(
+            store.load_node_by_path(".")?.is_some_and(|node| {
+                node.purpose.purpose.as_deref() == Some("Accepted repository purpose")
+            }),
+            "rejected purpose requests prevented the admitted mutation from committing",
+        )?;
+        Ok(())
     }
 
     #[test]

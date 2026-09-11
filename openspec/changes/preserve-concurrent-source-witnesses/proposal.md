@@ -6,6 +6,7 @@ Concurrent MCP navigation and purpose mutation share a source observer. An older
 
 - Distinguish accepted evidence, superseded evidence, and actual source invalidation at the existing observer acceptance boundary.
 - Retry superseded reads without clearing newer valid evidence; retain fail-closed source, policy, continuity, cancellation, and identity checks.
+- Reject invalid purpose-set targets through read-only preflight before they can supersede a valid mutation witness; retain transactional indexed-existence checks.
 - Prove the interleaving deterministically and pair it with a real-invalidation rollback case before full CLI/MCP and platform validation.
 
 ## Capabilities
@@ -20,7 +21,7 @@ None.
 
 ## Impact
 
-The existing CLI runtime source-observation owner and its owning tests change. No public schema, persistence migration, dependency, or crate is added. MCP purpose transactions retain exact-source verification before commit.
+The existing CLI runtime source-observation owner, MCP purpose preflight, and their owning tests change. No public schema, persistence migration, dependency, or crate is added. MCP purpose transactions retain exact-source verification before commit.
 
 ## Non-Goals
 

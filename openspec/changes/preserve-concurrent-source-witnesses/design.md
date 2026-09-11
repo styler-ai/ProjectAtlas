@@ -18,6 +18,8 @@ Exact preparation alone holds the reconciliation mutex because repair may need a
 
 Always using exact-only mutation witnesses would bypass the established observed path and change its performance behavior. Keep the existing exact fallback for its existing admission conditions. No new worker, long-held mutex, or persistent table is justified.
 
+Purpose-set target syntax and indexed existence are checked before mutation admission using the existing root-bound read store. Otherwise a rejected absolute, empty, or missing path could still supersede an already admitted valid mutation. Indexed existence is checked again in the write transaction to preserve the race boundary. Two valid competing mutations retain the existing witness-winner semantics; this does not permit superseded curators to co-commit.
+
 ## Risks / Trade-offs
 
 - Confusing supersession with source change could permit stale publication. Pair the no-change interleaving with source-event and policy/continuity invalidation cases and real purpose rollback.
