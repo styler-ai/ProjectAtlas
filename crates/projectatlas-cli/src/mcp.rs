@@ -3651,8 +3651,10 @@ impl ProjectAtlasMcpServer {
                 state,
             ));
         }
-        let store = open_atlas_store_read_only_for_project(&state.db_path, &state.root)?;
-        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)?;
+        let store = open_atlas_store_read_only_for_project(&state.db_path, &state.root)
+            .map_err(|error| Self::with_target_error_context(error, state))?;
+        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)
+            .map_err(|error| Self::with_target_error_context(error, state))?;
         Ok(store)
     }
 
@@ -7409,16 +7411,35 @@ impl ProjectAtlasMcpServer {
         }
     }
 
-    /// Validate an MCP purpose path as an indexed folder or file key.
-    fn validated_indexed_node_key(store: &AtlasStore, path: &str) -> Result<String, CliError> {
+    /// Reject invalid purpose targets before admission can supersede another source witness.
+    fn preflight_purpose_path(state: &McpProjectState, path: &str) -> Result<String, CliError> {
         let node_key = validated_repo_node_key(std::path::Path::new(path))
             .map_err(Self::selected_project_path_error)?;
-        if store.load_node_by_path(&node_key)?.is_none() {
+        let store = Self::open_read_store(state)?;
+        let indexed = store.load_node_by_path(&node_key)?.is_some();
+        store.finish_index_read_snapshot()?;
+        let source = state.root.join(&node_key);
+        if !indexed
+            && !source.try_exists().map_err(|source_error| CliError::Io {
+                path: source,
+                source: source_error,
+            })?
+        {
             return Err(CliError::InvalidInput(format!(
                 "path {node_key:?} is not indexed in the MCP-bound project"
             )));
         }
         Ok(node_key)
+    }
+
+    /// Require a purpose target in the captured index, including inside its write transaction.
+    fn require_indexed_purpose_path(store: &AtlasStore, node_key: &str) -> Result<(), CliError> {
+        if store.load_node_by_path(node_key)?.is_none() {
+            return Err(CliError::InvalidInput(format!(
+                "path {node_key:?} is not indexed in the MCP-bound project"
+            )));
+        }
+        Ok(())
     }
 
     /// Add selected-project guidance to repository-relative path errors.
@@ -10006,8 +10027,9 @@ impl ProjectAtlasMcpServer {
     ) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.state_for_target(params.project_path, params.worktree)?;
+            let node_key = Self::preflight_purpose_path(&state, &params.path)?;
             self.with_admitted_purpose_mutation(&state, Some(context), |store| {
-                let node_key = Self::validated_indexed_node_key(store, &params.path)?;
+                Self::require_indexed_purpose_path(store, &node_key)?;
                 store.set_purpose(&node_key, &params.purpose, PurposeSource::Agent)?;
                 let classification = if store
                     .load_node_by_path(&node_key)?
@@ -10501,6 +10523,125 @@ mod tests {
             canceled,
             "RMCP cancellation probe did not reach the shared index work control",
         )
+    }
+
+    #[test]
+    fn purpose_preflight_preserves_admitted_mutations_and_saved_source_repair()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join(".projectatlas"))?;
+        fs::write(root.join("source.rs"), "fn current() {}\n")?;
+        let db_path = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let mut store = open_atlas_store_for_project(&db_path, &plan.root)?;
+        run_scan_pipeline(
+            &mut store,
+            &plan,
+            &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+        )?;
+        drop(store);
+        let server =
+            ProjectAtlasMcpServer::new(db_path, None, "purpose-preflight".to_owned(), false);
+        let state = server.state_for_target(Some(normalize_native_path_display(root)), None)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let admission = server.source_observations.admit_mutation(
+            &state.db_path,
+            &state.root,
+            state.config_path.as_deref(),
+            &control,
+        )?;
+        let store = ProjectAtlasMcpServer::open_existing_mut_store(&state, &server.control_state)?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(".", "Accepted repository purpose", PurposeSource::Agent)?;
+        let absolute = normalize_native_path_display(root.join("source.rs"));
+        for path in [absolute.as_str(), "", "missing.rs"] {
+            require(
+                matches!(
+                    ProjectAtlasMcpServer::preflight_purpose_path(&state, path),
+                    Err(CliError::InvalidInput(_))
+                ),
+                "invalid purpose path passed admission preflight",
+            )?;
+            admission.verify()?;
+        }
+        transaction.commit()?;
+        require(
+            store.load_node_by_path(".")?.is_some_and(|node| {
+                node.purpose.purpose.as_deref() == Some("Accepted repository purpose")
+            }),
+            "rejected purpose requests prevented the admitted mutation from committing",
+        )?;
+        let identity = store.captured_project_binding()?.project_instance_id;
+        drop(store);
+        let saved_path = root.join("added.rs");
+        let saved_source = "fn added() {}\n";
+        fs::write(&saved_path, saved_source)?;
+        let node_key = ProjectAtlasMcpServer::preflight_purpose_path(&state, "added.rs")?;
+        server.with_admitted_purpose_mutation_controlled(&state, &control, None, |store| {
+            ProjectAtlasMcpServer::require_indexed_purpose_path(store, &node_key)?;
+            store.set_purpose(&node_key, "New saved source", PurposeSource::Agent)?;
+            Ok(())
+        })?;
+        let store = ProjectAtlasMcpServer::open_read_store(&state)?;
+        require(
+            store.captured_project_binding()?.project_instance_id == identity
+                && store.load_node_by_path("added.rs")?.is_some_and(|node| {
+                    node.purpose.purpose.as_deref() == Some("New saved source")
+                })
+                && fs::read_to_string(saved_path)? == saved_source,
+            "purpose preflight prevented exact saved-source repair or changed source identity",
+        )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_preflight_preserves_selected_worktree_error_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = registered_worktree_race_fixture("purpose-target")?;
+        fs::create_dir_all(fixture.state.root.join(PROJECTATLAS_DIR_NAME))?;
+        // The selected alias now points at an index belonging to another root.
+        drop(AtlasStore::open_for_project(
+            &fixture.target_db,
+            &fixture.control_root,
+        )?);
+        let before = fs::read(&fixture.target_db)?;
+        let error = ProjectAtlasMcpServer::preflight_purpose_path(&fixture.state, "src/lib.rs")
+            .err()
+            .ok_or_else(|| io::Error::other("mismatched preflight was accepted"))?;
+        require(
+            matches!(&error, CliError::ProjectMismatch(report)
+                if report.worktree.as_deref() == Some("purpose-target")),
+            "purpose preflight lost the selected worktree context",
+        )?;
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        let value: serde_json::Value = toon_format::decode_default(&payload)?;
+        require(
+            value
+                .pointer("/error/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("project_mismatch")
+                && value
+                    .pointer("/error/project_mismatch/worktree")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("purpose-target"),
+            "MCP mismatch payload lost the selected worktree alias",
+        )?;
+        let mut explicit = fixture.state.clone();
+        explicit.worktree = None;
+        require(
+            matches!(
+                ProjectAtlasMcpServer::preflight_purpose_path(&explicit, "src/lib.rs"),
+                Err(CliError::ProjectMismatch(report)) if report.worktree.is_none()
+            ),
+            "explicit-project preflight acquired an unrelated worktree alias",
+        )?;
+        require(
+            fs::read(&fixture.target_db)? == before,
+            "rejected purpose preflight changed the mismatched database",
+        )?;
+        Ok(())
     }
 
     #[test]
