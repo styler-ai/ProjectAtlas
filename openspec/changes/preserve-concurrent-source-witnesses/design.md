@@ -14,6 +14,8 @@ Keep acceptance classification inside the existing source-observation owner. A s
 
 Conditional invalidation based only on epoch equality is insufficient: a stale reader may drain a genuine event that also invalidates the newer witness. Classification must preserve the reason for rejection, and event consumption must not leave invalid evidence reusable. The implementation must also preserve lock ordering and avoid clearing a subsequently reconciled epoch with stale cleanup.
 
+Exact preparation alone holds the reconciliation mutex because repair may need a SQLite writer. Mutation acceptance runs inside the purpose write transaction and must never acquire that mutex. Event drain and final epoch installation instead share the existing receiver-to-state lock order, with SQLite reads and policy sampling outside that final gate. A consumed relevant event retains continuity invalidation until the next exact verification starts, so another consumer cannot hide it from a verification already in flight. If reconciliation replaces an epoch during policy sampling, acceptance resamples within the existing attempt limit.
+
 Always using exact-only mutation witnesses would bypass the established observed path and change its performance behavior. Keep the existing exact fallback for its existing admission conditions. No new worker, long-held mutex, or persistent table is justified.
 
 ## Risks / Trade-offs
