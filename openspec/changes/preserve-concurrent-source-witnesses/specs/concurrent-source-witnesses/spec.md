@@ -44,6 +44,10 @@ The fix SHALL retain exact root/database/config binding and existing bounded ret
 - **WHEN** a purpose request selects a wrong root or missing index
 - **THEN** the existing typed refusal occurs without creating or changing project state
 
+#### Scenario: Selected worktree database identity changes before purpose preflight
+- **WHEN** an alias-routed purpose request encounters a database/root mismatch during read-only preflight
+- **THEN** the typed MCP mismatch retains the selected worktree alias without changing the database, while an explicitly selected project retains its alias-free error context
+
 #### Scenario: Concurrent real MCP payload fixture
 - **WHEN** existing navigation and purpose requests execute in the same MCP phase against unchanged indexed source
 - **THEN** the expected purpose and navigation payloads are returned with their existing assertions and source identity intact

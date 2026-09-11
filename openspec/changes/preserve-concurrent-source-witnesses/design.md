@@ -22,6 +22,8 @@ A proven exact saved-source mismatch invalidates shared evidence even if a succe
 
 Purpose-set target syntax is checked before mutation admission. The existing root-bound read store and a fallible filesystem existence check reject a target absent from both the index and saved source, without superseding an already admitted valid mutation. Existing saved source remains eligible for the established exact incremental repair even when absent from the old index. Indexed existence is checked again in the write transaction to preserve the race boundary. Existing but excluded or unindexable targets retain post-admission validation; no new source-candidate classifier is introduced. Two valid competing mutations retain the existing witness-winner semantics; this does not permit superseded curators to co-commit.
 
+The selected read-store boundary attaches the existing target context to typed preflight errors. A database/root mismatch must retain a captured worktree alias even though preflight runs before the mutation wrapper; explicit project selection must not acquire an alias. Error reporting remains read-only.
+
 ## Risks / Trade-offs
 
 - Confusing supersession with source change could permit stale publication. Pair the no-change interleaving with source-event and policy/continuity invalidation cases and real purpose rollback.

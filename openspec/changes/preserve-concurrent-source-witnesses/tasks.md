@@ -4,6 +4,6 @@
 
 ## 2. Implementation and proof
 
-- [x] 2.1 Distinguish accepted, superseded, and invalidated observed evidence in the existing owner; preserve newer valid witnesses and every actual source, policy, continuity, identity, and cancellation refusal.
-- [x] 2.2 Prove the unchanged-source interleaving and paired real-invalidation purpose rollback deterministically; retain existing observer, exact fallback, source-change, and cancellation coverage.
-- [x] 2.3 Pass cargo fmt --check, required affected Rust and documentation gates, the unchanged concurrent MCP payload fixture, and current-head hosted platform proof before refreshing dependent #339.
+- [ ] 2.1 Distinguish accepted, superseded, and invalidated observed evidence in the existing owner; preserve newer valid witnesses and every actual source, policy, continuity, identity, and cancellation refusal.
+- [ ] 2.2 Prove the unchanged-source interleaving and paired real-invalidation purpose rollback deterministically; retain existing observer, exact fallback, source-change, and cancellation coverage.
+- [ ] 2.3 Pass cargo fmt --check, required affected Rust and documentation gates, the unchanged concurrent MCP payload fixture, and current-head hosted platform proof before refreshing dependent #339.

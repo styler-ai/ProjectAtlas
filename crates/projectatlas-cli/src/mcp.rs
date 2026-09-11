@@ -3651,8 +3651,10 @@ impl ProjectAtlasMcpServer {
                 state,
             ));
         }
-        let store = open_atlas_store_read_only_for_project(&state.db_path, &state.root)?;
-        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)?;
+        let store = open_atlas_store_read_only_for_project(&state.db_path, &state.root)
+            .map_err(|error| Self::with_target_error_context(error, state))?;
+        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)
+            .map_err(|error| Self::with_target_error_context(error, state))?;
         Ok(store)
     }
 
@@ -10591,6 +10593,54 @@ mod tests {
             "purpose preflight prevented exact saved-source repair or changed source identity",
         )?;
         store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn purpose_preflight_preserves_selected_worktree_error_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = registered_worktree_race_fixture("purpose-target")?;
+        fs::create_dir_all(fixture.state.root.join(PROJECTATLAS_DIR_NAME))?;
+        // The selected alias now points at an index belonging to another root.
+        drop(AtlasStore::open_for_project(
+            &fixture.target_db,
+            &fixture.control_root,
+        )?);
+        let before = fs::read(&fixture.target_db)?;
+        let error = ProjectAtlasMcpServer::preflight_purpose_path(&fixture.state, "src/lib.rs")
+            .err()
+            .ok_or_else(|| io::Error::other("mismatched preflight was accepted"))?;
+        require(
+            matches!(&error, CliError::ProjectMismatch(report)
+                if report.worktree.as_deref() == Some("purpose-target")),
+            "purpose preflight lost the selected worktree context",
+        )?;
+        let payload = ProjectAtlasMcpServer::encode_error_payload(&error);
+        let value: serde_json::Value = toon_format::decode_default(&payload)?;
+        require(
+            value
+                .pointer("/error/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("project_mismatch")
+                && value
+                    .pointer("/error/project_mismatch/worktree")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("purpose-target"),
+            "MCP mismatch payload lost the selected worktree alias",
+        )?;
+        let mut explicit = fixture.state.clone();
+        explicit.worktree = None;
+        require(
+            matches!(
+                ProjectAtlasMcpServer::preflight_purpose_path(&explicit, "src/lib.rs"),
+                Err(CliError::ProjectMismatch(report)) if report.worktree.is_none()
+            ),
+            "explicit-project preflight acquired an unrelated worktree alias",
+        )?;
+        require(
+            fs::read(&fixture.target_db)? == before,
+            "rejected purpose preflight changed the mismatched database",
+        )?;
         Ok(())
     }
 
