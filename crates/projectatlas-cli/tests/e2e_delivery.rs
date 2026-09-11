@@ -14159,17 +14159,47 @@ fn assert_plugin_update_preserves_prior_integration_when_all_replacement_adds_fa
 -> Result<(), Box<dyn Error>> {
     let expected_release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     for previous_ref in [expected_release_tag.as_str(), "v0.0.1"] {
-        assert_failed_codex_replacement_preserves_prior_integration(previous_ref, true, false)?;
+        assert_failed_codex_replacement_preserves_prior_integration(
+            previous_ref,
+            true,
+            CodexReplacementFailure::Command,
+        )?;
     }
-    assert_failed_codex_replacement_preserves_prior_integration("v0.0.1", false, false)?;
-    assert_failed_codex_replacement_preserves_prior_integration(&expected_release_tag, true, true)?;
+    assert_failed_codex_replacement_preserves_prior_integration(
+        "v0.0.1",
+        false,
+        CodexReplacementFailure::Command,
+    )?;
+    assert_failed_codex_replacement_preserves_prior_integration(
+        &expected_release_tag,
+        true,
+        CodexReplacementFailure::BlankSource,
+    )?;
+    for previous_ref in [expected_release_tag.as_str(), "v0.0.1"] {
+        for asset in ["SKILL.md", "references/language-support.md"] {
+            for missing in [true, false] {
+                assert_failed_codex_replacement_preserves_prior_integration(
+                    previous_ref,
+                    true,
+                    CodexReplacementFailure::SkillAsset { asset, missing },
+                )?;
+            }
+        }
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CodexReplacementFailure {
+    Command,
+    BlankSource,
+    SkillAsset { asset: &'static str, missing: bool },
 }
 
 fn assert_failed_codex_replacement_preserves_prior_integration(
     previous_ref: &str,
     config_existed: bool,
-    replacement_has_blank_source: bool,
+    replacement_failure: CodexReplacementFailure,
 ) -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
@@ -14227,35 +14257,70 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     let stale_plugin_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":{plugin_source_json}}}}}],"available":[]}}"#
     );
-    let blank_source_plugin_json = format!(
+    let mut replacement_plugin_json = format!(
         r#"{{"installed":[{{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"{}","installed":true,"enabled":true,"marketplaceSource":{{"source":"https://github.com/styler-ai/ProjectAtlas.git"}},"source":{{"path":""}}}}],"available":[]}}"#,
         env!("CARGO_PKG_VERSION")
     );
-    let windows_replacement = if replacement_has_blank_source {
-        ">\"%PROJECTATLAS_FAKE_CODEX_STATE%\" echo blank-source\r\nexit /b 0"
-    } else {
-        "exit /b 1"
-    };
-    let posix_replacement = if replacement_has_blank_source {
-        "printf '%s\\n' blank-source > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\nexit 0"
-    } else {
-        "exit 1"
+    let mut replacement_payload = None;
+    let (windows_replacement, posix_replacement) = match replacement_failure {
+        CodexReplacementFailure::Command => ("exit /b 1".to_string(), "exit 1".to_string()),
+        CodexReplacementFailure::BlankSource => (
+            ">\"%PROJECTATLAS_FAKE_CODEX_STATE%\" echo blank-source\r\nexit /b 0".to_string(),
+            "printf '%s\\n' blank-source > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\nexit 0".to_string(),
+        ),
+        CodexReplacementFailure::SkillAsset { asset, missing } => {
+            let (payload, source, _) = write_fake_codex_projectatlas_integration(
+                &temp.path().join("replacement-payload"),
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION"),
+                include_str!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md"),
+            )?;
+            let asset_path = source.join("skills/projectatlas").join(asset);
+            fs::write(asset_path, "stale replacement guidance\n")?;
+            fs::write(payload.join("replacement-ready"), "ready\n")?;
+            replacement_payload = Some(payload);
+            replacement_plugin_json = stale_plugin_json.replace("0.0.1", env!("CARGO_PKG_VERSION"));
+            let asset_variable = if asset == "SKILL.md" {
+                "PROJECTATLAS_FAKE_PLUGIN_SKILL"
+            } else {
+                "PROJECTATLAS_FAKE_PLUGIN_REFERENCE"
+            };
+            let windows_remove = if missing {
+                format!("del /q \"%{asset_variable}%\"\r\nif errorlevel 1 exit /b 1\r\n")
+            } else {
+                String::new()
+            };
+            let posix_remove = if missing {
+                format!("rm -- \"${asset_variable}\" || exit 1\n")
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "xcopy /e /i /y \"%PROJECTATLAS_REPLACEMENT_PAYLOAD%\" \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\" >nul\r\nif errorlevel 1 exit /b 1\r\n{windows_remove}echo replacement command succeeded>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nexit /b 0"
+                ),
+                format!(
+                    "mkdir -p -- \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT\" || exit 1\ncp -R \"$PROJECTATLAS_REPLACEMENT_PAYLOAD/.\" \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT/\" || exit 1\n{posix_remove}printf '%s\\n' 'replacement command succeeded' >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nexit 0"
+                ),
+            )
+        }
     };
     let fake_codex_script = if cfg!(windows) {
         format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"remove\" goto destructive_marketplace_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto destructive_plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"add\" goto replacement_failure\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto replacement_failure\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n  echo {blank_source_plugin_json}\r\n  exit /b 0\r\n)\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {stale_plugin_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:destructive_marketplace_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\"\r\nexit /b 0\r\n:destructive_plugin_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:replacement_failure\r\n{windows_replacement}\r\n"
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"list\" goto plugin_list\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"remove\" goto destructive_marketplace_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"remove\" goto destructive_plugin_remove\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"marketplace\" if \"%~3\"==\"add\" goto replacement_failure\r\nif \"%~1\"==\"plugin\" if \"%~2\"==\"add\" goto replacement_failure\r\nif \"%~1\"==\"mcp\" if \"%~2\"==\"get\" exit /b 1\r\nexit /b 0\r\n:plugin_list\r\nif exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n  echo {replacement_plugin_json}\r\n  exit /b 0\r\n)\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL%\" goto plugin_absent\r\nif not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION%\" goto plugin_absent\r\necho {stale_plugin_json}\r\nexit /b 0\r\n:plugin_absent\r\necho {{\"installed\":[],\"available\":[]}}\r\nexit /b 0\r\n:destructive_marketplace_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\"\r\nexit /b 0\r\n:destructive_plugin_remove\r\n>\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\nif exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\nexit /b 0\r\n:replacement_failure\r\n{windows_replacement}\r\n"
         )
     } else {
         format!(
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  if [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ]; then\n    printf '%s\\n' '{blank_source_plugin_json}'\n  elif [ -f \"$PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION\" ]; then\n    printf '%s\\n' '{stale_plugin_json}'\n  else\n    printf '%s\\n' '{{\"installed\":[],\"available\":[]}}'\n  fi\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"remove\" ]; then\n  printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\n  rm -rf -- \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"remove\" ]; then\n  printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\n  rm -rf -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && {{ [ \"${{2:-}}\" = \"add\" ] || {{ [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"add\" ]; }}; }}; then\n  {posix_replacement}\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  if [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ]; then\n    printf '%s\\n' '{replacement_plugin_json}'\n  elif [ -f \"$PROJECTATLAS_FAKE_MARKETPLACE_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_MARKETPLACE_INSTALL_RECORD\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\" ] && [ -f \"$PROJECTATLAS_FAKE_PLUGIN_RUNTIME_INTEGRATION\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_SKILL\" ] && [ -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_RUNTIME_INTEGRATION\" ]; then\n    printf '%s\\n' '{stale_plugin_json}'\n  else\n    printf '%s\\n' '{{\"installed\":[],\"available\":[]}}'\n  fi\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"remove\" ]; then\n  printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\n  rm -rf -- \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"remove\" ]; then\n  printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\n  rm -rf -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && {{ [ \"${{2:-}}\" = \"add\" ] || {{ [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"add\" ]; }}; }}; then\n  {posix_replacement}\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
         )
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
 
     let workspace_root = workspace_root()?;
     let runtime = isolated_installer_runtime(temp.path())?;
-    let verify_separate_state =
-        previous_ref == expected_release_tag && config_existed && !replacement_has_blank_source;
+    let verify_separate_state = previous_ref == expected_release_tag
+        && config_existed
+        && matches!(replacement_failure, CodexReplacementFailure::Command);
     let generated_state_before = if verify_separate_state {
         let mut skip_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
             &workspace_root,
@@ -14317,26 +14382,37 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     } else {
         None
     };
-    let installer_output = run_plugin_installer_with_codex_fixture(
+    let mut installer_command = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &workspace_root,
         &repo,
         &runtime,
-        &fake_path,
-        &isolated_home,
+        Some(&fake_path),
+        Some(&isolated_home),
     )?;
+    if let Some(payload) = replacement_payload {
+        installer_command
+            .env("PROJECTATLAS_REPLACEMENT_PAYLOAD", payload)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_STATE",
+                marketplace_root.join("replacement-ready"),
+            );
+    }
+    let installer_output = require_successful_plugin_installer_output(installer_command.output()?)?;
     let installer_output_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&installer_output.stdout),
         String::from_utf8_lossy(&installer_output.stderr)
     );
     let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
-    if !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
+    if installer_output_text.contains("Codex ProjectAtlas plugin marketplace updated")
+        || installer_output_text.contains("Codex ProjectAtlas plugin skill verified")
+        || !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
         || !installer_output_text.contains(
             "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
         )
     {
         return Err(io::Error::other(format!(
-            "installer did not preserve the plugin while checking the independent MCP registry:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
+            "installer did not preserve the plugin for {previous_ref}/{replacement_failure:?} while checking the independent MCP registry:\n{installer_output_text}\nfake Codex calls:\n{fake_codex_calls}"
         ))
         .into());
     }
@@ -14350,7 +14426,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         (
             "plugin remove projectatlas --marketplace projectatlas --json",
             "plugin add projectatlas --marketplace projectatlas --json".to_string(),
-            "plugin marketplace add",
+            Some("plugin marketplace add"),
         )
     } else {
         (
@@ -14358,7 +14434,14 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             format!(
                 "plugin marketplace add styler-ai/ProjectAtlas --ref {expected_release_tag} --json"
             ),
-            "plugin add projectatlas --marketplace projectatlas",
+            if matches!(
+                replacement_failure,
+                CodexReplacementFailure::SkillAsset { .. }
+            ) {
+                None
+            } else {
+                Some("plugin add projectatlas --marketplace projectatlas")
+            },
         )
     };
     for required in [required_remove, required_add.as_str()] {
@@ -14369,6 +14452,26 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             .into());
         }
     }
+    if matches!(
+        replacement_failure,
+        CodexReplacementFailure::SkillAsset { .. }
+    ) && (!fake_codex_calls
+        .contains("plugin add projectatlas --marketplace projectatlas --json")
+        || fake_codex_calls
+            .lines()
+            .filter(|call| *call == "replacement command succeeded")
+            .count()
+            != if previous_ref == expected_release_tag {
+                1
+            } else {
+                2
+            })
+    {
+        return Err(io::Error::other(format!(
+            "asset failure did not reach successful plugin acquisition:\n{fake_codex_calls}"
+        ))
+        .into());
+    }
     let prior_ref_add =
         format!("plugin marketplace add styler-ai/ProjectAtlas --ref {previous_ref} --json");
     if fake_codex_calls
@@ -14378,7 +14481,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         != 1
         || (previous_ref != expected_release_tag
             && fake_codex_calls.lines().any(|call| call == prior_ref_add))
-        || fake_codex_calls.contains(forbidden_add)
+        || forbidden_add.is_some_and(|call| fake_codex_calls.contains(call))
     {
         return Err(io::Error::other(format!(
             "failed replacement repeated acquisition or attempted network rollback:\n{fake_codex_calls}"

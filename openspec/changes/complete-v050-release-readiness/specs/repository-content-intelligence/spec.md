@@ -26,6 +26,11 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** behavior has not been established
 - **THEN** guidance explicitly abstains or selects lexical/fallback evidence and does not generalize PHP into a plural language campaign
 
+#### Scenario: Plugin refresh leaves incomplete guidance
+- **WHEN** Codex plugin acquisition succeeds during current-ref repair or stale-ref replacement but the selected plugin source has missing or stale `SKILL.md` or `references/language-support.md`
+- **THEN** the POSIX and Windows installers refuse refresh success even when inventory and manifest versions match, report the failed artifact check, and restore the prior marketplace, plugin cache, and configuration from the existing recovery snapshot
+- **AND** they discard recovery state only after verified refresh success or successful restoration; exact packaged assets remain the success case
+
 ### Requirement: v0.5 document extraction supports only PDF and DOCX
 #465 SHALL pin and audit the fixed `pdf-extract` 0.12.0+projectatlas guest with `lopdf` 0.44.0, the `wasmi`/`wasmi_core` 2.0.0 host, `quick-xml` 0.42.0, and `zip` 0.6.6 (ZIP default features disabled, only `deflate` enabled) plus their exact locked transitive trees. It SHALL admit only PDF content streams and stored or DEFLATE DOCX `word/document.xml`, reject encrypted or unsupported compression as typed unsupported input before text publication, and invoke no OCR, legacy DOC, spreadsheet/presentation formats, macros, scripts, remote references, arbitrary processes, or embedded recursive parsers.
 

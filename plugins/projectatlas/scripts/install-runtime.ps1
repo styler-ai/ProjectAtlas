@@ -4551,6 +4551,10 @@ function Update-ProjectAtlasCodexPlugin {
                 Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
                 return
             }
+            if (-not (Test-ProjectAtlasCodexSkillArtifacts (Get-ProjectAtlasCodexPluginSourcePath $installedPlugin))) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: installed skill assets do not match $runtimeVersion after refresh."
+                return
+            }
             $updateSucceeded = $true
             Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
             Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
@@ -4587,6 +4591,10 @@ function Update-ProjectAtlasCodexPlugin {
         if (-not (Test-ProjectAtlasCodexPluginSourceManifest $installedPlugin $runtimeVersion)) {
             $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $installedPlugin
             Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
+            return
+        }
+        if (-not (Test-ProjectAtlasCodexSkillArtifacts (Get-ProjectAtlasCodexPluginSourcePath $installedPlugin))) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: installed skill assets do not match $runtimeVersion after refresh."
             return
         }
         $updateSucceeded = $true
