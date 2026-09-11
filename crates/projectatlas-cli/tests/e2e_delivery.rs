@@ -10494,39 +10494,12 @@ public static class Program
     let fake_codex_log = isolated_home.join(FAKE_CODEX_LOG_FILE);
     let fake_codex = isolated_home.join("codex.cmd");
     let runtime = isolated_installer_runtime(temp.path())?;
-    let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
-    let plugin_manifest = plugin_cache
-        .join(CODEX_PLUGIN_MANIFEST_DIR)
-        .join("plugin.json");
-    let plugin_skill = plugin_cache
-        .join(PROJECTATLAS_SKILL_DIR)
-        .join(PROJECTATLAS_SKILL_NAME)
-        .join(SKILL_FILE_NAME);
-    fs::create_dir_all(
-        plugin_manifest
-            .parent()
-            .ok_or_else(|| io::Error::other("fake plugin manifest parent missing"))?,
-    )?;
-    fs::create_dir_all(
-        plugin_skill
-            .parent()
-            .ok_or_else(|| io::Error::other("fake plugin skill parent missing"))?,
-    )?;
-    fs::write(
-        &plugin_manifest,
-        serde_json::to_vec(&json!({ "version": env!("CARGO_PKG_VERSION") }))?,
-    )?;
-    fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
-    let plugin_references = plugin_cache
-        .join(PROJECTATLAS_SKILL_DIR)
-        .join(PROJECTATLAS_SKILL_NAME)
-        .join(SKILL_REFERENCES_DIR);
-    fs::create_dir_all(&plugin_references)?;
-    fs::write(
-        plugin_references.join(LANGUAGE_SUPPORT_FILE_NAME),
-        include_bytes!(
-            "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
-        ),
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        FAKE_CODEX_SKILL_CONTENT,
     )?;
     let fake_plugin_list = isolated_home.join(FAKE_CODEX_PLUGIN_LIST_FILE_NAME);
     fs::write(
@@ -10542,7 +10515,7 @@ public static class Program
                 "marketplaceSource": {
                     "source": "https://github.com/styler-ai/ProjectAtlas.git"
                 },
-                "source": { "path": plugin_cache }
+                "source": { "path": plugin_source }
             }]
         }))?,
     )?;
@@ -10619,6 +10592,7 @@ public static class Program
             .arg(&runtime)
             .env("HOME", &isolated_home)
             .env("USERPROFILE", &isolated_home)
+            .env("CODEX_HOME", &codex_dir)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
             .env("PATH", process_path)
@@ -10658,6 +10632,7 @@ public static class Program
             .arg(&runtime)
             .env("HOME", &isolated_home)
             .env("USERPROFILE", &isolated_home)
+            .env("CODEX_HOME", &codex_dir)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
             .env("PATH", &parent_path)
@@ -11128,40 +11103,20 @@ public static class Program
     let runtime_source = assert_cmd::cargo::cargo_bin("projectatlas");
     let runtime = temp.path().join("projectatlas-current.exe");
     let runtime_byte_count = fs::copy(&runtime_source, &runtime)?;
-    let plugin_cache = isolated_home.join(FAKE_CODEX_PLUGIN_CACHE_DIR);
-    let plugin_manifest = plugin_cache
+    let codex_dir = isolated_home.join(CODEX_CONFIG_DIR);
+    let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_dir,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        FAKE_CODEX_SKILL_CONTENT,
+    )?;
+    let plugin_manifest = plugin_source
         .join(CODEX_PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
-    let plugin_skill = plugin_cache
+    let plugin_skill = plugin_source
         .join(PROJECTATLAS_SKILL_DIR)
         .join(PROJECTATLAS_SKILL_NAME)
         .join(SKILL_FILE_NAME);
-    fs::create_dir_all(
-        plugin_manifest
-            .parent()
-            .ok_or_else(|| io::Error::other("fake plugin manifest parent missing"))?,
-    )?;
-    fs::create_dir_all(
-        plugin_skill
-            .parent()
-            .ok_or_else(|| io::Error::other("fake plugin skill parent missing"))?,
-    )?;
-    fs::write(
-        &plugin_manifest,
-        serde_json::to_vec(&json!({ "version": env!("CARGO_PKG_VERSION") }))?,
-    )?;
-    fs::write(&plugin_skill, FAKE_CODEX_SKILL_CONTENT)?;
-    let plugin_references = plugin_cache
-        .join(PROJECTATLAS_SKILL_DIR)
-        .join(PROJECTATLAS_SKILL_NAME)
-        .join(SKILL_REFERENCES_DIR);
-    fs::create_dir_all(&plugin_references)?;
-    fs::write(
-        plugin_references.join(LANGUAGE_SUPPORT_FILE_NAME),
-        include_bytes!(
-            "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
-        ),
-    )?;
     let plugin_list = isolated_home.join(FAKE_CODEX_PLUGIN_LIST_FILE_NAME);
     fs::write(
         &plugin_list,
@@ -11180,7 +11135,7 @@ public static class Program
                         "installed": true,
                         "enabled": enabled,
                         "marketplaceSource": { "source": marketplace_source },
-                        "source": { "path": &plugin_cache }
+                        "source": { "path": &plugin_source }
                     }]
                 }))?,
             )?;
@@ -11277,6 +11232,7 @@ public static class Program
             .arg(&runtime)
             .env("HOME", &isolated_home)
             .env("USERPROFILE", &isolated_home)
+            .env("CODEX_HOME", &codex_dir)
             .env("APPDATA", &app_data)
             .env("LOCALAPPDATA", &local_app_data)
             .env("PATH", &parent_path)
@@ -11513,7 +11469,7 @@ public static class Program
                         "marketplaceSource": {
                             "source": "https://github.com/styler-ai/ProjectAtlas.git"
                         },
-                        "source": { "path": &plugin_cache }
+                        "source": { "path": &plugin_source }
                     }]]
                 }))?,
             )?;
@@ -11868,7 +11824,7 @@ fn windows_installer_obsolete_mcp_handoff_requires_exact_codex_plugin_state()
         &script,
         r#"$ErrorActionPreference = "Stop"
 $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
-foreach ($functionName in @(
+$selectorFunctions = foreach ($functionName in @(
         "Test-ProjectAtlasJsonObject",
         "Test-ProjectAtlasOfficialMarketplaceSource",
         "Get-ProjectAtlasCodexPluginInventory",
@@ -11876,6 +11832,11 @@ foreach ($functionName in @(
         "Get-ProjectAtlasCodexMarketplace",
         "Get-ProjectAtlasCodexPluginSourcePath",
         "Get-ProjectAtlasCodexPluginSourceManifestVersion",
+        "Get-ProjectAtlasCodexPluginManifestVersion",
+        "Get-ProjectAtlasCodexConfigPath",
+        "Test-ProjectAtlasCodexContainedPath",
+        "Assert-ProjectAtlasCodexDirectAncestry",
+        "Test-ProjectAtlasCodexPluginArtifacts",
         "Test-ProjectAtlasCodexPluginSourceManifest",
         "Test-ProjectAtlasCodexSkillArtifacts",
         "Test-ProjectAtlasCodexPluginReady"
@@ -11887,8 +11848,11 @@ foreach ($functionName in @(
     if (-not $functionMatch.Success) {
         throw "Installer Codex selector was not found: $functionName"
     }
-    Invoke-Expression $functionMatch.Value
+    $functionMatch.Value
 }
+$selectorPath = Join-Path $PSScriptRoot "codex-selectors.ps1"
+Set-Content -LiteralPath $selectorPath -Value $selectorFunctions
+. $selectorPath
 $script:pluginPayload = $null
 function Invoke-ProjectAtlasBoundedJsonCommand {
     return ,$script:pluginPayload
@@ -12008,13 +11972,17 @@ function Test-ProjectAtlasCodexPluginSourceManifest {
 }
 $script:pluginSourcePath = $null
 function Get-ProjectAtlasCodexPluginSourcePath { return $script:pluginSourcePath }
-function Get-ProjectAtlasSha256 { throw "Unreadable plugin artifact." }
+$script:artifactReadAttempted = $false
+function Get-ProjectAtlasSha256 {
+    $script:artifactReadAttempted = $true
+    throw "Unreadable plugin artifact."
+}
 $directoryArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "directory-artifact"
 $unreadableArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "unreadable-artifact"
 foreach ($pluginRoot in @($directoryArtifactRoot, $unreadableArtifactRoot)) {
     New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot ".codex-plugin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot "skills\projectatlas") | Out-Null
-    Set-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") -Value "{}"
+    Set-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") -Value '{"version":"0.4.2"}'
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $directoryArtifactRoot "skills\projectatlas\SKILL.md") | Out-Null
 Set-Content -LiteralPath (Join-Path $unreadableArtifactRoot "skills\projectatlas\SKILL.md") -Value "fixture"
@@ -12028,6 +11996,9 @@ if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
 $script:pluginSourcePath = $unreadableArtifactRoot
 if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
     throw "An unreadable plugin artifact was accepted as ready."
+}
+if (-not $script:artifactReadAttempted) {
+    throw "The unreadable plugin artifact was not examined."
 }
 $script:sourceManifestError = $true
 if (Test-ProjectAtlasCodexPluginReady "0.4.2") {
@@ -12054,6 +12025,7 @@ Write-Output "strict_plugin_marketplace_and_readiness"
             .arg("-File")
             .arg(&script)
             .env("PROJECTATLAS_INSTALLER", &installer)
+            .env("CODEX_HOME", temp.path().join(CODEX_CONFIG_DIR))
             .env(
                 "PROJECTATLAS_PLUGIN_CACHE",
                 temp.path().join(FAKE_CODEX_PLUGIN_CACHE_DIR),
