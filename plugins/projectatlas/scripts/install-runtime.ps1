@@ -2237,14 +2237,25 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
     $locks = [System.Collections.Generic.List[object]]::new()
     try {
         foreach ($key in $keys) {
-            $remainingTicks = $deadline - [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $waitStarted = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $remainingTicks = $deadline - $waitStarted
             $remainingMilliseconds = [long][Math]::Ceiling(
                 ($remainingTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
             if ($remainingMilliseconds -le 0) {
                 throw "ProjectAtlas atlas forwarder lifecycle lock deadline expired before acquiring $($key.ForwarderPath)."
             }
+            if ($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE) {
+                [System.IO.File]::AppendAllText(
+                    $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE,
+                    "request $($locks.Count) $deadline $waitStarted $remainingMilliseconds $([System.Diagnostics.Stopwatch]::Frequency)`n")
+            }
             $lock = Enter-ProjectAtlasAtlasForwarderLifecycleLockKey $key $remainingMilliseconds
             $locks.Add($lock) | Out-Null
+            if ($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE) {
+                [System.IO.File]::AppendAllText(
+                    $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE,
+                    "acquired $($locks.Count - 1) $([System.Diagnostics.Stopwatch]::GetTimestamp())`n")
+            }
         }
         return [pscustomobject]@{
             Locks = $locks

@@ -31710,9 +31710,8 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     // the production budget remains one shared 30-second lock-wait budget.
     // Keep both sorted locks occupied so the contender spends part of its one
     // budget waiting for lock 1, then proves that the remaining time—not a
-    // reset budget—is used for lock 2. Unix process-group termination needs
-    // scheduling slack; its exact trace verifies budget sharing independently
-    // of the Windows elapsed-time assertion.
+    // reset budget—is used for lock 2. Native request traces separate that
+    // contract from process cleanup and delayed parent-side observation.
     let lock_budget_ms = if cfg!(unix) { 1_000_u64 } else { 250 };
     let deadline_state_before_first = state_snapshot()?;
     let held_first_gate = fixture_root.join("deadline-held-first.gate");
@@ -31756,9 +31755,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS",
         lock_budget_ms.to_string(),
     );
-    #[cfg(unix)]
     let lock_wait_trace = fixture_root.join("deadline-lock-waits.txt");
-    #[cfg(unix)]
     timed_first.env(
         "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE",
         &lock_wait_trace,
@@ -31782,8 +31779,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         drop(held_second.wait());
         return Err(error);
     }
-    #[cfg(windows)]
-    let contender_started = Instant::now();
     thread::sleep(Duration::from_millis(200));
     held_first.kill()?;
     terminate_plugin_installer_process_tree(&mut held_first)?;
@@ -31792,8 +31787,6 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         "deadline held-first contender",
         Duration::from_secs(5),
     )?;
-    #[cfg(windows)]
-    let contender_elapsed = contender_started.elapsed();
     // Reaping the interrupted owner also drains its descendants' output pipes;
     // that cleanup is independent of the contender's shared lock deadline.
     let held_first_output = held_first.child.wait_with_output()?;
@@ -31816,13 +31809,54 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         ),
     )?;
     #[cfg(windows)]
-    require(
-        contender_elapsed >= Duration::from_millis(180)
-            && contender_elapsed < Duration::from_millis(425),
-        format!(
-            "held-first contender did not consume one shared lock deadline (elapsed={contender_elapsed:?}; expected 180..425 ms)"
-        ),
-    )?;
+    {
+        // Observe the actual shared deadline and requested native wait budgets;
+        // hashing and scheduling can consume time before even the first wait.
+        let trace = fs::read_to_string(&lock_wait_trace)?;
+        let rows = trace
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        require(
+            rows.len() == 3
+                && rows[0].len() == 6
+                && rows[0][..2] == ["request", "0"]
+                && rows[1].len() == 3
+                && rows[1][..2] == ["acquired", "0"]
+                && rows[2].len() == 6
+                && rows[2][..2] == ["request", "1"],
+            format!("contender did not reach both ordered native lock waits: {trace}"),
+        )?;
+        let deadline = rows[0][2].parse::<u64>()?;
+        let first_started = rows[0][3].parse::<u64>()?;
+        let first_budget = rows[0][4].parse::<u64>()?;
+        let frequency = rows[0][5].parse::<u64>()?;
+        let acquired = rows[1][2].parse::<u64>()?;
+        let second_started = rows[2][3].parse::<u64>()?;
+        let second_budget = rows[2][4].parse::<u64>()?;
+        require(
+            frequency > 0
+                && rows[2][2].parse::<u64>()? == deadline
+                && rows[2][5].parse::<u64>()? == frequency
+                && first_started < acquired
+                && acquired <= second_started
+                && second_started < deadline
+                && first_budget <= lock_budget_ms
+                && second_budget > 0
+                && second_budget < first_budget,
+            format!("contender reset the shared native lock-wait deadline: {trace}"),
+        )?;
+        for (started, budget) in [
+            (first_started, first_budget),
+            (second_started, second_budget),
+        ] {
+            require(
+                u128::from(budget)
+                    == (u128::from(deadline - started) * 1_000).div_ceil(u128::from(frequency)),
+                format!("native lock wait did not receive its deadline remainder: {trace}"),
+            )?;
+        }
+    }
     #[cfg(unix)]
     {
         // Shell hashing, identity checks and process startup are outside native
