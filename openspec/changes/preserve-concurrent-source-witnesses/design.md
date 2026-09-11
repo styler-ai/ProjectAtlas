@@ -18,6 +18,8 @@ Exact preparation alone holds the reconciliation mutex because repair may need a
 
 Always using exact-only mutation witnesses would bypass the established observed path and change its performance behavior. Keep the existing exact fallback for its existing admission conditions. No new worker, long-held mutex, or persistent table is justified.
 
+A proven exact saved-source mismatch invalidates shared evidence even if a successor replaced the verifying operation's epoch. It takes the same receiver-to-state gate and retains continuity loss until fresh exact verification starts, preventing a verification already in flight from installing stale evidence. Cancellation and other exact-check errors do not prove shared source invalidation and retain conditional cleanup of the failed operation's epoch.
+
 Purpose-set target syntax is checked before mutation admission. The existing root-bound read store and a fallible filesystem existence check reject a target absent from both the index and saved source, without superseding an already admitted valid mutation. Existing saved source remains eligible for the established exact incremental repair even when absent from the old index. Indexed existence is checked again in the write transaction to preserve the race boundary. Existing but excluded or unindexable targets retain post-admission validation; no new source-candidate classifier is introduced. Two valid competing mutations retain the existing witness-winner semantics; this does not permit superseded curators to co-commit.
 
 ## Risks / Trade-offs

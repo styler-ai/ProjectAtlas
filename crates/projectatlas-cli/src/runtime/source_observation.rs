@@ -141,7 +141,14 @@ impl VerifiedMutationAdmission {
     pub(crate) fn verify(&self) -> Result<(), CliError> {
         match &self.witness {
             MutationSourceWitness::Observed { entry, epoch } => {
-                Self::verify_observed(entry, epoch, &self.control)
+                Self::verify_observed(entry, epoch, &self.control, || {
+                    verify_saved_source_matches_index_controlled(
+                        &entry.binding.database,
+                        &entry.binding.root,
+                        entry.binding.config.as_deref(),
+                        &self.control,
+                    )
+                })
             }
             MutationSourceWitness::Exact {
                 binding,
@@ -163,18 +170,18 @@ impl VerifiedMutationAdmission {
         entry: &SourceObservationEntry,
         epoch: &VerifiedSourceEpoch,
         control: &IndexWorkControl,
+        verify_source: impl FnOnce() -> Result<(), CliError>,
     ) -> Result<(), CliError> {
         if let Err(error) = Self::verify_observation(entry, epoch, control) {
             entry.invalidate_epoch(epoch);
             return Err(error);
         }
-        if let Err(error) = verify_saved_source_matches_index_controlled(
-            &entry.binding.database,
-            &entry.binding.root,
-            entry.binding.config.as_deref(),
-            control,
-        ) {
-            entry.invalidate_epoch(epoch);
+        if let Err(error) = verify_source() {
+            if matches!(error, CliError::RefreshRequired(_)) {
+                entry.invalidate_after_proven_source_mismatch()?;
+            } else {
+                entry.invalidate_epoch(epoch);
+            }
             return Err(error);
         }
         if let Err(error) = Self::verify_observation(entry, epoch, control) {
@@ -460,6 +467,17 @@ impl SourceObservationEntry {
         {
             state.verified = None;
         }
+    }
+
+    /// Reject all cached and in-flight evidence after exact source verification fails.
+    fn invalidate_after_proven_source_mismatch(&self) -> Result<(), CliError> {
+        let _receiver = self
+            .receiver
+            .lock()
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
+        self.continuity_lost.store(true, Ordering::Release);
+        self.invalidate();
+        Ok(())
     }
 
     /// Reset continuity and drain events before sampling exact source truth.
@@ -1087,7 +1105,7 @@ impl SourceObservationRegistry {
                 })
                 .is_ok()
             {
-                entry.continuity_lost.store(true, Ordering::Release);
+                entry.invalidate_after_proven_source_mismatch()?;
             }
             if before_contract != after_contract || before_policy != after_policy {
                 drop(exact.store.finish_index_read_snapshot());
@@ -1950,6 +1968,92 @@ mod tests {
     }
 
     #[test]
+    fn exact_source_mismatch_invalidates_successor_without_observer_delivery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let mut observer = SourceObservationEntry::start(binding.clone())?;
+        observer.watcher.unwatch(&binding.root)?;
+        observer.watcher.configure(notify::Config::default())?;
+        let entry = Arc::new(observer);
+        registry
+            .entries
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("observer registry lock poisoned"))?
+            .insert(binding, Arc::clone(&entry));
+        let control = test_control();
+        let previous = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let MutationSourceWitness::Observed { epoch, .. } = &previous.witness else {
+            return Err(std::io::Error::other("observed mutation missing").into());
+        };
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before_revision = store.authored_purpose_revision()?;
+        let transaction = store.begin_purpose_mutation()?;
+        let mut successor = None;
+        let result = VerifiedMutationAdmission::verify_observed(&entry, epoch, &control, || {
+            successor = Some(registry.admit_mutation(&database, temp.path(), None, &control)?);
+            store.set_purpose("source.rs", "Uncommitted purpose", PurposeSource::Agent)?;
+            fs::write(&source, "fn changed_after_successor() {}\n").map_err(|error| {
+                CliError::Io {
+                    path: source.clone(),
+                    source: error,
+                }
+            })?;
+            verify_saved_source_matches_index_controlled(&database, temp.path(), None, &control)
+        });
+        drop(transaction);
+        require(
+            matches!(result, Err(CliError::RefreshRequired(_))),
+            "exact source mismatch did not reject the previous mutation",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "rejected mutation changed the authored-purpose revision",
+        )?;
+        require(
+            entry.current_epoch()?.is_none(),
+            "proven saved-source mismatch left successor evidence reusable",
+        )?;
+        let successor =
+            successor.ok_or_else(|| std::io::Error::other("successor admission missing"))?;
+        require(
+            matches!(successor.verify(), Err(CliError::RefreshRequired(_))),
+            "successor survived a proven saved-source mismatch",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_exact_verification_preserves_successor_witness() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(30)));
+        let previous = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let MutationSourceWitness::Observed { entry, epoch } = &previous.witness else {
+            return Err(std::io::Error::other("observed mutation missing").into());
+        };
+        let mut successor = None;
+        let result = VerifiedMutationAdmission::verify_observed(entry, epoch, &control, || {
+            successor =
+                Some(registry.admit_mutation(&database, temp.path(), None, &test_control())?);
+            cancellation.cancel();
+            verify_saved_source_matches_index_controlled(&database, temp.path(), None, &control)
+        });
+        require(
+            matches!(result, Err(CliError::IndexWork(_))),
+            "exact verification did not return cancellation",
+        )?;
+        successor
+            .ok_or_else(|| std::io::Error::other("successor admission missing"))?
+            .verify()?;
+        Ok(())
+    }
+
+    #[test]
     fn stale_read_source_event_invalidates_newer_mutation_and_rolls_back()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -2120,7 +2224,8 @@ mod tests {
     }
 
     #[test]
-    fn preparation_continuity_loss_falls_back_only_for_mutations() -> Result<(), Box<dyn Error>> {
+    fn exact_mismatch_during_preparation_prevents_observed_installation()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, _source) = indexed_project(temp.path())?;
         let registry = SourceObservationRegistry::default();

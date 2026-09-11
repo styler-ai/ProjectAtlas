@@ -28,6 +28,14 @@ Real source changes, policy changes, observer continuity loss, identity changes,
 - **WHEN** cancellation occurs after admission but before purpose commit
 - **THEN** the existing typed cancellation is returned and no purpose mutation commits
 
+#### Scenario: Exact source verification detects a change after successor admission
+- **WHEN** a successor replaces a mutation witness and the older mutation's exact check proves a saved-source mismatch before observer delivery
+- **THEN** the purpose transaction rolls back and shared invalidation prevents both successor reuse and stale installation by exact verification already in flight
+
+#### Scenario: Exact verification is cancelled after successor admission
+- **WHEN** an older mutation's exact check is cancelled after a successor is admitted against unchanged source
+- **THEN** the older operation returns typed cancellation without invalidating the valid successor
+
 ### Requirement: Existing isolation and runtime contracts remain intact
 
 The fix SHALL retain exact root/database/config binding and existing bounded retries, output, CLI/MCP payloads, and observer fallback. It MUST NOT add implicit refresh, database initialization, telemetry suppression, or serialized fixture requests to manufacture success.
