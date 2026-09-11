@@ -3577,9 +3577,9 @@ checksum = "d4ca08e5ef825b65b056d9efbd95c8750683f0a6d0466d02e96dc2e4e360f3d2"
 
 [[package]]
 name = "whichdisk"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b247dc23016b46fba2889eb6551419696033784faaae8a007cf66413a1a7bf9e"
+checksum = "0ca926ef48e097434358a2081de46b0913a915e939b382afac637118422bf873"
 dependencies = [
  "bytes",
  "libc",
