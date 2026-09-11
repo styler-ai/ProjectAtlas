@@ -14201,6 +14201,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     config_existed: bool,
     replacement_failure: CodexReplacementFailure,
 ) -> Result<(), Box<dyn Error>> {
+    const REPLACEMENT_READY_FILE_NAME: &str = "replacement-ready";
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
@@ -14277,7 +14278,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             )?;
             let asset_path = source.join("skills/projectatlas").join(asset);
             fs::write(asset_path, "stale replacement guidance\n")?;
-            fs::write(payload.join("replacement-ready"), "ready\n")?;
+            fs::write(payload.join(REPLACEMENT_READY_FILE_NAME), "ready\n")?;
             replacement_payload = Some(payload);
             replacement_plugin_json = stale_plugin_json.replace("0.0.1", env!("CARGO_PKG_VERSION"));
             let asset_variable = if asset == "SKILL.md" {
@@ -14394,7 +14395,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             .env("PROJECTATLAS_REPLACEMENT_PAYLOAD", payload)
             .env(
                 "PROJECTATLAS_FAKE_CODEX_STATE",
-                marketplace_root.join("replacement-ready"),
+                marketplace_root.join(REPLACEMENT_READY_FILE_NAME),
             );
     }
     let installer_output = require_successful_plugin_installer_output(installer_command.output()?)?;
