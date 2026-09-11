@@ -2044,14 +2044,25 @@ codex_projectatlas_plugin_source_manifest_matches() {
   [ "$(codex_projectatlas_plugin_source_manifest_version "$plugin_source_path")" = "$expected_version" ]
 }
 
-codex_projectatlas_plugin_source_ready() {
-  expected_version=$1
-  plugin_source_path=$2
-  codex_projectatlas_plugin_source_manifest_matches "$expected_version" "$plugin_source_path" || return 1
-  for skill_asset in SKILL.md references/language-support.md; do
-    cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$plugin_source_path/skills/projectatlas/$skill_asset" || return 1
+codex_projectatlas_plugin_artifacts_ready() (
+  artifact_version=$1
+  artifact_source_path=$2
+  case "$artifact_version" in
+    ''|*[!0-9A-Za-z.+-]*) return 1 ;;
+  esac
+  artifact_config_path=$(codex_config_path)
+  [ -n "$artifact_config_path" ] || return 1
+  artifact_codex_root=$(CDPATH= cd -P -- "$(dirname -- "$artifact_config_path")" 2>/dev/null && pwd -P) || return 1
+  artifact_cache_path=$artifact_codex_root/plugins/cache/projectatlas/projectatlas/$artifact_version
+  [ ! -L "$artifact_cache_path" ] || return 1
+  [ "$(CDPATH= cd -P -- "$artifact_cache_path" 2>/dev/null && pwd -P)" = "$artifact_cache_path" ] || return 1
+  for artifact_root in "$artifact_source_path" "$artifact_cache_path"; do
+    codex_projectatlas_plugin_source_manifest_matches "$artifact_version" "$artifact_root" || return 1
+    for skill_asset in SKILL.md references/language-support.md; do
+      cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$artifact_root/skills/projectatlas/$skill_asset" || return 1
+    done
   done
-}
+)
 
 verify_codex_projectatlas_skill_artifact() {
   runtime_version=$(expected_runtime_version)
@@ -2090,8 +2101,8 @@ verify_codex_projectatlas_skill_artifact() {
     printf 'warning: Codex ProjectAtlas plugin skill verification failed: manifest version does not match %s.\n' "$runtime_version" >&2
     return 0
   fi
-  if ! codex_projectatlas_plugin_source_ready "$runtime_version" "$plugin_source_path"; then
-    printf 'warning: Codex ProjectAtlas plugin skill verification failed: installed skill assets do not match the installer at %s.\n' "$plugin_source_path" >&2
+  if ! codex_projectatlas_plugin_artifacts_ready "$runtime_version" "$plugin_source_path"; then
+    printf 'warning: Codex ProjectAtlas plugin skill verification failed: plugin source or cache artifacts do not match the installer at %s.\n' "$plugin_source_path" >&2
     return 0
   fi
   printf 'Codex ProjectAtlas plugin skill verified at %s for %s.\n' "$skill_path" "$runtime_version"
@@ -2171,7 +2182,7 @@ update_codex_plugin_locked() {
   current_plugin_source_path=$codex_projectatlas_inventory_source_path
   if [ "$previous_ref" = "$release_tag" ] &&
     [ "$current_plugin_version" = "$runtime_version" ] &&
-    codex_projectatlas_plugin_source_ready "$runtime_version" "$current_plugin_source_path"; then
+    codex_projectatlas_plugin_artifacts_ready "$runtime_version" "$current_plugin_source_path"; then
     printf 'Codex ProjectAtlas plugin marketplace already points to %s.\n' "$release_tag"
     verify_codex_projectatlas_skill_artifact
     return 0
@@ -2201,12 +2212,12 @@ update_codex_plugin_locked() {
         printf '%s\n' "warning: Codex ProjectAtlas plugin update failed: installed plugin inventory could not be verified completely after refresh." >&2
       fi
       if [ -n "$installed_version" ] && [ "$installed_version" = "$runtime_version" ]; then
-        if codex_projectatlas_plugin_source_ready "$runtime_version" "$installed_source_path"; then
+        if codex_projectatlas_plugin_artifacts_ready "$runtime_version" "$installed_source_path"; then
           update_succeeded=true
           printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
           verify_codex_projectatlas_skill_artifact
         else
-          printf "warning: Codex ProjectAtlas plugin update failed: source manifest or skill assets do not match %s after refresh.\n" "$runtime_version" >&2
+          printf "warning: Codex ProjectAtlas plugin update failed: plugin source or cache artifacts do not match %s after refresh.\n" "$runtime_version" >&2
         fi
       elif [ -n "$installed_version" ]; then
         printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
@@ -2283,12 +2294,12 @@ update_codex_plugin_locked() {
       printf '%s\n' "warning: Codex ProjectAtlas plugin update failed: installed plugin inventory could not be verified completely after refresh." >&2
     fi
     if [ -n "$installed_version" ] && [ "$installed_version" = "$runtime_version" ]; then
-      if codex_projectatlas_plugin_source_ready "$runtime_version" "$installed_source_path"; then
+      if codex_projectatlas_plugin_artifacts_ready "$runtime_version" "$installed_source_path"; then
         update_succeeded=true
         printf 'Codex ProjectAtlas plugin marketplace updated to %s.\n' "$release_tag"
         verify_codex_projectatlas_skill_artifact
       else
-        printf "warning: Codex ProjectAtlas plugin update failed: source manifest or skill assets do not match %s after refresh.\n" "$runtime_version" >&2
+        printf "warning: Codex ProjectAtlas plugin update failed: plugin source or cache artifacts do not match %s after refresh.\n" "$runtime_version" >&2
       fi
     elif [ -n "$installed_version" ]; then
       printf "warning: Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '%s' does not match %s.\n" "$installed_version" "$runtime_version" >&2
