@@ -4522,21 +4522,6 @@ function Update-ProjectAtlasCodexPlugin {
         $updateSucceeded = $false
         $restoreSucceeded = $false
         try {
-            $marketplaceGit = Join-Path $stateSnapshot.MarketplaceRootPath ".git"
-            if (Test-Path -LiteralPath $marketplaceGit) {
-                if (-not (Get-ProjectAtlasShellCommand git -CommandType Application)) {
-                    Write-Warning "Codex ProjectAtlas plugin update failed: git is unavailable to fetch release tag $releaseTag."
-                    return
-                }
-                & git -C $stateSnapshot.MarketplaceRootPath rev-parse --verify --quiet "refs/tags/$releaseTag^{commit}" 2>$null | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    & git -C $stateSnapshot.MarketplaceRootPath fetch --force --no-tags https://github.com/styler-ai/ProjectAtlas.git "refs/tags/${releaseTag}:refs/tags/${releaseTag}" 2>$null | Out-Null
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Warning "Codex ProjectAtlas plugin update failed: could not fetch release tag $releaseTag."
-                        return
-                    }
-                }
-            }
             if ($previousRef -eq $releaseTag) {
             if ($currentPluginVersion -eq $runtimeVersion -and -not $currentSourceManifestMatches) {
                 $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
@@ -4586,6 +4571,21 @@ function Update-ProjectAtlasCodexPlugin {
             return
         }
 
+        $marketplaceGit = Join-Path $stateSnapshot.MarketplaceRootPath ".git"
+        if (Test-Path -LiteralPath $marketplaceGit) {
+            if (-not (Get-ProjectAtlasShellCommand git -CommandType Application)) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: git is unavailable to fetch release tag $releaseTag."
+                return
+            }
+            & git -C $stateSnapshot.MarketplaceRootPath rev-parse --verify --quiet "refs/tags/$releaseTag^{commit}" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                & git -C $stateSnapshot.MarketplaceRootPath fetch --force --no-tags https://github.com/styler-ai/ProjectAtlas.git "refs/tags/${releaseTag}:refs/tags/${releaseTag}" 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "Codex ProjectAtlas plugin update failed: could not fetch release tag $releaseTag."
+                    return
+                }
+            }
+        }
         & $codexCommandPath plugin marketplace remove projectatlas --json | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Codex ProjectAtlas plugin update failed: could not remove stale projectatlas marketplace."

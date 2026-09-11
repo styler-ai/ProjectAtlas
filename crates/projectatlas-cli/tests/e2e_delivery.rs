@@ -14115,11 +14115,21 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
             "[marketplaces.projectatlas]\nsource_type = \"git\"\nsource = \"https://github.com/styler-ai/ProjectAtlas.git\"\nref = \"{expected_release_tag}\"\n"
         ),
     )?;
-    let (_, fake_plugin_source, _) = write_fake_codex_projectatlas_integration(
+    let (marketplace_root, fake_plugin_source, _) = write_fake_codex_projectatlas_integration(
         &codex_dir,
         env!("CARGO_PKG_VERSION"),
         "0.0.1",
         FAKE_CODEX_SKILL_CONTENT,
+    )?;
+    fs::create_dir(marketplace_root.join(".git"))?;
+    let unavailable_git = fake_path.join(if cfg!(windows) { "git.cmd" } else { "git" });
+    write_executable_script(
+        &unavailable_git,
+        if cfg!(windows) {
+            "@echo off\r\nexit /b 1\r\n"
+        } else {
+            "#!/usr/bin/env sh\nexit 1\n"
+        },
     )?;
     let manifest_path = fake_plugin_source
         .join(CODEX_PLUGIN_MANIFEST_DIR)
