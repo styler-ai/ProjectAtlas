@@ -7414,8 +7414,19 @@ impl ProjectAtlasMcpServer {
         let node_key = validated_repo_node_key(std::path::Path::new(path))
             .map_err(Self::selected_project_path_error)?;
         let store = Self::open_read_store(state)?;
-        Self::require_indexed_purpose_path(&store, &node_key)?;
+        let indexed = store.load_node_by_path(&node_key)?.is_some();
         store.finish_index_read_snapshot()?;
+        let source = state.root.join(&node_key);
+        if !indexed
+            && !source.try_exists().map_err(|source_error| CliError::Io {
+                path: source,
+                source: source_error,
+            })?
+        {
+            return Err(CliError::InvalidInput(format!(
+                "path {node_key:?} is not indexed in the MCP-bound project"
+            )));
+        }
         Ok(node_key)
     }
 
@@ -10513,7 +10524,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_purpose_paths_preserve_an_admitted_mutation()
+    fn purpose_preflight_preserves_admitted_mutations_and_saved_source_repair()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -10563,6 +10574,27 @@ mod tests {
             }),
             "rejected purpose requests prevented the admitted mutation from committing",
         )?;
+        let identity = store.captured_project_binding()?.project_instance_id;
+        drop(store);
+        let saved_path = root.join("added.rs");
+        let saved_source = "fn added() {}\n";
+        fs::write(&saved_path, saved_source)?;
+        let node_key = ProjectAtlasMcpServer::preflight_purpose_path(&state, "added.rs")?;
+        server.with_admitted_purpose_mutation_controlled(&state, &control, None, |store| {
+            ProjectAtlasMcpServer::require_indexed_purpose_path(store, &node_key)?;
+            store.set_purpose(&node_key, "New saved source", PurposeSource::Agent)?;
+            Ok(())
+        })?;
+        let store = ProjectAtlasMcpServer::open_read_store(&state)?;
+        require(
+            store.captured_project_binding()?.project_instance_id == identity
+                && store.load_node_by_path("added.rs")?.is_some_and(|node| {
+                    node.purpose.purpose.as_deref() == Some("New saved source")
+                })
+                && fs::read_to_string(saved_path)? == saved_source,
+            "purpose preflight prevented exact saved-source repair or changed source identity",
+        )?;
+        store.finish_index_read_snapshot()?;
         Ok(())
     }
 

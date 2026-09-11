@@ -9,8 +9,12 @@ The source-observation owner SHALL distinguish a superseded read from invalid so
 - **THEN** the old read discards its provisional result and retries within existing bounds while the mutation witness remains valid
 
 #### Scenario: Invalid purpose target arrives during an admitted mutation
-- **WHEN** another purpose-set request names an absolute, empty, or unindexed path
-- **THEN** read-only target preflight rejects it before source admission can supersede the valid mutation witness, while indexed existence is rechecked inside any admitted write transaction
+- **WHEN** another purpose-set request names an absolute or empty path, or a target absent from both the index and saved source
+- **THEN** read-only target preflight rejects it before source admission can supersede the valid mutation witness, while existing saved source remains eligible for exact incremental repair and indexed existence is rechecked inside any admitted write transaction
+
+#### Scenario: Newly saved source is absent from the previous index
+- **WHEN** an indexable source file is created after the last scan and a purpose-set request targets it
+- **THEN** preflight allows the existing exact-admission path to repair the index and commit its purpose without replacing project identity or changing source bytes
 
 ### Requirement: Actual invalidation prevents purpose publication
 
