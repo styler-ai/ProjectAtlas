@@ -31,6 +31,11 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **THEN** the POSIX and Windows installers refuse refresh success even when inventory and the other artifact tree match, report the failed artifact check, and restore the prior marketplace, plugin cache, and configuration from the existing recovery snapshot
 - **AND** they discard recovery state only after verified refresh success or successful restoration; exact packaged assets remain the success case
 
+#### Scenario: Current marketplace source needs repair
+- **WHEN** the configured official marketplace already pins the required release but its source assets are missing or stale
+- **THEN** the installers snapshot prior state, refresh that configured marketplace source before removing and reinstalling the plugin, and verify both source and installed cache afterward
+- **AND** a failed marketplace refresh stops before plugin removal and restores prior state through the existing snapshot; a successful command with damaged source still fails the complete artifact check
+
 #### Scenario: Current source hides a damaged installed cache
 - **WHEN** the marketplace source matches the packaged candidate but its versioned installed cache does not
 - **THEN** the installers reject already-current readiness and attempt the existing repair flow; readiness and skill verification require matching manifests and both mandatory skill assets in both trees

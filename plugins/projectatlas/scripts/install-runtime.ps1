@@ -4533,6 +4533,11 @@ function Update-ProjectAtlasCodexPlugin {
             elseif ($currentPluginVersion -eq $runtimeVersion -and -not $currentPluginReady) {
                 Write-Output "Codex ProjectAtlas plugin skill artifact does not match $runtimeVersion; refreshing official projectatlas plugin cache."
             }
+            & $codexCommandPath plugin marketplace upgrade projectatlas --json | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: could not refresh the configured projectatlas marketplace source."
+                return
+            }
             & $codexCommandPath plugin remove projectatlas --marketplace projectatlas --json | Out-Null
             & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
             if ($LASTEXITCODE -ne 0) {
