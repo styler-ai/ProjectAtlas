@@ -10539,12 +10539,8 @@ mod tests {
             &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
         )?;
         drop(store);
-        let server = ProjectAtlasMcpServer::new(
-            db_path.clone(),
-            None,
-            "purpose-preflight".to_owned(),
-            false,
-        );
+        let server =
+            ProjectAtlasMcpServer::new(db_path, None, "purpose-preflight".to_owned(), false);
         let state = server.state_for_target(Some(normalize_native_path_display(root)), None)?;
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
         let admission = server.source_observations.admit_mutation(
@@ -10556,7 +10552,7 @@ mod tests {
         let store = ProjectAtlasMcpServer::open_existing_mut_store(&state, &server.control_state)?;
         let transaction = store.begin_purpose_mutation()?;
         store.set_purpose(".", "Accepted repository purpose", PurposeSource::Agent)?;
-        let absolute = normalize_native_path_display(&root.join("source.rs"));
+        let absolute = normalize_native_path_display(root.join("source.rs"));
         for path in [absolute.as_str(), "", "missing.rs"] {
             require(
                 matches!(
