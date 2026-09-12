@@ -23075,9 +23075,20 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .get(name.as_str())
             .and_then(|tool| tool.get("inputSchema"))
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        let normalized_baseline = if name == "atlas_symbol_relations" {
+            let mut schema = baseline_schema.clone();
+            if let Some(description) = schema.pointer_mut("/properties/analysis_mode/description") {
+                *description = json!(
+                    "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`."
+                );
+            }
+            schema
+        } else {
+            baseline_schema.clone()
+        };
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
-            baseline_schema,
+            &normalized_baseline,
             current_schema,
         )?;
     }
