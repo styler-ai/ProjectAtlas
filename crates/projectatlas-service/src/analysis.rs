@@ -1467,6 +1467,7 @@ fn load_entrypoint_profile_draft(
     let mut relation_work = DetailedRelationWork::default();
     let mut first_anchor = None;
     let mut authored_purpose_revision = 0;
+    let mut purpose_revision_initialized = false;
     let mut complete = true;
     let mut reached_limits = Vec::new();
 
@@ -1511,8 +1512,15 @@ fn load_entrypoint_profile_draft(
                     });
                 }
                 first_anchor.get_or_insert_with(|| report.anchor.clone());
-                authored_purpose_revision =
-                    authored_purpose_revision.max(report.authored_purpose_revision);
+                if purpose_revision_initialized
+                    && report.authored_purpose_revision != authored_purpose_revision
+                {
+                    return Err(ServiceError::RelationCursorStale {
+                        field: "entrypoint authored purpose revision",
+                    });
+                }
+                authored_purpose_revision = report.authored_purpose_revision;
+                purpose_revision_initialized = true;
                 add_relation_work(&mut relation_work, &report.work)?;
                 for limit in &report.reached_limits {
                     push_limit(&mut reached_limits, *limit);
@@ -1543,13 +1551,25 @@ fn load_entrypoint_profile_draft(
                         insert_node(&mut reachable, target);
                         if resolved {
                             let target_key = target.entity.key().canonical_identity().to_string();
-                            if visited.insert(target_key)
-                                && let Some(target_anchor) =
-                                    relation_anchor_for_entity(&target.entity)
-                                && let Ok(anchor_key) = serde_json::to_string(&target_anchor)
-                                && scheduled_anchors.insert(anchor_key)
-                            {
-                                next_frontier.push(target_anchor);
+                            if visited.insert(target_key) {
+                                match relation_anchor_for_entity(&target.entity) {
+                                    Some(target_anchor) => {
+                                        if let Ok(anchor_key) =
+                                            serde_json::to_string(&target_anchor)
+                                            && scheduled_anchors.insert(anchor_key)
+                                        {
+                                            next_frontier.push(target_anchor);
+                                        }
+                                    }
+                                    None if !matches!(
+                                        target.entity.selector(),
+                                        EntitySelector::External { .. }
+                                    ) =>
+                                    {
+                                        complete = false;
+                                    }
+                                    None => {}
+                                }
                             }
                         }
                     }
@@ -1593,19 +1613,24 @@ fn load_entrypoint_profile_draft(
         ServiceError::InvalidInput("entrypoint profile resolved no anchors".to_string())
     })?;
     let entity_limit = budget.nodes();
-    let read_budget = RepositoryGraphReadBudget::new(
-        1,
-        entity_limit.saturating_add(1),
-        budget
-            .intermediate_bytes()
-            .clamp(1, RepositoryGraphReadBudget::MAX_DECODED_BYTES),
-        entity_limit.saturating_add(1).saturating_mul(2),
-        entity_limit.saturating_add(1).saturating_mul(2),
-    )
-    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
     let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
     let mut unreachable = BTreeMap::new();
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(relation_work.intermediate_bytes);
+    if remaining_intermediate == 0 {
+        complete = false;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+    }
     if complete {
+        let read_budget = RepositoryGraphReadBudget::new(
+            1,
+            entity_limit.saturating_add(1),
+            remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+            entity_limit.saturating_add(1).saturating_mul(2),
+            entity_limit.saturating_add(1).saturating_mul(2),
+        )
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
         let all_entities = store.repository_graph_entities_page_bounded(
             generation_project(&anchor.entity),
             generation,
@@ -1689,6 +1714,16 @@ fn load_entrypoint_profile_draft(
                     candidate_query.budget = step_budget;
                     let candidate_report =
                         load_detailed_relations(store, &candidate_query, control)?;
+                    if candidate_report.generation != generation {
+                        return Err(ServiceError::RelationCursorStale {
+                            field: "entrypoint graph generation",
+                        });
+                    }
+                    if candidate_report.authored_purpose_revision != authored_purpose_revision {
+                        return Err(ServiceError::RelationCursorStale {
+                            field: "entrypoint authored purpose revision",
+                        });
+                    }
                     add_relation_work(&mut relation_work, &candidate_report.work)?;
                     if relation_work.inspected_edges > budget.edges() {
                         complete = false;
