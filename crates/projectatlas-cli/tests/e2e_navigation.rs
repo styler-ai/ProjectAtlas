@@ -98,6 +98,8 @@ const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 
 const LIB_RS_FILE_NAME: &str = "lib.rs";
 
+const COMPOSER_JSON_FILE_NAME: &str = "composer.json";
+
 const GIT_DIR_NAME: &str = ".git";
 
 const ATLAS_DIR_NAME: &str = ".projectatlas";
@@ -735,7 +737,7 @@ fn entrypoint_analysis_cli_and_mcp_share_profile_result_and_rejections()
         "pub fn root() { child(); }\nfn child() {}\nfn isolated() {}\n",
     )?;
     fs::write(
-        repo.join("composer.json"),
+        repo.join(COMPOSER_JSON_FILE_NAME),
         r#"{"autoload":{"psr-4":{"Parity\\":"src/"}}}"#,
     )?;
     fs::write(
@@ -9293,7 +9295,7 @@ fn composer_shaped_php_cli_mcp_and_incremental_refresh_agree() -> Result<(), Box
         fs::write(repo.join(path), source)?;
     }
     fs::write(
-        repo.join("composer.json"),
+        repo.join(COMPOSER_JSON_FILE_NAME),
         r#"{
   "name": "atlas/composer-fixture",
   "autoload": {"psr-4": {"Atlas\\": "src/"}}

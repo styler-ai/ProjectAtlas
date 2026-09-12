@@ -466,6 +466,16 @@ const MCP_RELATION_ANALYSIS_MODE_IMPACT: &str = "impact";
 const MCP_RELATION_ANALYSIS_MODE_TRACE: &str = "trace";
 /// Explicit entrypoint-profile reachability mode.
 const MCP_RELATION_ANALYSIS_MODE_ENTRYPOINT: &str = "entrypoint";
+/// Default entrypoint profile name.
+const MCP_ENTRYPOINT_PROFILE_DEFAULT_NAME: &str = "entrypoint-profile";
+/// MCP validation error when entrypoint analysis receives federated stores.
+const MCP_ERROR_ENTRYPOINT_FEDERATED: &str = "entrypoint profiles require one project root";
+/// Prefix for invalid entrypoint anchor JSON.
+const MCP_ERROR_ENTRYPOINT_ANCHORS_PREFIX: &str =
+    "entrypoints must contain exact RelationAnchor JSON objects: ";
+/// MCP validation error for entrypoint controls on another analysis mode.
+const MCP_ERROR_ENTRYPOINT_CONTROLS_MODE: &str =
+    "entrypoint profile controls require analysis_mode=entrypoint";
 /// Default working-tree VCS impact selection.
 const MCP_RELATION_ANALYSIS_VCS_WORKING_TREE: &str = "working_tree";
 /// Staged-index VCS impact selection.
@@ -9185,7 +9195,7 @@ impl ProjectAtlasMcpServer {
                 && matches!(&stores, SymbolRelationStores::Federated(_))
             {
                 return Err(CliError::Service(ServiceError::InvalidInput(
-                    "entrypoint profiles require one project root".to_string(),
+                    MCP_ERROR_ENTRYPOINT_FEDERATED.to_string(),
                 )));
             }
             let entrypoint_profile = if mode == RelationAnalysisMode::Entrypoint {
@@ -9195,9 +9205,9 @@ impl ProjectAtlasMcpServer {
                         .map(|value| serde_json::from_str::<RelationAnchor>(value))
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|error| {
-                            CliError::Service(ServiceError::InvalidInput(format!(
-                                "entrypoints must contain exact RelationAnchor JSON objects: {error}"
-                            )))
+                            let mut message = MCP_ERROR_ENTRYPOINT_ANCHORS_PREFIX.to_string();
+                            message.push_str(&error.to_string());
+                            CliError::Service(ServiceError::InvalidInput(message))
                         })?,
                     _ => vec![relations.anchor.clone()],
                 };
@@ -9212,7 +9222,7 @@ impl ProjectAtlasMcpServer {
                     name: params
                         .profile_name
                         .clone()
-                        .unwrap_or_else(|| "entrypoint-profile".to_string()),
+                        .unwrap_or_else(|| MCP_ENTRYPOINT_PROFILE_DEFAULT_NAME.to_string()),
                     anchors,
                     relations: relation_families,
                 })
@@ -9228,7 +9238,7 @@ impl ProjectAtlasMcpServer {
                         .is_some_and(|items| !items.is_empty())
                 {
                     return Err(CliError::Service(ServiceError::InvalidInput(
-                        "entrypoint profile controls require analysis_mode=entrypoint".to_string(),
+                        MCP_ERROR_ENTRYPOINT_CONTROLS_MODE.to_string(),
                     )));
                 }
                 None
@@ -9398,9 +9408,9 @@ impl ProjectAtlasMcpServer {
                     .map(|value| serde_json::from_str::<RelationAnchor>(value))
                     .transpose()
                     .map_err(|error| {
-                        CliError::Service(ServiceError::InvalidInput(format!(
-                            "entrypoints must contain exact RelationAnchor JSON objects: {error}"
-                        )))
+                        let mut message = MCP_ERROR_ENTRYPOINT_ANCHORS_PREFIX.to_string();
+                        message.push_str(&error.to_string());
+                        CliError::Service(ServiceError::InvalidInput(message))
                     })?
                     .map(|anchor| match anchor {
                         RelationAnchor::File { file } | RelationAnchor::Symbol { file, .. } => {
