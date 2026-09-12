@@ -2191,7 +2191,7 @@ fn entrypoint_report_complete(report: &DetailedRelationReport) -> bool {
         && report.rows.iter().all(|row| {
             matches!(
                 row.relation.resolution(),
-                RelationResolution::Resolved { .. }
+                RelationResolution::Resolved { .. } | RelationResolution::External { .. }
             ) && row.relation.completeness() == Completeness::Complete
                 && trusted_relation_row(row)
         })

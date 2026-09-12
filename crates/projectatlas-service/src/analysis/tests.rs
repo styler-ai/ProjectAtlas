@@ -989,6 +989,44 @@ fn entrypoint_profile_marks_unanchorable_local_targets_inconclusive() -> Result<
             }),
         "an external resolved target incorrectly made complete entrypoint coverage partial",
     )?;
+
+    let (_temp, store) = analysis_store_with_external_candidate()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "external-candidate-control".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.unreachable_candidates > 0
+        }) && report.findings.iter().any(|finding| {
+            finding.status == AnalysisStatus::Candidate
+                && finding.nodes.iter().any(|node| {
+                    matches!(
+                        node.node.entity.selector(),
+                        EntitySelector::Symbol { symbol }
+                            if symbol.name.as_str() == "d_unused"
+                    )
+                })
+        }),
+        "an external candidate relation did not remain valid negative evidence",
+    )?;
     Ok(())
 }
 
@@ -3285,18 +3323,24 @@ fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
 fn analysis_store_with_coverage(
     include_tools_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(include_tools_coverage, None)
+    analysis_store_with_options(include_tools_coverage, None, false)
 }
 
 fn analysis_store_with_target(
     target_selector: EntitySelector,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, Some(target_selector))
+    analysis_store_with_options(true, Some(target_selector), false)
+}
+
+fn analysis_store_with_external_candidate()
+-> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(true, None, true)
 }
 
 fn analysis_store_with_options(
     include_tools_coverage: bool,
     target_selector: Option<EntitySelector>,
+    external_candidate: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
@@ -3328,6 +3372,20 @@ fn analysis_store_with_options(
     let guide = entity("docs/guide.md")?;
     let extra_target = target_selector
         .map(|selector| GraphEntity::new(project, selector, generation))
+        .transpose()?;
+    let candidate_external = external_candidate
+        .then(|| {
+            GraphEntity::new(
+                project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new("crates.io")?,
+                        identity: GraphIdentityText::new("candidate@1")?,
+                    },
+                },
+                generation,
+            )
+        })
         .transpose()?;
     let symbol_entity = |path: &str, name: &str, signature: &str| {
         GraphEntity::new(
@@ -3424,6 +3482,16 @@ fn analysis_store_with_options(
             relation(&a, target, GraphRelationKind::Legacy(RelationKind::Calls))?
         };
         relations.push(relation);
+    }
+    if let Some(target) = candidate_external.as_ref() {
+        relations.push(LogicalRelation::new(
+            &d_unused,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::external(target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
     }
     let mut coverage_paths = vec!["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"];
     if extra_target
@@ -3544,6 +3612,9 @@ fn analysis_store_with_options(
     })?;
     let mut entities = vec![a, b, c, guide, a_long, d_unused, b_hub, c_aux];
     if let Some(target) = extra_target {
+        entities.push(target);
+    }
+    if let Some(target) = candidate_external {
         entities.push(target);
     }
     publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
