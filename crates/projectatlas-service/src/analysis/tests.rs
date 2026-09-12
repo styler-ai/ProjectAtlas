@@ -1133,6 +1133,136 @@ fn entrypoint_profile_rejects_candidate_generation_and_purpose_changes()
 }
 
 #[test]
+fn entrypoint_profile_rejects_generation_change_after_empty_candidate_page()
+-> Result<(), Box<dyn Error>> {
+    let (temp, stale_store) = analysis_store()?;
+    let root = temp.path().join("analysis-service");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let refreshed = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let refreshed_for_observer = Rc::clone(&refreshed);
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.content_selection = projectatlas_core::language::ContentSelection::Source;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(30),
+        Some(30),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "empty-candidate-page-stale".to_string(),
+        anchors: vec![
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            },
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+            },
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("tools/c.rs"))?,
+            },
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                name: "a_long".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some("fn a_long()".to_string()),
+            },
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                name: "d_unused".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some("fn d_unused()".to_string()),
+            },
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+                name: "b_hub".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some("fn b_hub()".to_string()),
+            },
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("tools/c.rs"))?,
+                name: "c_aux".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some("fn c_aux()".to_string()),
+            },
+        ],
+        relations: vec![
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Legacy(RelationKind::Contains),
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+        ],
+    });
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::CandidateEnumeration
+                && !refreshed_for_observer.replace(true)
+                && let Some(mut writer) = writer_for_observer.borrow_mut().take()
+                && let Ok(refresh) = writer.begin_index_projection_refresh("analysis-service")
+            {
+                drop(refresh.complete());
+            }
+        },
+        || load_relation_analysis(&stale_store, &query, None),
+    );
+    require(
+        refreshed.get()
+            && stale
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("typed graph generation")),
+        "empty candidate enumeration did not reject a generation transition",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_does_not_use_disabled_occurrences_as_row_budget() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "disabled-occurrence-row-budget".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete),
+        "disabled occurrence collection incorrectly constrained entrypoint relation rows",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_bounds_candidate_entity_hydration_by_remaining_bytes()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;

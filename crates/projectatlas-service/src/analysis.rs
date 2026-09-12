@@ -42,6 +42,8 @@ mod analysis_test_observer {
             /// Intermediate bytes left after relation traversal.
             remaining_intermediate_bytes: u64,
         },
+        /// The repository-wide candidate page has been reduced to exact candidates.
+        CandidateEnumeration,
         /// Adapter-specific output fitting has begun under the retained request control.
         OutputRendering,
     }
@@ -1504,15 +1506,20 @@ fn load_entrypoint_profile_draft(
         for anchor in frontier.drain(..) {
             for relation in &profile.relations {
                 check_control(control)?;
-                let step_budget =
-                    match entrypoint_step_budget(budget, &relation_work, reachable.len(), 0)? {
-                        Ok(step_budget) => step_budget,
-                        Err(limit) => {
-                            complete = false;
-                            push_limit(&mut reached_limits, limit);
-                            break 'profile;
-                        }
-                    };
+                let step_budget = match entrypoint_step_budget(
+                    budget,
+                    &relation_work,
+                    reachable.len(),
+                    0,
+                    query.relations.include_occurrences,
+                )? {
+                    Ok(step_budget) => step_budget,
+                    Err(limit) => {
+                        complete = false;
+                        push_limit(&mut reached_limits, limit);
+                        break 'profile;
+                    }
+                };
                 let mut relation_query = query.relations.clone();
                 relation_query.anchor = anchor.clone();
                 relation_query.relation = Some(*relation);
@@ -1698,7 +1705,22 @@ fn load_entrypoint_profile_draft(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::CandidateEnumeration,
+        );
         if complete {
+            let current_generation = store.repository_graph_generation()?.ok_or_else(|| {
+                ServiceError::InvalidInput(
+                    "repository graph has no complete generation for entrypoint analysis"
+                        .to_string(),
+                )
+            })?;
+            if current_generation != generation {
+                return Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation",
+                });
+            }
             for entity in candidate_entities {
                 check_control(control)?;
                 if !complete {
@@ -1716,6 +1738,7 @@ fn load_entrypoint_profile_draft(
                         &relation_work,
                         reachable.len(),
                         unreachable.len(),
+                        query.relations.include_occurrences,
                     )? {
                         Ok(step_budget) => step_budget,
                         Err(limit) => {
@@ -2199,15 +2222,20 @@ fn entrypoint_step_budget(
     work: &DetailedRelationWork,
     retained_nodes: usize,
     validated_candidates: usize,
+    include_occurrences: bool,
 ) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
     let accounted_nodes = retained_nodes.saturating_add(validated_candidates);
     let accounted_nodes = u32::try_from(accounted_nodes).unwrap_or(u32::MAX);
     let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
     let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
     let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
-    let remaining_occurrences = budget
-        .occurrences_total()
-        .saturating_sub(work.retained_occurrences);
+    let remaining_occurrences = if include_occurrences {
+        budget
+            .occurrences_total()
+            .saturating_sub(work.retained_occurrences)
+    } else {
+        budget.occurrences_total()
+    };
     let remaining_intermediate = budget
         .intermediate_bytes()
         .saturating_sub(work.intermediate_bytes);
@@ -2215,8 +2243,12 @@ fn entrypoint_step_budget(
         .page_rows()
         .min(remaining_edges)
         .min(remaining_nodes)
-        .min(remaining_visited)
-        .min(remaining_occurrences);
+        .min(remaining_visited);
+    let rows = if include_occurrences {
+        rows.min(remaining_occurrences)
+    } else {
+        rows
+    };
     if remaining_edges == 0 {
         return Ok(Err(GraphLimitKind::Edges));
     }
@@ -2226,7 +2258,7 @@ fn entrypoint_step_budget(
     if remaining_visited == 0 {
         return Ok(Err(GraphLimitKind::Visited));
     }
-    if remaining_occurrences == 0 {
+    if include_occurrences && remaining_occurrences == 0 {
         return Ok(Err(GraphLimitKind::Occurrences));
     }
     if remaining_intermediate < 64 * 1_024 {
