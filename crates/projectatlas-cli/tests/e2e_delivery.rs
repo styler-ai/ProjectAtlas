@@ -169,6 +169,8 @@ const CODEX_MARKETPLACE_SNAPSHOT_DIR_NAME: &str = "marketplace-root";
 
 const CODEX_PLUGIN_RUNTIME_INTEGRATION_FILE_NAME: &str = "runtime-integration.json";
 
+const CODEX_OFFLINE_MARKER_FILE_NAME: &str = "codex-offline";
+
 const CODEX_PLUGIN_UPDATE_LOCK_FILE_NAME: &str = ".projectatlas-plugin-update.lock";
 
 #[cfg(windows)]
@@ -13896,11 +13898,11 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     );
     let fake_codex_script = if cfg!(windows) {
         format!(
-            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"upgrade\" (\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_REFERENCE%\" \"%PROJECTATLAS_FAKE_PLUGIN_REFERENCE%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"remove\" (\r\n  if exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"add\" (\r\n  xcopy /e /i /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
+            "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST%\" (\r\n    echo {{\"installed\":[],\"available\":[]}}\r\n    exit /b 0\r\n  )\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"upgrade\" (\r\n  if exist \"%PROJECTATLAS_FAKE_OFFLINE%\" exit /b 1\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_SKILL%\" \"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  copy /Y \"%PROJECTATLAS_PACKAGED_REFERENCE%\" \"%PROJECTATLAS_FAKE_PLUGIN_REFERENCE%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"remove\" (\r\n  if exist \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"add\" (\r\n  xcopy /e /i /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" exit /b 1\r\nexit /b 0\r\n"
         )
     } else {
         format!(
-            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"upgrade\" ]; then\n  cp \"$PROJECTATLAS_PACKAGED_SKILL\" \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\"\n  if [ $? -ne 0 ]; then exit 1; fi\n  cp \"$PROJECTATLAS_PACKAGED_REFERENCE\" \"$PROJECTATLAS_FAKE_PLUGIN_REFERENCE\" || exit 1\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"remove\" ]; then\n  rm -rf -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  mkdir -p -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\" || exit 1\n  cp -R \"$PROJECTATLAS_FAKE_PLUGIN_ROOT/.\" \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT/\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
+            "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  if [ ! -f \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_MANIFEST\" ]; then\n    printf '%s\\n' '{{\"installed\":[],\"available\":[]}}'\n    exit 0\n  fi\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"upgrade\" ]; then\n  if [ -f \"$PROJECTATLAS_FAKE_OFFLINE\" ]; then exit 1; fi\n  cp \"$PROJECTATLAS_PACKAGED_SKILL\" \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\"\n  if [ $? -ne 0 ]; then exit 1; fi\n  cp \"$PROJECTATLAS_PACKAGED_REFERENCE\" \"$PROJECTATLAS_FAKE_PLUGIN_REFERENCE\" || exit 1\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"remove\" ]; then\n  rm -rf -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  mkdir -p -- \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT\" || exit 1\n  cp -R \"$PROJECTATLAS_FAKE_PLUGIN_ROOT/.\" \"$PROJECTATLAS_FAKE_INSTALLED_PLUGIN_ROOT/\"\n  exit $?\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  exit 1\nfi\nexit 0\n"
         )
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
@@ -13944,6 +13946,43 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         }
     }
     let ready_state = repository_filesystem_snapshot(&codex_dir)?;
+    let installed_manifest = installed_cache
+        .join(CODEX_PLUGIN_MANIFEST_DIR)
+        .join("plugin.json");
+    fs::remove_file(&installed_manifest)?;
+    let offline_marker = isolated_home.join(CODEX_OFFLINE_MARKER_FILE_NAME);
+    fs::write(&offline_marker, b"offline")?;
+    fs::write(&fake_codex_log, b"")?;
+    let absent_plugin_output = run_plugin_installer_with_codex_fixture(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    fs::remove_file(&offline_marker)?;
+    let absent_plugin_output_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&absent_plugin_output.stdout),
+        String::from_utf8_lossy(&absent_plugin_output.stderr)
+    );
+    let absent_plugin_calls = fs::read_to_string(&fake_codex_log)?;
+    let remove_call =
+        absent_plugin_calls.find("plugin remove projectatlas --marketplace projectatlas");
+    let add_call = absent_plugin_calls.find("plugin add projectatlas --marketplace projectatlas");
+    if !absent_plugin_output_text.contains(&format!(
+        "Codex ProjectAtlas plugin marketplace updated to {expected_release_tag}."
+    )) || absent_plugin_calls.contains("plugin marketplace upgrade projectatlas")
+        || remove_call.is_none()
+        || add_call.is_none()
+        || remove_call >= add_call
+        || repository_filesystem_snapshot(&codex_dir)? != ready_state
+    {
+        return Err(io::Error::other(format!(
+            "offline absent-plugin repair did not use the intact marketplace snapshot:\n{absent_plugin_output_text}\ncalls:\n{absent_plugin_calls}"
+        ))
+        .into());
+    }
     for (artifact_label, plugin_asset, expected_bytes) in [
         ("source", &plugin_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
         (
@@ -28470,6 +28509,10 @@ fn projectatlas_plugin_installer_command_with_optional_path_and_home(
             .env(
                 "PROJECTATLAS_FAKE_CODEX_LOG",
                 home.join(FAKE_CODEX_LOG_FILE),
+            )
+            .env(
+                "PROJECTATLAS_FAKE_OFFLINE",
+                home.join(CODEX_OFFLINE_MARKER_FILE_NAME),
             )
             .env(
                 "PROJECTATLAS_FAKE_CODEX_CONFIG",

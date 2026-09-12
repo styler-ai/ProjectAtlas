@@ -4519,6 +4519,13 @@ function Update-ProjectAtlasCodexPlugin {
             $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
             return
         }
+        if (-not $currentPluginVersion) {
+            $marketplacePluginSourcePath = Join-Path $stateSnapshot.MarketplaceRootPath "plugins\projectatlas"
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $marketplacePluginSourcePath) -eq $runtimeVersion `
+                -and (Test-ProjectAtlasCodexSkillArtifacts $marketplacePluginSourcePath)) {
+                $currentSourceArtifactsReady = $true
+            }
+        }
         $updateSucceeded = $false
         $restoreSucceeded = $false
         try {

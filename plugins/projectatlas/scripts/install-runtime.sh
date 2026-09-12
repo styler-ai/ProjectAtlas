@@ -2214,6 +2214,12 @@ update_codex_plugin_locked() {
       codex_plugin_update_preserved_prior_state=true
       return 0
     fi
+    if [ -z "$current_plugin_version" ] &&
+      codex_projectatlas_plugin_artifact_ready \
+        "$runtime_version" \
+        "$codex_state_snapshot_marketplace_root_path/plugins/projectatlas"; then
+      source_artifacts_ready=true
+    fi
     update_succeeded=false
     restore_succeeded=false
     refresh_succeeded=true
