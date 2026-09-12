@@ -1442,6 +1442,7 @@ fn load_entrypoint_profile_draft(
         .ok_or_else(|| ServiceError::InvalidInput("entrypoint profile is missing".to_string()))?;
     let started = Instant::now();
     let budget = bounded_analysis_budget(query.relations.budget)?;
+    validate_entrypoint_profile_budget(profile, budget)?;
     let deadline = started
         .checked_add(Duration::from_millis(budget.deadline_ms()))
         .unwrap_or(started);
@@ -1797,6 +1798,25 @@ fn load_entrypoint_profile_draft(
         external_relation_identities: BTreeSet::new(),
         control: analysis_control,
     })
+}
+
+/// Reject a profile whose required initial anchors cannot fit its shared state.
+fn validate_entrypoint_profile_budget(
+    profile: &EntrypointProfile,
+    budget: DetailedRelationBudget,
+) -> ServiceResult<()> {
+    let anchor_count = u32::try_from(profile.anchors.len()).unwrap_or(u32::MAX);
+    if anchor_count > budget.nodes() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile anchor count exceeds the node budget".to_string(),
+        ));
+    }
+    if anchor_count > budget.visited() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile anchor count exceeds the visited budget".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Add one detailed traversal work ledger without widening its types.

@@ -1006,6 +1006,75 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         "ambiguous or dynamic references became a confident entrypoint result",
     )?;
 
+    let mut over_budget = query.clone();
+    over_budget.entrypoint_profile = Some(EntrypointProfile {
+        name: "over-budget".to_string(),
+        anchors: vec![
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            },
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+            },
+        ],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    over_budget.relations.budget = over_budget.relations.budget.with_aggregate_limits(
+        Some(10),
+        Some(1),
+        Some(1),
+        None,
+        Some(256 * 1_024),
+        None,
+    )?;
+    let preflight_seen = Rc::new(Cell::new(false));
+    let preflight_seen_observer = Rc::clone(&preflight_seen);
+    let over_budget_result = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal {
+                preflight_seen_observer.set(true);
+            }
+        },
+        || load_relation_analysis(&store, &over_budget, None),
+    );
+    let preflight_error = over_budget_result.as_ref().err().map(ToString::to_string);
+    require(
+        !preflight_seen.get()
+            && preflight_error
+                .as_deref()
+                .is_some_and(|error| error.contains("anchor count exceeds the node budget")),
+        "over-budget entrypoint anchors entered traversal before typed rejection",
+    )?;
+
+    let publication_before_cancel = store.index_publication()?;
+    let cancellation = IndexCancellation::new();
+    let cancel_seen = Rc::new(Cell::new(false));
+    let cancel_seen_observer = Rc::clone(&cancel_seen);
+    let cancellation_for_observer = cancellation.clone();
+    let cancel_control = IndexWorkControl::with_deadline(
+        cancellation.clone(),
+        Instant::now() + std::time::Duration::from_secs(5),
+    );
+    let cancelled = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal && !cancel_seen_observer.replace(true) {
+                cancellation_for_observer.cancel();
+            }
+        },
+        || load_relation_analysis(&store, &query, Some(&cancel_control)),
+    );
+    require(
+        cancel_seen.get()
+            && matches!(
+                cancelled,
+                Err(ServiceError::Db(DbError::IndexWork(
+                    projectatlas_core::IndexWorkFailure::Cancelled { .. }
+                )))
+            )
+            && store.index_publication()? == publication_before_cancel,
+        "cancelled entrypoint traversal returned a partial result or changed publication",
+    )?;
+
     let (_stale_temp, stale_store) = analysis_store()?;
     let root = _stale_temp.path().join("analysis-service");
     let database = root.join("projectatlas.db");
@@ -1082,6 +1151,11 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         ))
         .into());
     }
+    let cycle_replay = fitted_report(&store, &cycle)?;
+    require(
+        cycle_report == cycle_replay,
+        "identical multi-anchor entrypoint requests were not deterministic",
+    )?;
 
     let mut bounded = query;
     bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
