@@ -7,7 +7,7 @@ mod analysis_test_observer {
     use std::cell::RefCell;
 
     /// Named production phase reached by one synchronous analysis request.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     pub(super) enum AnalysisPhaseEvent {
         /// Exact byte ledger passed to the architecture community projection.
         CompositionBudget {
@@ -30,6 +30,13 @@ mod analysis_test_observer {
         ClassificationHydration,
         /// One bounded candidate relation traversal is about to run.
         CandidateTraversal,
+        /// One candidate relation report has returned its typed truncation state.
+        CandidateReport {
+            /// Whether the candidate report has a resumable continuation.
+            has_continuation: bool,
+            /// Whether the candidate report reached the edge limit.
+            has_edges_limit: bool,
+        },
         /// The repository-wide candidate entity page is about to run.
         CandidateEntityHydration {
             /// Intermediate bytes left after relation traversal.
@@ -1493,7 +1500,7 @@ fn load_entrypoint_profile_draft(
             for relation in &profile.relations {
                 check_control(control)?;
                 let step_budget =
-                    match entrypoint_step_budget(budget, &relation_work, reachable.len())? {
+                    match entrypoint_step_budget(budget, &relation_work, reachable.len(), 0)? {
                         Ok(step_budget) => step_budget,
                         Err(limit) => {
                             complete = false;
@@ -1705,15 +1712,19 @@ fn load_entrypoint_profile_draft(
                 })?;
                 let mut candidate_report_anchor = None;
                 for relation in &profile.relations {
-                    let step_budget =
-                        match entrypoint_step_budget(budget, &relation_work, reachable.len())? {
-                            Ok(step_budget) => step_budget,
-                            Err(limit) => {
-                                complete = false;
-                                push_limit(&mut reached_limits, limit);
-                                break;
-                            }
-                        };
+                    let step_budget = match entrypoint_step_budget(
+                        budget,
+                        &relation_work,
+                        reachable.len(),
+                        unreachable.len(),
+                    )? {
+                        Ok(step_budget) => step_budget,
+                        Err(limit) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, limit);
+                            break;
+                        }
+                    };
                     let mut candidate_query = query.relations.clone();
                     candidate_query.anchor = candidate_anchor.clone();
                     candidate_query.relation = Some(*relation);
@@ -1727,6 +1738,15 @@ fn load_entrypoint_profile_draft(
                     );
                     let candidate_report =
                         load_detailed_relations(store, &candidate_query, control)?;
+                    #[cfg(test)]
+                    analysis_test_observer::notify(
+                        analysis_test_observer::AnalysisPhaseEvent::CandidateReport {
+                            has_continuation: candidate_report.continuation.is_some(),
+                            has_edges_limit: candidate_report
+                                .reached_limits
+                                .contains(&GraphLimitKind::Edges),
+                        },
+                    );
                     if candidate_report.generation != generation {
                         return Err(ServiceError::RelationCursorStale {
                             field: "entrypoint graph generation",
@@ -1747,6 +1767,12 @@ fn load_entrypoint_profile_draft(
                         complete = false;
                         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                         break;
+                    }
+                    for limit in &candidate_report.reached_limits {
+                        push_limit(&mut reached_limits, *limit);
+                    }
+                    if candidate_report.continuation.is_some() {
+                        push_limit(&mut reached_limits, GraphLimitKind::Rows);
                     }
                     if !entrypoint_report_complete(&candidate_report) {
                         complete = false;
@@ -2128,11 +2154,13 @@ fn entrypoint_step_budget(
     budget: DetailedRelationBudget,
     work: &DetailedRelationWork,
     retained_nodes: usize,
+    validated_candidates: usize,
 ) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
-    let retained_nodes = u32::try_from(retained_nodes).unwrap_or(u32::MAX);
+    let accounted_nodes = retained_nodes.saturating_add(validated_candidates);
+    let accounted_nodes = u32::try_from(accounted_nodes).unwrap_or(u32::MAX);
     let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
-    let remaining_nodes = budget.nodes().saturating_sub(retained_nodes);
-    let remaining_visited = budget.visited().saturating_sub(retained_nodes);
+    let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
+    let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
     let remaining_occurrences = budget
         .occurrences_total()
         .saturating_sub(work.retained_occurrences);

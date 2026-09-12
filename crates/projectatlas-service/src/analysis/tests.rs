@@ -1664,7 +1664,7 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         "identical multi-anchor entrypoint requests were not deterministic",
     )?;
 
-    let mut bounded = query;
+    let mut bounded = query.clone();
     bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
         Some(2),
         Some(4),
@@ -1673,6 +1673,49 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         Some(64 * 1_024),
         None,
     )?;
+    let mut candidate_limits = query.clone();
+    candidate_limits.relations.budget = DetailedRelationBudget::from_graph_limits(
+        projectatlas_core::graph::GraphLimits::new(50, 1, 3, 256 * 1_024)?,
+    )
+    .with_aggregate_limits(
+        Some(1),
+        Some(100),
+        Some(100),
+        Some(100),
+        Some(256 * 1_024),
+        None,
+    )?;
+    candidate_limits.relations.content_selection = ContentSelection::Source;
+    candidate_limits.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-limit-reason".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(
+            ExtendedRelationKind::References,
+        )],
+    });
+    let candidate_limit_seen = Rc::new(Cell::new(false));
+    let candidate_limit_observer = Rc::clone(&candidate_limit_seen);
+    let candidate_limit_report = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CandidateReport {
+                has_edges_limit, ..
+            } = event
+            {
+                candidate_limit_observer.set(candidate_limit_observer.get() || has_edges_limit);
+            }
+        },
+        || fitted_report(&store, &candidate_limits),
+    )?;
+    require(
+        candidate_limit_seen.get()
+            && candidate_limit_report
+                .reached_limits
+                .contains(&GraphLimitKind::Edges),
+        "candidate traversal truncation did not preserve its typed limit reason",
+    )?;
+
     let report = fitted_report(&store, &bounded)?;
     let profile = report
         .entrypoint_profile
@@ -1693,6 +1736,90 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
             && report.work.relations.visited_nodes <= 4
             && report.work.peak_intermediate_bytes <= 64 * 1_024,
         "entrypoint traversal crossed a caller aggregate ceiling",
+    )?;
+
+    let mut candidate_continuation = query.clone();
+    candidate_continuation.relations.budget = DetailedRelationBudget::from_graph_limits(
+        projectatlas_core::graph::GraphLimits::new(1, 1, 3, 256 * 1_024)?,
+    )
+    .with_aggregate_limits(
+        Some(100),
+        Some(100),
+        Some(100),
+        Some(100),
+        Some(256 * 1_024),
+        None,
+    )?;
+    candidate_continuation.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-continuation".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(
+            ExtendedRelationKind::References,
+        )],
+    });
+    let candidate_continuation_seen = Rc::new(Cell::new(false));
+    let candidate_continuation_observer = Rc::clone(&candidate_continuation_seen);
+    let continuation_report = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CandidateReport {
+                has_continuation: true,
+                ..
+            } = event
+            {
+                candidate_continuation_observer.set(true);
+            }
+        },
+        || fitted_report(&store, &candidate_continuation),
+    )?;
+    require(
+        candidate_continuation_seen.get()
+            && continuation_report
+                .reached_limits
+                .contains(&GraphLimitKind::Rows)
+            && continuation_report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && continuation_report.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "candidate continuation did not preserve the outer typed row limit",
+    )?;
+
+    let mut candidate_visited = query;
+    candidate_visited.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-visited".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(ExtendedRelationKind::Documents)],
+    });
+    candidate_visited.relations.budget = candidate_visited.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(100),
+        Some(2),
+        Some(100),
+        None,
+        None,
+    )?;
+    let candidate_visited_report = fitted_report(&store, &candidate_visited)?;
+    require(
+        candidate_visited_report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && candidate_visited_report
+                .reached_limits
+                .contains(&GraphLimitKind::Visited)
+            && candidate_visited_report.work.analyzed_nodes == 2
+            && candidate_visited_report.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "validated disconnected candidates escaped the shared visited ceiling",
     )?;
 
     let mut node_bounded = bounded;
