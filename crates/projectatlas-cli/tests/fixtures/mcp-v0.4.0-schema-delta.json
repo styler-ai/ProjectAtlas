@@ -222,7 +222,7 @@
         "intermediate_bytes": {"description": "Maximum decoded, cursor, and service-composition intermediate bytes.", "type": ["integer", "null"], "format": "uint64", "minimum": 0},
         "deadline_ms": {"description": "Maximum service-owned elapsed milliseconds.", "type": ["integer", "null"], "format": "uint64", "minimum": 0},
         "output_bytes": {"description": "Maximum encoded bytes admitted to the detailed response.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
-        "analysis_mode": {"description": "Closed analysis mode: `architecture`, `impact`, or `trace`.", "type": ["string", "null"]},
+        "analysis_mode": {"description": "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`.", "type": ["string", "null"]},
         "trace_target": {"description": "Exact target symbol name for trace mode.", "type": ["string", "null"]},
         "trace_target_file": {"description": "Exact target file for trace mode; alone selects a file target.", "type": ["string", "null"]},
         "trace_target_parent": {"description": "Exact target parent for symbol trace mode.", "type": ["string", "null"]},

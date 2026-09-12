@@ -456,7 +456,7 @@ const LANGUAGE_SUPPORT_FILE_NAME: &str = "language-support.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12f49d956a18ad6fcd";
+const MCP_TOOLS_SHA256: &str = "9a01e84163fd5a60cd850a6ccb2edb0c4cdb60bc3bd9c7cec9a61541c980b4c5";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
