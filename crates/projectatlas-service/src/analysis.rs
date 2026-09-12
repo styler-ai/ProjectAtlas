@@ -103,9 +103,9 @@ use super::{
 };
 use impact::{LoadedVcs, digest_vcs_paths, impact_findings, load_vcs_paths};
 use projectatlas_core::graph::{
-    Completeness, ConfidenceClass, EntitySelector, ExtendedRelationKind, GraphEntity,
-    GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, ProjectInstanceId,
-    RelationResolution,
+    Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExtendedRelationKind,
+    GraphEntity, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
+    ProjectInstanceId, RelationResolution,
 };
 #[cfg(test)]
 use projectatlas_core::language::ContentClassification;
@@ -1523,6 +1523,7 @@ fn load_entrypoint_profile_draft(
                     reachable.len(),
                     0,
                     anchor_is_retained,
+                    false,
                     query.relations.include_occurrences,
                 )? {
                     Ok(step_budget) => step_budget,
@@ -1573,7 +1574,7 @@ fn load_entrypoint_profile_draft(
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     break 'profile;
                 }
-                complete &= trusted_node_coverage(&report.anchor);
+                complete &= trusted_node_coverage(&report.anchor, &profile.relations);
                 let anchor_key = report.anchor.entity.key().canonical_identity().to_string();
                 visited.insert(anchor_key);
                 insert_node(&mut reachable, &report.anchor);
@@ -1583,7 +1584,7 @@ fn load_entrypoint_profile_draft(
                         row.relation.resolution(),
                         RelationResolution::Resolved { .. } | RelationResolution::External { .. }
                     ) && row.relation.completeness() == Completeness::Complete;
-                    complete &= resolved && trusted_relation_row(row);
+                    complete &= resolved && trusted_relation_row(row, &profile.relations);
                     insert_node(&mut reachable, &row.source);
                     if let Some(target) = &row.target
                         && entity_selected(target)
@@ -1664,6 +1665,7 @@ fn load_entrypoint_profile_draft(
     })?;
     let entity_limit = budget.nodes();
     let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
+    let mut retained_candidate_keys = reachable_keys.clone();
     let mut unreachable = BTreeMap::new();
     let remaining_intermediate = budget
         .intermediate_bytes()
@@ -1750,19 +1752,26 @@ fn load_entrypoint_profile_draft(
                 if !complete {
                     break;
                 }
+                let candidate_key = entity.key().canonical_identity().to_string();
                 let candidate_anchor = relation_anchor_for_entity(entity).ok_or_else(|| {
                     ServiceError::InvalidInput(
                         "entrypoint candidate is not addressable by an exact anchor".to_string(),
                     )
                 })?;
                 let mut candidate_report_anchor = None;
+                let mut candidate_unretained_keys = BTreeSet::new();
                 for relation in &profile.relations {
+                    let accounted_candidates = retained_candidate_keys
+                        .len()
+                        .saturating_sub(reachable.len());
+                    let anchor_is_retained = retained_candidate_keys.contains(&candidate_key);
                     let step_budget = match entrypoint_step_budget(
                         budget,
                         &relation_work,
                         reachable.len(),
-                        unreachable.len(),
-                        false,
+                        accounted_candidates,
+                        anchor_is_retained,
+                        true,
                         query.relations.include_occurrences,
                     )? {
                         Ok(step_budget) => step_budget,
@@ -1815,23 +1824,38 @@ fn load_entrypoint_profile_draft(
                         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                         break;
                     }
+                    candidate_unretained_keys.extend(candidate_report_unretained_local_keys(
+                        &candidate_report,
+                        &retained_candidate_keys,
+                    ));
+                    if candidate_unretained_keys.len()
+                        > usize::try_from(budget.nodes().saturating_sub(
+                            u32::try_from(retained_candidate_keys.len()).unwrap_or(u32::MAX),
+                        ))
+                        .unwrap_or(usize::MAX)
+                    {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                        push_limit(&mut reached_limits, GraphLimitKind::Visited);
+                        break;
+                    }
                     for limit in &candidate_report.reached_limits {
                         push_limit(&mut reached_limits, *limit);
                     }
                     if candidate_report.continuation.is_some() {
                         push_limit(&mut reached_limits, GraphLimitKind::Rows);
                     }
-                    if !entrypoint_report_complete(&candidate_report) {
+                    if !entrypoint_report_complete(&candidate_report, &profile.relations) {
                         complete = false;
                         break;
                     }
                     candidate_report_anchor.get_or_insert(candidate_report.anchor);
                 }
                 if complete && let Some(candidate_report_anchor) = candidate_report_anchor {
-                    unreachable.insert(
-                        entity.key().canonical_identity().to_string(),
-                        candidate_report_anchor,
-                    );
+                    unreachable.insert(candidate_key.clone(), candidate_report_anchor);
+                    for key in candidate_unretained_keys {
+                        retained_candidate_keys.insert(key);
+                    }
                 }
             }
         }
@@ -2248,6 +2272,7 @@ fn entrypoint_step_budget(
     retained_nodes: usize,
     validated_candidates: usize,
     anchor_is_retained: bool,
+    candidate_anchor_overhead: bool,
     include_occurrences: bool,
 ) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
     let accounted_nodes = retained_nodes.saturating_add(validated_candidates);
@@ -2256,12 +2281,16 @@ fn entrypoint_step_budget(
     let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
     let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
     let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
-    let step_nodes = if anchor_is_retained {
+    let step_nodes = if candidate_anchor_overhead {
+        remaining_nodes.saturating_add(1)
+    } else if anchor_is_retained {
         budget.nodes().saturating_sub(validated_candidates)
     } else {
         remaining_nodes
     };
-    let step_visited = if anchor_is_retained {
+    let step_visited = if candidate_anchor_overhead {
+        remaining_visited.saturating_add(1)
+    } else if anchor_is_retained {
         budget.visited().saturating_sub(validated_candidates)
     } else {
         remaining_visited
@@ -2328,41 +2357,83 @@ fn generation_project(entity: &GraphEntity) -> ProjectInstanceId {
     entity.key().project()
 }
 
-/// Return whether a detailed node carries trusted local coverage.
-fn trusted_node_coverage(node: &DetailedRelationNode) -> bool {
-    !node.coverage.is_empty()
+/// Return whether a detailed node carries trusted coverage for admitted relations.
+fn trusted_node_coverage(
+    node: &DetailedRelationNode,
+    admitted_relations: &[GraphRelationKind],
+) -> bool {
+    let applies = |coverage: &CoverageRecord| {
+        coverage
+            .relation()
+            .is_none_or(|relation| admitted_relations.contains(&relation))
+    };
+    node.coverage.iter().any(&applies)
         && node
             .coverage
             .iter()
+            .filter(|coverage| applies(coverage))
             .all(|coverage| coverage_trust(coverage.state()) == CoverageTrustState::Trusted)
 }
 
 /// Return whether every local endpoint in one relation row has trusted coverage.
-fn trusted_relation_row(row: &DetailedRelationRow) -> bool {
-    trusted_node_coverage(&row.source)
+fn trusted_relation_row(
+    row: &DetailedRelationRow,
+    admitted_relations: &[GraphRelationKind],
+) -> bool {
+    trusted_node_coverage(&row.source, admitted_relations)
         && row.target.as_ref().is_none_or(|target| {
             matches!(target.entity.selector(), EntitySelector::External { .. })
-                || trusted_node_coverage(target)
+                || trusted_node_coverage(target, admitted_relations)
         })
-        && row.path.iter().all(trusted_node_coverage)
+        && row
+            .path
+            .iter()
+            .all(|node| trusted_node_coverage(node, admitted_relations))
 }
 
 /// Return whether one terminal candidate traversal supports a safe negative.
-fn entrypoint_report_complete(report: &DetailedRelationReport) -> bool {
+fn entrypoint_report_complete(
+    report: &DetailedRelationReport,
+    admitted_relations: &[GraphRelationKind],
+) -> bool {
     matches!(
         report.total,
         RelationTotalState::Exact(total) if total == u64::from(report.returned)
     ) && !report.truncated
         && report.continuation.is_none()
         && report.reached_limits.is_empty()
-        && trusted_node_coverage(&report.anchor)
+        && trusted_node_coverage(&report.anchor, admitted_relations)
         && report.rows.iter().all(|row| {
             matches!(
                 row.relation.resolution(),
                 RelationResolution::Resolved { .. } | RelationResolution::External { .. }
             ) && row.relation.completeness() == Completeness::Complete
-                && trusted_relation_row(row)
+                && trusted_relation_row(row, admitted_relations)
         })
+}
+
+/// Return local identities exposed by candidate traversal that were not retained already.
+fn candidate_report_unretained_local_keys(
+    report: &DetailedRelationReport,
+    retained_keys: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let mut retain = |node: &DetailedRelationNode| {
+        if !matches!(node.entity.selector(), EntitySelector::External { .. })
+            && !retained_keys.contains(node.entity.key().canonical_identity())
+        {
+            keys.insert(node.entity.key().canonical_identity().to_string());
+        }
+    };
+    retain(&report.anchor);
+    for row in &report.rows {
+        retain(&row.source);
+        if let Some(target) = row.target.as_ref() {
+            retain(target);
+        }
+        row.path.iter().for_each(&mut retain);
+    }
+    keys
 }
 
 /// Clamp the existing traversal budget to analysis product ceilings.

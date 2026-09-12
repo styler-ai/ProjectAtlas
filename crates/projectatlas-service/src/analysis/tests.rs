@@ -1317,6 +1317,116 @@ fn entrypoint_profile_inspects_retained_frontier_at_exact_node_limit() -> Result
 }
 
 #[test]
+fn entrypoint_profile_reuses_retained_candidate_endpoints() -> Result<(), Box<dyn Error>> {
+    for (target, expected_coverage) in [
+        ("reachable", EntrypointProfileCoverage::Complete),
+        ("new", EntrypointProfileCoverage::Partial),
+    ] {
+        let (_temp, store) = analysis_store_with_candidate_relation(target)?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.content_selection = ContentSelection::Source;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(7),
+            Some(7),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: format!("candidate-endpoint-{target}"),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                GraphRelationKind::Legacy(RelationKind::Contains),
+                GraphRelationKind::Legacy(RelationKind::DependsOn),
+            ],
+        });
+        let report = fitted_report(&store, &query)?;
+        let profile = report
+            .entrypoint_profile
+            .as_ref()
+            .ok_or("candidate endpoint profile metadata missing")?;
+        if expected_coverage == EntrypointProfileCoverage::Complete {
+            require(
+                profile.coverage == expected_coverage
+                    && profile.unreachable_candidates == 1
+                    && !report.reached_limits.contains(&GraphLimitKind::Nodes)
+                    && !report.reached_limits.contains(&GraphLimitKind::Visited),
+                "a retained candidate endpoint consumed the global node or visited slot",
+            )?;
+        } else {
+            require(
+                profile.coverage == expected_coverage
+                    && profile.unreachable_candidates == 0
+                    && report.reached_limits.contains(&GraphLimitKind::Nodes)
+                    && report.reached_limits.contains(&GraphLimitKind::Visited)
+                    && report
+                        .findings
+                        .iter()
+                        .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+                "a new candidate endpoint escaped the global node or visited bound",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_scopes_coverage_to_admitted_relations() -> Result<(), Box<dyn Error>> {
+    let run = |partial_calls| -> Result<RelationAnalysisReport, Box<dyn Error>> {
+        let (_temp, store) = analysis_store_with_relation_coverage(partial_calls)?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(20),
+            Some(20),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "calls-coverage-scope".to_string(),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        fitted_report(&store, &query)
+    };
+
+    let complete = run(false)?;
+    require(
+        complete
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete),
+        "unrelated partial Documents coverage poisoned a Calls-only profile",
+    )?;
+    let partial = run(true)?;
+    require(
+        partial
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && partial.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "partial admitted Calls coverage did not remain inconclusive",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_drops_nodes_from_overflowing_retained_frontier() -> Result<(), Box<dyn Error>>
 {
     let (_temp, store) = analysis_store()?;
@@ -3964,28 +4074,40 @@ fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
 fn analysis_store_with_coverage(
     include_tools_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(include_tools_coverage, None, false, 0, false)
+    analysis_store_with_options(include_tools_coverage, None, false, 0, false, None, None)
 }
 
 fn analysis_store_with_target(
     target_selector: EntitySelector,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, Some(target_selector), false, 0, false)
+    analysis_store_with_options(true, Some(target_selector), false, 0, false, None, None)
 }
 
 fn analysis_store_with_external_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, true, 0, false)
+    analysis_store_with_options(true, None, true, 0, false, None, None)
 }
 
 fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 20, false)
+    analysis_store_with_options(true, None, false, 20, false, None, None)
 }
 
 fn analysis_store_with_document_relation() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 0, true)
+    analysis_store_with_options(true, None, false, 0, true, None, None)
+}
+
+fn analysis_store_with_candidate_relation(
+    target: &str,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(true, None, false, 0, false, Some(target), None)
+}
+
+fn analysis_store_with_relation_coverage(
+    partial_calls: bool,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(true, None, false, 0, false, None, Some(partial_calls))
 }
 
 fn analysis_store_with_options(
@@ -3994,6 +4116,8 @@ fn analysis_store_with_options(
     external_candidate: bool,
     large_candidate_count: usize,
     document_relation: bool,
+    candidate_relation_target: Option<&str>,
+    relation_coverage_partial_calls: Option<bool>,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
@@ -4073,6 +4197,25 @@ fn analysis_store_with_options(
     let d_unused = symbol_entity("src/a.rs", "d_unused", "fn d_unused()")?;
     let b_hub = symbol_entity("src/b.rs", "b_hub", "fn b_hub()")?;
     let c_aux = symbol_entity("tools/c.rs", "c_aux", "fn c_aux()")?;
+    let candidate_relation_target = candidate_relation_target
+        .map(|target| -> Result<GraphEntity, Box<dyn Error>> {
+            match target {
+                "reachable" => Ok(a.clone()),
+                "new" => Ok(GraphEntity::new(
+                    project,
+                    EntitySelector::Package {
+                        package: PackageSelector {
+                            manager: GraphIdentityText::new("cargo")?,
+                            name: GraphIdentityText::new("candidate-package")?,
+                            manifest: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                        },
+                    },
+                    generation,
+                )?),
+                _ => Err(io::Error::other("unknown candidate relation target").into()),
+            }
+        })
+        .transpose()?;
     let large_candidates = (0..large_candidate_count)
         .map(|index| {
             symbol_entity(
@@ -4189,6 +4332,13 @@ fn analysis_store_with_options(
             generation,
         )?);
     }
+    if let Some(target) = candidate_relation_target.as_ref() {
+        relations.push(relation(
+            &d_unused,
+            target,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+        )?);
+    }
     let mut coverage_paths = vec!["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"];
     if extra_target
         .as_ref()
@@ -4238,6 +4388,42 @@ fn analysis_store_with_options(
             })
             .collect::<Result<Vec<_>, Box<dyn Error>>>()?,
     );
+    if let Some(partial_calls) = relation_coverage_partial_calls {
+        let (calls_state, calls_covered, calls_omitted, calls_reason) = if partial_calls {
+            (
+                CoverageState::Partial,
+                1,
+                1,
+                Some(GraphIdentityText::new("partial calls fixture")?),
+            )
+        } else {
+            (CoverageState::Complete, 1, 0, None)
+        };
+        coverage.push(CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/a.rs"))?,
+            },
+            Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+            calls_state,
+            calls_covered,
+            calls_omitted,
+            generation,
+            calls_reason,
+            None,
+        )?);
+        coverage.push(CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/a.rs"))?,
+            },
+            Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("partial documents fixture")?),
+            None,
+        )?);
+    }
     let mut publication = store.begin_index_publication("analysis-service")?;
     publication.begin_scan_replacement()?;
     publication.upsert_scan_node_batch(&[
@@ -4309,6 +4495,9 @@ fn analysis_store_with_options(
     let mut entities = vec![a, b, c, guide, a_long, d_unused, b_hub, c_aux];
     entities.extend(large_candidates);
     if let Some(target) = extra_target {
+        entities.push(target);
+    }
+    if let Some(target) = candidate_relation_target {
         entities.push(target);
     }
     if let Some(target) = candidate_external {
