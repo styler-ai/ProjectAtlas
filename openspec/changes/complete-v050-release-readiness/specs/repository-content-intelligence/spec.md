@@ -26,6 +26,20 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **WHEN** behavior has not been established
 - **THEN** guidance explicitly abstains or selects lexical/fallback evidence and does not generalize PHP into a plural language campaign
 
+#### Scenario: Plugin refresh leaves incomplete guidance
+- **WHEN** Codex plugin acquisition succeeds during current-ref repair or stale-ref replacement but the selected plugin source or versioned installed cache has a missing or stale manifest, `SKILL.md`, or `references/language-support.md`
+- **THEN** the POSIX and Windows installers refuse refresh success even when inventory and the other artifact tree match, report the failed artifact check, and restore the prior marketplace, plugin cache, and configuration from the existing recovery snapshot
+- **AND** they discard recovery state only after verified refresh success or successful restoration; exact packaged assets remain the success case
+
+#### Scenario: Current marketplace source needs repair
+- **WHEN** the configured official marketplace already pins the required release but its source assets are missing or stale
+- **THEN** the installers snapshot prior state, refresh that configured marketplace source before removing and reinstalling the plugin, and verify both source and installed cache afterward
+- **AND** a failed marketplace refresh stops before plugin removal and restores prior state through the existing snapshot; a successful command with damaged source still fails the complete artifact check
+
+#### Scenario: Current source hides a damaged installed cache
+- **WHEN** the marketplace source matches the packaged candidate but its versioned installed cache does not
+- **THEN** the installers reject already-current readiness and attempt the existing repair flow; readiness and skill verification require matching manifests and both mandatory skill assets in both trees
+
 ### Requirement: v0.5 document extraction supports only PDF and DOCX
 #465 SHALL pin and audit the fixed `pdf-extract` 0.12.0+projectatlas guest with `lopdf` 0.44.0, the `wasmi`/`wasmi_core` 2.0.0 host, `quick-xml` 0.42.0, and `zip` 0.6.6 (ZIP default features disabled, only `deflate` enabled) plus their exact locked transitive trees. It SHALL admit only PDF content streams and stored or DEFLATE DOCX `word/document.xml`, reject encrypted or unsupported compression as typed unsupported input before text publication, and invoke no OCR, legacy DOC, spreadsheet/presentation formats, macros, scripts, remote references, arbitrary processes, or embedded recursive parsers.
 

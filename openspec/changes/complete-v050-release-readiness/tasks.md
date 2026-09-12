@@ -14,10 +14,10 @@
 
 ## 3. PHP language guidance (#339)
 
-- [ ] 3.1 Freeze PHP as the v0.5 first guidance profile after #477 acceptance; derive its syntax, symbol, relation, provenance, fallback, and abstention claims from `LANGUAGE_CAPABILITIES`, generated language-support data, PHP fixtures, and representative PHP repositories.
-- [ ] 3.2 Update only the version-matched ProjectAtlas plugin guidance and its generated support references to route PHP tasks through overview, folders, files, summary, outline, search, detailed graph evidence, and exact slice without adding a generic language-guidance framework.
-- [ ] 3.3 Prove positive PHP navigation, malformed and mixed HTML/PHP fallback, unsupported/dynamic behavior, generated-source abstention, CLI/MCP parity, version match, and representative-repository task outcomes in the owning language compatibility and installed-skill tests.
-- [ ] 3.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 3.1 Freeze PHP as the v0.5 first guidance profile after #477 acceptance; derive its syntax, symbol, relation, provenance, fallback, and abstention claims from `LANGUAGE_CAPABILITIES`, generated language-support data, PHP fixtures, and representative PHP repositories.
+- [x] 3.2 Update the version-matched ProjectAtlas plugin guidance and its generated support references to route PHP tasks through overview, folders, files, summary, outline, search, detailed graph evidence, and exact slice; require matching manifests and skill assets in both the plugin source and installed cache before installer readiness or refresh success without adding a generic language-guidance framework.
+- [x] 3.3 Prove positive PHP navigation, malformed and mixed HTML/PHP fallback, unsupported/dynamic behavior, generated-source abstention, CLI/MCP parity, version match, representative-repository task outcomes, and installer repair and restoration when the plugin source or installed cache has missing or stale manifests or skill assets in the owning language compatibility and installed-skill tests.
+- [x] 3.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 4. Reverse-caller performance decision (#342)
 
