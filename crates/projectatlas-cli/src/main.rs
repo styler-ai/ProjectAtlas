@@ -2496,7 +2496,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             let anchors = if parsed_entrypoints.is_empty() {
                                 vec![relations.anchor.clone()]
                             } else {
-                                parsed_entrypoints.clone()
+                                parsed_entrypoints
                             };
                             let relation_families = if profile_relations.is_empty() {
                                 GraphRelationKind::ALL.to_vec()

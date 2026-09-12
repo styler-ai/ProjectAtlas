@@ -1397,20 +1397,18 @@ fn validate_entrypoint_profile(profile: &EntrypointProfile) -> ServiceResult<()>
             signature,
             ..
         } = anchor
-        {
-            if name.trim().is_empty()
+            && (name.trim().is_empty()
                 || name != name.trim()
                 || signature
                     .as_deref()
                     .is_some_and(|value| value.trim().is_empty())
                 || parent
                     .as_deref()
-                    .is_some_and(|value| value.trim().is_empty())
-            {
-                return Err(ServiceError::InvalidInput(
-                    "entrypoint symbol anchors require nonempty exact identity fields".to_string(),
-                ));
-            }
+                    .is_some_and(|value| value.trim().is_empty()))
+        {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint symbol anchors require nonempty exact identity fields".to_string(),
+            ));
         }
     }
     if profile.relations.is_empty() || profile.relations.len() > GraphRelationKind::ALL.len() {
@@ -1597,8 +1595,7 @@ fn load_entrypoint_profile_draft(
         entity_limit.saturating_add(1),
         budget
             .intermediate_bytes()
-            .min(RepositoryGraphReadBudget::MAX_DECODED_BYTES)
-            .max(1),
+            .clamp(1, RepositoryGraphReadBudget::MAX_DECODED_BYTES),
         entity_limit.saturating_add(1).saturating_mul(2),
         entity_limit.saturating_add(1).saturating_mul(2),
     )
@@ -1675,13 +1672,11 @@ fn load_entrypoint_profile_draft(
                     }
                     candidate_report_anchor.get_or_insert(candidate_report.anchor);
                 }
-                if complete {
-                    if let Some(candidate_report_anchor) = candidate_report_anchor {
-                        unreachable.insert(
-                            entity.key().canonical_identity().to_string(),
-                            candidate_report_anchor,
-                        );
-                    }
+                if complete && let Some(candidate_report_anchor) = candidate_report_anchor {
+                    unreachable.insert(
+                        entity.key().canonical_identity().to_string(),
+                        candidate_report_anchor,
+                    );
                 }
             }
         }
@@ -1961,6 +1956,7 @@ fn entrypoint_step_budget(
     Ok(Ok(step))
 }
 
+/// Return the typed error for aggregate entrypoint work overflow.
 fn entrypoint_work_overflow() -> ServiceError {
     ServiceError::InvalidInput("entrypoint relation work overflowed".to_string())
 }

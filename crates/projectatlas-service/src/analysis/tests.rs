@@ -970,12 +970,14 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
     });
 
-    let output_error = load_relation_analysis(&store, &query, None)?
+    let Err(output_error) = load_relation_analysis(&store, &query, None)?
         .fit_output::<_, ServiceError, _>(|report, _control| {
             let _ = report;
             Ok(vec![0_u8; 65_537])
         })
-        .expect_err("entrypoint output unexpectedly accepted a non-replayable prefix");
+    else {
+        return Err("entrypoint output unexpectedly accepted a non-replayable prefix".into());
+    };
     require(
         output_error
             .to_string()
@@ -1052,7 +1054,7 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
     let cancel_seen_observer = Rc::clone(&cancel_seen);
     let cancellation_for_observer = cancellation.clone();
     let cancel_control = IndexWorkControl::with_deadline(
-        cancellation.clone(),
+        cancellation,
         Instant::now() + std::time::Duration::from_secs(5),
     );
     let cancelled = observe_analysis_phase(
@@ -1075,28 +1077,30 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         "cancelled entrypoint traversal returned a partial result or changed publication",
     )?;
 
-    let (_stale_temp, stale_store) = analysis_store()?;
-    let root = _stale_temp.path().join("analysis-service");
+    let (stale_temp, stale_store) = analysis_store()?;
+    let root = stale_temp.path().join("analysis-service");
     let database = root.join("projectatlas.db");
     stale_store.finish_index_read_snapshot()?;
     let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
         &database, &root,
     )?)));
     let refreshed = Rc::new(Cell::new(false));
+    let refresh_succeeded = Rc::new(Cell::new(false));
     let writer_for_observer = Rc::clone(&writer);
     let refreshed_for_observer = Rc::clone(&refreshed);
+    let refresh_succeeded_for_observer = Rc::clone(&refresh_succeeded);
     let stale = observe_analysis_phase(
         move |event| {
             if event == AnalysisPhaseEvent::Traversal && !refreshed_for_observer.replace(true) {
-                let mut writer = writer_for_observer
-                    .borrow_mut()
-                    .take()
-                    .expect("generation test writer already consumed");
-                writer
-                    .begin_index_projection_refresh("analysis-service")
-                    .expect("generation test refresh could not start")
-                    .complete()
-                    .expect("generation test refresh could not publish");
+                let succeeded = if let Some(mut writer) = writer_for_observer.borrow_mut().take() {
+                    match writer.begin_index_projection_refresh("analysis-service") {
+                        Ok(refresh) => refresh.complete().is_ok(),
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                };
+                refresh_succeeded_for_observer.set(succeeded);
             }
         },
         || load_relation_analysis(&stale_store, &query, None),
@@ -1104,6 +1108,7 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
     let stale_error = stale.as_ref().err().map(ToString::to_string);
     require(
         refreshed.get()
+            && refresh_succeeded.get()
             && stale_error
                 .as_deref()
                 .is_some_and(|error| error.contains("typed graph generation")),
@@ -1188,7 +1193,7 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         "entrypoint traversal crossed a caller aggregate ceiling",
     )?;
 
-    let mut node_bounded = bounded.clone();
+    let mut node_bounded = bounded;
     node_bounded.relations.budget = node_bounded.relations.budget.with_aggregate_limits(
         Some(100),
         Some(1),
