@@ -30715,6 +30715,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             String::from_utf8_lossy(&committed_cleanup.stdout),
             String::from_utf8_lossy(&committed_cleanup.stderr)
         );
+        let cleanup_normalized = cleanup_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let retained = fs::read_dir(runtime_directory)?
             .collect::<Result<Vec<_>, io::Error>>()?
             .into_iter()
@@ -30727,7 +30731,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .collect::<Vec<_>>();
         require(
             committed_cleanup.status.success()
-                && cleanup_text.contains("retirement committed; quarantine cleanup remains")
+                && cleanup_normalized.contains("retirement committed; quarantine cleanup remains")
                 && !forwarder.exists()
                 && !provenance.exists()
                 && !installer_state.exists()
