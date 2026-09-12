@@ -1448,6 +1448,7 @@ impl AtlasStore {
         project: ProjectInstanceId,
         generation: IndexGeneration,
         limit: u32,
+        selection: ContentSelection,
         budget: RepositoryGraphReadBudget,
         control: Option<&IndexWorkControl>,
     ) -> DbResult<RepositoryGraphReadPage<GraphEntity>> {
@@ -1458,22 +1459,41 @@ impl AtlasStore {
         )?;
         self.require_repository_graph_snapshot(project, generation)?;
         let mut meter = RepositoryGraphReadMeter::new(budget, 1)?;
+        let selection_filter = match selection {
+            ContentSelection::UnspecifiedLegacy => "",
+            ContentSelection::Source => {
+                " AND EXISTS (SELECT 1 FROM file_content_classifications AS classification
+                               WHERE classification.path = graph_entities.repository_path
+                                 AND classification.classification = 'source')"
+            }
+            ContentSelection::Documentation => {
+                " AND EXISTS (SELECT 1 FROM file_content_classifications AS classification
+                               WHERE classification.path = graph_entities.repository_path
+                                 AND classification.classification = 'documentation')"
+            }
+            ContentSelection::Both => {
+                " AND EXISTS (SELECT 1 FROM file_content_classifications AS classification
+                               WHERE classification.path = graph_entities.repository_path
+                                 AND classification.classification IN ('source', 'documentation'))"
+            }
+        };
+        let sql = format!(
+            "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
+                    repository_path, package_manager, package_name, manifest_path,
+                    symbol_name, symbol_kind, symbol_parent, symbol_signature,
+                    external_system, external_identity
+               FROM graph_entities
+              WHERE project_instance_id = ?1
+                AND entity_kind IN ('file', 'symbol'){selection_filter}
+              ORDER BY entity_key
+              LIMIT ?2"
+        );
         let raw = with_sqlite_read_progress(
             &self.connection,
             control,
             IndexWorkStage::RepositoryTraversal,
             || {
-                let mut statement = self.connection.prepare_cached(
-                    "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
-                            repository_path, package_manager, package_name, manifest_path,
-                            symbol_name, symbol_kind, symbol_parent, symbol_signature,
-                            external_system, external_identity
-                       FROM graph_entities
-                      WHERE project_instance_id = ?1
-                        AND entity_kind IN ('file', 'symbol')
-                      ORDER BY entity_key
-                      LIMIT ?2",
-                )?;
+                let mut statement = self.connection.prepare_cached(&sql)?;
                 collect_entity_rows_metered(
                     statement.query(params![&project.as_bytes()[..], limit_plus_one])?,
                     &mut meter,

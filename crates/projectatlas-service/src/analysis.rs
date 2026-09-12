@@ -88,9 +88,10 @@ mod analysis_test_observer {
     }
 }
 
+#[cfg(test)]
+use super::relations::classification_path;
 use super::relations::{
-    ExternalRelationIdentity, classification_path, entity_matches_selection,
-    external_relation_identities, load_detailed_relations,
+    ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
 };
 use super::{
     CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
@@ -104,16 +105,20 @@ use projectatlas_core::graph::{
     GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, ProjectInstanceId,
     RelationResolution,
 };
-use projectatlas_core::language::{ContentClassification, ContentSelection};
+#[cfg(test)]
+use projectatlas_core::language::ContentClassification;
+use projectatlas_core::language::ContentSelection;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
 use projectatlas_core::{
     CanonicalProjectRoot, IndexCancellation, IndexWorkControl, IndexWorkStage,
 };
+#[cfg(test)]
+use projectatlas_db::MAX_FILE_CONTENT_CLASSIFICATION_PATHS;
 use projectatlas_db::{
-    AtlasStore, DbError, MAX_FILE_CONTENT_CLASSIFICATION_PATHS, MAX_REPOSITORY_GRAPH_FRONTIER,
-    MAX_SYMBOL_BATCH_DECODED_BYTES, MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS,
-    RepositoryGraphAdjacencyContinuation, RepositoryGraphDirection, RepositoryGraphReadBudget,
-    RepositoryGraphReadWork, SymbolBatchReadBudget, SymbolBatchReadLimit,
+    AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, MAX_SYMBOL_BATCH_DECODED_BYTES,
+    MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS, RepositoryGraphAdjacencyContinuation,
+    RepositoryGraphDirection, RepositoryGraphReadBudget, RepositoryGraphReadWork,
+    SymbolBatchReadBudget, SymbolBatchReadLimit,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1655,6 +1660,7 @@ fn load_entrypoint_profile_draft(
             generation_project(&anchor.entity),
             generation,
             entity_limit,
+            query.relations.content_selection,
             read_budget,
             control,
         )?;
@@ -1674,33 +1680,8 @@ fn load_entrypoint_profile_draft(
                 ) && !reachable_keys.contains(entity.key().canonical_identity())
             })
             .collect::<Vec<_>>();
-        let candidate_classifications = if complete
-            && query.relations.content_selection != ContentSelection::UnspecifiedLegacy
-        {
-            if let Some(classifications) = load_entrypoint_candidate_classifications(
-                store,
-                candidate_entities.iter().copied(),
-                budget,
-                &mut relation_work,
-                control,
-            )? {
-                classifications
-            } else {
-                complete = false;
-                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
-                BTreeMap::new()
-            }
-        } else {
-            BTreeMap::new()
-        };
         if complete {
-            for entity in candidate_entities.into_iter().filter(|entity| {
-                entity_matches_selection(
-                    entity,
-                    &candidate_classifications,
-                    query.relations.content_selection,
-                )
-            }) {
+            for entity in candidate_entities {
                 check_control(control)?;
                 if !complete {
                     break;
@@ -1836,7 +1817,11 @@ fn load_entrypoint_profile_draft(
         relations: profile.relations.clone(),
         coverage,
         reachable: u32::try_from(reachable.len()).unwrap_or(u32::MAX),
-        unreachable_candidates: 0,
+        unreachable_candidates: if complete {
+            u32::try_from(unreachable.len()).unwrap_or(u32::MAX)
+        } else {
+            0
+        },
     };
     let mut work = RelationAnalysisWork {
         relations: relation_work,
@@ -1878,6 +1863,7 @@ fn load_entrypoint_profile_draft(
         work.composition_truncated = true;
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
         profile_result.coverage = EntrypointProfileCoverage::Partial;
+        profile_result.unreachable_candidates = 0;
         for finding in &mut findings {
             finding.status = AnalysisStatus::Inconclusive;
         }
@@ -1887,7 +1873,14 @@ fn load_entrypoint_profile_draft(
     work.peak_intermediate_bytes = work
         .relations
         .intermediate_bytes
-        .saturating_add(work.retained_composition_bytes);
+        .checked_add(work.retained_composition_bytes)
+        .ok_or_else(entrypoint_work_overflow)?;
+    if work.peak_intermediate_bytes > budget.intermediate_bytes() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile construction exceeds its aggregate intermediate-byte budget"
+                .to_string(),
+        ));
+    }
     if !complete {
         profile_result.coverage = EntrypointProfileCoverage::Partial;
         for finding in &mut findings {
@@ -2037,6 +2030,7 @@ fn add_repository_read_work(
 }
 
 /// Load candidate classifications in bounded, cancellable batches.
+#[cfg(test)]
 fn load_entrypoint_candidate_classifications<'entity>(
     store: &AtlasStore,
     entities: impl IntoIterator<Item = &'entity GraphEntity>,
@@ -2123,6 +2117,7 @@ fn load_entrypoint_candidate_classifications<'entity>(
 }
 
 /// Count one bounded path retained while classification batches run.
+#[cfg(test)]
 fn classification_path_bytes(path: &str) -> ServiceResult<u64> {
     u64::try_from(path.len())
         .ok()
@@ -2131,6 +2126,7 @@ fn classification_path_bytes(path: &str) -> ServiceResult<u64> {
 }
 
 /// Bound one classification batch before materializing its database rows.
+#[cfg(test)]
 fn classification_rows_upper_bound(
     paths: &[String],
     control: Option<&IndexWorkControl>,
@@ -2155,6 +2151,7 @@ fn classification_rows_upper_bound(
 }
 
 /// Count conservative decoded and retained bytes for one classification batch.
+#[cfg(test)]
 fn classification_rows_bytes(
     rows: &[projectatlas_db::FileContentClassification],
     control: Option<&IndexWorkControl>,

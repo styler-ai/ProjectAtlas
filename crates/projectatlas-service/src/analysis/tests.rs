@@ -1332,6 +1332,100 @@ fn entrypoint_profile_filters_non_candidate_entities_before_node_limit()
 }
 
 #[test]
+fn entrypoint_profile_falls_back_before_exceeding_composition_budget() -> Result<(), Box<dyn Error>>
+{
+    let (temp, initial_store) = analysis_store()?;
+    let root = temp.path().join("analysis-service");
+    let database = root.join("projectatlas.db");
+    drop(initial_store);
+    let writable = AtlasStore::open_for_project(&database, &root)?;
+    writable.set_purpose(
+        "src/a.rs",
+        &format!("composition boundary {}", "x".repeat(20_000)),
+        PurposeSource::Agent,
+    )?;
+    drop(writable);
+    let store = AtlasStore::open_read_only_for_project(&database, &root)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget =
+        DetailedRelationBudget::from_graph_limits(GraphLimits::new(50, 1, 3, 1024 * 1024)?)
+            .with_aggregate_limits(
+                None,
+                None,
+                None,
+                None,
+                Some(DetailedRelationBudget::MAX_INTERMEDIATE_BYTES),
+                None,
+            )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "composition-boundary".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let complete = load_relation_analysis(&store, &query, None)?;
+    let complete_profile = complete
+        .report
+        .entrypoint_profile
+        .as_ref()
+        .ok_or("complete entrypoint profile missing")?;
+    let complete_composition =
+        serialized_bytes_controlled(&(&complete.report.findings, complete_profile), None)?;
+    let mut fallback_findings = complete.report.findings.clone();
+    for finding in &mut fallback_findings {
+        finding.status = AnalysisStatus::Inconclusive;
+        finding.nodes.clear();
+    }
+    let mut fallback_profile = complete_profile.clone();
+    fallback_profile.coverage = EntrypointProfileCoverage::Partial;
+    fallback_profile.unreachable_candidates = 0;
+    let fallback_composition =
+        serialized_bytes_controlled(&(&fallback_findings, &fallback_profile), None)?;
+    require(
+        complete_profile.coverage == EntrypointProfileCoverage::Complete
+            && complete_profile.unreachable_candidates > 0
+            && complete_composition > fallback_composition,
+        "entrypoint fixture did not produce a larger complete composition",
+    )?;
+    let boundary_budget = complete
+        .report
+        .work
+        .peak_intermediate_bytes
+        .saturating_sub(1);
+    let mut boundary_query = query;
+    boundary_query.relations.budget = boundary_query.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(boundary_budget),
+        None,
+    )?;
+    let boundary = load_relation_analysis(&store, &boundary_query, None)?.report;
+    require(
+        boundary.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Partial
+                && profile.unreachable_candidates == 0
+        }) && boundary.work.composition_truncated
+            && boundary
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && boundary
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+            && boundary.work.peak_intermediate_bytes <= boundary_budget,
+        "entrypoint composition fallback exceeded its declared byte budget",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_classification_hydration_honors_control_and_byte_budget() -> Result<(), Box<dyn Error>>
 {
     let (_temp, store) = analysis_store()?;
