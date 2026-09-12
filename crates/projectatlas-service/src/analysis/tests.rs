@@ -4,6 +4,7 @@ use projectatlas_core::graph::{
     CoverageRecord, CoverageScope, CoverageState, GraphIdentityText, LogicalRelation,
     RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
 };
+use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
 use projectatlas_core::{IndexGeneration, Node, NodeKind, PurposeSource};
 use std::cell::{Cell, RefCell};
@@ -13,6 +14,7 @@ use std::io;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 #[test]
@@ -885,6 +887,155 @@ fn entrypoint_profile_reports_reachable_and_unreachable_without_persistence()
 }
 
 #[test]
+fn entrypoint_profile_honors_content_and_confidence_filters() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut source_only = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    source_only.relations.resolution = RelationResolutionFilter::Any;
+    source_only.relations.content_selection = ContentSelection::Source;
+    source_only.include_communities = false;
+    source_only.include_cycles = false;
+    source_only.entrypoint_profile = Some(EntrypointProfile {
+        name: "source-only".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let source_report = fitted_report(&store, &source_only)?;
+    require(
+        source_report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+            && source_report.findings.iter().all(|finding| {
+                finding.nodes.iter().all(|node| {
+                    !matches!(
+                        node.node.entity.selector(),
+                        EntitySelector::File { path } if path.as_str() == "docs/guide.md"
+                    )
+                })
+            }),
+        "source-only entrypoint profile admitted a documentation candidate",
+    )?;
+
+    let mut exact = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    exact.relations.resolution = RelationResolutionFilter::Any;
+    exact.relations.minimum_confidence = ConfidenceClass::Exact;
+    exact.include_communities = false;
+    exact.include_cycles = false;
+    exact.entrypoint_profile = Some(EntrypointProfile {
+        name: "exact-confidence".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(
+            ExtendedRelationKind::References,
+        )],
+    });
+    let exact_report = fitted_report(&store, &exact)?;
+    let mut low = exact;
+    low.relations.minimum_confidence = ConfidenceClass::Low;
+    let low_report = fitted_report(&store, &low)?;
+    require(
+        exact_report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+            && low_report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && exact_report
+                .findings
+                .iter()
+                .all(|finding| finding.status != AnalysisStatus::Inconclusive)
+            && low_report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "entrypoint profile did not preserve the requested minimum confidence",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_classification_hydration_honors_control_and_byte_budget() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store) = analysis_store()?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("analysis fixture project identity missing")?;
+    let generation = store
+        .repository_graph_generation()?
+        .ok_or("analysis fixture graph generation missing")?;
+    let entity = GraphEntity::new(
+        project,
+        EntitySelector::File {
+            path: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        },
+        generation,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.content_selection = ContentSelection::Source;
+    let budget = query.relations.budget;
+
+    let cancellation = IndexCancellation::new();
+    let control = IndexWorkControl::with_deadline(
+        cancellation.clone(),
+        Instant::now() + Duration::from_secs(5),
+    );
+    let cancelled = cancel_at_analysis_phase(
+        AnalysisPhaseEvent::ClassificationHydration,
+        cancellation,
+        || {
+            super::load_entrypoint_candidate_classifications(
+                &store,
+                std::slice::from_ref(&entity),
+                budget,
+                &mut DetailedRelationWork::default(),
+                Some(&control),
+            )
+        },
+    )?;
+    require(
+        matches!(
+            cancelled,
+            Err(ServiceError::Db(DbError::IndexWork(
+                projectatlas_core::IndexWorkFailure::Cancelled { .. }
+            )))
+        ),
+        "classification hydration ignored cancellation",
+    )?;
+
+    let mut work = DetailedRelationWork {
+        intermediate_bytes: budget
+            .intermediate_bytes()
+            .saturating_sub(super::classification_path_bytes("src/a.rs")?),
+        ..DetailedRelationWork::default()
+    };
+    let bounded = super::load_entrypoint_candidate_classifications(
+        &store,
+        std::slice::from_ref(&entity),
+        budget,
+        &mut work,
+        None,
+    )?;
+    require(
+        bounded.is_none(),
+        "classification hydration accepted data beyond the intermediate-byte budget",
+    )?;
+    require(
+        work.database_requested_rows == 1
+            && work.database_returned_rows == 1
+            && work.database_decoded_bytes > 0
+            && work.hydrated_classification_paths == 1
+            && work.intermediate_bytes == budget.intermediate_bytes(),
+        "rejected classification work was omitted from the returned ledger",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_rejects_ambiguous_cursor_and_wrong_scope_and_stays_inconclusive()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;
@@ -983,6 +1134,23 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
             .to_string()
             .contains("entrypoint profile output"),
         "entrypoint output refusal did not identify the typed output boundary",
+    )?;
+
+    let mut oversized_construction = load_relation_analysis(&store, &query, None)?;
+    let construction_budget = oversized_construction.budget.intermediate_bytes();
+    oversized_construction.report.work.peak_intermediate_bytes = construction_budget + 1;
+    let Err(construction_error) =
+        oversized_construction.fit_output::<_, ServiceError, _>(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        })
+    else {
+        return Err("entrypoint output fitting ignored construction work".into());
+    };
+    require(
+        construction_error
+            .to_string()
+            .contains("aggregate intermediate-byte budget"),
+        "entrypoint output fitting did not preserve the construction peak",
     )?;
 
     let mut uncertain = query.clone();
@@ -1202,10 +1370,21 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         Some(256 * 1_024),
         None,
     )?;
-    let node_report = fitted_report(&store, &node_bounded)?;
+    node_bounded.relations.content_selection = ContentSelection::Source;
+    let classification_seen = Rc::new(Cell::new(false));
+    let classification_seen_observer = Rc::clone(&classification_seen);
+    let node_report = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::ClassificationHydration {
+                classification_seen_observer.set(true);
+            }
+        },
+        || fitted_report(&store, &node_bounded),
+    )?;
     require(
         node_report.reached_limits.contains(&GraphLimitKind::Nodes)
-            && !node_report.reached_limits.contains(&GraphLimitKind::Edges),
+            && !node_report.reached_limits.contains(&GraphLimitKind::Edges)
+            && !classification_seen.get(),
         "node exhaustion was reported as an edge limit",
     )?;
     Ok(())
@@ -2814,9 +2993,11 @@ fn analysis_store_with_coverage(
     let root = temp.path().join("analysis-service");
     fs::create_dir_all(root.join("src"))?;
     fs::create_dir_all(root.join("tools"))?;
+    fs::create_dir_all(root.join("docs"))?;
     fs::write(root.join("src/a.rs"), "pub fn a() {}\n")?;
     fs::write(root.join("src/b.rs"), "pub fn b() {}\n")?;
     fs::write(root.join("tools/c.rs"), "pub fn c() {}\n")?;
+    fs::write(root.join("docs/guide.md"), "# Guide\n")?;
     let database = root.join("projectatlas.db");
     let mut store = AtlasStore::open_for_project(&database, &root)?;
     let project = store
@@ -2835,6 +3016,7 @@ fn analysis_store_with_coverage(
     let a = entity("src/a.rs")?;
     let b = entity("src/b.rs")?;
     let c = entity("tools/c.rs")?;
+    let guide = entity("docs/guide.md")?;
     let symbol_entity = |path: &str, name: &str, signature: &str| {
         GraphEntity::new(
             project,
@@ -2916,7 +3098,7 @@ fn analysis_store_with_coverage(
             generation,
         )?,
     ];
-    let mut coverage = ["src/a.rs", "src/b.rs", "tools/c.rs"]
+    let mut coverage = ["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"]
         .into_iter()
         .filter(|path| include_tools_coverage || *path != "tools/c.rs")
         .map(|path| {
@@ -2936,7 +3118,7 @@ fn analysis_store_with_coverage(
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     coverage.extend(
-        ["src/a.rs", "src/b.rs", "tools/c.rs"]
+        ["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"]
             .into_iter()
             .filter(|path| include_tools_coverage || *path != "tools/c.rs")
             .map(|path| {
@@ -2961,9 +3143,29 @@ fn analysis_store_with_coverage(
     publication.upsert_scan_node_batch(&[
         test_folder_node("src"),
         test_folder_node("tools"),
+        test_folder_node("docs"),
         test_node("src/a.rs", "hash-a"),
         test_node("src/b.rs", "hash-b"),
         test_node_in("tools/c.rs", "tools", "hash-c"),
+        classified_test_node("docs/guide.md", "hash-guide", ".md", "markdown"),
+    ])?;
+    publication.upsert_file_content_classification_batch(&[
+        projectatlas_db::FileContentClassification {
+            path: "src/a.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+        projectatlas_db::FileContentClassification {
+            path: "src/b.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+        projectatlas_db::FileContentClassification {
+            path: "tools/c.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+        projectatlas_db::FileContentClassification {
+            path: "docs/guide.md".to_string(),
+            classification: ContentClassification::Documentation,
+        },
     ])?;
     publication.finish_scan_replacement()?;
     publication.replace_symbol_graph(&SymbolGraph {
@@ -3006,7 +3208,7 @@ fn analysis_store_with_coverage(
     })?;
     publication.replace_repository_graph(
         project,
-        &[a, b, c, a_long, d_unused, b_hub, c_aux],
+        &[a, b, c, guide, a_long, d_unused, b_hub, c_aux],
         &relations,
         &[],
         &coverage,
@@ -3067,6 +3269,19 @@ fn test_node_in(path: &str, parent: &str, hash: &str) -> Node {
         extension: Some(".rs".to_string()),
         language: Some("rust".to_string()),
         size_bytes: Some(16),
+        mtime_ns: Some(1),
+        content_hash: Some(hash.to_string()),
+    }
+}
+
+fn classified_test_node(path: &str, hash: &str, extension: &str, language: &str) -> Node {
+    Node {
+        path: path.to_string(),
+        kind: NodeKind::File,
+        parent_path: Some("docs".to_string()),
+        extension: Some(extension.to_string()),
+        language: Some(language.to_string()),
+        size_bytes: Some(8),
         mtime_ns: Some(1),
         content_hash: Some(hash.to_string()),
     }

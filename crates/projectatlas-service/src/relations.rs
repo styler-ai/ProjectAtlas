@@ -871,7 +871,7 @@ struct SerializedByteCounter {
 }
 
 /// Return the exact admitted file path that owns an entity classification.
-fn classification_path(entity: &GraphEntity) -> Option<String> {
+pub(super) fn classification_path(entity: &GraphEntity) -> Option<String> {
     match entity.selector() {
         EntitySelector::File { path } => Some(path.as_str().to_string()),
         EntitySelector::Package { package } => Some(package.manifest.as_str().to_string()),
@@ -906,7 +906,7 @@ fn load_entity_classifications<'entity>(
 }
 
 /// Return whether one local file-bearing entity belongs to the selection.
-fn entity_matches_selection(
+pub(super) fn entity_matches_selection(
     entity: &GraphEntity,
     classifications: &BTreeMap<String, ContentClassification>,
     selection: ContentSelection,

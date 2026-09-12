@@ -26,6 +26,8 @@ mod analysis_test_observer {
         Composition,
         /// Optional dead-code candidate discovery has entered complete-scope work.
         DeadCodeDiscovery,
+        /// One bounded candidate-classification batch is about to run.
+        ClassificationHydration,
         /// Adapter-specific output fitting has begun under the retained request control.
         OutputRendering,
     }
@@ -73,7 +75,8 @@ mod analysis_test_observer {
 }
 
 use super::relations::{
-    ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
+    ExternalRelationIdentity, classification_path, entity_matches_selection,
+    external_relation_identities, load_detailed_relations,
 };
 use super::{
     CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
@@ -93,10 +96,10 @@ use projectatlas_core::{
     CanonicalProjectRoot, IndexCancellation, IndexWorkControl, IndexWorkStage,
 };
 use projectatlas_db::{
-    AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, MAX_SYMBOL_BATCH_DECODED_BYTES,
-    MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS, RepositoryGraphAdjacencyContinuation,
-    RepositoryGraphDirection, RepositoryGraphReadBudget, RepositoryGraphReadWork,
-    SymbolBatchReadBudget, SymbolBatchReadLimit,
+    AtlasStore, DbError, MAX_FILE_CONTENT_CLASSIFICATION_PATHS, MAX_REPOSITORY_GRAPH_FRONTIER,
+    MAX_SYMBOL_BATCH_DECODED_BYTES, MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS,
+    RepositoryGraphAdjacencyContinuation, RepositoryGraphDirection, RepositoryGraphReadBudget,
+    RepositoryGraphReadWork, SymbolBatchReadBudget, SymbolBatchReadLimit,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -709,15 +712,16 @@ impl RelationAnalysisDraft {
                         "entrypoint output fitting byte count overflowed".to_string(),
                     ))
                 })?;
+            let peak = candidate.work.peak_intermediate_bytes.max(fitting_peak);
             if candidate.work.rendered_output_bytes == rendered
-                && candidate.work.peak_intermediate_bytes == fitting_peak
+                && candidate.work.peak_intermediate_bytes == peak
             {
                 if encoded.as_ref().len() > self.output_bytes as usize {
                     return Err(E::from(ServiceError::InvalidInput(
                         "entrypoint profile output exceeds its declared byte budget".to_string(),
                     )));
                 }
-                if fitting_peak > self.budget.intermediate_bytes() {
+                if peak > self.budget.intermediate_bytes() {
                     return Err(E::from(ServiceError::InvalidInput(
                         "entrypoint profile output exceeds its aggregate intermediate-byte budget"
                             .to_string(),
@@ -726,7 +730,7 @@ impl RelationAnalysisDraft {
                 return Ok((candidate, encoded));
             }
             candidate.work.rendered_output_bytes = rendered;
-            candidate.work.peak_intermediate_bytes = fitting_peak;
+            candidate.work.peak_intermediate_bytes = peak;
             encoded = encode(&candidate, &self.control)?;
         }
         Err(E::from(ServiceError::InvalidInput(
@@ -1493,7 +1497,6 @@ fn load_entrypoint_profile_draft(
                 relation_query.anchor = anchor.clone();
                 relation_query.relation = Some(*relation);
                 relation_query.direction = RelationDirection::Outbound;
-                relation_query.minimum_confidence = ConfidenceClass::Low;
                 relation_query.resolution = RelationResolutionFilter::Any;
                 relation_query.cursor = None;
                 relation_query.budget = step_budget;
@@ -1616,6 +1619,31 @@ fn load_entrypoint_profile_draft(
             complete = false;
             push_limit(&mut reached_limits, GraphLimitKind::Nodes);
         }
+        let candidate_entities = all_entities.rows.iter().filter(|entity| {
+            matches!(
+                entity.selector(),
+                EntitySelector::File { .. } | EntitySelector::Symbol { .. }
+            ) && !reachable_keys.contains(entity.key().canonical_identity())
+        });
+        let candidate_classifications = if complete
+            && query.relations.content_selection != ContentSelection::UnspecifiedLegacy
+        {
+            if let Some(classifications) = load_entrypoint_candidate_classifications(
+                store,
+                candidate_entities,
+                budget,
+                &mut relation_work,
+                control,
+            )? {
+                classifications
+            } else {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                BTreeMap::new()
+            }
+        } else {
+            BTreeMap::new()
+        };
         if complete {
             for entity in all_entities.rows {
                 check_control(control)?;
@@ -1627,6 +1655,13 @@ fn load_entrypoint_profile_draft(
                     EntitySelector::File { .. } | EntitySelector::Symbol { .. }
                 ) || reachable_keys.contains(entity.key().canonical_identity())
                 {
+                    continue;
+                }
+                if !entity_matches_selection(
+                    &entity,
+                    &candidate_classifications,
+                    query.relations.content_selection,
+                ) {
                     continue;
                 }
                 let candidate_anchor = relation_anchor_for_entity(&entity).ok_or_else(|| {
@@ -1649,7 +1684,6 @@ fn load_entrypoint_profile_draft(
                     candidate_query.anchor = candidate_anchor.clone();
                     candidate_query.relation = Some(*relation);
                     candidate_query.direction = RelationDirection::Outbound;
-                    candidate_query.minimum_confidence = ConfidenceClass::Low;
                     candidate_query.resolution = RelationResolutionFilter::Any;
                     candidate_query.cursor = None;
                     candidate_query.budget = step_budget;
@@ -1896,6 +1930,114 @@ fn add_repository_read_work(
         .ok_or_else(entrypoint_work_overflow)?;
     total.intermediate_bytes = total.intermediate_bytes.saturating_add(next.decoded_bytes);
     Ok(())
+}
+
+/// Load candidate classifications in bounded, cancellable batches.
+fn load_entrypoint_candidate_classifications<'entity>(
+    store: &AtlasStore,
+    entities: impl IntoIterator<Item = &'entity GraphEntity>,
+    budget: DetailedRelationBudget,
+    relation_work: &mut DetailedRelationWork,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Option<BTreeMap<String, projectatlas_core::language::ContentClassification>>> {
+    let mut path_set = BTreeSet::new();
+    for entity in entities {
+        check_control(control)?;
+        let Some(path) = classification_path(entity) else {
+            continue;
+        };
+        if path_set.contains(&path) {
+            continue;
+        }
+        let path_bytes = classification_path_bytes(&path)?;
+        if relation_work
+            .intermediate_bytes
+            .checked_add(path_bytes)
+            .is_none_or(|bytes| bytes > budget.intermediate_bytes())
+        {
+            return Ok(None);
+        }
+        path_set.insert(path);
+        relation_work.intermediate_bytes = relation_work
+            .intermediate_bytes
+            .checked_add(path_bytes)
+            .ok_or_else(entrypoint_work_overflow)?;
+    }
+    let paths = path_set.into_iter().collect::<Vec<_>>();
+    let mut classifications = BTreeMap::new();
+    for chunk in paths.chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS) {
+        check_control(control)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::ClassificationHydration,
+        );
+        let rows = store.file_content_classifications_for_paths(chunk)?;
+        check_control(control)?;
+        let decoded_bytes = classification_rows_bytes(&rows, control)?;
+        let retained_bytes = classification_rows_bytes(&rows, control)?;
+        let requested_rows =
+            u32::try_from(chunk.len()).map_err(|_overflow| entrypoint_work_overflow())?;
+        let returned_rows =
+            u32::try_from(rows.len()).map_err(|_overflow| entrypoint_work_overflow())?;
+        relation_work.database_requested_rows = relation_work
+            .database_requested_rows
+            .checked_add(requested_rows)
+            .ok_or_else(entrypoint_work_overflow)?;
+        relation_work.database_returned_rows = relation_work
+            .database_returned_rows
+            .checked_add(returned_rows)
+            .ok_or_else(entrypoint_work_overflow)?;
+        relation_work.database_decoded_bytes = relation_work
+            .database_decoded_bytes
+            .checked_add(decoded_bytes)
+            .ok_or_else(entrypoint_work_overflow)?;
+        relation_work.hydrated_classification_paths = relation_work
+            .hydrated_classification_paths
+            .checked_add(returned_rows)
+            .ok_or_else(entrypoint_work_overflow)?;
+        let retained_intermediate = relation_work
+            .intermediate_bytes
+            .checked_add(decoded_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_bytes))
+            .ok_or_else(entrypoint_work_overflow)?;
+        if retained_intermediate > budget.intermediate_bytes() {
+            return Ok(None);
+        }
+        relation_work.intermediate_bytes = retained_intermediate;
+        classifications.extend(rows.into_iter().map(|row| (row.path, row.classification)));
+        check_control(control)?;
+    }
+    Ok(Some(classifications))
+}
+
+/// Count one bounded path retained while classification batches run.
+fn classification_path_bytes(path: &str) -> ServiceResult<u64> {
+    u64::try_from(path.len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(8))
+        .ok_or_else(entrypoint_work_overflow)
+}
+
+/// Count conservative decoded and retained bytes for one classification batch.
+fn classification_rows_bytes(
+    rows: &[projectatlas_db::FileContentClassification],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    rows.iter().try_fold(0_u64, |bytes, row| {
+        check_control(control)?;
+        let row_bytes = u64::try_from(row.path.len())
+            .ok()
+            .and_then(|path| {
+                u64::try_from(row.classification.as_str().len())
+                    .ok()
+                    .and_then(|classification| path.checked_add(classification))
+            })
+            .and_then(|bytes| bytes.checked_add(8))
+            .ok_or_else(entrypoint_work_overflow)?;
+        bytes
+            .checked_add(row_bytes)
+            .ok_or_else(entrypoint_work_overflow)
+    })
 }
 
 /// Derive one one-step detailed budget from the remaining profile-wide capacity.
