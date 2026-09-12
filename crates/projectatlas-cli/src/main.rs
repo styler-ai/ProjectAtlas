@@ -48,10 +48,10 @@ use projectatlas_fs::worktree::{
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
-    DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileSummaryReport,
-    GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor,
-    RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode,
-    ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    DetailedRelationBudget, DetailedRelationQuery, EntrypointProfile, FederatedStore,
+    FileSummaryReport, GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery,
+    RelationAnchor, RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport,
+    SearchRetrievalMode, ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
     build_file_summary_from_source_with_selection, load_coverage_discovery,
     load_detailed_relation_page, load_federated_detailed_relations,
     load_federated_relation_analysis, load_relation_analysis, load_token_report,
@@ -491,6 +491,8 @@ enum RelationAnalysisModeArg {
     Impact,
     /// One node-simple static relationship path.
     Trace,
+    /// Bounded reachability from an explicit entrypoint profile.
+    Entrypoint,
 }
 
 impl From<RelationAnalysisModeArg> for RelationAnalysisMode {
@@ -499,6 +501,7 @@ impl From<RelationAnalysisModeArg> for RelationAnalysisMode {
             RelationAnalysisModeArg::Architecture => Self::Architecture,
             RelationAnalysisModeArg::Impact => Self::Impact,
             RelationAnalysisModeArg::Trace => Self::Trace,
+            RelationAnalysisModeArg::Entrypoint => Self::Entrypoint,
         }
     }
 }
@@ -601,6 +604,15 @@ struct RelationAnalysisArgs {
     /// Closed analysis projection computed over the bounded relation traversal.
     #[arg(long, value_enum)]
     analysis_mode: Option<RelationAnalysisModeArg>,
+    /// Stable name for an explicit entrypoint profile.
+    #[arg(long)]
+    profile_name: Option<String>,
+    /// JSON `RelationAnchor` value; repeat for multiple entrypoints.
+    #[arg(long = "entrypoint")]
+    entrypoints: Vec<String>,
+    /// Relation family admitted by an entrypoint profile; repeat to add families.
+    #[arg(long = "profile-relation")]
+    profile_relations: Vec<String>,
     /// Exact JSON `RelationAnchor` (`file` or fully disambiguated `symbol`) for trace mode.
     #[arg(long)]
     trace_target: Option<String>,
@@ -2213,6 +2225,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                 } = detailed.as_ref();
                 let RelationAnalysisArgs {
                     analysis_mode,
+                    profile_name,
+                    entrypoints,
+                    profile_relations,
                     trace_target,
                     vcs,
                     include_communities,
@@ -2220,6 +2235,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     include_dead_code,
                 } = analysis.as_ref();
                 let analysis_controls_explicit = analysis_mode.is_some()
+                    || profile_name.is_some()
+                    || !entrypoints.is_empty()
+                    || !profile_relations.is_empty()
                     || trace_target.is_some()
                     || vcs.is_some()
                     || *include_communities
@@ -2300,16 +2318,61 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                                 .to_string(),
                         )));
                     }
-                    let file = file.as_deref().ok_or_else(|| {
-                        CliError::Service(ServiceError::InvalidInput(
-                            "detailed symbol relations require --file".to_string(),
-                        ))
-                    })?;
-                    let file = validated_indexed_file_key(store, Path::new(file))?;
+                    let mode: RelationAnalysisMode = analysis_mode
+                        .unwrap_or(RelationAnalysisModeArg::Architecture)
+                        .into();
+                    let parsed_entrypoints = if mode == RelationAnalysisMode::Entrypoint {
+                        entrypoints
+                            .iter()
+                            .map(|value| serde_json::from_str::<RelationAnchor>(value))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| {
+                                CliError::Service(ServiceError::InvalidInput(format!(
+                                    "--entrypoint must be an exact RelationAnchor JSON object: {error}"
+                                )))
+                            })?
+                    } else {
+                        Vec::new()
+                    };
+                    if mode == RelationAnalysisMode::Entrypoint
+                        && !parsed_entrypoints.is_empty()
+                        && (symbol.is_some()
+                            || symbol_parent.is_some()
+                            || symbol_kind.is_some()
+                            || symbol_signature.is_some())
+                    {
+                        return Err(CliError::Service(ServiceError::InvalidInput(
+                            "--entrypoint anchors cannot be combined with detailed symbol selectors"
+                                .to_string(),
+                        )));
+                    }
+                    let file = match file.as_deref() {
+                        Some(file) => file.to_string(),
+                        None if mode == RelationAnalysisMode::Entrypoint => parsed_entrypoints
+                            .first()
+                            .map(|anchor| match anchor {
+                                RelationAnchor::File { file }
+                                | RelationAnchor::Symbol { file, .. } => file.as_str().to_string(),
+                            })
+                            .ok_or_else(|| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "entrypoint analysis requires --entrypoint or --file"
+                                        .to_string(),
+                                ))
+                            })?,
+                        None => {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "detailed symbol relations require --file".to_string(),
+                            )));
+                        }
+                    };
+                    let file = validated_indexed_file_key(store, Path::new(&file))?;
                     let file = RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
                         CliError::Service(ServiceError::InvalidInput(error.to_string()))
                     })?;
-                    let anchor = if let Some(symbol) = symbol {
+                    let anchor = if let Some(anchor) = parsed_entrypoints.first() {
+                        anchor.clone()
+                    } else if let Some(symbol) = symbol {
                         if symbol.is_empty() {
                             return Err(CliError::Service(ServiceError::InvalidInput(
                                 "detailed relation symbol must not be empty".to_string(),
@@ -2420,9 +2483,6 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                                 }
                             }
                         };
-                        let mode: RelationAnalysisMode = analysis_mode
-                            .unwrap_or(RelationAnalysisModeArg::Architecture)
-                            .into();
                         let trace_target = trace_target
                             .as_deref()
                             .map(serde_json::from_str::<RelationAnchor>)
@@ -2432,6 +2492,39 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                                     "--trace-target must be an exact RelationAnchor JSON object: {error}"
                                 )))
                             })?;
+                        let entrypoint_profile = if mode == RelationAnalysisMode::Entrypoint {
+                            let anchors = if parsed_entrypoints.is_empty() {
+                                vec![relations.anchor.clone()]
+                            } else {
+                                parsed_entrypoints.clone()
+                            };
+                            let relation_families = if profile_relations.is_empty() {
+                                GraphRelationKind::ALL.to_vec()
+                            } else {
+                                profile_relations
+                                    .iter()
+                                    .map(|value| parse_coverage_relation(value))
+                                    .collect::<Result<Vec<_>, _>>()?
+                            };
+                            Some(EntrypointProfile {
+                                name: profile_name
+                                    .clone()
+                                    .unwrap_or_else(|| "entrypoint-profile".to_string()),
+                                anchors,
+                                relations: relation_families,
+                            })
+                        } else {
+                            if profile_name.is_some()
+                                || !entrypoints.is_empty()
+                                || !profile_relations.is_empty()
+                            {
+                                return Err(CliError::Service(ServiceError::InvalidInput(
+                                    "entrypoint profile controls require --analysis-mode entrypoint"
+                                        .to_string(),
+                                )));
+                            }
+                            None
+                        };
                         let query = RelationAnalysisQuery {
                             relations,
                             mode,
@@ -2441,6 +2534,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             include_communities: *include_communities,
                             include_cycles: *include_cycles,
                             include_dead_code: *include_dead_code,
+                            entrypoint_profile,
                         };
                         if let Some(stores) = federated_stores.take() {
                             let control = federation_control.as_ref().ok_or_else(|| {

@@ -1432,6 +1432,56 @@ impl AtlasStore {
         Ok(RepositoryGraphReadPage { page, work })
     }
 
+    /// Load a bounded stable-order page of every local graph entity.
+    ///
+    /// This read is intentionally page-shaped and has no persistence side
+    /// effects. Callers use the truncation sentinel to refuse conclusions
+    /// when the complete entity scope does not fit its declared bound.
+    pub fn repository_graph_entities_page_bounded(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        limit: u32,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadPage<GraphEntity>> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "graph entity rows must be nonzero and within the product ceiling",
+        )?;
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, 1)?;
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare_cached(
+                    "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
+                            repository_path, package_manager, package_name, manifest_path,
+                            symbol_name, symbol_kind, symbol_parent, symbol_signature,
+                            external_system, external_identity
+                       FROM graph_entities
+                      WHERE project_instance_id = ?1
+                      ORDER BY entity_key
+                      LIMIT ?2",
+                )?;
+                collect_entity_rows_metered(
+                    statement.query(params![&project.as_bytes()[..], limit_plus_one])?,
+                    &mut meter,
+                )
+            },
+        )?;
+        let page = page_from_raw(raw, limit, |row| {
+            let entity = entity_from_row(row, project, generation)?;
+            meter.record_entity(&entity)?;
+            Ok(entity)
+        })?;
+        let work = meter.finish(page.rows.len())?;
+        Ok(RepositoryGraphReadPage { page, work })
+    }
+
     /// Load bounded graph entities that export one exact canonical resolution key.
     ///
     /// # Errors

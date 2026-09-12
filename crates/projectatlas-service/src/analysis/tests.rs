@@ -810,6 +810,128 @@ fn analysis_modes_are_closed_and_partial_evidence_stays_inconclusive() -> Result
 }
 
 #[test]
+fn entrypoint_profile_reports_reachable_and_unreachable_without_persistence()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "public-rust".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![
+            GraphRelationKind::Legacy(RelationKind::Contains),
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+        ],
+    });
+    let before = store.index_publication()?;
+    let report = fitted_report(&store, &query)?;
+    let profile = report
+        .entrypoint_profile
+        .as_ref()
+        .ok_or("entrypoint profile metadata missing")?;
+    require(
+        profile.coverage == EntrypointProfileCoverage::Complete
+            && profile.reachable > 0
+            && profile.unreachable_candidates > 0,
+        "entrypoint profile did not classify a complete reachable and unreachable scope",
+    )?;
+    require(
+        report.findings.iter().any(|finding| {
+            finding.kind == AnalysisFindingKind::EntrypointReachability
+                && finding.status == AnalysisStatus::Candidate
+                && finding.nodes.iter().any(|node| {
+                    matches!(
+                        node.node.entity.selector(),
+                        EntitySelector::Symbol { symbol }
+                            if symbol.name.as_str() == "d_unused"
+                    )
+                })
+        }),
+        "entrypoint profile omitted the unreachable candidate finding",
+    )?;
+    require(
+        store.index_publication()? == before,
+        "entrypoint profile changed the authoritative publication",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_rejects_ambiguous_cursor_and_wrong_scope_and_stays_inconclusive()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let file_anchor = |path: &str| {
+        Ok::<_, Box<dyn Error>>(RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new(path))?,
+        })
+    };
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "invalid".to_string(),
+        anchors: vec![file_anchor("src/a.rs")?, file_anchor("src/a.rs")?],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    require(
+        load_relation_analysis(&store, &query, None).is_err(),
+        "duplicate entrypoint anchors were accepted",
+    )?;
+
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "wrong-root".to_string(),
+        anchors: vec![file_anchor("missing.rs")?],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    require(
+        load_relation_analysis(&store, &query, None).is_err(),
+        "a wrong-root entrypoint was accepted",
+    )?;
+
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "cursor".to_string(),
+        anchors: vec![file_anchor("src/a.rs")?],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    query.relations.cursor = Some("stale".to_string());
+    let cursor_result = load_relation_analysis(&store, &query, None);
+    let cursor_error = cursor_result.err().map(|error| error.to_string());
+    require(
+        cursor_error
+            .as_deref()
+            .is_some_and(|error| error.contains("relation cursors")),
+        "entrypoint profiles accepted a replay cursor",
+    )?;
+
+    let (_partial_temp, partial_store) = analysis_store_with_coverage(false)?;
+    query.relations.cursor = None;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "partial".to_string(),
+        anchors: vec![file_anchor("tools/c.rs")?],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&partial_store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "incomplete entrypoint coverage produced a confident finding",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn community_closure_scopes_scope_gaps_to_admitted_relations() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;
     let mut all_relations = analysis_query(RelationAnalysisMode::Architecture)?;
@@ -2354,6 +2476,7 @@ fn analysis_query(mode: RelationAnalysisMode) -> Result<RelationAnalysisQuery, B
         include_communities: true,
         include_cycles: true,
         include_dead_code: false,
+        entrypoint_profile: None,
     })
 }
 

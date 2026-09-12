@@ -105,7 +105,7 @@ use projectatlas_service::build_file_summary_from_source;
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSliceBudget, CoverageDigest, CoverageTrustState,
     DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport,
-    DetailedRelationRow, DetailedRelationWork, FederatedDetailedRelationReport,
+    DetailedRelationRow, DetailedRelationWork, EntrypointProfile, FederatedDetailedRelationReport,
     FederatedParticipant, FederatedRelationWork, FederatedRendezvous, FederatedStore,
     FileCallSummary, FileSummaryReport, FileSymbolSummary, GitImpactSelection,
     RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor, RelationDirection,
@@ -464,6 +464,8 @@ const MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE: &str = "architecture";
 const MCP_RELATION_ANALYSIS_MODE_IMPACT: &str = "impact";
 /// Static trace relation-analysis mode.
 const MCP_RELATION_ANALYSIS_MODE_TRACE: &str = "trace";
+/// Explicit entrypoint-profile reachability mode.
+const MCP_RELATION_ANALYSIS_MODE_ENTRYPOINT: &str = "entrypoint";
 /// Default working-tree VCS impact selection.
 const MCP_RELATION_ANALYSIS_VCS_WORKING_TREE: &str = "working_tree";
 /// Staged-index VCS impact selection.
@@ -1213,8 +1215,14 @@ struct AtlasSymbolRelationsParams {
     deadline_ms: Option<u64>,
     /// Maximum encoded bytes admitted to the detailed response.
     output_bytes: Option<u32>,
-    /// Closed analysis mode: `architecture`, `impact`, or `trace`.
+    /// Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`.
     analysis_mode: Option<String>,
+    /// Stable name for an explicit entrypoint profile.
+    profile_name: Option<String>,
+    /// JSON `RelationAnchor` values; repeat for multiple entrypoints.
+    entrypoints: Option<Vec<String>>,
+    /// Relation families admitted by an entrypoint profile.
+    profile_relations: Option<Vec<String>>,
     /// Exact target symbol name for trace mode.
     trace_target: Option<String>,
     /// Exact target file for trace mode; alone selects a file target.
@@ -1244,6 +1252,15 @@ struct AtlasSymbolRelationsParams {
 /// Return whether any closed analysis-only control was supplied.
 fn relation_analysis_controls_present(params: &AtlasSymbolRelationsParams) -> bool {
     params.analysis_mode.is_some()
+        || params.profile_name.is_some()
+        || params
+            .entrypoints
+            .as_ref()
+            .is_some_and(|items| !items.is_empty())
+        || params
+            .profile_relations
+            .as_ref()
+            .is_some_and(|items| !items.is_empty())
         || params.trace_target.is_some()
         || params.trace_target_file.is_some()
         || params.trace_target_parent.is_some()
@@ -9153,6 +9170,7 @@ impl ProjectAtlasMcpServer {
                 MCP_RELATION_ANALYSIS_MODE_ARCHITECTURE => RelationAnalysisMode::Architecture,
                 MCP_RELATION_ANALYSIS_MODE_IMPACT => RelationAnalysisMode::Impact,
                 MCP_RELATION_ANALYSIS_MODE_TRACE => RelationAnalysisMode::Trace,
+                MCP_RELATION_ANALYSIS_MODE_ENTRYPOINT => RelationAnalysisMode::Entrypoint,
                 _unsupported => {
                     return Err(CliError::Service(ServiceError::InvalidInput(
                         MCP_ERROR_UNSUPPORTED_ANALYSIS_MODE.to_string(),
@@ -9163,6 +9181,58 @@ impl ProjectAtlasMcpServer {
             let vcs_explicit =
                 params.vcs.is_some() || params.vcs_base.is_some() || params.vcs_head.is_some();
             let vcs = relation_analysis_vcs(params)?;
+            if mode == RelationAnalysisMode::Entrypoint
+                && matches!(&stores, SymbolRelationStores::Federated(_))
+            {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    "entrypoint profiles require one project root".to_string(),
+                )));
+            }
+            let entrypoint_profile = if mode == RelationAnalysisMode::Entrypoint {
+                let anchors = match params.entrypoints.as_ref() {
+                    Some(values) if !values.is_empty() => values
+                        .iter()
+                        .map(|value| serde_json::from_str::<RelationAnchor>(value))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| {
+                            CliError::Service(ServiceError::InvalidInput(format!(
+                                "entrypoints must contain exact RelationAnchor JSON objects: {error}"
+                            )))
+                        })?,
+                    _ => vec![relations.anchor.clone()],
+                };
+                let relation_families = match params.profile_relations.as_ref() {
+                    Some(values) if !values.is_empty() => values
+                        .iter()
+                        .map(|value| parse_coverage_relation(value))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => GraphRelationKind::ALL.to_vec(),
+                };
+                Some(EntrypointProfile {
+                    name: params
+                        .profile_name
+                        .clone()
+                        .unwrap_or_else(|| "entrypoint-profile".to_string()),
+                    anchors,
+                    relations: relation_families,
+                })
+            } else {
+                if params.profile_name.is_some()
+                    || params
+                        .entrypoints
+                        .as_ref()
+                        .is_some_and(|items| !items.is_empty())
+                    || params
+                        .profile_relations
+                        .as_ref()
+                        .is_some_and(|items| !items.is_empty())
+                {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "entrypoint profile controls require analysis_mode=entrypoint".to_string(),
+                    )));
+                }
+                None
+            };
             let query = RelationAnalysisQuery {
                 relations,
                 mode,
@@ -9171,6 +9241,7 @@ impl ProjectAtlasMcpServer {
                 include_communities: params.include_communities.unwrap_or(false),
                 include_cycles: params.include_cycles.unwrap_or(false),
                 include_dead_code: params.include_dead_code.unwrap_or(false),
+                entrypoint_profile,
             };
             let toon = match stores {
                 SymbolRelationStores::Single(store) => {
@@ -9317,10 +9388,32 @@ impl ProjectAtlasMcpServer {
                 .and_then(|worktrees| worktrees.first())
                 .map(String::as_str)
                 .or(params.worktree.as_deref());
+            let profile_file = if analysis
+                && params.analysis_mode.as_deref() == Some(MCP_RELATION_ANALYSIS_MODE_ENTRYPOINT)
+            {
+                params
+                    .entrypoints
+                    .as_ref()
+                    .and_then(|values| values.first())
+                    .map(|value| serde_json::from_str::<RelationAnchor>(value))
+                    .transpose()
+                    .map_err(|error| {
+                        CliError::Service(ServiceError::InvalidInput(format!(
+                            "entrypoints must contain exact RelationAnchor JSON objects: {error}"
+                        )))
+                    })?
+                    .map(|anchor| match anchor {
+                        RelationAnchor::File { file } | RelationAnchor::Symbol { file, .. } => {
+                            file.as_str().to_string()
+                        }
+                    })
+            } else {
+                None
+            };
             let (state, file, routed_project) = self.state_and_optional_file_key(
                 params.project_path.as_deref(),
                 selected_worktree,
-                params.file.as_deref(),
+                params.file.as_deref().or(profile_file.as_deref()),
                 nearest_project,
             )?;
             if params.roots.is_some() || federated_worktrees.is_some() {
@@ -12032,6 +12125,35 @@ mod tests {
                 && analysis.contains("next_call:")
                 && analysis.contains("work:"),
             "MCP relation analysis omitted its closed mode, findings, work, or reusable next call",
+        )?;
+        let entrypoint_anchor = serde_json::to_string(&RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/lib.rs"))?,
+        })?;
+        let entrypoint = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: None,
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                direction: Some("outbound".to_string()),
+                resolution: Some("any".to_string()),
+                depth: Some(2),
+                limit: Some(50),
+                output_bytes: Some(64 * 1024),
+                analysis_mode: Some("entrypoint".to_string()),
+                profile_name: Some("mcp-entrypoint".to_string()),
+                entrypoints: Some(vec![entrypoint_anchor]),
+                profile_relations: Some(vec!["calls".to_string()]),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            entrypoint.contains("symbol_relations:")
+                && entrypoint.contains("mode: entrypoint")
+                && entrypoint.contains("entrypoint_profile:")
+                && entrypoint.contains("coverage:"),
+            "MCP entrypoint analysis did not serialize the shared profile contract",
         )?;
 
         let state = ProjectAtlasMcpServer::project_state_from_root(Path::new(project_path))?;

@@ -77,9 +77,9 @@ use super::relations::{
 };
 use super::{
     CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
-    DetailedRelationReport, DetailedRelationWork, RelationAnchor, RelationDirection,
-    RelationNextCall, RelationPurpose, RelationResolutionFilter, RelationTotalState, ServiceError,
-    ServiceResult, coverage_trust, selected_project_binding,
+    DetailedRelationReport, DetailedRelationRow, DetailedRelationWork, RelationAnchor,
+    RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
+    RelationTotalState, ServiceError, ServiceResult, coverage_trust, selected_project_binding,
 };
 use impact::{LoadedVcs, digest_vcs_paths, impact_findings, load_vcs_paths};
 use projectatlas_core::graph::{
@@ -142,6 +142,49 @@ pub enum RelationAnalysisMode {
     Impact,
     /// One node-simple static relationship path to an exact target label.
     Trace,
+    /// Bounded reachability from an explicit, non-persistent entrypoint profile.
+    Entrypoint,
+}
+
+/// Request-owned entrypoint reachability profile.
+///
+/// Profiles are deliberately not discovered or persisted. The surrounding
+/// relation budget supplies the input, traversal, and output ceilings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EntrypointProfile {
+    /// Stable human-readable profile name.
+    pub name: String,
+    /// Exact file or fully disambiguated symbol anchors.
+    pub anchors: Vec<RelationAnchor>,
+    /// Closed relation families admitted by this profile.
+    pub relations: Vec<GraphRelationKind>,
+}
+
+/// Typed profile-level reachability disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntrypointProfileCoverage {
+    /// Every admitted entity and relation was inspected under the profile bounds.
+    Complete,
+    /// A declared relation, entity, or resource boundary prevented a safe negative.
+    Partial,
+}
+
+/// Non-persistent profile metadata returned with entrypoint findings.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EntrypointProfileResult {
+    /// Request-owned stable profile name.
+    pub name: String,
+    /// Exact anchors used for traversal.
+    pub anchors: Vec<RelationAnchor>,
+    /// Exact relation families used for traversal.
+    pub relations: Vec<GraphRelationKind>,
+    /// Coverage disposition for the complete local entity scope.
+    pub coverage: EntrypointProfileCoverage,
+    /// Number of reachable local entities retained in the result.
+    pub reachable: u32,
+    /// Number of evidence-backed unreachable candidates retained in the result.
+    pub unreachable_candidates: u32,
 }
 
 /// Version-control scope used by the impact projection.
@@ -178,6 +221,8 @@ pub struct RelationAnalysisQuery {
     pub include_cycles: bool,
     /// Include conservative non-exported dead-code candidates.
     pub include_dead_code: bool,
+    /// Explicit non-persistent profile for entrypoint reachability mode.
+    pub entrypoint_profile: Option<EntrypointProfile>,
 }
 
 /// Confidence disposition of one analysis finding.
@@ -220,6 +265,8 @@ pub enum AnalysisFindingKind {
     StaticTrace,
     /// Ambiguous or unresolved static relation that prevents a closed conclusion.
     ResolutionGap,
+    /// Reachability disposition for an explicit entrypoint profile.
+    EntrypointReachability,
 }
 
 /// One deterministic bounded analysis finding.
@@ -441,6 +488,9 @@ pub struct RelationAnalysisReport {
     pub reached_limits: Vec<GraphLimitKind>,
     /// Typed VCS evidence for impact mode.
     pub vcs: VcsImpact,
+    /// Request-owned entrypoint profile metadata, when that mode is selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint_profile: Option<EntrypointProfileResult>,
     /// Exact bounded work retained by this analysis.
     pub work: RelationAnalysisWork,
     /// Deterministically ordered structural findings.
@@ -692,6 +742,8 @@ struct AnalysisCursorBinding {
     trace_target: Option<RelationAnchor>,
     /// Optional VCS selector.
     vcs: Option<GitImpactSelection>,
+    /// Explicit entrypoint profile, when selected.
+    entrypoint_profile: Option<EntrypointProfile>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -767,6 +819,9 @@ pub fn load_relation_analysis(
     query: &RelationAnalysisQuery,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<RelationAnalysisDraft> {
+    if query.mode == RelationAnalysisMode::Entrypoint {
+        return load_entrypoint_profile_draft(store, query, control);
+    }
     load_relation_analysis_with_closure_deadline(store, query, control, None, false)
 }
 
@@ -776,6 +831,11 @@ pub(super) fn load_relation_analysis_for_federation(
     query: &RelationAnalysisQuery,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<RelationAnalysisDraft> {
+    if query.mode == RelationAnalysisMode::Entrypoint {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profiles require one project root".to_string(),
+        ));
+    }
     load_relation_analysis_with_closure_deadline(store, query, control, None, true)
 }
 
@@ -974,6 +1034,7 @@ fn load_relation_analysis_with_closure_deadline(
             RelationAnalysisMode::Trace => {
                 trace_findings(&relations, query.trace_target.as_ref(), evidence_complete)?
             }
+            RelationAnalysisMode::Entrypoint => Vec::new(),
         });
     }
     let generated_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
@@ -1122,6 +1183,7 @@ fn load_relation_analysis_with_closure_deadline(
         truncated: analysis_truncated,
         reached_limits,
         vcs,
+        entrypoint_profile: None,
         work,
         findings,
     };
@@ -1143,6 +1205,47 @@ fn load_relation_analysis_with_closure_deadline(
 
 /// Validate closed mode, selector, option, and budget combinations.
 fn validate_analysis_query(query: &RelationAnalysisQuery) -> ServiceResult<()> {
+    if query.mode == RelationAnalysisMode::Entrypoint {
+        let profile = query.entrypoint_profile.as_ref().ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "entrypoint analysis requires an explicit profile".to_string(),
+            )
+        })?;
+        validate_entrypoint_profile(profile)?;
+        if query.relations.direction != RelationDirection::Outbound
+            || query.relations.resolution != RelationResolutionFilter::Any
+        {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profiles require outbound traversal with any resolution".to_string(),
+            ));
+        }
+        if query.relations.cursor.is_some() {
+            return Err(ServiceError::RelationCursorInvalid {
+                reason: "entrypoint profiles do not support relation cursors; restart the profile",
+            });
+        }
+        if query.relations.relation.is_some() {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profiles carry relation families in the profile itself".to_string(),
+            ));
+        }
+        if query.trace_target.is_some()
+            || query.vcs.is_some()
+            || query.include_communities
+            || query.include_cycles
+            || query.include_dead_code
+        {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profiles do not accept unrelated analysis controls".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if query.entrypoint_profile.is_some() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile is valid only for entrypoint analysis".to_string(),
+        ));
+    }
     if query.mode == RelationAnalysisMode::Trace {
         let Some(target) = query.trace_target.as_ref() else {
             return Err(ServiceError::InvalidInput(
@@ -1189,6 +1292,522 @@ fn validate_analysis_query(query: &RelationAnalysisQuery) -> ServiceResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Validate the request-owned profile before any graph read occurs.
+fn validate_entrypoint_profile(profile: &EntrypointProfile) -> ServiceResult<()> {
+    let name = profile.name.trim();
+    if name.is_empty() || name.len() > 128 || name != profile.name {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile name must be nonempty, trimmed, and at most 128 bytes".to_string(),
+        ));
+    }
+    if profile.anchors.is_empty() || profile.anchors.len() > 32 {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile requires 1 to 32 anchors".to_string(),
+        ));
+    }
+    let mut anchors = BTreeSet::new();
+    for anchor in &profile.anchors {
+        let encoded = serde_json::to_string(anchor)?;
+        if !anchors.insert(encoded) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profile anchors must be unique".to_string(),
+            ));
+        }
+        if matches!(
+            anchor,
+            RelationAnchor::Symbol {
+                symbol_kind: None,
+                ..
+            }
+        ) || matches!(
+            anchor,
+            RelationAnchor::Symbol {
+                signature: None,
+                ..
+            }
+        ) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint symbol anchors require exact kind and signature".to_string(),
+            ));
+        }
+        if let RelationAnchor::Symbol {
+            name,
+            parent,
+            signature,
+            ..
+        } = anchor
+        {
+            if name.trim().is_empty()
+                || name != name.trim()
+                || signature
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                || parent
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(ServiceError::InvalidInput(
+                    "entrypoint symbol anchors require nonempty exact identity fields".to_string(),
+                ));
+            }
+        }
+    }
+    if profile.relations.is_empty() || profile.relations.len() > GraphRelationKind::ALL.len() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile requires 1 to 12 relation families".to_string(),
+        ));
+    }
+    let mut relations = BTreeSet::new();
+    for relation in &profile.relations {
+        if !GraphRelationKind::ALL.contains(relation) || !relations.insert(relation.as_str()) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profile relation families must be unique supported values".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Build a bounded, non-persistent entrypoint profile over the existing graph.
+fn load_entrypoint_profile_draft(
+    store: &AtlasStore,
+    query: &RelationAnalysisQuery,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<RelationAnalysisDraft> {
+    validate_analysis_query(query)?;
+    let profile = query
+        .entrypoint_profile
+        .as_ref()
+        .ok_or_else(|| ServiceError::InvalidInput("entrypoint profile is missing".to_string()))?;
+    let started = Instant::now();
+    let budget = bounded_analysis_budget(query.relations.budget)?;
+    let deadline = started
+        .checked_add(Duration::from_millis(budget.deadline_ms()))
+        .unwrap_or(started);
+    let analysis_control = control.map_or_else(
+        || IndexWorkControl::with_deadline(IndexCancellation::new(), deadline),
+        |caller| {
+            caller.with_timeout_ceiling(deadline.saturating_duration_since(caller.started_at()))
+        },
+    );
+    let control = Some(&analysis_control);
+    check_control(control)?;
+    let selected_binding = selected_project_binding(store)?;
+    let generation = store.repository_graph_generation()?.ok_or_else(|| {
+        ServiceError::InvalidInput(
+            "repository graph has no complete generation for entrypoint analysis".to_string(),
+        )
+    })?;
+    let mut reachable = BTreeMap::<String, DetailedRelationNode>::new();
+    let mut edges = Vec::new();
+    let mut relation_work = DetailedRelationWork::default();
+    let mut first_anchor = None;
+    let mut authored_purpose_revision = 0;
+    let mut complete = true;
+    let mut reached_limits = Vec::new();
+
+    'profile: for anchor in &profile.anchors {
+        for relation in &profile.relations {
+            check_control(control)?;
+            if relation_work.inspected_edges >= budget.edges() {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                break 'profile;
+            }
+            if reachable.len() >= budget.nodes() as usize {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                break 'profile;
+            }
+            if relation_work.intermediate_bytes >= budget.intermediate_bytes() {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                break 'profile;
+            }
+            let mut relation_query = query.relations.clone();
+            relation_query.anchor = anchor.clone();
+            relation_query.relation = Some(*relation);
+            relation_query.direction = RelationDirection::Outbound;
+            relation_query.minimum_confidence = ConfidenceClass::Low;
+            relation_query.resolution = RelationResolutionFilter::Any;
+            relation_query.cursor = None;
+            relation_query.budget = budget;
+            let mut cursor = None;
+            let mut pages = 0_u32;
+            loop {
+                relation_query.cursor = cursor;
+                let report = load_detailed_relations(store, &relation_query, control)?;
+                if report.generation != generation {
+                    return Err(ServiceError::RelationCursorStale {
+                        field: "entrypoint graph generation",
+                    });
+                }
+                first_anchor.get_or_insert_with(|| report.anchor.clone());
+                authored_purpose_revision =
+                    authored_purpose_revision.max(report.authored_purpose_revision);
+                add_relation_work(&mut relation_work, &report.work)?;
+                if relation_work.inspected_edges > budget.edges() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                }
+                if relation_work.inspected_edges > budget.edges() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                    break 'profile;
+                }
+                if reachable.len() > budget.nodes() as usize {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                    break 'profile;
+                }
+                if relation_work.intermediate_bytes > budget.intermediate_bytes() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    break 'profile;
+                }
+                for limit in &report.reached_limits {
+                    push_limit(&mut reached_limits, *limit);
+                }
+                complete &= trusted_node_coverage(&report.anchor);
+                insert_node(&mut reachable, &report.anchor);
+                for row in &report.rows {
+                    check_control(control)?;
+                    let resolved = matches!(
+                        row.relation.resolution(),
+                        RelationResolution::Resolved { .. }
+                    ) && row.relation.completeness() == Completeness::Complete;
+                    complete &= resolved && trusted_relation_row(row);
+                    insert_node(&mut reachable, &row.source);
+                    if let Some(target) = &row.target {
+                        insert_node(&mut reachable, target);
+                    }
+                    for node in &row.path {
+                        insert_node(&mut reachable, node);
+                    }
+                    if let Some(edge) =
+                        local_edge(&row.relation, &row.source.entity, row.target.as_ref())
+                    {
+                        edges.push(edge);
+                    }
+                }
+                cursor = report.continuation;
+                pages = pages.saturating_add(1);
+                if cursor.is_none() {
+                    complete &= !report.truncated
+                        && report.reached_limits.is_empty()
+                        && matches!(report.total, RelationTotalState::Exact(_));
+                    break;
+                }
+                if pages >= budget.nodes() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                    break 'profile;
+                }
+            }
+        }
+    }
+    edges.sort_by(|left, right| {
+        (&left.source, &left.target, left.kind.as_str()).cmp(&(
+            &right.source,
+            &right.target,
+            right.kind.as_str(),
+        ))
+    });
+    edges.dedup_by(|left, right| {
+        left.source == right.source && left.target == right.target && left.kind == right.kind
+    });
+    let anchor = first_anchor.ok_or_else(|| {
+        ServiceError::InvalidInput("entrypoint profile resolved no anchors".to_string())
+    })?;
+    let entity_limit = budget.nodes();
+    let read_budget = RepositoryGraphReadBudget::new(
+        1,
+        entity_limit.saturating_add(1),
+        budget
+            .intermediate_bytes()
+            .min(RepositoryGraphReadBudget::MAX_DECODED_BYTES)
+            .max(1),
+        entity_limit.saturating_add(1).saturating_mul(2),
+        entity_limit.saturating_add(1).saturating_mul(2),
+    )
+    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
+    let mut unreachable = BTreeMap::new();
+    if complete {
+        let all_entities = store
+            .repository_graph_entities_page_bounded(
+                generation_project(&anchor.entity),
+                generation,
+                entity_limit,
+                read_budget,
+                control,
+            )?
+            .page;
+        if all_entities.truncated {
+            complete = false;
+            push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+        }
+        if complete {
+            for entity in all_entities.rows {
+                check_control(control)?;
+                if !complete {
+                    break;
+                }
+                if !matches!(
+                    entity.selector(),
+                    EntitySelector::File { .. } | EntitySelector::Symbol { .. }
+                ) || reachable_keys.contains(entity.key().canonical_identity())
+                {
+                    continue;
+                }
+                let candidate_anchor = relation_anchor_for_entity(&entity).ok_or_else(|| {
+                    ServiceError::InvalidInput(
+                        "entrypoint candidate is not addressable by an exact anchor".to_string(),
+                    )
+                })?;
+                let mut candidate_query = query.relations.clone();
+                candidate_query.anchor = candidate_anchor;
+                candidate_query.relation = Some(profile.relations[0]);
+                candidate_query.direction = RelationDirection::Outbound;
+                candidate_query.resolution = RelationResolutionFilter::Any;
+                candidate_query.cursor = None;
+                candidate_query.budget = budget;
+                let candidate_report = load_detailed_relations(store, &candidate_query, control)?;
+                add_relation_work(&mut relation_work, &candidate_report.work)?;
+                if relation_work.inspected_edges > budget.edges() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                    break;
+                }
+                if relation_work.intermediate_bytes > budget.intermediate_bytes() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    break;
+                }
+                if entrypoint_report_complete(&candidate_report) {
+                    unreachable.insert(
+                        entity.key().canonical_identity().to_string(),
+                        candidate_report.anchor,
+                    );
+                } else {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+    }
+    let reachable_nodes = reachable.values().map(analysis_node).collect::<Vec<_>>();
+    let unreachable_nodes = unreachable.values().map(analysis_node).collect::<Vec<_>>();
+    let coverage = if complete {
+        EntrypointProfileCoverage::Complete
+    } else {
+        EntrypointProfileCoverage::Partial
+    };
+    let mut findings = Vec::new();
+    if complete {
+        findings.push(AnalysisFinding {
+            kind: AnalysisFindingKind::EntrypointReachability,
+            status: AnalysisStatus::Confirmed,
+            summary: "explicit entrypoints reach these local entities through complete admitted relations"
+                .to_string(),
+            nodes: reachable_nodes.clone(),
+            metric: Some(reachable_nodes.len() as u64),
+            evidence: None,
+            community: None,
+        });
+        if !unreachable_nodes.is_empty() {
+            findings.push(AnalysisFinding {
+                kind: AnalysisFindingKind::EntrypointReachability,
+                status: AnalysisStatus::Candidate,
+                summary: "local entities are unreachable from the explicit entrypoints; review exact source evidence before any deletion decision"
+                    .to_string(),
+                nodes: unreachable_nodes.clone(),
+                metric: Some(unreachable_nodes.len() as u64),
+                evidence: None,
+                community: None,
+            });
+        }
+    } else {
+        findings.push(AnalysisFinding {
+            kind: AnalysisFindingKind::EntrypointReachability,
+            status: AnalysisStatus::Inconclusive,
+            summary: "entrypoint reachability is inconclusive because relation coverage or a declared bound is partial"
+                .to_string(),
+            nodes: reachable_nodes.clone(),
+            metric: None,
+            evidence: None,
+            community: None,
+        });
+    }
+    let mut profile_result = EntrypointProfileResult {
+        name: profile.name.clone(),
+        anchors: profile.anchors.clone(),
+        relations: profile.relations.clone(),
+        coverage,
+        reachable: u32::try_from(reachable_nodes.len()).unwrap_or(u32::MAX),
+        unreachable_candidates: u32::try_from(unreachable_nodes.len()).unwrap_or(u32::MAX),
+    };
+    let mut work = RelationAnalysisWork {
+        relations: relation_work,
+        analyzed_nodes: u32::try_from(reachable.len().saturating_add(unreachable.len()))
+            .unwrap_or(u32::MAX),
+        analyzed_edges: u32::try_from(edges.len()).unwrap_or(u32::MAX),
+        ..RelationAnalysisWork::default()
+    };
+    work.retained_composition_bytes =
+        serialized_bytes_controlled(&(findings.clone(), &profile_result), control)?;
+    work.peak_intermediate_bytes = work
+        .relations
+        .intermediate_bytes
+        .saturating_add(work.retained_composition_bytes);
+    if work.peak_intermediate_bytes > budget.intermediate_bytes() {
+        complete = false;
+        work.composition_truncated = true;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+    }
+    if !complete {
+        profile_result.coverage = EntrypointProfileCoverage::Partial;
+        for finding in &mut findings {
+            finding.status = AnalysisStatus::Inconclusive;
+        }
+    }
+    let report = RelationAnalysisReport {
+        mode: RelationAnalysisMode::Entrypoint,
+        anchor,
+        generation,
+        authored_purpose_revision,
+        continuation: None,
+        returned: u32::try_from(findings.len()).unwrap_or(u32::MAX),
+        total: if complete {
+            RelationTotalState::Exact(findings.len() as u64)
+        } else {
+            RelationTotalState::AtLeast(findings.len() as u64)
+        },
+        truncated: !complete,
+        reached_limits,
+        vcs: VcsImpact::NotRequested,
+        entrypoint_profile: Some(profile_result),
+        work,
+        findings,
+    };
+    let cursor_snapshot = AnalysisCursorSnapshot {
+        project: generation_project(&report.anchor.entity),
+        generation,
+        authored_purpose_revision,
+    };
+    let cursor_binding = analysis_cursor_binding(query, &selected_binding.project_root_identity)?;
+    Ok(RelationAnalysisDraft {
+        report,
+        output_bytes: budget.output_bytes(),
+        budget,
+        cursor_binding,
+        cursor_snapshot,
+        replay_relation_cursor: None,
+        finding_offset: 0,
+        vcs_digest: None,
+        external_relation_identities: BTreeSet::new(),
+        control: analysis_control,
+    })
+}
+
+/// Add one detailed traversal work ledger without widening its types.
+fn add_relation_work(
+    total: &mut DetailedRelationWork,
+    next: &DetailedRelationWork,
+) -> ServiceResult<()> {
+    total.returned_rows = total
+        .returned_rows
+        .checked_add(next.returned_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.inspected_edges = total
+        .inspected_edges
+        .checked_add(next.inspected_edges)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.active_nodes = total.active_nodes.max(next.active_nodes);
+    total.visited_nodes = total.visited_nodes.max(next.visited_nodes);
+    total.retained_occurrences = total
+        .retained_occurrences
+        .checked_add(next.retained_occurrences)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_requested_rows = total
+        .database_requested_rows
+        .checked_add(next.database_requested_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_returned_rows = total
+        .database_returned_rows
+        .checked_add(next.database_returned_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_decoded_bytes = total
+        .database_decoded_bytes
+        .checked_add(next.database_decoded_bytes)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_entities = total
+        .hydrated_entities
+        .checked_add(next.hydrated_entities)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_purpose_paths = total
+        .hydrated_purpose_paths
+        .checked_add(next.hydrated_purpose_paths)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_classification_paths = total
+        .hydrated_classification_paths
+        .checked_add(next.hydrated_classification_paths)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.retained_composition_bytes = total
+        .retained_composition_bytes
+        .saturating_add(next.retained_composition_bytes);
+    total.intermediate_bytes = total
+        .intermediate_bytes
+        .saturating_add(next.intermediate_bytes);
+    total.rendered_output_bytes = total
+        .rendered_output_bytes
+        .saturating_add(next.rendered_output_bytes);
+    Ok(())
+}
+
+fn entrypoint_work_overflow() -> ServiceError {
+    ServiceError::InvalidInput("entrypoint relation work overflowed".to_string())
+}
+
+/// Return the project identity for an already generation-bound graph entity.
+fn generation_project(entity: &GraphEntity) -> ProjectInstanceId {
+    entity.key().project()
+}
+
+/// Return whether a detailed node carries trusted local coverage.
+fn trusted_node_coverage(node: &DetailedRelationNode) -> bool {
+    !node.coverage.is_empty()
+        && node
+            .coverage
+            .iter()
+            .all(|coverage| coverage_trust(coverage.state()) == CoverageTrustState::Trusted)
+}
+
+/// Return whether every local endpoint in one relation row has trusted coverage.
+fn trusted_relation_row(row: &DetailedRelationRow) -> bool {
+    trusted_node_coverage(&row.source)
+        && row.target.as_ref().is_none_or(trusted_node_coverage)
+        && row.path.iter().all(trusted_node_coverage)
+}
+
+/// Return whether one terminal candidate traversal supports a safe negative.
+fn entrypoint_report_complete(report: &DetailedRelationReport) -> bool {
+    matches!(
+        report.total,
+        RelationTotalState::Exact(total) if total == u64::from(report.returned)
+    ) && !report.truncated
+        && report.continuation.is_none()
+        && report.reached_limits.is_empty()
+        && trusted_node_coverage(&report.anchor)
+        && report.rows.iter().all(|row| {
+            matches!(
+                row.relation.resolution(),
+                RelationResolution::Resolved { .. }
+            ) && row.relation.completeness() == Completeness::Complete
+                && trusted_relation_row(row)
+        })
 }
 
 /// Clamp the existing traversal budget to analysis product ceilings.
@@ -1242,6 +1861,7 @@ fn analysis_cursor_binding(
         trace_target: query.trace_target.clone(),
         vcs: (query.mode == RelationAnalysisMode::Impact)
             .then(|| query.vcs.clone().unwrap_or(GitImpactSelection::WorkingTree)),
+        entrypoint_profile: query.entrypoint_profile.clone(),
     })
 }
 

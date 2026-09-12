@@ -1544,6 +1544,7 @@ mod tests {
                 include_communities: false,
                 include_cycles: false,
                 include_dead_code: false,
+                entrypoint_profile: None,
             },
             None,
         )?;
@@ -1599,6 +1600,7 @@ mod tests {
                 include_communities: false,
                 include_cycles: false,
                 include_dead_code: false,
+                entrypoint_profile: None,
             },
             None,
         )?;
