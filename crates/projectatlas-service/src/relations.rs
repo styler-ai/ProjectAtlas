@@ -871,7 +871,7 @@ struct SerializedByteCounter {
 }
 
 /// Return the exact admitted file path that owns an entity classification.
-fn classification_path(entity: &GraphEntity) -> Option<String> {
+pub(super) fn classification_path(entity: &GraphEntity) -> Option<String> {
     match entity.selector() {
         EntitySelector::File { path } => Some(path.as_str().to_string()),
         EntitySelector::Package { package } => Some(package.manifest.as_str().to_string()),
@@ -906,7 +906,7 @@ fn load_entity_classifications<'entity>(
 }
 
 /// Return whether one local file-bearing entity belongs to the selection.
-fn entity_matches_selection(
+pub(super) fn entity_matches_selection(
     entity: &GraphEntity,
     classifications: &BTreeMap<String, ContentClassification>,
     selection: ContentSelection,
@@ -1859,6 +1859,38 @@ fn resolve_anchor(
             }
         }
     }
+}
+
+/// Resolve one entrypoint anchor before profile traversal and expose its read ledger.
+pub(super) fn resolve_relation_anchor_for_analysis(
+    store: &AtlasStore,
+    project: projectatlas_core::graph::ProjectInstanceId,
+    generation: IndexGeneration,
+    anchor: &RelationAnchor,
+    budget: DetailedRelationBudget,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(GraphEntity, DetailedRelationWork)> {
+    let mut database_work = RelationDatabaseWork::default();
+    let entity = resolve_anchor(
+        store,
+        project,
+        generation,
+        anchor,
+        budget,
+        &mut database_work,
+        control,
+    )?;
+    Ok((
+        entity,
+        DetailedRelationWork {
+            database_requested_rows: database_work.requested_rows,
+            database_returned_rows: database_work.returned_rows,
+            database_decoded_bytes: database_work.decoded_bytes,
+            hydrated_entities: database_work.hydrated_entities,
+            hydrated_purpose_paths: database_work.hydrated_paths,
+            ..DetailedRelationWork::default()
+        },
+    ))
 }
 
 /// Test one normalized relation against the service-owned trust filters.

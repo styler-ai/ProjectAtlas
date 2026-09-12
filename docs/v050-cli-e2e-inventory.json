@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "4c72e4f5e9e51753fd7e74d87a202cc8b882e8b392f32c4d1b9271e3f378738a",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "de155b4541c68a726519292644b489292742d5b26f774e3b4b17ea76569d0e82",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "b2691058f2324abbccd250c9541ec762bf302f1f1e5f93f0455ece8729e5c21f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "0fca4b81eccb59fcb208b5c8a409cbf120ffc40f0f0b4d01dda5c582274ea0ec",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "7be2d40d611935b8e9a5d420dcfd6cf94703011e601aa5f890467999ead9fb22",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "ebf6762b94065c955bf4526269917ee6516ec5722a79ec0d596faf3cef54169a",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "46609fba4c5930d24ff497638c294497e38a91eecdabd0a47191b6161a985ecd"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 193,
+  "test_count": 194,
   "symbol_count": 431,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -38,6 +38,13 @@
     },
     {
       "name": "composer_shaped_php_cli_mcp_and_incremental_refresh_agree",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "entrypoint_analysis_cli_and_mcp_share_profile_result_and_rejections",
       "owner": "e2e_navigation",
       "attributes": [
         "#[test]"

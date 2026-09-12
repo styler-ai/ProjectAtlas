@@ -456,7 +456,7 @@ const LANGUAGE_SUPPORT_FILE_NAME: &str = "language-support.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "c364a97710088181c61ebf3ba57573fae5cf26b0eb21fe12f49d956a18ad6fcd";
+const MCP_TOOLS_SHA256: &str = "9a01e84163fd5a60cd850a6ccb2edb0c4cdb60bc3bd9c7cec9a61541c980b4c5";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -23075,9 +23075,20 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .get(name.as_str())
             .and_then(|tool| tool.get("inputSchema"))
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        let normalized_baseline = if name == "atlas_symbol_relations" {
+            let mut schema = baseline_schema.clone();
+            if let Some(description) = schema.pointer_mut("/properties/analysis_mode/description") {
+                *description = json!(
+                    "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`."
+                );
+            }
+            schema
+        } else {
+            baseline_schema.clone()
+        };
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
-            baseline_schema,
+            &normalized_baseline,
             current_schema,
         )?;
     }
@@ -30704,6 +30715,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             String::from_utf8_lossy(&committed_cleanup.stdout),
             String::from_utf8_lossy(&committed_cleanup.stderr)
         );
+        let cleanup_normalized = cleanup_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let retained = fs::read_dir(runtime_directory)?
             .collect::<Result<Vec<_>, io::Error>>()?
             .into_iter()
@@ -30716,7 +30731,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .collect::<Vec<_>>();
         require(
             committed_cleanup.status.success()
-                && cleanup_text.contains("retirement committed; quarantine cleanup remains")
+                && cleanup_normalized.contains("retirement committed; quarantine cleanup remains")
                 && !forwarder.exists()
                 && !provenance.exists()
                 && !installer_state.exists()

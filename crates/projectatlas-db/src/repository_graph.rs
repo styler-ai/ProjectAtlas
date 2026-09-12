@@ -1432,6 +1432,83 @@ impl AtlasStore {
         Ok(RepositoryGraphReadPage { page, work })
     }
 
+    /// Load a bounded stable-order page of local entrypoint candidate entities.
+    ///
+    /// This read is intentionally page-shaped and has no persistence side
+    /// effects. Callers use the truncation sentinel to refuse conclusions
+    /// when the complete entity scope does not fit its declared bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the requested snapshot is unavailable,
+    /// the limit or budget is invalid, the read is cancelled, or SQLite
+    /// cannot execute the bounded query.
+    pub fn repository_graph_entrypoint_candidates_page_bounded(
+        &self,
+        project: ProjectInstanceId,
+        generation: IndexGeneration,
+        limit: u32,
+        selection: ContentSelection,
+        budget: RepositoryGraphReadBudget,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<RepositoryGraphReadPage<GraphEntity>> {
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "graph entity rows must be nonzero and within the product ceiling",
+        )?;
+        self.require_repository_graph_snapshot(project, generation)?;
+        let mut meter = RepositoryGraphReadMeter::new(budget, 1)?;
+        let selection_filter = match selection {
+            ContentSelection::UnspecifiedLegacy => "",
+            ContentSelection::Source => {
+                " AND EXISTS (SELECT 1 FROM file_content_classifications AS classification
+                               WHERE classification.path = graph_entities.repository_path
+                                 AND classification.classification = 'source')"
+            }
+            ContentSelection::Documentation => {
+                " AND EXISTS (SELECT 1 FROM file_content_classifications AS classification
+                               WHERE classification.path = graph_entities.repository_path
+                                 AND classification.classification = 'documentation')"
+            }
+            ContentSelection::Both => {
+                " AND EXISTS (SELECT 1 FROM file_content_classifications AS classification
+                               WHERE classification.path = graph_entities.repository_path
+                                 AND classification.classification IN ('source', 'documentation'))"
+            }
+        };
+        let sql = format!(
+            "SELECT entity_key, project_instance_id, canonical_identity, entity_kind,
+                    repository_path, package_manager, package_name, manifest_path,
+                    symbol_name, symbol_kind, symbol_parent, symbol_signature,
+                    external_system, external_identity
+               FROM graph_entities
+              WHERE project_instance_id = ?1
+                AND entity_kind IN ('file', 'symbol'){selection_filter}
+              ORDER BY entity_key
+              LIMIT ?2"
+        );
+        let raw = with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare_cached(&sql)?;
+                collect_entity_rows_metered(
+                    statement.query(params![&project.as_bytes()[..], limit_plus_one])?,
+                    &mut meter,
+                )
+            },
+        )?;
+        let page = page_from_raw(raw, limit, |row| {
+            let entity = entity_from_row(row, project, generation)?;
+            meter.record_entity(&entity)?;
+            Ok(entity)
+        })?;
+        let work = meter.finish(page.rows.len())?;
+        Ok(RepositoryGraphReadPage { page, work })
+    }
+
     /// Load bounded graph entities that export one exact canonical resolution key.
     ///
     /// # Errors
@@ -2248,6 +2325,70 @@ impl AtlasStore {
             limit,
             budget,
             control,
+        )
+    }
+
+    /// Check one exact relation family without admitting or decoding a row.
+    ///
+    /// This is the terminal probe used when a bounded traversal has exhausted
+    /// its edge allowance. It distinguishes an empty adjacency from a pending
+    /// edge without granting the caller another ordinary adjacency row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid entity key, cancellation, or a SQLite
+    /// failure.
+    pub fn repository_graph_adjacency_is_empty(
+        &self,
+        key: &GraphEntityKey,
+        direction: RepositoryGraphDirection,
+        relation: GraphRelationKind,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<bool> {
+        let project = key.project();
+        if !verify_project_identity(&self.connection, project)?
+            || self.repository_graph_generation()?.is_none()
+        {
+            return Ok(true);
+        }
+        let digest = key.digest_bytes()?;
+        let (key_column, index_name) = match direction {
+            RepositoryGraphDirection::Outbound => {
+                ("source_entity_key", "idx_graph_relations_source_kind")
+            }
+            RepositoryGraphDirection::Inbound => {
+                ("target_entity_key", "idx_graph_relations_target_kind")
+            }
+        };
+        let (scope, kind) = relation_parts(relation);
+        let sql = format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                   FROM graph_relations AS relation INDEXED BY {index_name}
+                  WHERE relation.project_instance_id = ?1
+                    AND relation.{key_column} = ?2
+                    AND relation.relation_scope = ?3
+                    AND relation.relation_kind = ?4
+             )"
+        );
+        let bindings = [
+            Value::Blob(project.as_bytes().to_vec()),
+            Value::Blob(digest.to_vec()),
+            Value::Text(scope.to_string()),
+            Value::Text(kind.to_string()),
+        ];
+        with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                self.connection
+                    .query_row(&sql, params_from_iter(bindings.iter()), |row| {
+                        row.get::<_, bool>(0)
+                    })
+                    .map(|has_row| !has_row)
+                    .map_err(Into::into)
+            },
         )
     }
 

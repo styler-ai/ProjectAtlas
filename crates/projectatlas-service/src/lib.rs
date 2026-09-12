@@ -7,9 +7,10 @@ mod import_aliases;
 mod relations;
 
 pub use analysis::{
-    AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, GitImpactSelection,
-    RelationAnalysisDraft, RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport,
-    RelationAnalysisWork, VcsImpact, load_relation_analysis,
+    AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, EntrypointProfile,
+    EntrypointProfileCoverage, EntrypointProfileResult, GitImpactSelection, RelationAnalysisDraft,
+    RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport, RelationAnalysisWork,
+    VcsImpact, load_relation_analysis,
 };
 pub use federation::{
     FederatedAnalysisDraft, FederatedAnalysisReport, FederatedDetailedRelationDraft,
