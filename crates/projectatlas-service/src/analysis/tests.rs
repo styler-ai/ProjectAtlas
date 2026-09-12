@@ -1118,6 +1118,72 @@ fn entrypoint_profile_charges_multi_anchor_preflight_bytes() -> Result<(), Box<d
 }
 
 #[test]
+fn entrypoint_profile_bounds_each_initial_anchor_by_remaining_bytes() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store) =
+        analysis_store_with_options(true, None, false, 8, false, None, None, Some("tools/c.rs"))?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(128 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "bounded-multi-anchor-preflight".to_string(),
+        anchors: vec![
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                name: "byte_candidate_0".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some(format!("candidate_0_{}", "x".repeat(4_000))),
+            },
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("tools/c.rs"))?,
+                name: "byte_candidate_tools_0".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some(format!("candidate_tools_0_{}", "x".repeat(4_000))),
+            },
+        ],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let traversals = Rc::new(Cell::new(0_u32));
+    let traversals_for_observer = Rc::clone(&traversals);
+    let report = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal {
+                traversals_for_observer.set(traversals_for_observer.get().saturating_add(1));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    )?;
+    require(
+        traversals.get() == 0
+            && report
+                .report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report
+                .report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && report.report.work.relations.database_decoded_bytes > 0
+            && report.report.work.relations.intermediate_bytes
+                <= query.relations.budget.intermediate_bytes(),
+        "initial anchor reads exceeded the aggregate intermediate-byte budget",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = branching_entrypoint_store(false, 0)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -4948,40 +5014,58 @@ fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), B
 fn analysis_store_with_coverage(
     include_tools_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(include_tools_coverage, None, false, 0, false, None, None)
+    analysis_store_with_options(
+        include_tools_coverage,
+        None,
+        false,
+        0,
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 fn analysis_store_with_target(
     target_selector: EntitySelector,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, Some(target_selector), false, 0, false, None, None)
+    analysis_store_with_options(
+        true,
+        Some(target_selector),
+        false,
+        0,
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 fn analysis_store_with_external_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, true, 0, false, None, None)
+    analysis_store_with_options(true, None, true, 0, false, None, None, None)
 }
 
 fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 20, false, None, None)
+    analysis_store_with_options(true, None, false, 20, false, None, None, None)
 }
 
 fn analysis_store_with_document_relation() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 0, true, None, None)
+    analysis_store_with_options(true, None, false, 0, true, None, None, None)
 }
 
 fn analysis_store_with_candidate_relation(
     target: &str,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, false, 0, false, Some(target), None)
+    analysis_store_with_options(true, None, false, 0, false, Some(target), None, None)
 }
 
 fn analysis_store_with_relation_coverage(
     partial_calls: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, false, 0, false, None, Some(partial_calls))
+    analysis_store_with_options(true, None, false, 0, false, None, Some(partial_calls), None)
 }
 
 fn analysis_store_with_options(
@@ -4992,6 +5076,7 @@ fn analysis_store_with_options(
     document_relation: bool,
     candidate_relation_target: Option<&str>,
     relation_coverage_partial_calls: Option<bool>,
+    secondary_large_candidate_path: Option<&str>,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
@@ -5100,6 +5185,20 @@ fn analysis_store_with_options(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let secondary_large_candidates = secondary_large_candidate_path
+        .map(|path| {
+            (0..large_candidate_count)
+                .map(|index| {
+                    symbol_entity(
+                        path,
+                        &format!("byte_candidate_tools_{index}"),
+                        &format!("candidate_tools_{index}_{}", "x".repeat(4_000)),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let relation = |source: &GraphEntity, target: &GraphEntity, kind| {
         LogicalRelation::new(
             source,
@@ -5376,6 +5475,7 @@ fn analysis_store_with_options(
     })?;
     let mut entities = vec![a, b, c, guide, a_long, d_unused, b_hub, c_aux];
     entities.extend(large_candidates);
+    entities.extend(secondary_large_candidates);
     if let Some(target) = extra_target {
         entities.push(target);
     }

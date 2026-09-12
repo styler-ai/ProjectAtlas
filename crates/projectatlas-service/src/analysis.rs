@@ -1493,15 +1493,37 @@ fn load_entrypoint_profile_draft(
     let mut canonical_anchor_keys = BTreeSet::new();
     let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
     let mut first_resolved_anchor = None;
-    for anchor in &profile.anchors {
-        let (entity, anchor_work) = resolve_relation_anchor_for_analysis(
+    let mut complete = true;
+    let mut reached_limits = Vec::new();
+    'anchors: for anchor in &profile.anchors {
+        let anchor_budget = match entrypoint_anchor_budget(budget, &relation_work)? {
+            Ok(anchor_budget) => anchor_budget,
+            Err(limit) => {
+                complete = false;
+                push_limit(&mut reached_limits, limit);
+                break 'anchors;
+            }
+        };
+        let (entity, anchor_work) = match resolve_relation_anchor_for_analysis(
             store,
             selected_binding.project_instance_id,
             generation,
             anchor,
-            budget,
+            anchor_budget,
             control,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(ServiceError::Db(DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                    reason: "graph read decoded bytes exceed the batch budget",
+                },
+            ))) => {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                break 'anchors;
+            }
+            Err(error) => return Err(error),
+        };
         add_relation_work(&mut relation_work, &anchor_work)?;
         first_resolved_anchor.get_or_insert_with(|| entity.clone());
         let entity_key = entity.key().canonical_identity().to_string();
@@ -1523,8 +1545,6 @@ fn load_entrypoint_profile_draft(
     let mut first_anchor = None;
     let mut authored_purpose_revision = 0;
     let mut purpose_revision_initialized = false;
-    let mut complete = true;
-    let mut reached_limits = Vec::new();
     let entity_selected = |node: &DetailedRelationNode| {
         query.relations.content_selection == ContentSelection::UnspecifiedLegacy
             || node.classification.is_some_and(|classification| {
@@ -1532,7 +1552,11 @@ fn load_entrypoint_profile_draft(
             })
     };
 
-    let mut frontier = canonical_anchors;
+    let mut frontier = if complete {
+        canonical_anchors
+    } else {
+        Vec::new()
+    };
     let mut scheduled_anchors = frontier
         .iter()
         .map(serde_json::to_string)
@@ -2410,6 +2434,27 @@ fn classification_rows_bytes(
             .checked_add(row_bytes)
             .ok_or_else(entrypoint_work_overflow)
     })
+}
+
+/// Derive one initial-anchor budget from the remaining profile-wide capacity.
+fn entrypoint_anchor_budget(
+    budget: DetailedRelationBudget,
+    work: &DetailedRelationWork,
+) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(work.intermediate_bytes);
+    if remaining_intermediate < 64 * 1_024 {
+        return Ok(Err(GraphLimitKind::IntermediateBytes));
+    }
+    Ok(Ok(budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(remaining_intermediate),
+        None,
+    )?))
 }
 
 /// Derive one one-step detailed budget from the remaining profile-wide capacity.
