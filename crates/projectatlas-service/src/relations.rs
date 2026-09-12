@@ -1861,6 +1861,38 @@ fn resolve_anchor(
     }
 }
 
+/// Resolve one entrypoint anchor before profile traversal and expose its read ledger.
+pub(super) fn resolve_relation_anchor_for_analysis(
+    store: &AtlasStore,
+    project: projectatlas_core::graph::ProjectInstanceId,
+    generation: IndexGeneration,
+    anchor: &RelationAnchor,
+    budget: DetailedRelationBudget,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(GraphEntity, DetailedRelationWork)> {
+    let mut database_work = RelationDatabaseWork::default();
+    let entity = resolve_anchor(
+        store,
+        project,
+        generation,
+        anchor,
+        budget,
+        &mut database_work,
+        control,
+    )?;
+    Ok((
+        entity,
+        DetailedRelationWork {
+            database_requested_rows: database_work.requested_rows,
+            database_returned_rows: database_work.returned_rows,
+            database_decoded_bytes: database_work.decoded_bytes,
+            hydrated_entities: database_work.hydrated_entities,
+            hydrated_purpose_paths: database_work.hydrated_paths,
+            ..DetailedRelationWork::default()
+        },
+    ))
+}
+
 /// Test one normalized relation against the service-owned trust filters.
 pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelationQuery) -> bool {
     query.relation.is_none_or(|kind| relation.kind() == kind)

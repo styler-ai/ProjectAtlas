@@ -96,6 +96,7 @@ mod analysis_test_observer {
 use super::relations::classification_path;
 use super::relations::{
     ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
+    resolve_relation_anchor_for_analysis,
 };
 use super::{
     CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
@@ -1488,6 +1489,35 @@ fn load_entrypoint_profile_draft(
     let mut reachable = BTreeMap::<String, DetailedRelationNode>::new();
     let mut edges = Vec::new();
     let mut relation_work = DetailedRelationWork::default();
+    let mut canonical_anchors = Vec::with_capacity(profile.anchors.len());
+    let mut canonical_anchor_keys = BTreeSet::new();
+    let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
+    for anchor in &profile.anchors {
+        let (entity, anchor_work) = resolve_relation_anchor_for_analysis(
+            store,
+            selected_binding.project_instance_id,
+            generation,
+            anchor,
+            budget,
+            control,
+        )?;
+        add_relation_work(&mut relation_work, &anchor_work)?;
+        let entity_key = entity.key().canonical_identity().to_string();
+        if !canonical_anchor_keys.insert(entity_key.clone()) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profile anchors must resolve to unique entities".to_string(),
+            ));
+        }
+        let canonical_anchor = relation_anchor_for_entity(&entity).ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "entrypoint profile anchor is not addressable by an exact anchor".to_string(),
+            )
+        })?;
+        let anchor_identity = serde_json::to_string(&canonical_anchor)
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        resolved_anchor_keys.insert(anchor_identity, entity_key);
+        canonical_anchors.push(canonical_anchor);
+    }
     let mut first_anchor = None;
     let mut authored_purpose_revision = 0;
     let mut purpose_revision_initialized = false;
@@ -1500,14 +1530,12 @@ fn load_entrypoint_profile_draft(
             })
     };
 
-    let mut frontier = profile.anchors.clone();
-    let mut scheduled_anchors = profile
-        .anchors
+    let mut frontier = canonical_anchors;
+    let mut scheduled_anchors = frontier
         .iter()
         .map(serde_json::to_string)
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-    let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
     let mut visited = BTreeSet::new();
     let mut depth = 0_u32;
     'profile: while !frontier.is_empty() && depth < budget.depth() {
@@ -1522,6 +1550,8 @@ fn load_entrypoint_profile_draft(
                     .is_some_and(|key| reachable.contains_key(key));
                 let retained_keys =
                     anchor_is_retained.then(|| reachable.keys().cloned().collect::<BTreeSet<_>>());
+                let collect_occurrences = query.relations.include_occurrences
+                    && relation_work.retained_occurrences < budget.occurrences_total();
                 let step_budget = match entrypoint_step_budget(
                     budget,
                     &relation_work,
@@ -1529,7 +1559,7 @@ fn load_entrypoint_profile_draft(
                     0,
                     anchor_is_retained,
                     false,
-                    query.relations.include_occurrences,
+                    collect_occurrences,
                     None,
                 )? {
                     Ok(step_budget) => step_budget,
@@ -1559,6 +1589,7 @@ fn load_entrypoint_profile_draft(
                 relation_query.resolution = RelationResolutionFilter::Any;
                 relation_query.cursor = None;
                 relation_query.budget = step_budget;
+                relation_query.include_occurrences = collect_occurrences;
                 #[cfg(test)]
                 analysis_test_observer::notify(
                     analysis_test_observer::AnalysisPhaseEvent::Traversal,
@@ -1584,6 +1615,10 @@ fn load_entrypoint_profile_draft(
                 authored_purpose_revision = report.authored_purpose_revision;
                 purpose_revision_initialized = true;
                 add_relation_work(&mut relation_work, &report.work)?;
+                if query.relations.include_occurrences && !collect_occurrences {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                }
                 for limit in &report.reached_limits {
                     push_limit(&mut reached_limits, *limit);
                 }
@@ -1807,6 +1842,8 @@ fn load_entrypoint_profile_draft(
                         .len()
                         .saturating_sub(reachable.len());
                     let anchor_is_retained = retained_candidate_keys.contains(&candidate_key);
+                    let collect_occurrences = query.relations.include_occurrences
+                        && relation_work.retained_occurrences < budget.occurrences_total();
                     let step_budget = match entrypoint_step_budget(
                         budget,
                         &relation_work,
@@ -1814,7 +1851,7 @@ fn load_entrypoint_profile_draft(
                         accounted_candidates,
                         anchor_is_retained,
                         true,
-                        query.relations.include_occurrences,
+                        collect_occurrences,
                         None,
                     )? {
                         Ok(step_budget) => step_budget,
@@ -1858,6 +1895,7 @@ fn load_entrypoint_profile_draft(
                     candidate_query.resolution = RelationResolutionFilter::Any;
                     candidate_query.cursor = None;
                     candidate_query.budget = step_budget;
+                    candidate_query.include_occurrences = collect_occurrences;
                     #[cfg(test)]
                     analysis_test_observer::notify(
                         analysis_test_observer::AnalysisPhaseEvent::CandidateTraversal,
@@ -1884,6 +1922,10 @@ fn load_entrypoint_profile_draft(
                         });
                     }
                     add_relation_work(&mut relation_work, &candidate_report.work)?;
+                    if query.relations.include_occurrences && !collect_occurrences {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                    }
                     if relation_work.inspected_edges > budget.edges() {
                         complete = false;
                         push_limit(&mut reached_limits, GraphLimitKind::Edges);

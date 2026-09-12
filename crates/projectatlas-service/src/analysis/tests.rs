@@ -2,8 +2,8 @@ use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
     CoverageRecord, CoverageScope, CoverageState, ExternalSelector, GraphIdentityText,
-    LogicalRelation, PackageSelector, RelationResolution, RepositoryFilePath, RepositoryNodePath,
-    SymbolSelector,
+    LogicalRelation, PackageSelector, RelationOccurrence, RelationResolution, RepositoryFilePath,
+    RepositoryNodePath, SourceSpan, SymbolSelector,
 };
 use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
@@ -1013,8 +1013,57 @@ fn entrypoint_profile_binds_omitted_parent_to_resolved_symbol_identity()
 }
 
 #[test]
+fn entrypoint_profile_rejects_initial_anchors_with_duplicate_resolved_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = nested_symbol_entrypoint_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "duplicate-nested-symbol-identity".to_string(),
+        anchors: vec![
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                name: "inner".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: None,
+                signature: Some("fn inner()".to_string()),
+            },
+            RelationAnchor::Symbol {
+                file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                name: "inner".to_string(),
+                symbol_kind: Some(SymbolKind::Function),
+                parent: Some("Outer".to_string()),
+                signature: Some("fn inner()".to_string()),
+            },
+        ],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let traversals = Rc::new(Cell::new(0_u32));
+    let observed_traversals = Rc::clone(&traversals);
+    let result = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal {
+                observed_traversals.set(observed_traversals.get().saturating_add(1));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    );
+    require(
+        matches!(
+            result,
+            Err(ServiceError::InvalidInput(message))
+                if message.contains("anchors must resolve to unique entities")
+        ) && traversals.get() == 0,
+        "distinct selector shapes were allowed to traverse the same resolved anchor",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box<dyn Error>> {
-    let (_temp, store) = branching_entrypoint_store(false)?;
+    let (_temp, store) = branching_entrypoint_store(false, 0)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
     query.relations.include_occurrences = true;
@@ -1047,8 +1096,86 @@ fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box
 }
 
 #[test]
+fn entrypoint_profile_reports_occurrence_exhaustion_as_typed_limit() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = branching_entrypoint_store(false, 1)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.include_occurrences = true;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(3),
+        Some(8),
+        Some(8),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "occurrence-exhaustion-zero-row".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+        ],
+    });
+    let result = fitted_report(&store, &query);
+    require(
+        result.as_ref().is_ok_and(|report| {
+            report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                && report.reached_limits.contains(&GraphLimitKind::Occurrences)
+        }),
+        "occurrence exhaustion after a retained row became an invalid-input failure",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_reports_occurrence_row_exhaustion_as_typed_limit()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = branching_entrypoint_store(false, 2)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.include_occurrences = true;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(2),
+        Some(8),
+        Some(8),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "occurrence-exhaustion-next-row".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let result = fitted_report(&store, &query);
+    require(
+        result.as_ref().is_ok_and(|report| {
+            report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                && report.reached_limits.contains(&GraphLimitKind::Occurrences)
+        }),
+        "a row needing another occurrence became an invalid-input failure",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_keeps_pending_candidate_edges_inconclusive() -> Result<(), Box<dyn Error>> {
-    let (_temp, store) = branching_entrypoint_store(true)?;
+    let (_temp, store) = branching_entrypoint_store(true, 0)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
     query.relations.budget = query.relations.budget.with_aggregate_limits(
@@ -4474,6 +4601,7 @@ fn terminal_entrypoint_store(
 
 fn branching_entrypoint_store(
     include_pending_candidate: bool,
+    occurrence_count: u8,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("branching-entrypoint");
@@ -4535,6 +4663,23 @@ fn branching_entrypoint_store(
             generation,
         )?);
     }
+    let mut occurrences = Vec::new();
+    if occurrence_count >= 1 {
+        occurrences.push(RelationOccurrence::new(
+            &relations[0],
+            RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            SourceSpan::new(1, 0, 1, 4)?,
+            generation,
+        )?);
+    }
+    if occurrence_count >= 2 {
+        occurrences.push(RelationOccurrence::new(
+            &relations[1],
+            RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            SourceSpan::new(1, 5, 1, 9)?,
+            generation,
+        )?);
+    }
     let mut entities = vec![a, b, c];
     if let Some(d) = d {
         entities.push(d);
@@ -4574,7 +4719,13 @@ fn branching_entrypoint_store(
         .collect::<Vec<_>>();
     publication.upsert_scan_node_batch(&scan_nodes)?;
     publication.finish_scan_replacement()?;
-    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
+    publication.replace_repository_graph(
+        project,
+        &entities,
+        &relations,
+        &occurrences,
+        &coverage,
+    )?;
     publication.complete()?;
     drop(store);
     Ok((
