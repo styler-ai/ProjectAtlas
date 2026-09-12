@@ -1651,7 +1651,7 @@ fn load_entrypoint_profile_draft(
             entity_limit.saturating_add(1).saturating_mul(2),
         )
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-        let all_entities = store.repository_graph_entities_page_bounded(
+        let all_entities = store.repository_graph_entrypoint_candidates_page_bounded(
             generation_project(&anchor.entity),
             generation,
             entity_limit,
@@ -1789,8 +1789,6 @@ fn load_entrypoint_profile_draft(
             }
         }
     }
-    let reachable_nodes = reachable.values().map(analysis_node).collect::<Vec<_>>();
-    let unreachable_nodes = unreachable.values().map(analysis_node).collect::<Vec<_>>();
     let coverage = if complete {
         EntrypointProfileCoverage::Complete
     } else {
@@ -1803,19 +1801,19 @@ fn load_entrypoint_profile_draft(
             status: AnalysisStatus::Confirmed,
             summary: "explicit entrypoints reach these local entities through complete admitted relations"
                 .to_string(),
-            nodes: reachable_nodes.clone(),
-            metric: Some(reachable_nodes.len() as u64),
+            nodes: Vec::new(),
+            metric: Some(reachable.len() as u64),
             evidence: None,
             community: None,
         });
-        if !unreachable_nodes.is_empty() {
+        if !unreachable.is_empty() {
             findings.push(AnalysisFinding {
                 kind: AnalysisFindingKind::EntrypointReachability,
                 status: AnalysisStatus::Candidate,
                 summary: "local entities are unreachable from the explicit entrypoints; review exact source evidence before any deletion decision"
                     .to_string(),
-                nodes: unreachable_nodes.clone(),
-                metric: Some(unreachable_nodes.len() as u64),
+                nodes: Vec::new(),
+                metric: Some(unreachable.len() as u64),
                 evidence: None,
                 community: None,
             });
@@ -1826,7 +1824,7 @@ fn load_entrypoint_profile_draft(
             status: AnalysisStatus::Inconclusive,
             summary: "entrypoint reachability is inconclusive because relation coverage or a declared bound is partial"
                 .to_string(),
-            nodes: reachable_nodes.clone(),
+            nodes: Vec::new(),
             metric: None,
             evidence: None,
             community: None,
@@ -1837,7 +1835,7 @@ fn load_entrypoint_profile_draft(
         anchors: profile.anchors.clone(),
         relations: profile.relations.clone(),
         coverage,
-        reachable: u32::try_from(reachable_nodes.len()).unwrap_or(u32::MAX),
+        reachable: u32::try_from(reachable.len()).unwrap_or(u32::MAX),
         unreachable_candidates: 0,
     };
     let mut work = RelationAnalysisWork {
@@ -1847,21 +1845,50 @@ fn load_entrypoint_profile_draft(
         analyzed_edges: u32::try_from(edges.len()).unwrap_or(u32::MAX),
         ..RelationAnalysisWork::default()
     };
+    let metadata_composition_bytes =
+        serialized_bytes_controlled(&(&findings, &profile_result), control)?;
+    let mut node_composition_bytes = serialized_analysis_nodes_bytes(reachable.values(), control)?;
+    if complete && !unreachable.is_empty() {
+        node_composition_bytes = node_composition_bytes
+            .checked_add(serialized_analysis_nodes_bytes(
+                unreachable.values(),
+                control,
+            )?)
+            .ok_or_else(entrypoint_work_overflow)?;
+    }
+    let composition_fits = work
+        .relations
+        .intermediate_bytes
+        .checked_add(metadata_composition_bytes)
+        .and_then(|bytes| bytes.checked_add(node_composition_bytes))
+        .is_some_and(|bytes| bytes <= budget.intermediate_bytes());
+    if composition_fits {
+        if complete {
+            findings[0].nodes = reachable.values().map(analysis_node).collect();
+            if !unreachable.is_empty() {
+                findings[1].nodes = unreachable.values().map(analysis_node).collect();
+            }
+            profile_result.unreachable_candidates =
+                u32::try_from(unreachable.len()).unwrap_or(u32::MAX);
+        } else {
+            findings[0].nodes = reachable.values().map(analysis_node).collect();
+        }
+    } else {
+        complete = false;
+        work.composition_truncated = true;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+        profile_result.coverage = EntrypointProfileCoverage::Partial;
+        for finding in &mut findings {
+            finding.status = AnalysisStatus::Inconclusive;
+        }
+    }
     work.retained_composition_bytes =
-        serialized_bytes_controlled(&(findings.clone(), &profile_result), control)?;
+        serialized_bytes_controlled(&(&findings, &profile_result), control)?;
     work.peak_intermediate_bytes = work
         .relations
         .intermediate_bytes
         .saturating_add(work.retained_composition_bytes);
-    if work.peak_intermediate_bytes > budget.intermediate_bytes() {
-        complete = false;
-        work.composition_truncated = true;
-        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
-    }
-    if complete {
-        profile_result.unreachable_candidates =
-            u32::try_from(unreachable_nodes.len()).unwrap_or(u32::MAX);
-    } else {
+    if !complete {
         profile_result.coverage = EntrypointProfileCoverage::Partial;
         for finding in &mut findings {
             finding.status = AnalysisStatus::Inconclusive;
@@ -4348,6 +4375,25 @@ fn analysis_nodes_for(
         .filter_map(|key| nodes.get(key))
         .map(analysis_node)
         .collect()
+}
+
+/// Measure node payload added to an already serialized empty node array.
+fn serialized_analysis_nodes_bytes<'node>(
+    nodes: impl IntoIterator<Item = &'node DetailedRelationNode>,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut bytes = 0_u64;
+    for (index, node) in nodes.into_iter().enumerate() {
+        if index > 0 {
+            bytes = bytes
+                .checked_add(JSON_ARRAY_SEPARATOR_BYTES)
+                .ok_or_else(entrypoint_work_overflow)?;
+        }
+        bytes = bytes
+            .checked_add(serialized_bytes_controlled(&analysis_node(node), control)?)
+            .ok_or_else(entrypoint_work_overflow)?;
+    }
+    Ok(bytes)
 }
 
 /// Preserve one detailed node and its exact reusable next call.

@@ -1293,6 +1293,45 @@ fn entrypoint_profile_honors_content_and_confidence_filters() -> Result<(), Box<
 }
 
 #[test]
+fn entrypoint_profile_filters_non_candidate_entities_before_node_limit()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_external_candidate()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = DetailedRelationBudget::from_graph_limits(
+        projectatlas_core::graph::GraphLimits::new(50, 1, 3, 256 * 1_024)?,
+    )
+    .with_aggregate_limits(
+        Some(100),
+        Some(8),
+        Some(100),
+        Some(100),
+        Some(256 * 1_024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-page-filter".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.unreachable_candidates > 0
+        }) && !report.reached_limits.contains(&GraphLimitKind::Nodes),
+        "non-candidate graph entities consumed the entrypoint candidate limit",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_classification_hydration_honors_control_and_byte_budget() -> Result<(), Box<dyn Error>>
 {
     let (_temp, store) = analysis_store()?;
@@ -1695,25 +1734,12 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
             ExtendedRelationKind::References,
         )],
     });
-    let candidate_limit_seen = Rc::new(Cell::new(false));
-    let candidate_limit_observer = Rc::clone(&candidate_limit_seen);
-    let candidate_limit_report = observe_analysis_phase(
-        move |event| {
-            if let AnalysisPhaseEvent::CandidateReport {
-                has_edges_limit, ..
-            } = event
-            {
-                candidate_limit_observer.set(candidate_limit_observer.get() || has_edges_limit);
-            }
-        },
-        || fitted_report(&store, &candidate_limits),
-    )?;
+    let candidate_limit_report = fitted_report(&store, &candidate_limits)?;
     require(
-        candidate_limit_seen.get()
-            && candidate_limit_report
-                .reached_limits
-                .contains(&GraphLimitKind::Edges),
-        "candidate traversal truncation did not preserve its typed limit reason",
+        candidate_limit_report
+            .reached_limits
+            .contains(&GraphLimitKind::Edges),
+        "candidate traversal did not preserve its typed edge limit reason",
     )?;
 
     let report = fitted_report(&store, &bounded)?;

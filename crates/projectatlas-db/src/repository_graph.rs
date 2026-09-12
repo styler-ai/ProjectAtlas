@@ -1432,7 +1432,7 @@ impl AtlasStore {
         Ok(RepositoryGraphReadPage { page, work })
     }
 
-    /// Load a bounded stable-order page of every local graph entity.
+    /// Load a bounded stable-order page of local entrypoint candidate entities.
     ///
     /// This read is intentionally page-shaped and has no persistence side
     /// effects. Callers use the truncation sentinel to refuse conclusions
@@ -1443,7 +1443,7 @@ impl AtlasStore {
     /// Returns a database error when the requested snapshot is unavailable,
     /// the limit or budget is invalid, the read is cancelled, or SQLite
     /// cannot execute the bounded query.
-    pub fn repository_graph_entities_page_bounded(
+    pub fn repository_graph_entrypoint_candidates_page_bounded(
         &self,
         project: ProjectInstanceId,
         generation: IndexGeneration,
@@ -1470,6 +1470,7 @@ impl AtlasStore {
                             external_system, external_identity
                        FROM graph_entities
                       WHERE project_instance_id = ?1
+                        AND entity_kind IN ('file', 'symbol')
                       ORDER BY entity_key
                       LIMIT ?2",
                 )?;
