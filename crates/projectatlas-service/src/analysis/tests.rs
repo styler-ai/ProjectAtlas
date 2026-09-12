@@ -1525,9 +1525,14 @@ fn entrypoint_profile_falls_back_before_exceeding_composition_budget() -> Result
                 .reached_limits
                 .contains(&GraphLimitKind::IntermediateBytes)
             && boundary
-                .findings
-                .iter()
-                .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.reachable == 0)
+            && boundary.findings.iter().all(|finding| {
+                finding.status == AnalysisStatus::Inconclusive
+                    && finding.metric.is_none()
+                    && finding.nodes.is_empty()
+            })
             && boundary.work.peak_intermediate_bytes <= boundary_budget,
         "entrypoint composition fallback exceeded its declared byte budget",
     )?;

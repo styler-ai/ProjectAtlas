@@ -124,6 +124,8 @@ const DEFAULT_CALLER_LABEL: &str = "default";
 const DEFAULT_FILE_SUMMARY_LIMIT: usize = 25;
 /// CLI top-level field for detailed and analysis relation responses.
 const CLI_PAYLOAD_SYMBOL_RELATIONS: &str = "symbol_relations";
+/// Federated analysis does not support single-root entrypoint profiling.
+const CLI_ERROR_ENTRYPOINT_FEDERATED: &str = "entrypoint profiles require one project root";
 /// One-shot watcher refresh mode.
 const WATCH_MODE_ONCE: &str = "single-refresh";
 /// Event-backed watcher mode.
@@ -2259,6 +2261,14 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                             .to_string(),
                     )));
                 }
+                let mode = analysis_mode
+                    .unwrap_or(RelationAnalysisModeArg::Architecture)
+                    .into();
+                if mode == RelationAnalysisMode::Entrypoint && !roots.is_empty() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        CLI_ERROR_ENTRYPOINT_FEDERATED.to_string(),
+                    )));
+                }
                 let federation_control = (!roots.is_empty()).then(|| {
                     standalone_index_work_control()
                         .with_timeout_ceiling(Duration::from_millis(10_000))
@@ -2318,9 +2328,6 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                                 .to_string(),
                         )));
                     }
-                    let mode: RelationAnalysisMode = analysis_mode
-                        .unwrap_or(RelationAnalysisModeArg::Architecture)
-                        .into();
                     let parsed_entrypoints = if mode == RelationAnalysisMode::Entrypoint {
                         entrypoints
                             .iter()
@@ -6568,6 +6575,39 @@ mod tests {
                 && toon.contains("not-installed")
                 && toon.contains("compatible semantic"),
             "CLI TOON lost typed semantic capability state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_rejects_federated_entrypoint_analysis_before_opening_roots() -> Result<(), Box<dyn Error>>
+    {
+        let mut cli = Cli::try_parse_from([
+            "projectatlas",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--root",
+            "missing-a",
+            "--root",
+            "missing-b",
+            "--analysis-mode",
+            "entrypoint",
+            "--file",
+            "src/a.rs",
+        ])?;
+        let error = match super::run(&mut cli) {
+            Ok(()) => {
+                return Err(io::Error::other("federated entrypoint analysis was accepted").into());
+            }
+            Err(error) => error,
+        };
+        require_condition(
+            error
+                .to_string()
+                .contains(super::CLI_ERROR_ENTRYPOINT_FEDERATED),
+            "federated entrypoint rejection did not preserve its typed boundary",
         )?;
         Ok(())
     }

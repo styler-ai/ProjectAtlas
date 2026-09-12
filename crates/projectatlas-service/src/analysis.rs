@@ -1881,9 +1881,11 @@ fn load_entrypoint_profile_draft(
         work.composition_truncated = true;
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
         profile_result.coverage = EntrypointProfileCoverage::Partial;
+        profile_result.reachable = 0;
         profile_result.unreachable_candidates = 0;
         for finding in &mut findings {
             finding.status = AnalysisStatus::Inconclusive;
+            finding.metric = None;
         }
     }
     work.retained_composition_bytes =
