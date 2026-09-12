@@ -1491,6 +1491,12 @@ fn load_entrypoint_profile_draft(
     let mut purpose_revision_initialized = false;
     let mut complete = true;
     let mut reached_limits = Vec::new();
+    let entity_selected = |node: &DetailedRelationNode| {
+        query.relations.content_selection == ContentSelection::UnspecifiedLegacy
+            || node.classification.is_some_and(|classification| {
+                query.relations.content_selection.includes(classification)
+            })
+    };
 
     let mut frontier = profile.anchors.clone();
     let mut scheduled_anchors = profile
@@ -1579,7 +1585,9 @@ fn load_entrypoint_profile_draft(
                     ) && row.relation.completeness() == Completeness::Complete;
                     complete &= resolved && trusted_relation_row(row);
                     insert_node(&mut reachable, &row.source);
-                    if let Some(target) = &row.target {
+                    if let Some(target) = &row.target
+                        && entity_selected(target)
+                    {
                         insert_node(&mut reachable, target);
                         if resolved {
                             let target_key = target.entity.key().canonical_identity().to_string();
@@ -1606,7 +1614,9 @@ fn load_entrypoint_profile_draft(
                         }
                     }
                     for node in &row.path {
-                        insert_node(&mut reachable, node);
+                        if entity_selected(node) {
+                            insert_node(&mut reachable, node);
+                        }
                     }
                     if let Some(edge) =
                         local_edge(&row.relation, &row.source.entity, row.target.as_ref())

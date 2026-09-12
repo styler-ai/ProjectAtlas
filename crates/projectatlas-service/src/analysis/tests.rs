@@ -1639,6 +1639,49 @@ fn entrypoint_profile_honors_content_and_confidence_filters() -> Result<(), Box<
 }
 
 #[test]
+fn entrypoint_profile_keeps_cross_class_document_targets_out_of_frontier()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_document_relation()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.content_selection = ContentSelection::Documentation;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "documentation-cross-class-frontier".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(ExtendedRelationKind::Documents)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let source_target_present = report.findings.iter().any(|finding| {
+        finding.nodes.iter().any(|node| {
+            matches!(
+                node.node.entity.selector(),
+                EntitySelector::File { path } if path.as_str() == "src/a.rs"
+            )
+        })
+    });
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 1
+        }) && !report.reached_limits.contains(&GraphLimitKind::Depth)
+            && !source_target_present,
+        "documentation entrypoint traversal admitted a cross-class source target",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_filters_non_candidate_entities_before_node_limit()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store_with_external_candidate()?;
@@ -3921,23 +3964,28 @@ fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
 fn analysis_store_with_coverage(
     include_tools_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(include_tools_coverage, None, false, 0)
+    analysis_store_with_options(include_tools_coverage, None, false, 0, false)
 }
 
 fn analysis_store_with_target(
     target_selector: EntitySelector,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, Some(target_selector), false, 0)
+    analysis_store_with_options(true, Some(target_selector), false, 0, false)
 }
 
 fn analysis_store_with_external_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, true, 0)
+    analysis_store_with_options(true, None, true, 0, false)
 }
 
 fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 20)
+    analysis_store_with_options(true, None, false, 20, false)
+}
+
+fn analysis_store_with_document_relation() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
+{
+    analysis_store_with_options(true, None, false, 0, true)
 }
 
 fn analysis_store_with_options(
@@ -3945,6 +3993,7 @@ fn analysis_store_with_options(
     target_selector: Option<EntitySelector>,
     external_candidate: bool,
     large_candidate_count: usize,
+    document_relation: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
@@ -4095,6 +4144,16 @@ fn analysis_store_with_options(
             generation,
         )?,
     ];
+    if document_relation {
+        relations.push(LogicalRelation::new(
+            &guide,
+            GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+            RelationResolution::resolved(&a)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+    }
     if let Some(target) = extra_target.as_ref() {
         let relation = if matches!(target.selector(), EntitySelector::External { .. }) {
             LogicalRelation::new(
