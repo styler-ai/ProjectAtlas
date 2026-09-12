@@ -1062,6 +1062,62 @@ fn entrypoint_profile_rejects_initial_anchors_with_duplicate_resolved_identity()
 }
 
 #[test]
+fn entrypoint_profile_charges_multi_anchor_preflight_bytes() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(64 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "multi-anchor-preflight-budget".to_string(),
+        anchors: vec![
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            },
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+            },
+        ],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let traversals = Rc::new(Cell::new(0_u32));
+    let traversals_for_observer = Rc::clone(&traversals);
+    let report = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal {
+                traversals_for_observer.set(traversals_for_observer.get().saturating_add(1));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    )?;
+    require(
+        traversals.get() == 0
+            && report
+                .report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report
+                .report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && report.report.work.relations.database_decoded_bytes > 0
+            && report.report.work.relations.intermediate_bytes
+                == report.report.work.relations.database_decoded_bytes,
+        "multi-anchor preflight bytes were not charged before traversal",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = branching_entrypoint_store(false, 0)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -1699,18 +1755,25 @@ fn entrypoint_profile_inspects_retained_frontier_at_exact_node_limit() -> Result
 fn entrypoint_profile_reuses_retained_candidate_endpoints() -> Result<(), Box<dyn Error>> {
     for (target, expected_coverage) in [
         ("reachable", EntrypointProfileCoverage::Complete),
+        ("reachable-two", EntrypointProfileCoverage::Complete),
         ("new", EntrypointProfileCoverage::Partial),
     ] {
         let (_temp, store) = analysis_store_with_candidate_relation(target)?;
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
         query.relations.content_selection = ContentSelection::Source;
         query.relations.resolution = RelationResolutionFilter::Any;
+        let node_budget = 7;
+        let intermediate_budget = if target == "reachable-two" {
+            1_024 * 1_024
+        } else {
+            256 * 1024
+        };
         query.relations.budget = query.relations.budget.with_aggregate_limits(
             Some(100),
-            Some(7),
-            Some(7),
+            Some(node_budget),
+            Some(node_budget),
             Some(100),
-            Some(256 * 1024),
+            Some(intermediate_budget),
             None,
         )?;
         query.include_communities = false;
@@ -1739,6 +1802,12 @@ fn entrypoint_profile_reuses_retained_candidate_endpoints() -> Result<(), Box<dy
                     && !report.reached_limits.contains(&GraphLimitKind::Visited),
                 "a retained candidate endpoint consumed the global node or visited slot",
             )?;
+            if target == "reachable-two" {
+                require(
+                    profile.reachable + profile.unreachable_candidates == node_budget,
+                    "two retained candidate endpoints did not fit at the exact global union limit",
+                )?;
+            }
         } else {
             require(
                 profile.coverage == expected_coverage
@@ -2176,6 +2245,60 @@ fn entrypoint_profile_honors_content_and_confidence_filters() -> Result<(), Box<
                 .all(|finding| finding.status == AnalysisStatus::Inconclusive),
         "entrypoint profile did not preserve the requested minimum confidence",
     )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box<dyn Error>> {
+    for (confidence, selection, base_classification, terminal_classification) in [
+        (
+            ConfidenceClass::Low,
+            ContentSelection::Source,
+            ContentClassification::Source,
+            ContentClassification::Documentation,
+        ),
+        (
+            ConfidenceClass::Exact,
+            ContentSelection::Documentation,
+            ContentClassification::Documentation,
+            ContentClassification::Source,
+        ),
+    ] {
+        let (_temp, store) = terminal_entrypoint_store_with_options(
+            true,
+            confidence,
+            base_classification,
+            terminal_classification,
+        )?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.minimum_confidence = ConfidenceClass::Exact;
+        query.relations.content_selection = selection;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(1),
+            Some(8),
+            Some(8),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: format!("filtered-terminal-{confidence:?}-{selection:?}"),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        let report = fitted_report(&store, &query)?;
+        require(
+            report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 2
+            }) && !report.reached_limits.contains(&GraphLimitKind::Edges),
+            "terminal probing admitted a filtered relation as pending",
+        )?;
+    }
     Ok(())
 }
 
@@ -4505,6 +4628,20 @@ fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
 fn terminal_entrypoint_store(
     include_terminal_edge: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    terminal_entrypoint_store_with_options(
+        include_terminal_edge,
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        ContentClassification::Source,
+    )
+}
+
+fn terminal_entrypoint_store_with_options(
+    include_terminal_edge: bool,
+    terminal_edge_confidence: ConfidenceClass,
+    base_classification: ContentClassification,
+    terminal_edge_classification: ContentClassification,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("terminal-entrypoint");
     fs::create_dir_all(root.join("src"))?;
@@ -4552,7 +4689,14 @@ fn terminal_entrypoint_store(
     };
     let mut relations = vec![relation(&a, &b)?];
     if let Some(c) = c.as_ref() {
-        relations.push(relation(&b, c)?);
+        relations.push(LogicalRelation::new(
+            &b,
+            calls,
+            RelationResolution::resolved(c)?,
+            terminal_edge_confidence,
+            Completeness::Complete,
+            generation,
+        )?);
     }
     let mut entities = vec![a, b, d];
     if let Some(c) = c.as_ref() {
@@ -4589,6 +4733,24 @@ fn terminal_entrypoint_store(
         })
         .collect::<Vec<_>>();
     publication.upsert_scan_node_batch(&scan_nodes)?;
+    publication.upsert_file_content_classification_batch(
+        &entities
+            .iter()
+            .filter_map(|entity| {
+                let EntitySelector::File { path } = entity.selector() else {
+                    return None;
+                };
+                Some(projectatlas_db::FileContentClassification {
+                    path: path.as_str().to_string(),
+                    classification: if path.as_str() == "src/c.rs" {
+                        terminal_edge_classification
+                    } else {
+                        base_classification
+                    },
+                })
+            })
+            .collect::<Vec<_>>(),
+    )?;
     publication.finish_scan_replacement()?;
     publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
     publication.complete()?;
@@ -4909,10 +5071,11 @@ fn analysis_store_with_options(
     let d_unused = symbol_entity("src/a.rs", "d_unused", "fn d_unused()")?;
     let b_hub = symbol_entity("src/b.rs", "b_hub", "fn b_hub()")?;
     let c_aux = symbol_entity("tools/c.rs", "c_aux", "fn c_aux()")?;
+    let candidate_relation_target_is_two = candidate_relation_target == Some("reachable-two");
     let candidate_relation_target = candidate_relation_target
         .map(|target| -> Result<GraphEntity, Box<dyn Error>> {
             match target {
-                "reachable" => Ok(a.clone()),
+                "reachable" | "reachable-two" => Ok(a.clone()),
                 "new" => Ok(GraphEntity::new(
                     project,
                     EntitySelector::Package {
@@ -5050,6 +5213,13 @@ fn analysis_store_with_options(
             target,
             GraphRelationKind::Legacy(RelationKind::Calls),
         )?);
+        if candidate_relation_target_is_two {
+            relations.push(relation(
+                &d_unused,
+                &b,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+            )?);
+        }
     }
     let mut coverage_paths = vec!["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"];
     if extra_target

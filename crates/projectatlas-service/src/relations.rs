@@ -1888,6 +1888,7 @@ pub(super) fn resolve_relation_anchor_for_analysis(
             database_decoded_bytes: database_work.decoded_bytes,
             hydrated_entities: database_work.hydrated_entities,
             hydrated_purpose_paths: database_work.hydrated_paths,
+            intermediate_bytes: database_work.decoded_bytes,
             ..DetailedRelationWork::default()
         },
     ))

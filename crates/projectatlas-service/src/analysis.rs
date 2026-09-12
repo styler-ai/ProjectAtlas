@@ -1492,6 +1492,7 @@ fn load_entrypoint_profile_draft(
     let mut canonical_anchors = Vec::with_capacity(profile.anchors.len());
     let mut canonical_anchor_keys = BTreeSet::new();
     let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
+    let mut first_resolved_anchor = None;
     for anchor in &profile.anchors {
         let (entity, anchor_work) = resolve_relation_anchor_for_analysis(
             store,
@@ -1502,6 +1503,7 @@ fn load_entrypoint_profile_draft(
             control,
         )?;
         add_relation_work(&mut relation_work, &anchor_work)?;
+        first_resolved_anchor.get_or_insert_with(|| entity.clone());
         let entity_key = entity.key().canonical_identity().to_string();
         if !canonical_anchor_keys.insert(entity_key.clone()) {
             return Err(ServiceError::InvalidInput(
@@ -1572,6 +1574,8 @@ fn load_entrypoint_profile_draft(
                                 generation,
                                 anchor_node.entity.key(),
                                 *relation,
+                                query.relations.minimum_confidence,
+                                query.relations.content_selection,
                                 control,
                             )?
                         {
@@ -1724,9 +1728,26 @@ fn load_entrypoint_profile_draft(
     edges.dedup_by(|left, right| {
         left.source == right.source && left.target == right.target && left.kind == right.kind
     });
-    let anchor = first_anchor.ok_or_else(|| {
-        ServiceError::InvalidInput("entrypoint profile resolved no anchors".to_string())
-    })?;
+    let anchor = first_anchor
+        .or_else(|| {
+            first_resolved_anchor.map(|entity| {
+                let path = entity_path(&entity).map(str::to_string);
+                DetailedRelationNode {
+                    entity,
+                    classification: None,
+                    content_selection: query
+                        .relations
+                        .content_selection
+                        .explicit_value()
+                        .map(|_| query.relations.content_selection),
+                    purpose: RelationPurpose::Unavailable { path },
+                    coverage: Vec::new(),
+                }
+            })
+        })
+        .ok_or_else(|| {
+            ServiceError::InvalidInput("entrypoint profile resolved no anchors".to_string())
+        })?;
     let entity_limit = budget.nodes();
     let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
     let mut protected_reachable_keys = reachable_keys.clone();
@@ -1861,6 +1882,8 @@ fn load_entrypoint_profile_draft(
                                 generation,
                                 entity.key(),
                                 *relation,
+                                query.relations.minimum_confidence,
+                                query.relations.content_selection,
                                 control,
                             )? =>
                         {
@@ -1871,7 +1894,7 @@ fn load_entrypoint_profile_draft(
                                 accounted_candidates,
                                 anchor_is_retained,
                                 true,
-                                query.relations.include_occurrences,
+                                collect_occurrences,
                                 Some(1),
                             )? {
                                 Ok(step_budget) => step_budget,
@@ -2408,14 +2431,14 @@ fn entrypoint_step_budget(
     let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
     let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
     let step_nodes = if candidate_anchor_overhead {
-        remaining_nodes.saturating_add(1)
+        budget.nodes()
     } else if anchor_is_retained {
         budget.nodes().saturating_sub(validated_candidates)
     } else {
         remaining_nodes
     };
     let step_visited = if candidate_anchor_overhead {
-        remaining_visited.saturating_add(1)
+        budget.visited()
     } else if anchor_is_retained {
         budget.visited().saturating_sub(validated_candidates)
     } else {
@@ -2481,12 +2504,16 @@ fn entrypoint_terminal_adjacency_is_empty(
     generation: projectatlas_core::IndexGeneration,
     key: &GraphEntityKey,
     relation: GraphRelationKind,
+    minimum_confidence: ConfidenceClass,
+    content_selection: ContentSelection,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<bool> {
-    let empty = store.repository_graph_adjacency_is_empty(
+    let empty = store.repository_graph_adjacency_is_empty_filtered(
         key,
         RepositoryGraphDirection::Outbound,
         relation,
+        minimum_confidence,
+        content_selection,
         control,
     )?;
     #[cfg(test)]
