@@ -1221,6 +1221,115 @@ fn entrypoint_profile_bounds_candidate_entity_hydration_by_remaining_bytes()
 }
 
 #[test]
+fn entrypoint_profile_translates_candidate_decoded_byte_exhaustion() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_large_candidates()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(30),
+        Some(30),
+        Some(100),
+        Some(DetailedRelationBudget::MAX_INTERMEDIATE_BYTES),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-decoded-byte-boundary".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let remaining = Rc::new(Cell::new(None));
+    let remaining_for_observer = Rc::clone(&remaining);
+    observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CandidateEntityHydration {
+                remaining_intermediate_bytes,
+            } = event
+            {
+                remaining_for_observer.set(Some(remaining_intermediate_bytes));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    )?;
+    let remaining = remaining
+        .get()
+        .ok_or("candidate entity hydration did not expose its remaining budget")?;
+    let pre_candidate_work = query
+        .relations
+        .budget
+        .intermediate_bytes()
+        .checked_sub(remaining)
+        .ok_or("candidate byte probe exceeded its budget")?;
+    let bounded_budget = pre_candidate_work
+        .checked_add(64 * 1024)
+        .ok_or("candidate byte boundary overflowed")?;
+    let mut bounded_query = query;
+    bounded_query.relations.budget = bounded_query.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(bounded_budget),
+        None,
+    )?;
+    let report = load_relation_analysis(&store, &bounded_query, None)?.report;
+    require(
+        remaining > 0
+            && report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                profile.coverage == EntrypointProfileCoverage::Partial
+                    && profile.unreachable_candidates == 0
+            })
+            && report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+            && report.work.peak_intermediate_bytes <= bounded_budget,
+        "candidate decoded-byte exhaustion escaped as an error or exceeded its budget",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_candidate_page_filters_content_before_truncation_sentinel()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_external_candidate()?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("analysis fixture project identity missing")?;
+    let generation = store
+        .repository_graph_generation()?
+        .ok_or("analysis fixture graph generation missing")?;
+    let page = store.repository_graph_entrypoint_candidates_page_bounded(
+        project,
+        generation,
+        7,
+        ContentSelection::Source,
+        RepositoryGraphReadBudget::new(1, 7, 256 * 1024, 16, 16)?,
+        None,
+    )?;
+    require(
+        !page.page.truncated
+            && page.page.rows.len() == 7
+            && page.page.rows.iter().all(|entity| {
+                !matches!(
+                    entity.selector(),
+                    EntitySelector::File { path } if path.as_str() == "docs/guide.md"
+                )
+            }),
+        "content filtering was applied after the candidate-page sentinel",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_honors_content_and_confidence_filters() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;
     let mut source_only = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -3570,24 +3679,30 @@ fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
 fn analysis_store_with_coverage(
     include_tools_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(include_tools_coverage, None, false)
+    analysis_store_with_options(include_tools_coverage, None, false, 0)
 }
 
 fn analysis_store_with_target(
     target_selector: EntitySelector,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, Some(target_selector), false)
+    analysis_store_with_options(true, Some(target_selector), false, 0)
 }
 
 fn analysis_store_with_external_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, true)
+    analysis_store_with_options(true, None, true, 0)
+}
+
+fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
+{
+    analysis_store_with_options(true, None, false, 20)
 }
 
 fn analysis_store_with_options(
     include_tools_coverage: bool,
     target_selector: Option<EntitySelector>,
     external_candidate: bool,
+    large_candidate_count: usize,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
@@ -3653,6 +3768,15 @@ fn analysis_store_with_options(
     let d_unused = symbol_entity("src/a.rs", "d_unused", "fn d_unused()")?;
     let b_hub = symbol_entity("src/b.rs", "b_hub", "fn b_hub()")?;
     let c_aux = symbol_entity("tools/c.rs", "c_aux", "fn c_aux()")?;
+    let large_candidates = (0..large_candidate_count)
+        .map(|index| {
+            symbol_entity(
+                "src/a.rs",
+                &format!("byte_candidate_{index}"),
+                &format!("candidate_{index}_{}", "x".repeat(4_000)),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let relation = |source: &GraphEntity, target: &GraphEntity, kind| {
         LogicalRelation::new(
             source,
@@ -3858,6 +3982,7 @@ fn analysis_store_with_options(
         relations: Vec::new(),
     })?;
     let mut entities = vec![a, b, c, guide, a_long, d_unused, b_hub, c_aux];
+    entities.extend(large_candidates);
     if let Some(target) = extra_target {
         entities.push(target);
     }

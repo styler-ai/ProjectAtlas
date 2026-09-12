@@ -1656,30 +1656,48 @@ fn load_entrypoint_profile_draft(
             entity_limit.saturating_add(1).saturating_mul(2),
         )
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-        let all_entities = store.repository_graph_entrypoint_candidates_page_bounded(
+        let all_entities = match store.repository_graph_entrypoint_candidates_page_bounded(
             generation_project(&anchor.entity),
             generation,
             entity_limit,
             query.relations.content_selection,
             read_budget,
             control,
-        )?;
-        add_repository_read_work(&mut relation_work, &all_entities.work)?;
-        let all_entities = all_entities.page;
-        if all_entities.truncated {
-            complete = false;
-            push_limit(&mut reached_limits, GraphLimitKind::Nodes);
-        }
+        ) {
+            Ok(all_entities) => {
+                add_repository_read_work(&mut relation_work, &all_entities.work)?;
+                Some(all_entities.page)
+            }
+            Err(DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                    reason: "graph read decoded bytes exceed the batch budget",
+                },
+            )) => {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
         let candidate_entities = all_entities
-            .rows
-            .iter()
-            .filter(|entity| {
-                matches!(
-                    entity.selector(),
-                    EntitySelector::File { .. } | EntitySelector::Symbol { .. }
-                ) && !reachable_keys.contains(entity.key().canonical_identity())
+            .as_ref()
+            .map(|all_entities| {
+                if all_entities.truncated {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                }
+                all_entities
+                    .rows
+                    .iter()
+                    .filter(|entity| {
+                        matches!(
+                            entity.selector(),
+                            EntitySelector::File { .. } | EntitySelector::Symbol { .. }
+                        ) && !reachable_keys.contains(entity.key().canonical_identity())
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         if complete {
             for entity in candidate_entities {
                 check_control(control)?;
