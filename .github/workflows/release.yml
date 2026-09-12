@@ -466,6 +466,38 @@ jobs:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts
 
+      - name: Prepare isolated macOS arm64 host state
+        if: matrix.label == 'macos-arm64-posix'
+        run: |
+          set -euo pipefail
+          isolation_root="$RUNNER_TEMP/projectatlas-macos-arm64-clean"
+          for path in "$isolation_root" "$isolation_root/home" "$isolation_root/config" "$isolation_root/cache" "$isolation_root/state" "$isolation_root/codex" "$isolation_root/tmp"; do
+            if [ -e "$path" ]; then
+              echo "Clean macOS lifecycle path already exists: $path" >&2
+              exit 1
+            fi
+          done
+          mkdir -p "$isolation_root" "$isolation_root/home" "$isolation_root/config" "$isolation_root/cache" "$isolation_root/state" "$isolation_root/codex" "$isolation_root/tmp"
+          {
+            echo "HOME=$isolation_root/home"
+            echo "XDG_CONFIG_HOME=$isolation_root/config"
+            echo "XDG_CACHE_HOME=$isolation_root/cache"
+            echo "XDG_STATE_HOME=$isolation_root/state"
+            echo "CODEX_HOME=$isolation_root/codex"
+            echo "TMPDIR=$isolation_root/tmp"
+            echo "PATH=$isolation_root/home/.local/bin:$isolation_root/home/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+            echo "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1"
+            echo "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1"
+            echo "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1"
+            echo "PROJECTATLAS_NO_TELEMETRY=1"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### Clean macOS arm64 installed lifecycle"
+            echo
+            echo "HOME, XDG config/cache/state, CODEX_HOME, TMPDIR, PATH, project root, and database are isolated under RUNNER_TEMP."
+            echo "The following steps must use the downloaded packaged runtime via PROJECTATLAS_MCP_CONTRACT_EXECUTABLE."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Restore packaged contract execute permissions
         run: |
           set -euo pipefail
@@ -489,10 +521,32 @@ jobs:
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           chmod +x "$runtime"
           project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
+          if [ -e "$project_root" ]; then
+            echo "Packaged lifecycle project root was not clean: $project_root" >&2
+            exit 1
+          fi
           mkdir -p "$project_root"
           PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
             bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
           PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          archive_digest="$("${digest_command[@]}" "$archive" | awk '{print $1}')"
+          runtime_digest="$("${digest_command[@]}" "$runtime" | awk '{print $1}')"
+          if [ -z "$archive_digest" ] || [ -z "$runtime_digest" ]; then
+            echo "Packaged runtime digest capture failed." >&2
+            exit 1
+          fi
+          {
+            echo
+            echo "- packaged archive: $archive"
+            echo "- packaged archive SHA-256: $archive_digest"
+            echo "- extracted runtime: $runtime"
+            echo "- extracted runtime SHA-256: $runtime_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
           (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" config --print)
           (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" ignore list)
           PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$runtime" python3 <<'PY'
@@ -556,6 +610,27 @@ jobs:
             PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
               "$contract" "$test" --exact --include-ignored --nocapture
           done
+
+      - name: Clean macOS arm64 holistic packaged lifecycle
+        if: matrix.label == 'macos-arm64-posix'
+        timeout-minutes: 15
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          test=scan_and_watch_preserve_atomic_publication_across_roots
+          chmod +x "$contract"
+          inventory="$("$contract" --list)"
+          matches="$(printf '%s\n' "$inventory" | awk -v expected="$test: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+          if [ "$matches" -ne 1 ]; then
+            echo "Packaged contract inventory must contain exactly one '$test: test' line; found $matches." >&2
+            exit 1
+          fi
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            "$contract" "$test" --exact --include-ignored --nocapture
 
       - name: Installed-candidate regression and upgrade contracts
         timeout-minutes: 10

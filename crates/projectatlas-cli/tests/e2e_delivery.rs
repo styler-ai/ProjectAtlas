@@ -4536,6 +4536,69 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
 
+    let clean_macos_step_name = "- name: Prepare isolated macOS arm64 host state";
+    if unix_prepublish.matches(clean_macos_step_name).count() != 1 {
+        return Err(io::Error::other(
+            "Unix prepublish must own exactly one clean macOS arm64 isolation step",
+        )
+        .into());
+    }
+    let clean_macos_step = unix_prepublish
+        .split(clean_macos_step_name)
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted clean macOS arm64 isolation"))?;
+    for required in [
+        "if: matrix.label == 'macos-arm64-posix'",
+        "$RUNNER_TEMP/projectatlas-macos-arm64-clean",
+        "HOME=$isolation_root/home",
+        "XDG_CONFIG_HOME=$isolation_root/config",
+        "XDG_CACHE_HOME=$isolation_root/cache",
+        "XDG_STATE_HOME=$isolation_root/state",
+        "CODEX_HOME=$isolation_root/codex",
+        "TMPDIR=$isolation_root/tmp",
+        "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1",
+        "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1",
+        "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1",
+        "PROJECTATLAS_NO_TELEMETRY=1",
+    ] {
+        if !clean_macos_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "clean macOS arm64 isolation omitted {required:?}"
+            ))
+            .into());
+        }
+    }
+    let clean_macos_holistic_name = "- name: Clean macOS arm64 holistic packaged lifecycle";
+    if unix_prepublish.matches(clean_macos_holistic_name).count() != 1 {
+        return Err(io::Error::other(
+            "Unix prepublish must own exactly one clean macOS arm64 holistic step",
+        )
+        .into());
+    }
+    let clean_macos_holistic = unix_prepublish
+        .split(clean_macos_holistic_name)
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| {
+            io::Error::other("Unix prepublish omitted clean macOS arm64 holistic proof")
+        })?;
+    for required in [
+        "if: matrix.label == 'macos-arm64-posix'",
+        "timeout-minutes: 15",
+        "test=scan_and_watch_preserve_atomic_publication_across_roots",
+        "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
+        "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
+        "--exact --include-ignored --nocapture",
+    ] {
+        if !clean_macos_holistic.contains(required) {
+            return Err(io::Error::other(format!(
+                "clean macOS arm64 holistic proof omitted {required:?}"
+            ))
+            .into());
+        }
+    }
+
     if !template.contains("Refs #NNN")
         || !template.contains("Use `Closes #NNN` only when this pull request completes the issue.")
         || template.contains("every OpenSpec task is checked off before merge")
