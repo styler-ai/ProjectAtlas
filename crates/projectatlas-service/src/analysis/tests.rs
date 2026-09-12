@@ -1071,12 +1071,10 @@ fn entrypoint_profile_rejects_candidate_generation_and_purpose_changes()
         move |event| {
             if event == AnalysisPhaseEvent::CandidateTraversal
                 && !refreshed_for_observer.replace(true)
+                && let Some(mut writer) = writer_for_observer.borrow_mut().take()
+                && let Ok(refresh) = writer.begin_index_projection_refresh("analysis-service")
             {
-                if let Some(mut writer) = writer_for_observer.borrow_mut().take() {
-                    if let Ok(refresh) = writer.begin_index_projection_refresh("analysis-service") {
-                        let _ = refresh.complete();
-                    }
-                }
+                drop(refresh.complete());
             }
         },
         || load_relation_analysis(&stale_store, &generation_query, None),
@@ -1110,14 +1108,13 @@ fn entrypoint_profile_rejects_candidate_generation_and_purpose_changes()
         move |event| {
             if event == AnalysisPhaseEvent::CandidateTraversal
                 && !revised_for_observer.replace(true)
+                && let Some(writer) = writer_for_observer.borrow_mut().take()
             {
-                if let Some(writer) = writer_for_observer.borrow_mut().take() {
-                    let _ = writer.set_purpose(
-                        "src/a.rs",
-                        "purpose changed during analysis",
-                        PurposeSource::Agent,
-                    );
-                }
+                drop(writer.set_purpose(
+                    "src/a.rs",
+                    "purpose changed during analysis",
+                    PurposeSource::Agent,
+                ));
             }
         },
         || load_relation_analysis(&stale_store, &purpose_query, None),
