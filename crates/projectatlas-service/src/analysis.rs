@@ -1506,11 +1506,17 @@ fn load_entrypoint_profile_draft(
         for anchor in frontier.drain(..) {
             for relation in &profile.relations {
                 check_control(control)?;
+                let anchor_is_retained = reachable
+                    .values()
+                    .any(|node| relation_anchor_for_entity(&node.entity).as_ref() == Some(&anchor));
+                let retained_keys =
+                    anchor_is_retained.then(|| reachable.keys().cloned().collect::<BTreeSet<_>>());
                 let step_budget = match entrypoint_step_budget(
                     budget,
                     &relation_work,
                     reachable.len(),
                     0,
+                    anchor_is_retained,
                     query.relations.include_occurrences,
                 )? {
                     Ok(step_budget) => step_budget,
@@ -1607,6 +1613,14 @@ fn load_entrypoint_profile_draft(
                     {
                         edges.push(edge);
                     }
+                }
+                if reachable.len() > budget.nodes() as usize {
+                    if let Some(retained_keys) = retained_keys {
+                        reachable.retain(|key, _| retained_keys.contains(key));
+                    }
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                    break 'profile;
                 }
                 if report.continuation.is_some() {
                     complete = false;
@@ -1738,6 +1752,7 @@ fn load_entrypoint_profile_draft(
                         &relation_work,
                         reachable.len(),
                         unreachable.len(),
+                        false,
                         query.relations.include_occurrences,
                     )? {
                         Ok(step_budget) => step_budget,
@@ -2222,13 +2237,25 @@ fn entrypoint_step_budget(
     work: &DetailedRelationWork,
     retained_nodes: usize,
     validated_candidates: usize,
+    anchor_is_retained: bool,
     include_occurrences: bool,
 ) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
     let accounted_nodes = retained_nodes.saturating_add(validated_candidates);
     let accounted_nodes = u32::try_from(accounted_nodes).unwrap_or(u32::MAX);
+    let validated_candidates = u32::try_from(validated_candidates).unwrap_or(u32::MAX);
     let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
     let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
     let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
+    let step_nodes = if anchor_is_retained {
+        budget.nodes().saturating_sub(validated_candidates)
+    } else {
+        remaining_nodes
+    };
+    let step_visited = if anchor_is_retained {
+        budget.visited().saturating_sub(validated_candidates)
+    } else {
+        remaining_visited
+    };
     let remaining_occurrences = if include_occurrences {
         budget
             .occurrences_total()
@@ -2239,11 +2266,7 @@ fn entrypoint_step_budget(
     let remaining_intermediate = budget
         .intermediate_bytes()
         .saturating_sub(work.intermediate_bytes);
-    let rows = budget
-        .page_rows()
-        .min(remaining_edges)
-        .min(remaining_nodes)
-        .min(remaining_visited);
+    let rows = budget.page_rows().min(remaining_edges);
     let rows = if include_occurrences {
         rows.min(remaining_occurrences)
     } else {
@@ -2252,10 +2275,10 @@ fn entrypoint_step_budget(
     if remaining_edges == 0 {
         return Ok(Err(GraphLimitKind::Edges));
     }
-    if remaining_nodes == 0 {
+    if remaining_nodes == 0 && !anchor_is_retained {
         return Ok(Err(GraphLimitKind::Nodes));
     }
-    if remaining_visited == 0 {
+    if remaining_visited == 0 && !anchor_is_retained {
         return Ok(Err(GraphLimitKind::Visited));
     }
     if include_occurrences && remaining_occurrences == 0 {
@@ -2276,8 +2299,8 @@ fn entrypoint_step_budget(
     .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
     let step = DetailedRelationBudget::from_graph_limits(limits).with_aggregate_limits(
         Some(remaining_edges),
-        Some(remaining_nodes),
-        Some(remaining_visited),
+        Some(step_nodes),
+        Some(step_visited),
         Some(remaining_occurrences),
         Some(remaining_intermediate),
         Some(budget.deadline_ms()),
