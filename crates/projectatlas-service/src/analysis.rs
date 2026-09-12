@@ -552,6 +552,9 @@ impl RelationAnalysisDraft {
         E: From<ServiceError>,
         O: AsRef<[u8]>,
     {
+        if self.report.mode == RelationAnalysisMode::Entrypoint {
+            return self.fit_entrypoint_output(encode);
+        }
         check_control(Some(&self.control)).map_err(E::from)?;
         #[cfg(test)]
         analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OutputRendering);
@@ -673,6 +676,62 @@ impl RelationAnalysisDraft {
             };
             E::from(ServiceError::InvalidInput(message.to_string()))
         })
+    }
+
+    /// Fit an entrypoint report atomically; partial finding prefixes are not replayable.
+    fn fit_entrypoint_output<F, E, O>(self, mut encode: F) -> Result<(RelationAnalysisReport, O), E>
+    where
+        F: FnMut(&RelationAnalysisReport, &IndexWorkControl) -> Result<O, E>,
+        E: From<ServiceError>,
+        O: AsRef<[u8]>,
+    {
+        check_control(Some(&self.control)).map_err(E::from)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OutputRendering);
+        let original_report_bytes =
+            serialized_bytes_controlled(&self.report, Some(&self.control)).map_err(E::from)?;
+        let mut candidate = self.report;
+        let mut encoded = encode(&candidate, &self.control)?;
+        for _ in 0..8 {
+            check_control(Some(&self.control)).map_err(E::from)?;
+            let rendered = u64::try_from(encoded.as_ref().len()).map_err(|source| {
+                E::from(ServiceError::InvalidInput(format!(
+                    "entrypoint rendered byte count overflowed: {source}"
+                )))
+            })?;
+            let candidate_report_bytes =
+                serialized_bytes_controlled(&candidate, Some(&self.control)).map_err(E::from)?;
+            let fitting_peak = original_report_bytes
+                .checked_add(candidate_report_bytes)
+                .and_then(|bytes| bytes.checked_add(rendered))
+                .ok_or_else(|| {
+                    E::from(ServiceError::InvalidInput(
+                        "entrypoint output fitting byte count overflowed".to_string(),
+                    ))
+                })?;
+            if candidate.work.rendered_output_bytes == rendered
+                && candidate.work.peak_intermediate_bytes == fitting_peak
+            {
+                if encoded.as_ref().len() > self.output_bytes as usize {
+                    return Err(E::from(ServiceError::InvalidInput(
+                        "entrypoint profile output exceeds its declared byte budget".to_string(),
+                    )));
+                }
+                if fitting_peak > self.budget.intermediate_bytes() {
+                    return Err(E::from(ServiceError::InvalidInput(
+                        "entrypoint profile output exceeds its aggregate intermediate-byte budget"
+                            .to_string(),
+                    )));
+                }
+                return Ok((candidate, encoded));
+            }
+            candidate.work.rendered_output_bytes = rendered;
+            candidate.work.peak_intermediate_bytes = fitting_peak;
+            encoded = encode(&candidate, &self.control)?;
+        }
+        Err(E::from(ServiceError::InvalidInput(
+            "entrypoint output accounting did not stabilize".to_string(),
+        )))
     }
 }
 
@@ -1408,36 +1467,29 @@ fn load_entrypoint_profile_draft(
     let mut complete = true;
     let mut reached_limits = Vec::new();
 
-    'profile: for anchor in &profile.anchors {
-        for relation in &profile.relations {
-            check_control(control)?;
-            if relation_work.inspected_edges >= budget.edges() {
-                complete = false;
-                push_limit(&mut reached_limits, GraphLimitKind::Edges);
-                break 'profile;
-            }
-            if reachable.len() >= budget.nodes() as usize {
-                complete = false;
-                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
-                break 'profile;
-            }
-            if relation_work.intermediate_bytes >= budget.intermediate_bytes() {
-                complete = false;
-                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
-                break 'profile;
-            }
-            let mut relation_query = query.relations.clone();
-            relation_query.anchor = anchor.clone();
-            relation_query.relation = Some(*relation);
-            relation_query.direction = RelationDirection::Outbound;
-            relation_query.minimum_confidence = ConfidenceClass::Low;
-            relation_query.resolution = RelationResolutionFilter::Any;
-            relation_query.cursor = None;
-            relation_query.budget = budget;
-            let mut cursor = None;
-            let mut pages = 0_u32;
-            loop {
-                relation_query.cursor = cursor;
+    let mut frontier = profile.anchors.clone();
+    let mut visited = BTreeSet::new();
+    let mut depth = 0_u32;
+    'profile: while !frontier.is_empty() && depth < budget.depth() {
+        let mut next_frontier = Vec::new();
+        for anchor in frontier.drain(..) {
+            for relation in &profile.relations {
+                check_control(control)?;
+                let Some(step_budget) =
+                    entrypoint_step_budget(budget, &relation_work, reachable.len())?
+                else {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                    break 'profile;
+                };
+                let mut relation_query = query.relations.clone();
+                relation_query.anchor = anchor.clone();
+                relation_query.relation = Some(*relation);
+                relation_query.direction = RelationDirection::Outbound;
+                relation_query.minimum_confidence = ConfidenceClass::Low;
+                relation_query.resolution = RelationResolutionFilter::Any;
+                relation_query.cursor = None;
+                relation_query.budget = step_budget;
                 let report = load_detailed_relations(store, &relation_query, control)?;
                 if report.generation != generation {
                     return Err(ServiceError::RelationCursorStale {
@@ -1448,18 +1500,12 @@ fn load_entrypoint_profile_draft(
                 authored_purpose_revision =
                     authored_purpose_revision.max(report.authored_purpose_revision);
                 add_relation_work(&mut relation_work, &report.work)?;
-                if relation_work.inspected_edges > budget.edges() {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                for limit in &report.reached_limits {
+                    push_limit(&mut reached_limits, *limit);
                 }
                 if relation_work.inspected_edges > budget.edges() {
                     complete = false;
                     push_limit(&mut reached_limits, GraphLimitKind::Edges);
-                    break 'profile;
-                }
-                if reachable.len() > budget.nodes() as usize {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
                     break 'profile;
                 }
                 if relation_work.intermediate_bytes > budget.intermediate_bytes() {
@@ -1467,10 +1513,9 @@ fn load_entrypoint_profile_draft(
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     break 'profile;
                 }
-                for limit in &report.reached_limits {
-                    push_limit(&mut reached_limits, *limit);
-                }
                 complete &= trusted_node_coverage(&report.anchor);
+                let anchor_key = report.anchor.entity.key().canonical_identity().to_string();
+                visited.insert(anchor_key);
                 insert_node(&mut reachable, &report.anchor);
                 for row in &report.rows {
                     check_control(control)?;
@@ -1482,6 +1527,15 @@ fn load_entrypoint_profile_draft(
                     insert_node(&mut reachable, &row.source);
                     if let Some(target) = &row.target {
                         insert_node(&mut reachable, target);
+                        if resolved {
+                            let target_key = target.entity.key().canonical_identity().to_string();
+                            if visited.insert(target_key)
+                                && let Some(target_anchor) =
+                                    relation_anchor_for_entity(&target.entity)
+                            {
+                                next_frontier.push(target_anchor);
+                            }
+                        }
                     }
                     for node in &row.path {
                         insert_node(&mut reachable, node);
@@ -1492,21 +1546,22 @@ fn load_entrypoint_profile_draft(
                         edges.push(edge);
                     }
                 }
-                cursor = report.continuation;
-                pages = pages.saturating_add(1);
-                if cursor.is_none() {
+                if report.continuation.is_some() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Rows);
+                } else {
                     complete &= !report.truncated
                         && report.reached_limits.is_empty()
                         && matches!(report.total, RelationTotalState::Exact(_));
-                    break;
-                }
-                if pages >= budget.nodes() {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
-                    break 'profile;
                 }
             }
         }
+        frontier = next_frontier;
+        depth = depth.saturating_add(1);
+    }
+    if !frontier.is_empty() {
+        complete = false;
+        push_limit(&mut reached_limits, GraphLimitKind::Depth);
     }
     edges.sort_by(|left, right| {
         (&left.source, &left.target, left.kind.as_str()).cmp(&(
@@ -1567,33 +1622,49 @@ fn load_entrypoint_profile_draft(
                         "entrypoint candidate is not addressable by an exact anchor".to_string(),
                     )
                 })?;
-                let mut candidate_query = query.relations.clone();
-                candidate_query.anchor = candidate_anchor;
-                candidate_query.relation = Some(profile.relations[0]);
-                candidate_query.direction = RelationDirection::Outbound;
-                candidate_query.resolution = RelationResolutionFilter::Any;
-                candidate_query.cursor = None;
-                candidate_query.budget = budget;
-                let candidate_report = load_detailed_relations(store, &candidate_query, control)?;
-                add_relation_work(&mut relation_work, &candidate_report.work)?;
-                if relation_work.inspected_edges > budget.edges() {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
-                    break;
+                let mut candidate_report_anchor = None;
+                for relation in &profile.relations {
+                    let Some(step_budget) =
+                        entrypoint_step_budget(budget, &relation_work, reachable.len())?
+                    else {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                        break;
+                    };
+                    let mut candidate_query = query.relations.clone();
+                    candidate_query.anchor = candidate_anchor.clone();
+                    candidate_query.relation = Some(*relation);
+                    candidate_query.direction = RelationDirection::Outbound;
+                    candidate_query.minimum_confidence = ConfidenceClass::Low;
+                    candidate_query.resolution = RelationResolutionFilter::Any;
+                    candidate_query.cursor = None;
+                    candidate_query.budget = step_budget;
+                    let candidate_report =
+                        load_detailed_relations(store, &candidate_query, control)?;
+                    add_relation_work(&mut relation_work, &candidate_report.work)?;
+                    if relation_work.inspected_edges > budget.edges() {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                        break;
+                    }
+                    if relation_work.intermediate_bytes > budget.intermediate_bytes() {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                        break;
+                    }
+                    if !entrypoint_report_complete(&candidate_report) {
+                        complete = false;
+                        break;
+                    }
+                    candidate_report_anchor.get_or_insert(candidate_report.anchor);
                 }
-                if relation_work.intermediate_bytes > budget.intermediate_bytes() {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
-                    break;
-                }
-                if entrypoint_report_complete(&candidate_report) {
-                    unreachable.insert(
-                        entity.key().canonical_identity().to_string(),
-                        candidate_report.anchor,
-                    );
-                } else {
-                    complete = false;
-                    break;
+                if complete {
+                    if let Some(candidate_report_anchor) = candidate_report_anchor {
+                        unreachable.insert(
+                            entity.key().canonical_identity().to_string(),
+                            candidate_report_anchor,
+                        );
+                    }
                 }
             }
         }
@@ -1794,6 +1865,49 @@ fn add_repository_read_work(
         .ok_or_else(entrypoint_work_overflow)?;
     total.intermediate_bytes = total.intermediate_bytes.saturating_add(next.decoded_bytes);
     Ok(())
+}
+
+/// Derive one one-step detailed budget from the remaining profile-wide capacity.
+fn entrypoint_step_budget(
+    budget: DetailedRelationBudget,
+    work: &DetailedRelationWork,
+    retained_nodes: usize,
+) -> ServiceResult<Option<DetailedRelationBudget>> {
+    let retained_nodes = u32::try_from(retained_nodes).unwrap_or(u32::MAX);
+    let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
+    let remaining_nodes = budget.nodes().saturating_sub(retained_nodes);
+    let remaining_visited = budget.visited().saturating_sub(retained_nodes);
+    let remaining_occurrences = budget
+        .occurrences_total()
+        .saturating_sub(work.retained_occurrences);
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(work.intermediate_bytes);
+    let rows = budget
+        .page_rows()
+        .min(remaining_edges)
+        .min(remaining_nodes)
+        .min(remaining_visited)
+        .min(remaining_occurrences);
+    if rows == 0 || remaining_intermediate < 64 * 1_024 {
+        return Ok(None);
+    }
+    let limits = GraphLimits::new(
+        rows,
+        budget.occurrences_per_relation(),
+        1,
+        budget.output_bytes(),
+    )
+    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let step = DetailedRelationBudget::from_graph_limits(limits).with_aggregate_limits(
+        Some(remaining_edges),
+        Some(remaining_nodes),
+        Some(remaining_visited),
+        Some(remaining_occurrences),
+        Some(remaining_intermediate),
+        Some(budget.deadline_ms()),
+    )?;
+    Ok(Some(step))
 }
 
 fn entrypoint_work_overflow() -> ServiceError {

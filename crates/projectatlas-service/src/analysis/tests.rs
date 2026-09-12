@@ -843,6 +843,29 @@ fn entrypoint_profile_reports_reachable_and_unreachable_without_persistence()
     require(
         report.findings.iter().any(|finding| {
             finding.kind == AnalysisFindingKind::EntrypointReachability
+                && finding.status == AnalysisStatus::Confirmed
+                && finding.nodes.iter().any(|node| {
+                    matches!(
+                        node.node.entity.selector(),
+                        EntitySelector::Symbol { symbol }
+                            if symbol.name.as_str() == "b_hub"
+                    )
+                })
+        }) && !report.findings.iter().any(|finding| {
+            finding.status == AnalysisStatus::Candidate
+                && finding.nodes.iter().any(|node| {
+                    matches!(
+                        node.node.entity.selector(),
+                        EntitySelector::Symbol { symbol }
+                            if symbol.name.as_str() == "b_hub"
+                    )
+                })
+        }),
+        "mixed admitted relation families did not preserve the node-simple union",
+    )?;
+    require(
+        report.findings.iter().any(|finding| {
+            finding.kind == AnalysisFindingKind::EntrypointReachability
                 && finding.status == AnalysisStatus::Candidate
                 && finding.nodes.iter().any(|node| {
                     matches!(
@@ -927,6 +950,68 @@ fn entrypoint_profile_rejects_ambiguous_cursor_and_wrong_scope_and_stays_inconcl
                     && finding.status == AnalysisStatus::Inconclusive
             }),
         "incomplete entrypoint coverage produced a confident finding",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "bounded".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let output_error = load_relation_analysis(&store, &query, None)?
+        .fit_output::<_, ServiceError, _>(|report, _control| {
+            let _ = report;
+            Ok(vec![0_u8; 65_537])
+        })
+        .expect_err("entrypoint output unexpectedly accepted a non-replayable prefix");
+    require(
+        output_error
+            .to_string()
+            .contains("entrypoint profile output"),
+        "entrypoint output refusal did not identify the typed output boundary",
+    )?;
+
+    let mut bounded = query;
+    bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
+        Some(2),
+        Some(4),
+        Some(4),
+        Some(8),
+        Some(64 * 1_024),
+        None,
+    )?;
+    let report = fitted_report(&store, &bounded)?;
+    let profile = report
+        .entrypoint_profile
+        .as_ref()
+        .ok_or("bounded entrypoint profile metadata missing")?;
+    require(
+        profile.coverage == EntrypointProfileCoverage::Partial
+            && report.truncated
+            && report.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "shared entrypoint limits produced confident or complete output",
+    )?;
+    require(
+        report.work.relations.inspected_edges <= 2
+            && report.work.analyzed_nodes <= 4
+            && report.work.relations.visited_nodes <= 4
+            && report.work.peak_intermediate_bytes <= 64 * 1_024,
+        "entrypoint traversal crossed a caller aggregate ceiling",
     )?;
     Ok(())
 }
