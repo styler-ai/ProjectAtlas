@@ -2,7 +2,7 @@ use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
     CoverageRecord, CoverageScope, CoverageState, GraphIdentityText, LogicalRelation,
-    RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
+    PackageSelector, RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
 };
 use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
@@ -882,6 +882,251 @@ fn entrypoint_profile_reports_reachable_and_unreachable_without_persistence()
     require(
         store.index_publication()? == before,
         "entrypoint profile changed the authoritative publication",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_marks_unanchorable_local_targets_inconclusive() -> Result<(), Box<dyn Error>>
+{
+    let selectors = [
+        EntitySelector::Folder {
+            path: RepositoryNodePath::new(Path::new("src"))?,
+        },
+        EntitySelector::Package {
+            package: PackageSelector {
+                manager: GraphIdentityText::new("cargo")?,
+                name: GraphIdentityText::new("analysis-service")?,
+                manifest: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            },
+        },
+    ];
+    for selector in selectors {
+        let (_temp, store) = analysis_store_with_target(selector)?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(20),
+            Some(20),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "unanchorable-local".to_string(),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        let report = fitted_report(&store, &query)?;
+        require(
+            report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                && report.findings.iter().all(|finding| {
+                    finding.kind == AnalysisFindingKind::EntrypointReachability
+                        && finding.status == AnalysisStatus::Inconclusive
+                })
+                && report
+                    .entrypoint_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.unreachable_candidates == 0),
+            "an unanchorable local target produced a confident entrypoint result",
+        )?;
+    }
+
+    let (_temp, store) = analysis_store()?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("analysis fixture project identity missing")?;
+    let project_entity =
+        GraphEntity::new(project, EntitySelector::Project, IndexGeneration::new(1))?;
+    require(
+        RelationResolution::resolved(&project_entity).is_err(),
+        "the project aggregate became a directly resolvable entrypoint target",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_rejects_candidate_generation_and_purpose_changes()
+-> Result<(), Box<dyn Error>> {
+    let candidate_query = || -> Result<RelationAnalysisQuery, Box<dyn Error>> {
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(20),
+            Some(20),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "candidate-stale".to_string(),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        Ok(query)
+    };
+
+    let (temp, stale_store) = analysis_store()?;
+    let root = temp.path().join("analysis-service");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let refreshed = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let refreshed_for_observer = Rc::clone(&refreshed);
+    let generation_query = candidate_query()?;
+    let generation_stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::CandidateTraversal
+                && !refreshed_for_observer.replace(true)
+            {
+                if let Some(mut writer) = writer_for_observer.borrow_mut().take() {
+                    if let Ok(refresh) = writer.begin_index_projection_refresh("analysis-service") {
+                        let _ = refresh.complete();
+                    }
+                }
+            }
+        },
+        || load_relation_analysis(&stale_store, &generation_query, None),
+    );
+    if !(refreshed.get()
+        && generation_stale
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("typed graph generation")))
+    {
+        return Err(io::Error::other(format!(
+            "candidate generation transition was not refused: refreshed={}, error={:?}",
+            refreshed.get(),
+            generation_stale.as_ref().err().map(ToString::to_string)
+        ))
+        .into());
+    }
+
+    let (temp, stale_store) = analysis_store()?;
+    let root = temp.path().join("analysis-service");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let revised = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let revised_for_observer = Rc::clone(&revised);
+    let purpose_query = candidate_query()?;
+    let purpose_stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::CandidateTraversal
+                && !revised_for_observer.replace(true)
+            {
+                if let Some(writer) = writer_for_observer.borrow_mut().take() {
+                    let _ = writer.set_purpose(
+                        "src/a.rs",
+                        "purpose changed during analysis",
+                        PurposeSource::Agent,
+                    );
+                }
+            }
+        },
+        || load_relation_analysis(&stale_store, &purpose_query, None),
+    );
+    require(
+        revised.get()
+            && matches!(
+                purpose_stale,
+                Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint authored purpose revision"
+                })
+            ),
+        "candidate purpose revision transition was not refused at the candidate boundary",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_bounds_candidate_entity_hydration_by_remaining_bytes()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-byte-budget".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let remaining = Rc::new(Cell::new(None));
+    let remaining_for_observer = Rc::clone(&remaining);
+    let report = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CandidateEntityHydration {
+                remaining_intermediate_bytes,
+            } = event
+            {
+                remaining_for_observer.set(Some(remaining_intermediate_bytes));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    )?;
+    let remaining = remaining
+        .get()
+        .ok_or("candidate entity hydration did not expose its remaining budget")?;
+    require(
+        remaining < query.relations.budget.intermediate_bytes()
+            && report.report.work.relations.intermediate_bytes
+                <= query.relations.budget.intermediate_bytes(),
+        "candidate entity hydration did not consume only the remaining profile budget",
+    )?;
+
+    let mut bounded = query;
+    bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(64 * 1024),
+        None,
+    )?;
+    let bounded = fitted_report(&store, &bounded)?;
+    require(
+        bounded
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && bounded
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && bounded.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "a byte-limited candidate scope produced confident reachability output",
     )?;
     Ok(())
 }
@@ -2989,6 +3234,19 @@ fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
 fn analysis_store_with_coverage(
     include_tools_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(include_tools_coverage, None)
+}
+
+fn analysis_store_with_target(
+    target_selector: EntitySelector,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(true, Some(target_selector))
+}
+
+fn analysis_store_with_options(
+    include_tools_coverage: bool,
+    target_selector: Option<EntitySelector>,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
     fs::create_dir_all(root.join("src"))?;
@@ -3017,6 +3275,9 @@ fn analysis_store_with_coverage(
     let b = entity("src/b.rs")?;
     let c = entity("tools/c.rs")?;
     let guide = entity("docs/guide.md")?;
+    let extra_target = target_selector
+        .map(|selector| GraphEntity::new(project, selector, generation))
+        .transpose()?;
     let symbol_entity = |path: &str, name: &str, signature: &str| {
         GraphEntity::new(
             project,
@@ -3046,7 +3307,7 @@ fn analysis_store_with_coverage(
             generation,
         )
     };
-    let relations = vec![
+    let mut relations = vec![
         relation(&a, &b, GraphRelationKind::Legacy(RelationKind::Calls))?,
         relation(&b, &a, GraphRelationKind::Legacy(RelationKind::Calls))?,
         relation(&a, &c, GraphRelationKind::Legacy(RelationKind::Contains))?,
@@ -3098,6 +3359,13 @@ fn analysis_store_with_coverage(
             generation,
         )?,
     ];
+    if let Some(target) = extra_target.as_ref() {
+        relations.push(relation(
+            &a,
+            target,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+        )?);
+    }
     let mut coverage = ["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"]
         .into_iter()
         .filter(|path| include_tools_coverage || *path != "tools/c.rs")
@@ -3206,13 +3474,11 @@ fn analysis_store_with_coverage(
         )],
         relations: Vec::new(),
     })?;
-    publication.replace_repository_graph(
-        project,
-        &[a, b, c, guide, a_long, d_unused, b_hub, c_aux],
-        &relations,
-        &[],
-        &coverage,
-    )?;
+    let mut entities = vec![a, b, c, guide, a_long, d_unused, b_hub, c_aux];
+    if let Some(target) = extra_target {
+        entities.push(target);
+    }
+    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
     publication.complete()?;
     store.set_purpose("src/a.rs", "负责核心调用", PurposeSource::Agent)?;
     store.set_purpose("src/b.rs", "负责核心调用", PurposeSource::Agent)?;

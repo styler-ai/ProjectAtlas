@@ -28,6 +28,13 @@ mod analysis_test_observer {
         DeadCodeDiscovery,
         /// One bounded candidate-classification batch is about to run.
         ClassificationHydration,
+        /// One bounded candidate relation traversal is about to run.
+        CandidateTraversal,
+        /// The repository-wide candidate entity page is about to run.
+        CandidateEntityHydration {
+            /// Intermediate bytes left after relation traversal.
+            remaining_intermediate_bytes: u64,
+        },
         /// Adapter-specific output fitting has begun under the retained request control.
         OutputRendering,
     }
@@ -1623,6 +1630,12 @@ fn load_entrypoint_profile_draft(
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
     }
     if complete {
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::CandidateEntityHydration {
+                remaining_intermediate_bytes: remaining_intermediate,
+            },
+        );
         let read_budget = RepositoryGraphReadBudget::new(
             1,
             entity_limit.saturating_add(1),
@@ -1712,6 +1725,10 @@ fn load_entrypoint_profile_draft(
                     candidate_query.resolution = RelationResolutionFilter::Any;
                     candidate_query.cursor = None;
                     candidate_query.budget = step_budget;
+                    #[cfg(test)]
+                    analysis_test_observer::notify(
+                        analysis_test_observer::AnalysisPhaseEvent::CandidateTraversal,
+                    );
                     let candidate_report =
                         load_detailed_relations(store, &candidate_query, control)?;
                     if candidate_report.generation != generation {
