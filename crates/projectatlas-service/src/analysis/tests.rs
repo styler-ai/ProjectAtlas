@@ -1,8 +1,9 @@
 use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
-    CoverageRecord, CoverageScope, CoverageState, GraphIdentityText, LogicalRelation,
-    PackageSelector, RelationResolution, RepositoryFilePath, RepositoryNodePath, SymbolSelector,
+    CoverageRecord, CoverageScope, CoverageState, ExternalSelector, GraphIdentityText,
+    LogicalRelation, PackageSelector, RelationResolution, RepositoryFilePath, RepositoryNodePath,
+    SymbolSelector,
 };
 use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
@@ -950,6 +951,44 @@ fn entrypoint_profile_marks_unanchorable_local_targets_inconclusive() -> Result<
         RelationResolution::resolved(&project_entity).is_err(),
         "the project aggregate became a directly resolvable entrypoint target",
     )?;
+
+    let (_temp, store) = analysis_store_with_target(EntitySelector::External {
+        external: ExternalSelector {
+            system: GraphIdentityText::new("crates.io")?,
+            identity: GraphIdentityText::new("analysis-service@1")?,
+        },
+    })?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "external-control".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+            && report.findings.iter().all(|finding| {
+                finding.kind != AnalysisFindingKind::EntrypointReachability
+                    || finding.status != AnalysisStatus::Inconclusive
+            }),
+        "an external resolved target incorrectly made complete entrypoint coverage partial",
+    )?;
     Ok(())
 }
 
@@ -1104,8 +1143,8 @@ fn entrypoint_profile_bounds_candidate_entity_hydration_by_remaining_bytes()
         "candidate entity hydration did not consume only the remaining profile budget",
     )?;
 
-    let mut bounded = query;
-    bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
+    let mut bounded_query = query;
+    bounded_query.relations.budget = bounded_query.relations.budget.with_aggregate_limits(
         None,
         None,
         None,
@@ -1113,16 +1152,28 @@ fn entrypoint_profile_bounds_candidate_entity_hydration_by_remaining_bytes()
         Some(64 * 1024),
         None,
     )?;
-    let bounded = fitted_report(&store, &bounded)?;
+    let bounded_seen = Rc::new(Cell::new(false));
+    let bounded_seen_for_observer = Rc::clone(&bounded_seen);
+    let bounded_report = observe_analysis_phase(
+        move |event| {
+            if matches!(event, AnalysisPhaseEvent::CandidateEntityHydration { .. }) {
+                bounded_seen_for_observer.set(true);
+            }
+        },
+        || load_relation_analysis(&store, &bounded_query, None),
+    )?;
     require(
-        bounded
-            .entrypoint_profile
-            .as_ref()
-            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
-            && bounded
+        !bounded_seen.get()
+            && bounded_report
+                .report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && bounded_report
+                .report
                 .reached_limits
                 .contains(&GraphLimitKind::IntermediateBytes)
-            && bounded.findings.iter().all(|finding| {
+            && bounded_report.report.findings.iter().all(|finding| {
                 finding.kind == AnalysisFindingKind::EntrypointReachability
                     && finding.status == AnalysisStatus::Inconclusive
             }),
@@ -3360,14 +3411,30 @@ fn analysis_store_with_options(
         )?,
     ];
     if let Some(target) = extra_target.as_ref() {
-        relations.push(relation(
-            &a,
-            target,
-            GraphRelationKind::Legacy(RelationKind::Calls),
-        )?);
+        let relation = if matches!(target.selector(), EntitySelector::External { .. }) {
+            LogicalRelation::new(
+                &a,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::external(target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?
+        } else {
+            relation(&a, target, GraphRelationKind::Legacy(RelationKind::Calls))?
+        };
+        relations.push(relation);
     }
-    let mut coverage = ["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"]
-        .into_iter()
+    let mut coverage_paths = vec!["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"];
+    if extra_target
+        .as_ref()
+        .is_some_and(|target| matches!(target.selector(), EntitySelector::Folder { .. }))
+    {
+        coverage_paths.push("src");
+    }
+    let mut coverage = coverage_paths
+        .iter()
+        .copied()
         .filter(|path| include_tools_coverage || *path != "tools/c.rs")
         .map(|path| {
             CoverageRecord::new(
@@ -3386,8 +3453,9 @@ fn analysis_store_with_options(
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     coverage.extend(
-        ["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"]
-            .into_iter()
+        coverage_paths
+            .iter()
+            .copied()
             .filter(|path| include_tools_coverage || *path != "tools/c.rs")
             .map(|path| {
                 CoverageRecord::new(

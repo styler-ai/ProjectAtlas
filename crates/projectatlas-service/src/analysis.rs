@@ -1550,7 +1550,7 @@ fn load_entrypoint_profile_draft(
                     check_control(control)?;
                     let resolved = matches!(
                         row.relation.resolution(),
-                        RelationResolution::Resolved { .. }
+                        RelationResolution::Resolved { .. } | RelationResolution::External { .. }
                     ) && row.relation.completeness() == Completeness::Complete;
                     complete &= resolved && trusted_relation_row(row);
                     insert_node(&mut reachable, &row.source);
@@ -2172,7 +2172,10 @@ fn trusted_node_coverage(node: &DetailedRelationNode) -> bool {
 /// Return whether every local endpoint in one relation row has trusted coverage.
 fn trusted_relation_row(row: &DetailedRelationRow) -> bool {
     trusted_node_coverage(&row.source)
-        && row.target.as_ref().is_none_or(trusted_node_coverage)
+        && row.target.as_ref().is_none_or(|target| {
+            matches!(target.entity.selector(), EntitySelector::External { .. })
+                || trusted_node_coverage(target)
+        })
         && row.path.iter().all(trusted_node_coverage)
 }
 
