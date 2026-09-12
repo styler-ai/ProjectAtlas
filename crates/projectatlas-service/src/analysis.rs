@@ -1638,7 +1638,7 @@ fn load_entrypoint_profile_draft(
         );
         let read_budget = RepositoryGraphReadBudget::new(
             1,
-            entity_limit.saturating_add(1),
+            entity_limit,
             remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
             entity_limit.saturating_add(1).saturating_mul(2),
             entity_limit.saturating_add(1).saturating_mul(2),
