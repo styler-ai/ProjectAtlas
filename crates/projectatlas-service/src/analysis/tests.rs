@@ -1378,6 +1378,58 @@ fn entrypoint_profile_reuses_retained_candidate_endpoints() -> Result<(), Box<dy
 }
 
 #[test]
+fn entrypoint_profile_reconciles_candidate_node_and_visited_limits_independently()
+-> Result<(), Box<dyn Error>> {
+    for (nodes, visited, expected_limit, unexpected_limit) in [
+        (8, 7, GraphLimitKind::Visited, GraphLimitKind::Nodes),
+        (7, 8, GraphLimitKind::Nodes, GraphLimitKind::Visited),
+    ] {
+        let (_temp, store) = analysis_store_with_candidate_relation("new")?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.content_selection = ContentSelection::Source;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(nodes),
+            Some(visited),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: format!("candidate-asymmetric-{nodes}-{visited}"),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                GraphRelationKind::Legacy(RelationKind::Contains),
+                GraphRelationKind::Legacy(RelationKind::DependsOn),
+            ],
+        });
+        let report = fitted_report(&store, &query)?;
+        require(
+            report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                profile.coverage == EntrypointProfileCoverage::Partial
+                    && profile.unreachable_candidates == 0
+            }) && report.reached_limits.contains(&expected_limit)
+                && !report.reached_limits.contains(&unexpected_limit),
+            "candidate validation did not reconcile node and visited limits independently",
+        )?;
+        require(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+            "asymmetric candidate limit retained a confirmed entrypoint finding",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_scopes_coverage_to_admitted_relations() -> Result<(), Box<dyn Error>> {
     let run = |partial_calls| -> Result<RelationAnalysisReport, Box<dyn Error>> {
         let (_temp, store) = analysis_store_with_relation_coverage(partial_calls)?;

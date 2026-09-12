@@ -1828,15 +1828,27 @@ fn load_entrypoint_profile_draft(
                         &candidate_report,
                         &retained_candidate_keys,
                     ));
-                    if candidate_unretained_keys.len()
-                        > usize::try_from(budget.nodes().saturating_sub(
-                            u32::try_from(retained_candidate_keys.len()).unwrap_or(u32::MAX),
-                        ))
-                        .unwrap_or(usize::MAX)
-                    {
+                    let remaining_candidate_capacity =
+                        u32::try_from(retained_candidate_keys.len()).unwrap_or(u32::MAX);
+                    let remaining_nodes = usize::try_from(
+                        budget.nodes().saturating_sub(remaining_candidate_capacity),
+                    )
+                    .unwrap_or(usize::MAX);
+                    let remaining_visited = usize::try_from(
+                        budget
+                            .visited()
+                            .saturating_sub(remaining_candidate_capacity),
+                    )
+                    .unwrap_or(usize::MAX);
+                    if candidate_unretained_keys.len() > remaining_nodes {
                         complete = false;
                         push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                    }
+                    if candidate_unretained_keys.len() > remaining_visited {
+                        complete = false;
                         push_limit(&mut reached_limits, GraphLimitKind::Visited);
+                    }
+                    if !complete {
                         break;
                     }
                     for limit in &candidate_report.reached_limits {
