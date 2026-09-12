@@ -932,6 +932,155 @@ fn entrypoint_profile_rechecks_terminal_frontier_at_exact_edge_limit() -> Result
 }
 
 #[test]
+fn entrypoint_profile_protects_files_owned_by_reachable_symbols() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "symbol-owner-protection".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            name: "a_long".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: None,
+            signature: Some("fn a_long()".to_string()),
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let owner_paths_are_absent = report
+        .findings
+        .iter()
+        .filter(|finding| finding.status == AnalysisStatus::Candidate)
+        .flat_map(|finding| &finding.nodes)
+        .all(|node| {
+            !matches!(
+                node.node.entity.selector(),
+                EntitySelector::File { path }
+                    if path.as_str() == "src/a.rs" || path.as_str() == "src/b.rs"
+            )
+        });
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable >= 2
+        }) && owner_paths_are_absent,
+        "a reachable symbol left its owning file eligible as an unreachable candidate",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_binds_omitted_parent_to_resolved_symbol_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = nested_symbol_entrypoint_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(4),
+        Some(1),
+        Some(1),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "nested-symbol-identity".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+            name: "inner".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: None,
+            signature: Some("fn inner()".to_string()),
+        }],
+        relations: vec![
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+        ],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 1
+        }) && !report.reached_limits.contains(&GraphLimitKind::Nodes)
+            && !report.reached_limits.contains(&GraphLimitKind::Visited),
+        "an omitted symbol parent was compared as selector syntax instead of resolved identity",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = branching_entrypoint_store(false)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.include_occurrences = true;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(2),
+        Some(8),
+        Some(8),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "zero-occurrence-rows".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 3
+        }) && !report.reached_limits.contains(&GraphLimitKind::Rows)
+            && !report.reached_limits.contains(&GraphLimitKind::Occurrences),
+        "zero-occurrence relation rows were incorrectly capped by the occurrence budget",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_keeps_pending_candidate_edges_inconclusive() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = branching_entrypoint_store(true)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(2),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "pending-candidate-edge".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report.reached_limits.contains(&GraphLimitKind::Edges),
+        "a pending disconnected candidate edge was treated as a terminal negative",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_marks_unanchorable_local_targets_inconclusive() -> Result<(), Box<dyn Error>>
 {
     let selectors = [
@@ -1268,6 +1417,65 @@ fn entrypoint_profile_rejects_generation_change_after_empty_candidate_page()
                 .err()
                 .is_some_and(|error| error.to_string().contains("typed graph generation")),
         "empty candidate enumeration did not reject a generation transition",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_rejects_generation_change_after_terminal_probe() -> Result<(), Box<dyn Error>>
+{
+    let (temp, stale_store) = terminal_entrypoint_store(false)?;
+    let root = temp.path().join("terminal-entrypoint");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let probes = Rc::new(Cell::new(0_u32));
+    let writer_for_observer = Rc::clone(&writer);
+    let probes_for_observer = Rc::clone(&probes);
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-terminal-stale".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::TerminalProbe {
+                let count = probes_for_observer.get().saturating_add(1);
+                probes_for_observer.set(count);
+                if count == 2
+                    && let Some(mut writer) = writer_for_observer.borrow_mut().take()
+                    && let Ok(refresh) =
+                        writer.begin_index_projection_refresh("terminal-entrypoint")
+                {
+                    drop(refresh.complete());
+                }
+            }
+        },
+        || load_relation_analysis(&stale_store, &query, None),
+    );
+    require(
+        probes.get() == 2
+            && stale
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("typed graph generation")),
+        "candidate terminal probing did not reject a generation transition",
     )?;
     Ok(())
 }
@@ -4176,6 +4384,7 @@ fn terminal_entrypoint_store(
     for (path, contents) in [
         ("src/a.rs", "pub fn a() {}\n"),
         ("src/b.rs", "pub fn b() {}\n"),
+        ("src/d.rs", "pub fn d() {}\n"),
     ] {
         fs::write(root.join(path), contents)?;
     }
@@ -4199,6 +4408,7 @@ fn terminal_entrypoint_store(
     };
     let a = entity("src/a.rs")?;
     let b = entity("src/b.rs")?;
+    let d = entity("src/d.rs")?;
     let c = include_terminal_edge
         .then(|| entity("src/c.rs"))
         .transpose()?;
@@ -4217,10 +4427,10 @@ fn terminal_entrypoint_store(
     if let Some(c) = c.as_ref() {
         relations.push(relation(&b, c)?);
     }
-    let entities = c.as_ref().map_or_else(
-        || vec![a.clone(), b.clone()],
-        |c| vec![a.clone(), b.clone(), c.clone()],
-    );
+    let mut entities = vec![a, b, d];
+    if let Some(c) = c.as_ref() {
+        entities.push(c.clone());
+    }
     let coverage = entities
         .iter()
         .map(|entity| {
@@ -4254,6 +4464,166 @@ fn terminal_entrypoint_store(
     publication.upsert_scan_node_batch(&scan_nodes)?;
     publication.finish_scan_replacement()?;
     publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
+}
+
+fn branching_entrypoint_store(
+    include_pending_candidate: bool,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("branching-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    for (path, contents) in [
+        ("src/a.rs", "pub fn a() {}\n"),
+        ("src/b.rs", "pub fn b() {}\n"),
+        ("src/c.rs", "pub fn c() {}\n"),
+    ] {
+        fs::write(root.join(path), contents)?;
+    }
+    if include_pending_candidate {
+        fs::write(root.join("src/d.rs"), "pub fn d() {}\n")?;
+        fs::write(root.join("src/e.rs"), "pub fn e() {}\n")?;
+    }
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("branching entrypoint project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let entity = |path: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(path))?,
+            },
+            generation,
+        )
+    };
+    let a = entity("src/a.rs")?;
+    let b = entity("src/b.rs")?;
+    let c = entity("src/c.rs")?;
+    let d = include_pending_candidate
+        .then(|| entity("src/d.rs"))
+        .transpose()?;
+    let e = include_pending_candidate
+        .then(|| entity("src/e.rs"))
+        .transpose()?;
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let relation = |target: &GraphEntity| {
+        LogicalRelation::new(
+            &a,
+            calls,
+            RelationResolution::resolved(target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )
+    };
+    let mut relations = vec![relation(&b)?, relation(&c)?];
+    if let (Some(d), Some(e)) = (d.as_ref(), e.as_ref()) {
+        relations.push(LogicalRelation::new(
+            d,
+            calls,
+            RelationResolution::resolved(e)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+    }
+    let mut entities = vec![a, b, c];
+    if let Some(d) = d {
+        entities.push(d);
+    }
+    if let Some(e) = e {
+        entities.push(e);
+    }
+    let coverage = entities
+        .iter()
+        .map(|entity| {
+            let path = match entity.selector() {
+                EntitySelector::File { path } => path.as_str(),
+                _ => unreachable!("branching fixture only contains files"),
+            };
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(path))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut publication = store.begin_index_publication("branching-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    let scan_nodes = entities
+        .iter()
+        .map(|entity| match entity.selector() {
+            EntitySelector::File { path } => test_node(path.as_str(), path.as_str()),
+            _ => unreachable!("branching fixture only contains files"),
+        })
+        .collect::<Vec<_>>();
+    publication.upsert_scan_node_batch(&scan_nodes)?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
+}
+
+fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("nested-symbol-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/nested.rs"), "fn inner() {}\n")?;
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("nested symbol project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let inner = GraphEntity::new(
+        project,
+        EntitySelector::Symbol {
+            symbol: SymbolSelector {
+                file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                name: GraphIdentityText::new("inner")?,
+                kind: SymbolKind::Function,
+                parent: Some(GraphIdentityText::new("Outer")?),
+                signature: GraphIdentityText::new("fn inner()")?,
+            },
+        },
+        generation,
+    )?;
+    let coverage = CoverageRecord::new(
+        CoverageScope::Path {
+            path: RepositoryNodePath::new(Path::new("src/nested.rs"))?,
+        },
+        None,
+        CoverageState::Complete,
+        1,
+        0,
+        generation,
+        None,
+        None,
+    )?;
+    let mut publication = store.begin_index_publication("nested-symbol-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    publication.upsert_scan_node_batch(&[test_node("src/nested.rs", "src/nested.rs")])?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(project, &[inner], &[], &[], &[coverage])?;
     publication.complete()?;
     drop(store);
     Ok((

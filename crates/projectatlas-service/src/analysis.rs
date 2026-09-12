@@ -37,6 +37,8 @@ mod analysis_test_observer {
             /// Whether the candidate report reached the edge limit.
             has_edges_limit: bool,
         },
+        /// Terminal adjacency was probed before its generation was rechecked.
+        TerminalProbe,
         /// The repository-wide candidate entity page is about to run.
         CandidateEntityHydration {
             /// Intermediate bytes left after relation traversal.
@@ -104,7 +106,7 @@ use super::{
 use impact::{LoadedVcs, digest_vcs_paths, impact_findings, load_vcs_paths};
 use projectatlas_core::graph::{
     Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExtendedRelationKind,
-    GraphEntity, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
+    GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
     ProjectInstanceId, RelationResolution,
 };
 #[cfg(test)]
@@ -1505,6 +1507,7 @@ fn load_entrypoint_profile_draft(
         .map(serde_json::to_string)
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
     let mut visited = BTreeSet::new();
     let mut depth = 0_u32;
     'profile: while !frontier.is_empty() && depth < budget.depth() {
@@ -1512,9 +1515,11 @@ fn load_entrypoint_profile_draft(
         for anchor in frontier.drain(..) {
             for relation in &profile.relations {
                 check_control(control)?;
-                let anchor_is_retained = reachable
-                    .values()
-                    .any(|node| relation_anchor_for_entity(&node.entity).as_ref() == Some(&anchor));
+                let anchor_identity = serde_json::to_string(&anchor)
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+                let anchor_is_retained = resolved_anchor_keys
+                    .get(&anchor_identity)
+                    .is_some_and(|key| reachable.contains_key(key));
                 let retained_keys =
                     anchor_is_retained.then(|| reachable.keys().cloned().collect::<BTreeSet<_>>());
                 let step_budget = match entrypoint_step_budget(
@@ -1525,16 +1530,17 @@ fn load_entrypoint_profile_draft(
                     anchor_is_retained,
                     false,
                     query.relations.include_occurrences,
+                    None,
                 )? {
                     Ok(step_budget) => step_budget,
                     Err(limit) => {
                         if limit == GraphLimitKind::Edges
-                            && let Some(anchor_node) = reachable.values().find(|node| {
-                                relation_anchor_for_entity(&node.entity).as_ref() == Some(&anchor)
-                            })
-                            && store.repository_graph_adjacency_is_empty(
+                            && let Some(anchor_key) = resolved_anchor_keys.get(&anchor_identity)
+                            && let Some(anchor_node) = reachable.get(anchor_key)
+                            && entrypoint_terminal_adjacency_is_empty(
+                                store,
+                                generation,
                                 anchor_node.entity.key(),
-                                RepositoryGraphDirection::Outbound,
                                 *relation,
                                 control,
                             )?
@@ -1564,6 +1570,10 @@ fn load_entrypoint_profile_draft(
                     });
                 }
                 first_anchor.get_or_insert_with(|| report.anchor.clone());
+                resolved_anchor_keys.insert(
+                    anchor_identity,
+                    report.anchor.entity.key().canonical_identity().to_string(),
+                );
                 if purpose_revision_initialized
                     && report.authored_purpose_revision != authored_purpose_revision
                 {
@@ -1605,14 +1615,20 @@ fn load_entrypoint_profile_draft(
                         insert_node(&mut reachable, target);
                         if resolved {
                             let target_key = target.entity.key().canonical_identity().to_string();
-                            if visited.insert(target_key) {
+                            if visited.insert(target_key.clone()) {
                                 match relation_anchor_for_entity(&target.entity) {
                                     Some(target_anchor) => {
                                         if let Ok(anchor_key) =
                                             serde_json::to_string(&target_anchor)
-                                            && scheduled_anchors.insert(anchor_key)
                                         {
-                                            next_frontier.push(target_anchor);
+                                            let is_new =
+                                                scheduled_anchors.insert(anchor_key.clone());
+                                            resolved_anchor_keys
+                                                .entry(anchor_key)
+                                                .or_insert_with(|| target_key.clone());
+                                            if is_new {
+                                                next_frontier.push(target_anchor);
+                                            }
                                         }
                                     }
                                     None if !matches!(
@@ -1678,7 +1694,20 @@ fn load_entrypoint_profile_draft(
     })?;
     let entity_limit = budget.nodes();
     let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
-    let mut retained_candidate_keys = reachable_keys.clone();
+    let mut protected_reachable_keys = reachable_keys.clone();
+    for node in reachable.values() {
+        if let EntitySelector::Symbol { symbol } = node.entity.selector() {
+            let file_selector = EntitySelector::File {
+                path: symbol.file.clone(),
+            };
+            protected_reachable_keys.insert(
+                GraphEntityKey::new(node.entity.key().project(), &file_selector)
+                    .canonical_identity()
+                    .to_string(),
+            );
+        }
+    }
+    let mut retained_candidate_keys = reachable_keys;
     let mut unreachable = BTreeMap::new();
     let remaining_intermediate = budget
         .intermediate_bytes()
@@ -1739,7 +1768,7 @@ fn load_entrypoint_profile_draft(
                         matches!(
                             entity.selector(),
                             EntitySelector::File { .. } | EntitySelector::Symbol { .. }
-                        ) && !reachable_keys.contains(entity.key().canonical_identity())
+                        ) && !protected_reachable_keys.contains(entity.key().canonical_identity())
                     })
                     .collect::<Vec<_>>()
             })
@@ -1786,8 +1815,36 @@ fn load_entrypoint_profile_draft(
                         anchor_is_retained,
                         true,
                         query.relations.include_occurrences,
+                        None,
                     )? {
                         Ok(step_budget) => step_budget,
+                        Err(GraphLimitKind::Edges)
+                            if entrypoint_terminal_adjacency_is_empty(
+                                store,
+                                generation,
+                                entity.key(),
+                                *relation,
+                                control,
+                            )? =>
+                        {
+                            match entrypoint_step_budget(
+                                budget,
+                                &relation_work,
+                                reachable.len(),
+                                accounted_candidates,
+                                anchor_is_retained,
+                                true,
+                                query.relations.include_occurrences,
+                                Some(1),
+                            )? {
+                                Ok(step_budget) => step_budget,
+                                Err(limit) => {
+                                    complete = false;
+                                    push_limit(&mut reached_limits, limit);
+                                    break;
+                                }
+                            }
+                        }
                         Err(limit) => {
                             complete = false;
                             push_limit(&mut reached_limits, limit);
@@ -2299,11 +2356,13 @@ fn entrypoint_step_budget(
     anchor_is_retained: bool,
     candidate_anchor_overhead: bool,
     include_occurrences: bool,
+    remaining_edges_override: Option<u32>,
 ) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
     let accounted_nodes = retained_nodes.saturating_add(validated_candidates);
     let accounted_nodes = u32::try_from(accounted_nodes).unwrap_or(u32::MAX);
     let validated_candidates = u32::try_from(validated_candidates).unwrap_or(u32::MAX);
-    let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
+    let remaining_edges = remaining_edges_override
+        .unwrap_or_else(|| budget.edges().saturating_sub(work.inspected_edges));
     let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
     let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
     let step_nodes = if candidate_anchor_overhead {
@@ -2331,11 +2390,6 @@ fn entrypoint_step_budget(
         .intermediate_bytes()
         .saturating_sub(work.intermediate_bytes);
     let rows = budget.page_rows().min(remaining_edges);
-    let rows = if include_occurrences {
-        rows.min(remaining_occurrences)
-    } else {
-        rows
-    };
     if remaining_edges == 0 {
         return Ok(Err(GraphLimitKind::Edges));
     }
@@ -2344,9 +2398,6 @@ fn entrypoint_step_budget(
     }
     if remaining_visited == 0 && !anchor_is_retained {
         return Ok(Err(GraphLimitKind::Visited));
-    }
-    if include_occurrences && remaining_occurrences == 0 {
-        return Ok(Err(GraphLimitKind::Occurrences));
     }
     if remaining_intermediate < 64 * 1_024 {
         return Ok(Err(GraphLimitKind::IntermediateBytes));
@@ -2380,6 +2431,35 @@ fn entrypoint_work_overflow() -> ServiceError {
 /// Return the project identity for an already generation-bound graph entity.
 fn generation_project(entity: &GraphEntity) -> ProjectInstanceId {
     entity.key().project()
+}
+
+/// Probe one terminal adjacency and reject a publication change immediately afterward.
+fn entrypoint_terminal_adjacency_is_empty(
+    store: &AtlasStore,
+    generation: projectatlas_core::IndexGeneration,
+    key: &GraphEntityKey,
+    relation: GraphRelationKind,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<bool> {
+    let empty = store.repository_graph_adjacency_is_empty(
+        key,
+        RepositoryGraphDirection::Outbound,
+        relation,
+        control,
+    )?;
+    #[cfg(test)]
+    analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::TerminalProbe);
+    let current_generation = store.repository_graph_generation()?.ok_or_else(|| {
+        ServiceError::InvalidInput(
+            "repository graph has no complete generation for entrypoint analysis".to_string(),
+        )
+    })?;
+    if current_generation != generation {
+        return Err(ServiceError::RelationCursorStale {
+            field: "entrypoint graph generation",
+        });
+    }
+    Ok(empty)
 }
 
 /// Return whether a detailed node carries trusted coverage for admitted relations.
