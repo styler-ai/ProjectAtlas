@@ -39,6 +39,8 @@ mod analysis_test_observer {
         },
         /// Terminal adjacency was probed before its generation was rechecked.
         TerminalProbe,
+        /// Occurrence evidence was probed before its generation was rechecked.
+        OccurrenceProbe,
         /// The repository-wide candidate entity page is about to run.
         CandidateEntityHydration {
             /// Intermediate bytes left after relation traversal.
@@ -1647,6 +1649,7 @@ fn load_entrypoint_profile_draft(
                     match entrypoint_occurrence_evidence_is_incomplete(
                         store,
                         &report,
+                        generation,
                         budget,
                         &mut relation_work,
                         control,
@@ -1857,6 +1860,13 @@ fn load_entrypoint_profile_draft(
             }
             Err(error) => return Err(error.into()),
         };
+        if let Some(all_entities) = all_entities.as_ref() {
+            protect_reachable_symbol_enclosures(
+                &reachable,
+                &all_entities.rows,
+                &mut protected_reachable_keys,
+            );
+        }
         let candidate_entities = all_entities
             .as_ref()
             .map(|all_entities| {
@@ -1996,6 +2006,7 @@ fn load_entrypoint_profile_draft(
                         match entrypoint_occurrence_evidence_is_incomplete(
                             store,
                             &candidate_report,
+                            generation,
                             budget,
                             &mut relation_work,
                             control,
@@ -2164,10 +2175,13 @@ fn load_entrypoint_profile_draft(
         profile_result.coverage = EntrypointProfileCoverage::Partial;
         profile_result.reachable = 0;
         profile_result.unreachable_candidates = 0;
-        for finding in &mut findings {
-            finding.status = AnalysisStatus::Inconclusive;
-            finding.metric = None;
-        }
+        findings.truncate(1);
+        findings[0].status = AnalysisStatus::Inconclusive;
+        findings[0].summary =
+            "entrypoint evidence was omitted because the declared composition bound was partial"
+                .to_string();
+        findings[0].nodes.clear();
+        findings[0].metric = None;
     }
     work.retained_composition_bytes =
         serialized_bytes_controlled(&(&findings, &profile_result), control)?;
@@ -2499,6 +2513,7 @@ fn entrypoint_anchor_budget(
 fn entrypoint_occurrence_evidence_is_incomplete(
     store: &AtlasStore,
     report: &DetailedRelationReport,
+    generation: projectatlas_core::IndexGeneration,
     budget: DetailedRelationBudget,
     relation_work: &mut DetailedRelationWork,
     control: Option<&IndexWorkControl>,
@@ -2544,6 +2559,30 @@ fn entrypoint_occurrence_evidence_is_incomplete(
             Err(error) => return Err(error.into()),
         };
         add_repository_read_work(relation_work, &batch.work)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OccurrenceProbe);
+        let current_generation = match store.repository_graph_generation() {
+            Ok(generation) => generation.ok_or_else(|| {
+                ServiceError::InvalidInput(
+                    "repository graph has no complete generation for entrypoint analysis"
+                        .to_string(),
+                )
+            })?,
+            Err(DbError::GraphRowShape {
+                table: "project_identity",
+                reason: "typed graph generation does not match complete publication",
+            }) => {
+                return Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation",
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if current_generation != generation {
+            return Err(ServiceError::RelationCursorStale {
+                field: "entrypoint graph generation",
+            });
+        }
         if batch
             .pages
             .iter()
@@ -2553,6 +2592,47 @@ fn entrypoint_occurrence_evidence_is_incomplete(
         }
     }
     Ok(Ok(false))
+}
+
+/// Protect every indexed symbol that encloses a reachable symbol.
+fn protect_reachable_symbol_enclosures(
+    reachable: &BTreeMap<String, DetailedRelationNode>,
+    entities: &[GraphEntity],
+    protected_keys: &mut BTreeSet<String>,
+) {
+    let mut pending = reachable
+        .values()
+        .filter_map(|node| match node.entity.selector() {
+            EntitySelector::Symbol { symbol } => symbol.parent.as_ref().map(|parent| {
+                (
+                    symbol.file.as_str().to_string(),
+                    parent.as_str().to_string(),
+                )
+            }),
+            _ => None,
+        })
+        .collect::<VecDeque<_>>();
+    while let Some((file, parent)) = pending.pop_front() {
+        for entity in entities {
+            let EntitySelector::Symbol { symbol } = entity.selector() else {
+                continue;
+            };
+            let parent_name = parent
+                .rsplit_once('.')
+                .map_or(parent.as_str(), |(_, name)| name);
+            if symbol.file.as_str() != file
+                || (symbol.name.as_str() != parent && symbol.name.as_str() != parent_name)
+            {
+                continue;
+            }
+            let key = entity.key().canonical_identity().to_string();
+            if protected_keys.insert(key)
+                && let Some(next_parent) = symbol.parent.as_ref()
+            {
+                pending.push_back((file.clone(), next_parent.as_str().to_string()));
+            }
+        }
+    }
 }
 
 /// Derive one one-step detailed budget from the remaining profile-wide capacity.

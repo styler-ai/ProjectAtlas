@@ -1013,6 +1013,58 @@ fn entrypoint_profile_binds_omitted_parent_to_resolved_symbol_identity()
 }
 
 #[test]
+fn entrypoint_profile_protects_enclosing_symbols_of_reachable_nested_symbol()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = nested_symbol_entrypoint_store_with_unrelated_candidate()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(10),
+        Some(10),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "nested-symbol-enclosure-protection".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+            name: "inner".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: Some("Outer".to_string()),
+            signature: Some("fn inner()".to_string()),
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let candidate_names = report
+        .findings
+        .iter()
+        .filter(|finding| finding.status == AnalysisStatus::Candidate)
+        .flat_map(|finding| &finding.nodes)
+        .filter_map(|node| match node.node.entity.selector() {
+            EntitySelector::Symbol { symbol } => Some(symbol.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 1
+        }) && candidate_names == ["unrelated"]
+            && !candidate_names
+                .iter()
+                .any(|name| *name == "Outer" || *name == "Ancestor"),
+        "reachable nested symbols left an enclosing symbol eligible as an unreachable candidate",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_rejects_initial_anchors_with_duplicate_resolved_identity()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = nested_symbol_entrypoint_store()?;
@@ -1811,6 +1863,66 @@ fn entrypoint_profile_rejects_generation_change_after_terminal_probe() -> Result
                 .err()
                 .is_some_and(|error| error.to_string().contains("typed graph generation")),
         "candidate terminal probing did not reject a generation transition",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_rejects_generation_change_after_occurrence_probe()
+-> Result<(), Box<dyn Error>> {
+    let (temp, stale_store) = branching_entrypoint_store(true, 1)?;
+    let root = temp.path().join("branching-entrypoint");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let probed = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let probed_for_observer = Rc::clone(&probed);
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.include_occurrences = true;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(10),
+        Some(8),
+        Some(8),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "occurrence-probe-stale".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::OccurrenceProbe
+                && !probed_for_observer.replace(true)
+                && let Some(mut writer) = writer_for_observer.borrow_mut().take()
+                && let Ok(refresh) = writer.begin_index_projection_refresh("branching-entrypoint")
+            {
+                drop(refresh.complete());
+            }
+        },
+        || load_relation_analysis(&stale_store, &query, None),
+    );
+    require(
+        probed.get()
+            && stale.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error,
+                    ServiceError::RelationCursorStale {
+                        field: "entrypoint graph generation"
+                    }
+                )
+            }),
+        "occurrence evidence probing did not reject a generation transition",
     )?;
     Ok(())
 }
@@ -2628,6 +2740,8 @@ fn entrypoint_profile_falls_back_before_exceeding_composition_budget() -> Result
                 finding.status == AnalysisStatus::Inconclusive
                     && finding.metric.is_none()
                     && finding.nodes.is_empty()
+                    && finding.summary.contains("evidence was omitted")
+                    && !finding.summary.contains("unreachable")
             })
             && boundary.work.peak_intermediate_bytes <= boundary_budget,
         "entrypoint composition fallback exceeded its declared byte budget",
@@ -5049,6 +5163,18 @@ fn branching_entrypoint_store(
 }
 
 fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    nested_symbol_entrypoint_store_with_options(false, false)
+}
+
+fn nested_symbol_entrypoint_store_with_unrelated_candidate()
+-> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    nested_symbol_entrypoint_store_with_options(true, true)
+}
+
+fn nested_symbol_entrypoint_store_with_options(
+    include_enclosing: bool,
+    include_unrelated: bool,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("nested-symbol-entrypoint");
     fs::create_dir_all(root.join("src"))?;
@@ -5072,6 +5198,49 @@ fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), B
         },
         generation,
     )?;
+    let outer = GraphEntity::new(
+        project,
+        EntitySelector::Symbol {
+            symbol: SymbolSelector {
+                file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                name: GraphIdentityText::new("Outer")?,
+                kind: SymbolKind::Class,
+                parent: Some(GraphIdentityText::new("Ancestor")?),
+                signature: GraphIdentityText::new("class Outer")?,
+            },
+        },
+        generation,
+    )?;
+    let ancestor = GraphEntity::new(
+        project,
+        EntitySelector::Symbol {
+            symbol: SymbolSelector {
+                file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                name: GraphIdentityText::new("Ancestor")?,
+                kind: SymbolKind::Module,
+                parent: None,
+                signature: GraphIdentityText::new("mod Ancestor")?,
+            },
+        },
+        generation,
+    )?;
+    let unrelated = include_unrelated
+        .then(|| {
+            GraphEntity::new(
+                project,
+                EntitySelector::Symbol {
+                    symbol: SymbolSelector {
+                        file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                        name: GraphIdentityText::new("unrelated")?,
+                        kind: SymbolKind::Function,
+                        parent: None,
+                        signature: GraphIdentityText::new("fn unrelated()")?,
+                    },
+                },
+                generation,
+            )
+        })
+        .transpose()?;
     let coverage = CoverageRecord::new(
         CoverageScope::Path {
             path: RepositoryNodePath::new(Path::new("src/nested.rs"))?,
@@ -5088,7 +5257,14 @@ fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), B
     publication.begin_scan_replacement()?;
     publication.upsert_scan_node_batch(&[test_node("src/nested.rs", "src/nested.rs")])?;
     publication.finish_scan_replacement()?;
-    publication.replace_repository_graph(project, &[inner], &[], &[], &[coverage])?;
+    let mut entities = vec![inner];
+    if include_enclosing {
+        entities.extend([outer, ancestor]);
+    }
+    if let Some(unrelated) = unrelated {
+        entities.push(unrelated);
+    }
+    publication.replace_repository_graph(project, &entities, &[], &[], &[coverage])?;
     publication.complete()?;
     drop(store);
     Ok((
