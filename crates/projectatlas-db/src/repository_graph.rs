@@ -2328,6 +2328,70 @@ impl AtlasStore {
         )
     }
 
+    /// Check one exact relation family without admitting or decoding a row.
+    ///
+    /// This is the terminal probe used when a bounded traversal has exhausted
+    /// its edge allowance. It distinguishes an empty adjacency from a pending
+    /// edge without granting the caller another ordinary adjacency row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid entity key, cancellation, or a SQLite
+    /// failure.
+    pub fn repository_graph_adjacency_is_empty(
+        &self,
+        key: &GraphEntityKey,
+        direction: RepositoryGraphDirection,
+        relation: GraphRelationKind,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<bool> {
+        let project = key.project();
+        if !verify_project_identity(&self.connection, project)?
+            || self.repository_graph_generation()?.is_none()
+        {
+            return Ok(true);
+        }
+        let digest = key.digest_bytes()?;
+        let (key_column, index_name) = match direction {
+            RepositoryGraphDirection::Outbound => {
+                ("source_entity_key", "idx_graph_relations_source_kind")
+            }
+            RepositoryGraphDirection::Inbound => {
+                ("target_entity_key", "idx_graph_relations_target_kind")
+            }
+        };
+        let (scope, kind) = relation_parts(relation);
+        let sql = format!(
+            "SELECT EXISTS(
+                 SELECT 1
+                   FROM graph_relations AS relation INDEXED BY {index_name}
+                  WHERE relation.project_instance_id = ?1
+                    AND relation.{key_column} = ?2
+                    AND relation.relation_scope = ?3
+                    AND relation.relation_kind = ?4
+             )"
+        );
+        let bindings = [
+            Value::Blob(project.as_bytes().to_vec()),
+            Value::Blob(digest.to_vec()),
+            Value::Text(scope.to_string()),
+            Value::Text(kind.to_string()),
+        ];
+        with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                self.connection
+                    .query_row(&sql, params_from_iter(bindings.iter()), |row| {
+                        row.get::<_, bool>(0)
+                    })
+                    .map(|has_row| !has_row)
+                    .map_err(Into::into)
+            },
+        )
+    }
+
     /// Load one optionally family- and local-resolution-filtered adjacency page.
     fn repository_graph_adjacency_page_filtered_by_resolution_bounded(
         &self,

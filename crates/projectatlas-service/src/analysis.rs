@@ -1528,6 +1528,19 @@ fn load_entrypoint_profile_draft(
                 )? {
                     Ok(step_budget) => step_budget,
                     Err(limit) => {
+                        if limit == GraphLimitKind::Edges
+                            && let Some(anchor_node) = reachable.values().find(|node| {
+                                relation_anchor_for_entity(&node.entity).as_ref() == Some(&anchor)
+                            })
+                            && store.repository_graph_adjacency_is_empty(
+                                anchor_node.entity.key(),
+                                RepositoryGraphDirection::Outbound,
+                                *relation,
+                                control,
+                            )?
+                        {
+                            continue;
+                        }
                         complete = false;
                         push_limit(&mut reached_limits, limit);
                         break 'profile;

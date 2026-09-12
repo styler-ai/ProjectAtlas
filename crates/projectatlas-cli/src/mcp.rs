@@ -476,6 +476,9 @@ const MCP_ERROR_ENTRYPOINT_ANCHORS_PREFIX: &str =
 /// MCP validation error for entrypoint controls on another analysis mode.
 const MCP_ERROR_ENTRYPOINT_CONTROLS_MODE: &str =
     "entrypoint profile controls require analysis_mode=entrypoint";
+/// MCP validation error for contradictory entrypoint and symbol selectors.
+const MCP_ERROR_ENTRYPOINT_SYMBOL_SELECTOR: &str =
+    "entrypoint anchors cannot be combined with detailed symbol selectors";
 /// Default working-tree VCS impact selection.
 const MCP_RELATION_ANALYSIS_VCS_WORKING_TREE: &str = "working_tree";
 /// Staged-index VCS impact selection.
@@ -9198,6 +9201,20 @@ impl ProjectAtlasMcpServer {
                     MCP_ERROR_ENTRYPOINT_FEDERATED.to_string(),
                 )));
             }
+            if mode == RelationAnalysisMode::Entrypoint
+                && params
+                    .entrypoints
+                    .as_ref()
+                    .is_some_and(|items| !items.is_empty())
+                && (params.symbol.is_some()
+                    || params.symbol_parent.is_some()
+                    || params.symbol_kind.is_some()
+                    || params.symbol_signature.is_some())
+            {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_ENTRYPOINT_SYMBOL_SELECTOR.to_string(),
+                )));
+            }
             let entrypoint_profile = if mode == RelationAnalysisMode::Entrypoint {
                 let anchors = match params.entrypoints.as_ref() {
                     Some(values) if !values.is_empty() => values
@@ -12152,7 +12169,7 @@ mod tests {
                 output_bytes: Some(64 * 1024),
                 analysis_mode: Some("entrypoint".to_string()),
                 profile_name: Some("mcp-entrypoint".to_string()),
-                entrypoints: Some(vec![entrypoint_anchor]),
+                entrypoints: Some(vec![entrypoint_anchor.clone()]),
                 profile_relations: Some(vec!["calls".to_string()]),
                 ..AtlasSymbolRelationsParams::default()
             },
@@ -12164,6 +12181,29 @@ mod tests {
                 && entrypoint.contains("entrypoint_profile:")
                 && entrypoint.contains("coverage:"),
             "MCP entrypoint analysis did not serialize the shared profile contract",
+        )?;
+        let entrypoint_symbol_conflict = server.atlas_symbol_relations_response(
+            &AtlasSymbolRelationsParams {
+                project_path: Some(project_path.to_string()),
+                file: None,
+                nearest_project: Some(false),
+                view: Some("analysis".to_string()),
+                direction: Some("outbound".to_string()),
+                resolution: Some("any".to_string()),
+                depth: Some(2),
+                limit: Some(50),
+                output_bytes: Some(64 * 1024),
+                analysis_mode: Some("entrypoint".to_string()),
+                symbol: Some("first".to_string()),
+                entrypoints: Some(vec![entrypoint_anchor]),
+                profile_relations: Some(vec!["calls".to_string()]),
+                ..AtlasSymbolRelationsParams::default()
+            },
+            None,
+        );
+        require(
+            entrypoint_symbol_conflict.contains(MCP_ERROR_ENTRYPOINT_SYMBOL_SELECTOR),
+            "MCP silently ignored a symbol selector alongside explicit entrypoint anchors",
         )?;
 
         let state = ProjectAtlasMcpServer::project_state_from_root(Path::new(project_path))?;

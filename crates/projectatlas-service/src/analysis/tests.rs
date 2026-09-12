@@ -888,6 +888,50 @@ fn entrypoint_profile_reports_reachable_and_unreachable_without_persistence()
 }
 
 #[test]
+fn entrypoint_profile_rechecks_terminal_frontier_at_exact_edge_limit() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store) = terminal_entrypoint_store(false)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "terminal-edge-bound".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 2
+        }) && !report.reached_limits.contains(&GraphLimitKind::Edges),
+        "an empty terminal frontier was rejected at the exact edge limit",
+    )?;
+
+    let (_temp, store) = terminal_entrypoint_store(true)?;
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report.reached_limits.contains(&GraphLimitKind::Edges),
+        "a pending terminal edge was not retained as an edge-limit truncation",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_marks_unanchorable_local_targets_inconclusive() -> Result<(), Box<dyn Error>>
 {
     let selectors = [
@@ -4121,6 +4165,101 @@ fn initialize_git_fixture(root: &Path) -> Result<(), Box<dyn Error>> {
 
 fn analysis_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     analysis_store_with_coverage(true)
+}
+
+fn terminal_entrypoint_store(
+    include_terminal_edge: bool,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("terminal-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    for (path, contents) in [
+        ("src/a.rs", "pub fn a() {}\n"),
+        ("src/b.rs", "pub fn b() {}\n"),
+    ] {
+        fs::write(root.join(path), contents)?;
+    }
+    if include_terminal_edge {
+        fs::write(root.join("src/c.rs"), "pub fn c() {}\n")?;
+    }
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("terminal entrypoint project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let entity = |path: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(path))?,
+            },
+            generation,
+        )
+    };
+    let a = entity("src/a.rs")?;
+    let b = entity("src/b.rs")?;
+    let c = include_terminal_edge
+        .then(|| entity("src/c.rs"))
+        .transpose()?;
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let relation = |source: &GraphEntity, target: &GraphEntity| {
+        LogicalRelation::new(
+            source,
+            calls,
+            RelationResolution::resolved(target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )
+    };
+    let mut relations = vec![relation(&a, &b)?];
+    if let Some(c) = c.as_ref() {
+        relations.push(relation(&b, c)?);
+    }
+    let entities = c.as_ref().map_or_else(
+        || vec![a.clone(), b.clone()],
+        |c| vec![a.clone(), b.clone(), c.clone()],
+    );
+    let coverage = entities
+        .iter()
+        .map(|entity| {
+            let path = match entity.selector() {
+                EntitySelector::File { path } => path.as_str(),
+                _ => unreachable!("terminal fixture only contains files"),
+            };
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(path))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut publication = store.begin_index_publication("terminal-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    let scan_nodes = entities
+        .iter()
+        .map(|entity| match entity.selector() {
+            EntitySelector::File { path } => test_node(path.as_str(), path.as_str()),
+            _ => unreachable!("terminal fixture only contains files"),
+        })
+        .collect::<Vec<_>>();
+    publication.upsert_scan_node_batch(&scan_nodes)?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
 }
 
 fn analysis_store_with_coverage(
