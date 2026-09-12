@@ -95,8 +95,8 @@ use projectatlas_core::{
 use projectatlas_db::{
     AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, MAX_SYMBOL_BATCH_DECODED_BYTES,
     MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS, RepositoryGraphAdjacencyContinuation,
-    RepositoryGraphDirection, RepositoryGraphReadBudget, SymbolBatchReadBudget,
-    SymbolBatchReadLimit,
+    RepositoryGraphDirection, RepositoryGraphReadBudget, RepositoryGraphReadWork,
+    SymbolBatchReadBudget, SymbolBatchReadLimit,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1536,15 +1536,15 @@ fn load_entrypoint_profile_draft(
     let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
     let mut unreachable = BTreeMap::new();
     if complete {
-        let all_entities = store
-            .repository_graph_entities_page_bounded(
-                generation_project(&anchor.entity),
-                generation,
-                entity_limit,
-                read_budget,
-                control,
-            )?
-            .page;
+        let all_entities = store.repository_graph_entities_page_bounded(
+            generation_project(&anchor.entity),
+            generation,
+            entity_limit,
+            read_budget,
+            control,
+        )?;
+        add_repository_read_work(&mut relation_work, &all_entities.work)?;
+        let all_entities = all_entities.page;
         if all_entities.truncated {
             complete = false;
             push_limit(&mut reached_limits, GraphLimitKind::Nodes);
@@ -1764,6 +1764,35 @@ fn add_relation_work(
     total.rendered_output_bytes = total
         .rendered_output_bytes
         .saturating_add(next.rendered_output_bytes);
+    Ok(())
+}
+
+/// Add one bounded repository-graph read to the profile work ledger.
+fn add_repository_read_work(
+    total: &mut DetailedRelationWork,
+    next: &RepositoryGraphReadWork,
+) -> ServiceResult<()> {
+    total.database_requested_rows = total
+        .database_requested_rows
+        .checked_add(next.requested_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_returned_rows = total
+        .database_returned_rows
+        .checked_add(next.returned_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_decoded_bytes = total
+        .database_decoded_bytes
+        .checked_add(next.decoded_bytes)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_entities = total
+        .hydrated_entities
+        .checked_add(next.hydrated_entities)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_purpose_paths = total
+        .hydrated_purpose_paths
+        .checked_add(next.hydrated_paths)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.intermediate_bytes = total.intermediate_bytes.saturating_add(next.decoded_bytes);
     Ok(())
 }
 
