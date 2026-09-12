@@ -2314,8 +2314,66 @@ fn load_occurrence_pages(
     while start < rows.len() {
         check_relation_control(control)?;
         if remaining == 0 {
-            push_limit(reached_limits, GraphLimitKind::Occurrences);
-            pages.extend((start..rows.len()).map(|_| (Vec::new(), true)));
+            let mut occurrence_evidence_omitted = false;
+            while start < rows.len() {
+                check_relation_control(control)?;
+                let batch_size = (rows.len() - start).min(MAX_REPOSITORY_GRAPH_FRONTIER);
+                let chunk = &rows[start..start + batch_size];
+                let relations = chunk
+                    .iter()
+                    .map(|row| row.detail.relation.clone())
+                    .collect::<Vec<_>>();
+                let batch_rows = u32::try_from(batch_size).map_err(|_overflow| {
+                    ServiceError::InvalidInput("occurrence batch size overflowed".to_string())
+                })?;
+                let hydrated_paths = batch_rows.saturating_mul(2).max(1);
+                let Ok(database_budget) = relation_database_budget(
+                    budget,
+                    *database_work,
+                    retained_state_bytes,
+                    relations.len(),
+                    batch_rows,
+                    1,
+                    hydrated_paths,
+                ) else {
+                    occurrence_evidence_omitted = true;
+                    pages.extend((start..rows.len()).map(|_| (Vec::new(), true)));
+                    break;
+                };
+                let batch = match store.repository_graph_occurrence_pages_bounded(
+                    &relations,
+                    1,
+                    database_budget,
+                    control,
+                ) {
+                    Ok(batch) => batch,
+                    Err(DbError::GraphContract(
+                        projectatlas_core::graph::GraphContractError::InvalidLimits {
+                            reason: "graph read decoded bytes exceed the batch budget",
+                        },
+                    )) => {
+                        occurrence_evidence_omitted = true;
+                        pages.extend((start..rows.len()).map(|_| (Vec::new(), true)));
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                database_work.record(batch.work)?;
+                occurrence_evidence_omitted |= batch
+                    .pages
+                    .iter()
+                    .any(|page| page.truncated || !page.rows.is_empty());
+                pages.extend(
+                    batch
+                        .pages
+                        .into_iter()
+                        .map(|page| (Vec::new(), page.truncated || !page.rows.is_empty())),
+                );
+                start += batch_size;
+            }
+            if occurrence_evidence_omitted {
+                push_limit(reached_limits, GraphLimitKind::Occurrences);
+            }
             break;
         }
         let limit = per_relation.min(remaining);

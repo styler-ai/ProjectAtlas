@@ -1184,6 +1184,57 @@ fn entrypoint_profile_bounds_each_initial_anchor_by_remaining_bytes() -> Result<
 }
 
 #[test]
+fn entrypoint_profile_reports_first_anchor_byte_limit_without_anchor() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store) =
+        analysis_store_with_options(true, None, false, 8, false, None, None, Some("tools/c.rs"))?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(20),
+        Some(20),
+        Some(100),
+        Some(64 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "first-anchor-byte-limit".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            name: "byte_candidate_0".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: None,
+            signature: Some(format!("candidate_0_{}", "x".repeat(4_000))),
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let traversals = Rc::new(Cell::new(0_u32));
+    let traversals_for_observer = Rc::clone(&traversals);
+    let result = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal {
+                traversals_for_observer.set(traversals_for_observer.get().saturating_add(1));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    );
+    require(
+        traversals.get() == 0
+            && matches!(
+                result,
+                Err(ServiceError::ResourceLimit {
+                    limit: GraphLimitKind::IntermediateBytes
+                })
+            ),
+        "first-anchor intermediate-byte exhaustion lost its typed resource limit",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = branching_entrypoint_store(false, 0)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -1218,7 +1269,8 @@ fn entrypoint_profile_keeps_zero_occurrence_rows_independent() -> Result<(), Box
 }
 
 #[test]
-fn entrypoint_profile_reports_occurrence_exhaustion_as_typed_limit() -> Result<(), Box<dyn Error>> {
+fn entrypoint_profile_preserves_empty_terminal_after_occurrence_exhaustion()
+-> Result<(), Box<dyn Error>> {
     let (_temp, store) = branching_entrypoint_store(false, 1)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
@@ -1246,13 +1298,47 @@ fn entrypoint_profile_reports_occurrence_exhaustion_as_typed_limit() -> Result<(
     let result = fitted_report(&store, &query);
     require(
         result.as_ref().is_ok_and(|report| {
-            report
-                .entrypoint_profile
-                .as_ref()
-                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
-                && report.reached_limits.contains(&GraphLimitKind::Occurrences)
+            report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 3
+            }) && !report.reached_limits.contains(&GraphLimitKind::Occurrences)
         }),
-        "occurrence exhaustion after a retained row became an invalid-input failure",
+        "empty terminal adjacency was incorrectly marked as occurrence exhaustion",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_preserves_zero_occurrence_candidate_after_budget_exhaustion()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = branching_entrypoint_store(true, 1)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.include_occurrences = true;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(10),
+        Some(10),
+        Some(10),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "zero-occurrence-candidate".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 3
+                && profile.unreachable_candidates == 2
+        }) && !report.reached_limits.contains(&GraphLimitKind::Occurrences),
+        "zero-occurrence candidate validation was incorrectly marked incomplete",
     )?;
     Ok(())
 }

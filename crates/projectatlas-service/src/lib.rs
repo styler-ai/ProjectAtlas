@@ -143,6 +143,12 @@ pub enum ServiceError {
     /// Database operation failed.
     #[error("{0}")]
     Db(#[from] DbError),
+    /// A bounded service request reached a typed resource limit before a report could be composed.
+    #[error("service request reached the {limit:?} resource limit")]
+    ResourceLimit {
+        /// Resource limit that stopped the request.
+        limit: GraphLimitKind,
+    },
     /// User input or stored metadata was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),

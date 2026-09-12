@@ -1644,8 +1644,23 @@ fn load_entrypoint_profile_draft(
                 purpose_revision_initialized = true;
                 add_relation_work(&mut relation_work, &report.work)?;
                 if query.relations.include_occurrences && !collect_occurrences {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                    match entrypoint_occurrence_evidence_is_incomplete(
+                        store,
+                        &report,
+                        budget,
+                        &mut relation_work,
+                        control,
+                    )? {
+                        Ok(true) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                        }
+                        Err(limit) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, limit);
+                        }
+                        Ok(false) => {}
+                    }
                 }
                 for limit in &report.reached_limits {
                     push_limit(&mut reached_limits, *limit);
@@ -1752,6 +1767,14 @@ fn load_entrypoint_profile_draft(
     edges.dedup_by(|left, right| {
         left.source == right.source && left.target == right.target && left.kind == right.kind
     });
+    if first_anchor.is_none()
+        && first_resolved_anchor.is_none()
+        && reached_limits.contains(&GraphLimitKind::IntermediateBytes)
+    {
+        return Err(ServiceError::ResourceLimit {
+            limit: GraphLimitKind::IntermediateBytes,
+        });
+    }
     let anchor = first_anchor
         .or_else(|| {
             first_resolved_anchor.map(|entity| {
@@ -1970,8 +1993,23 @@ fn load_entrypoint_profile_draft(
                     }
                     add_relation_work(&mut relation_work, &candidate_report.work)?;
                     if query.relations.include_occurrences && !collect_occurrences {
-                        complete = false;
-                        push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                        match entrypoint_occurrence_evidence_is_incomplete(
+                            store,
+                            &candidate_report,
+                            budget,
+                            &mut relation_work,
+                            control,
+                        )? {
+                            Ok(true) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                            }
+                            Err(limit) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, limit);
+                            }
+                            Ok(false) => {}
+                        }
                     }
                     if relation_work.inspected_edges > budget.edges() {
                         complete = false;
@@ -2455,6 +2493,66 @@ fn entrypoint_anchor_budget(
         Some(remaining_intermediate),
         None,
     )?))
+}
+
+/// Check whether occurrence hydration omitted evidence after the profile total was exhausted.
+fn entrypoint_occurrence_evidence_is_incomplete(
+    store: &AtlasStore,
+    report: &DetailedRelationReport,
+    budget: DetailedRelationBudget,
+    relation_work: &mut DetailedRelationWork,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Result<bool, GraphLimitKind>> {
+    if report.rows.is_empty() {
+        return Ok(Ok(false));
+    }
+    for chunk in report.rows.chunks(MAX_REPOSITORY_GRAPH_FRONTIER) {
+        check_control(control)?;
+        let remaining_intermediate = budget
+            .intermediate_bytes()
+            .saturating_sub(relation_work.intermediate_bytes);
+        if remaining_intermediate < 64 * 1_024 {
+            return Ok(Err(GraphLimitKind::IntermediateBytes));
+        }
+        let relations = chunk
+            .iter()
+            .map(|row| row.relation.clone())
+            .collect::<Vec<_>>();
+        let batch_rows = u32::try_from(relations.len()).map_err(|_overflow| {
+            ServiceError::InvalidInput("occurrence evidence batch size overflowed".to_string())
+        })?;
+        let read_budget = RepositoryGraphReadBudget::new(
+            batch_rows,
+            batch_rows,
+            remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+            1,
+            batch_rows.saturating_mul(2).max(1),
+        )
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        let batch = match store.repository_graph_occurrence_pages_bounded(
+            &relations,
+            1,
+            read_budget,
+            control,
+        ) {
+            Ok(batch) => batch,
+            Err(DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                    reason: "graph read decoded bytes exceed the batch budget",
+                },
+            )) => return Ok(Err(GraphLimitKind::IntermediateBytes)),
+            Err(error) => return Err(error.into()),
+        };
+        add_repository_read_work(relation_work, &batch.work)?;
+        if batch
+            .pages
+            .iter()
+            .any(|page| page.truncated || !page.rows.is_empty())
+        {
+            return Ok(Ok(true));
+        }
+    }
+    Ok(Ok(false))
 }
 
 /// Derive one one-step detailed budget from the remaining profile-wide capacity.
