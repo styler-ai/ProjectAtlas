@@ -97,7 +97,7 @@ use projectatlas_core::graph::{
     GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, ProjectInstanceId,
     RelationResolution,
 };
-use projectatlas_core::language::ContentSelection;
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
 use projectatlas_core::{
     CanonicalProjectRoot, IndexCancellation, IndexWorkControl, IndexWorkStage,
@@ -1657,18 +1657,22 @@ fn load_entrypoint_profile_draft(
             complete = false;
             push_limit(&mut reached_limits, GraphLimitKind::Nodes);
         }
-        let candidate_entities = all_entities.rows.iter().filter(|entity| {
-            matches!(
-                entity.selector(),
-                EntitySelector::File { .. } | EntitySelector::Symbol { .. }
-            ) && !reachable_keys.contains(entity.key().canonical_identity())
-        });
+        let candidate_entities = all_entities
+            .rows
+            .iter()
+            .filter(|entity| {
+                matches!(
+                    entity.selector(),
+                    EntitySelector::File { .. } | EntitySelector::Symbol { .. }
+                ) && !reachable_keys.contains(entity.key().canonical_identity())
+            })
+            .collect::<Vec<_>>();
         let candidate_classifications = if complete
             && query.relations.content_selection != ContentSelection::UnspecifiedLegacy
         {
             if let Some(classifications) = load_entrypoint_candidate_classifications(
                 store,
-                candidate_entities,
+                candidate_entities.iter().copied(),
                 budget,
                 &mut relation_work,
                 control,
@@ -1683,26 +1687,18 @@ fn load_entrypoint_profile_draft(
             BTreeMap::new()
         };
         if complete {
-            for entity in all_entities.rows {
+            for entity in candidate_entities.into_iter().filter(|entity| {
+                entity_matches_selection(
+                    entity,
+                    &candidate_classifications,
+                    query.relations.content_selection,
+                )
+            }) {
                 check_control(control)?;
                 if !complete {
                     break;
                 }
-                if !matches!(
-                    entity.selector(),
-                    EntitySelector::File { .. } | EntitySelector::Symbol { .. }
-                ) || reachable_keys.contains(entity.key().canonical_identity())
-                {
-                    continue;
-                }
-                if !entity_matches_selection(
-                    &entity,
-                    &candidate_classifications,
-                    query.relations.content_selection,
-                ) {
-                    continue;
-                }
-                let candidate_anchor = relation_anchor_for_entity(&entity).ok_or_else(|| {
+                let candidate_anchor = relation_anchor_for_entity(entity).ok_or_else(|| {
                     ServiceError::InvalidInput(
                         "entrypoint candidate is not addressable by an exact anchor".to_string(),
                     )
@@ -1816,7 +1812,7 @@ fn load_entrypoint_profile_draft(
         relations: profile.relations.clone(),
         coverage,
         reachable: u32::try_from(reachable_nodes.len()).unwrap_or(u32::MAX),
-        unreachable_candidates: u32::try_from(unreachable_nodes.len()).unwrap_or(u32::MAX),
+        unreachable_candidates: 0,
     };
     let mut work = RelationAnalysisWork {
         relations: relation_work,
@@ -1836,7 +1832,10 @@ fn load_entrypoint_profile_draft(
         work.composition_truncated = true;
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
     }
-    if !complete {
+    if complete {
+        profile_result.unreachable_candidates =
+            u32::try_from(unreachable_nodes.len()).unwrap_or(u32::MAX);
+    } else {
         profile_result.coverage = EntrypointProfileCoverage::Partial;
         for finding in &mut findings {
             finding.status = AnalysisStatus::Inconclusive;
@@ -2023,6 +2022,14 @@ fn load_entrypoint_candidate_classifications<'entity>(
         analysis_test_observer::notify(
             analysis_test_observer::AnalysisPhaseEvent::ClassificationHydration,
         );
+        let row_upper_bound = classification_rows_upper_bound(chunk, control)?;
+        if relation_work
+            .intermediate_bytes
+            .checked_add(row_upper_bound)
+            .is_none_or(|bytes| bytes > budget.intermediate_bytes())
+        {
+            return Ok(None);
+        }
         let rows = store.file_content_classifications_for_paths(chunk)?;
         check_control(control)?;
         let decoded_bytes = classification_rows_bytes(&rows, control)?;
@@ -2068,6 +2075,30 @@ fn classification_path_bytes(path: &str) -> ServiceResult<u64> {
         .ok()
         .and_then(|bytes| bytes.checked_add(8))
         .ok_or_else(entrypoint_work_overflow)
+}
+
+/// Bound one classification batch before materializing its database rows.
+fn classification_rows_upper_bound(
+    paths: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let maximum_classification_bytes = ContentClassification::ALL
+        .iter()
+        .map(|classification| classification.as_str().len())
+        .max()
+        .map_or(0, |bytes| u64::try_from(bytes).unwrap_or(u64::MAX));
+    paths.iter().try_fold(0_u64, |bytes, path| {
+        check_control(control)?;
+        let row_bytes = u64::try_from(path.len())
+            .ok()
+            .and_then(|path_bytes| path_bytes.checked_add(maximum_classification_bytes))
+            .and_then(|row_bytes| row_bytes.checked_add(8))
+            .and_then(|row_bytes| row_bytes.checked_mul(2))
+            .ok_or_else(entrypoint_work_overflow)?;
+        bytes
+            .checked_add(row_bytes)
+            .ok_or_else(entrypoint_work_overflow)
+    })
 }
 
 /// Count conservative decoded and retained bytes for one classification batch.

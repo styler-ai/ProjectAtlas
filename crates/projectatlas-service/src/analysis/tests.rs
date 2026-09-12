@@ -1203,7 +1203,10 @@ fn entrypoint_profile_bounds_candidate_entity_hydration_by_remaining_bytes()
                 .report
                 .entrypoint_profile
                 .as_ref()
-                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                .is_some_and(|profile| {
+                    profile.coverage == EntrypointProfileCoverage::Partial
+                        && profile.unreachable_candidates == 0
+                })
             && bounded_report
                 .report
                 .reached_limits
@@ -1356,12 +1359,12 @@ fn entrypoint_classification_hydration_honors_control_and_byte_budget() -> Resul
         "classification hydration accepted data beyond the intermediate-byte budget",
     )?;
     require(
-        work.database_requested_rows == 1
-            && work.database_returned_rows == 1
-            && work.database_decoded_bytes > 0
-            && work.hydrated_classification_paths == 1
+        work.database_requested_rows == 0
+            && work.database_returned_rows == 0
+            && work.database_decoded_bytes == 0
+            && work.hydrated_classification_paths == 0
             && work.intermediate_bytes == budget.intermediate_bytes(),
-        "rejected classification work was omitted from the returned ledger",
+        "classification hydration materialized a batch beyond its remaining budget",
     )?;
     Ok(())
 }
