@@ -983,12 +983,112 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
         "entrypoint output refusal did not identify the typed output boundary",
     )?;
 
+    let mut uncertain = query.clone();
+    uncertain.entrypoint_profile = Some(EntrypointProfile {
+        name: "dynamic-reference".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(
+            ExtendedRelationKind::References,
+        )],
+    });
+    let uncertain_report = fitted_report(&store, &uncertain)?;
+    require(
+        uncertain_report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && uncertain_report.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "ambiguous or dynamic references became a confident entrypoint result",
+    )?;
+
+    let (_stale_temp, stale_store) = analysis_store()?;
+    let root = _stale_temp.path().join("analysis-service");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let refreshed = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let refreshed_for_observer = Rc::clone(&refreshed);
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::Traversal && !refreshed_for_observer.replace(true) {
+                let mut writer = writer_for_observer
+                    .borrow_mut()
+                    .take()
+                    .expect("generation test writer already consumed");
+                writer
+                    .begin_index_projection_refresh("analysis-service")
+                    .expect("generation test refresh could not start")
+                    .complete()
+                    .expect("generation test refresh could not publish");
+            }
+        },
+        || load_relation_analysis(&stale_store, &query, None),
+    );
+    let stale_error = stale.as_ref().err().map(ToString::to_string);
+    require(
+        refreshed.get()
+            && stale_error
+                .as_deref()
+                .is_some_and(|error| error.contains("typed graph generation")),
+        "entrypoint traversal did not reject a generation transition",
+    )?;
+
+    let mut cycle = query.clone();
+    cycle.entrypoint_profile = Some(EntrypointProfile {
+        name: "cycle".to_string(),
+        anchors: vec![
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            },
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+            },
+        ],
+        relations: vec![
+            GraphRelationKind::Legacy(RelationKind::Contains),
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Legacy(RelationKind::DependsOn),
+        ],
+    });
+    cycle.relations.budget = cycle.relations.budget.with_aggregate_limits(
+        Some(10),
+        Some(20),
+        Some(10),
+        Some(20),
+        Some(256 * 1_024),
+        None,
+    )?;
+    let cycle_report = fitted_report(&store, &cycle)?;
+    if !(cycle_report
+        .entrypoint_profile
+        .as_ref()
+        .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+        && cycle_report.work.relations.inspected_edges == 9
+        && !cycle_report.reached_limits.contains(&GraphLimitKind::Edges))
+    {
+        return Err(io::Error::other(format!(
+            "a tight cyclic profile re-expanded an original anchor: coverage={:?}, limits={:?}, work={:?}",
+            cycle_report.entrypoint_profile.as_ref().map(|profile| profile.coverage),
+            cycle_report.reached_limits,
+            cycle_report.work.relations,
+        ))
+        .into());
+    }
+
     let mut bounded = query;
     bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
         Some(2),
         Some(4),
         Some(4),
-        Some(8),
+        Some(10),
         Some(64 * 1_024),
         None,
     )?;
@@ -1012,6 +1112,22 @@ fn entrypoint_profile_refuses_unreplayable_output_and_charges_shared_limits()
             && report.work.relations.visited_nodes <= 4
             && report.work.peak_intermediate_bytes <= 64 * 1_024,
         "entrypoint traversal crossed a caller aggregate ceiling",
+    )?;
+
+    let mut node_bounded = bounded.clone();
+    node_bounded.relations.budget = node_bounded.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(1),
+        Some(100),
+        Some(100),
+        Some(256 * 1_024),
+        None,
+    )?;
+    let node_report = fitted_report(&store, &node_bounded)?;
+    require(
+        node_report.reached_limits.contains(&GraphLimitKind::Nodes)
+            && !node_report.reached_limits.contains(&GraphLimitKind::Edges),
+        "node exhaustion was reported as an edge limit",
     )?;
     Ok(())
 }

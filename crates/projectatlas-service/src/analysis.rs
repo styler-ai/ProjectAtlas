@@ -1468,6 +1468,12 @@ fn load_entrypoint_profile_draft(
     let mut reached_limits = Vec::new();
 
     let mut frontier = profile.anchors.clone();
+    let mut scheduled_anchors = profile
+        .anchors
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
     let mut visited = BTreeSet::new();
     let mut depth = 0_u32;
     'profile: while !frontier.is_empty() && depth < budget.depth() {
@@ -1475,13 +1481,15 @@ fn load_entrypoint_profile_draft(
         for anchor in frontier.drain(..) {
             for relation in &profile.relations {
                 check_control(control)?;
-                let Some(step_budget) =
-                    entrypoint_step_budget(budget, &relation_work, reachable.len())?
-                else {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
-                    break 'profile;
-                };
+                let step_budget =
+                    match entrypoint_step_budget(budget, &relation_work, reachable.len())? {
+                        Ok(step_budget) => step_budget,
+                        Err(limit) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, limit);
+                            break 'profile;
+                        }
+                    };
                 let mut relation_query = query.relations.clone();
                 relation_query.anchor = anchor.clone();
                 relation_query.relation = Some(*relation);
@@ -1490,6 +1498,10 @@ fn load_entrypoint_profile_draft(
                 relation_query.resolution = RelationResolutionFilter::Any;
                 relation_query.cursor = None;
                 relation_query.budget = step_budget;
+                #[cfg(test)]
+                analysis_test_observer::notify(
+                    analysis_test_observer::AnalysisPhaseEvent::Traversal,
+                );
                 let report = load_detailed_relations(store, &relation_query, control)?;
                 if report.generation != generation {
                     return Err(ServiceError::RelationCursorStale {
@@ -1532,6 +1544,8 @@ fn load_entrypoint_profile_draft(
                             if visited.insert(target_key)
                                 && let Some(target_anchor) =
                                     relation_anchor_for_entity(&target.entity)
+                                && let Ok(anchor_key) = serde_json::to_string(&target_anchor)
+                                && scheduled_anchors.insert(anchor_key)
                             {
                                 next_frontier.push(target_anchor);
                             }
@@ -1624,13 +1638,15 @@ fn load_entrypoint_profile_draft(
                 })?;
                 let mut candidate_report_anchor = None;
                 for relation in &profile.relations {
-                    let Some(step_budget) =
-                        entrypoint_step_budget(budget, &relation_work, reachable.len())?
-                    else {
-                        complete = false;
-                        push_limit(&mut reached_limits, GraphLimitKind::Edges);
-                        break;
-                    };
+                    let step_budget =
+                        match entrypoint_step_budget(budget, &relation_work, reachable.len())? {
+                            Ok(step_budget) => step_budget,
+                            Err(limit) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, limit);
+                                break;
+                            }
+                        };
                     let mut candidate_query = query.relations.clone();
                     candidate_query.anchor = candidate_anchor.clone();
                     candidate_query.relation = Some(*relation);
@@ -1872,7 +1888,7 @@ fn entrypoint_step_budget(
     budget: DetailedRelationBudget,
     work: &DetailedRelationWork,
     retained_nodes: usize,
-) -> ServiceResult<Option<DetailedRelationBudget>> {
+) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
     let retained_nodes = u32::try_from(retained_nodes).unwrap_or(u32::MAX);
     let remaining_edges = budget.edges().saturating_sub(work.inspected_edges);
     let remaining_nodes = budget.nodes().saturating_sub(retained_nodes);
@@ -1889,8 +1905,23 @@ fn entrypoint_step_budget(
         .min(remaining_nodes)
         .min(remaining_visited)
         .min(remaining_occurrences);
-    if rows == 0 || remaining_intermediate < 64 * 1_024 {
-        return Ok(None);
+    if remaining_edges == 0 {
+        return Ok(Err(GraphLimitKind::Edges));
+    }
+    if remaining_nodes == 0 {
+        return Ok(Err(GraphLimitKind::Nodes));
+    }
+    if remaining_visited == 0 {
+        return Ok(Err(GraphLimitKind::Visited));
+    }
+    if remaining_occurrences == 0 {
+        return Ok(Err(GraphLimitKind::Occurrences));
+    }
+    if remaining_intermediate < 64 * 1_024 {
+        return Ok(Err(GraphLimitKind::IntermediateBytes));
+    }
+    if rows == 0 {
+        return Ok(Err(GraphLimitKind::Rows));
     }
     let limits = GraphLimits::new(
         rows,
@@ -1907,7 +1938,7 @@ fn entrypoint_step_budget(
         Some(remaining_intermediate),
         Some(budget.deadline_ms()),
     )?;
-    Ok(Some(step))
+    Ok(Ok(step))
 }
 
 fn entrypoint_work_overflow() -> ServiceError {

@@ -734,8 +734,18 @@ fn entrypoint_analysis_cli_and_mcp_share_profile_result_and_rejections()
         repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn root() { child(); }\nfn child() {}\nfn isolated() {}\n",
     )?;
+    fs::write(
+        repo.join("composer.json"),
+        r#"{"autoload":{"psr-4":{"Parity\\":"src/"}}}"#,
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("Parity.php"),
+        "<?php\nnamespace Parity;\nfunction helper(): void {}\n",
+    )?;
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     run_scan(&repo, &database)?;
+    let php_summary = json_summary_command(&repo, &database, "src/Parity.php")?;
+    require_json_string(&php_summary, &["language"], "php")?;
 
     let anchor = serde_json::json!({
         "kind": "file",
@@ -767,6 +777,18 @@ fn entrypoint_analysis_cli_and_mcp_share_profile_result_and_rejections()
         .get("symbol_relations")
         .ok_or("CLI omitted symbol_relations")?;
     require_json_string(cli_report, &["mode"], "entrypoint")?;
+    if cli_report["entrypoint_profile"]["coverage"] != "partial"
+        || cli_report["findings"].as_array().is_none_or(|findings| {
+            findings
+                .iter()
+                .any(|finding| finding["status"] == "candidate")
+        })
+    {
+        return Err(io::Error::other(
+            "representative PHP graph uncertainty was exposed as a deletion candidate",
+        )
+        .into());
+    }
 
     let executable = mcp_contract_executable();
     let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
