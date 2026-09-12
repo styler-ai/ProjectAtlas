@@ -1437,6 +1437,12 @@ impl AtlasStore {
     /// This read is intentionally page-shaped and has no persistence side
     /// effects. Callers use the truncation sentinel to refuse conclusions
     /// when the complete entity scope does not fit its declared bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the requested snapshot is unavailable,
+    /// the limit or budget is invalid, the read is cancelled, or SQLite
+    /// cannot execute the bounded query.
     pub fn repository_graph_entities_page_bounded(
         &self,
         project: ProjectInstanceId,
