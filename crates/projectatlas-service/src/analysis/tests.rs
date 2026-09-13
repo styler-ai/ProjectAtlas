@@ -1659,10 +1659,15 @@ fn entrypoint_profile_marks_unanchorable_local_targets_inconclusive() -> Result<
     });
     let report = fitted_report(&store, &query)?;
     require(
-        report
-            .entrypoint_profile
-            .as_ref()
-            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 2
+        }) && !report.reached_limits.contains(&GraphLimitKind::Nodes)
+            && !report.reached_limits.contains(&GraphLimitKind::Visited)
+            && report.findings.iter().all(|finding| {
+                finding.nodes.iter().all(|node| {
+                    !matches!(node.node.entity.selector(), EntitySelector::External { .. })
+                })
+            })
             && report.findings.iter().all(|finding| {
                 finding.kind != AnalysisFindingKind::EntrypointReachability
                     || finding.status != AnalysisStatus::Inconclusive
@@ -2819,6 +2824,50 @@ fn entrypoint_candidate_page_filters_content_before_truncation_sentinel()
                 )
             }),
         "content filtering was applied after the candidate-page sentinel",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_excludes_protected_rows_before_candidate_limit() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store) = protected_candidate_page_store()?;
+    let anchor = RelationAnchor::Symbol {
+        file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        name: "a".to_string(),
+        symbol_kind: Some(SymbolKind::Function),
+        parent: None,
+        signature: Some("fn a()".to_string()),
+    };
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.anchor = anchor.clone();
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(10),
+        Some(1),
+        Some(1),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "protected-candidate-page".to_string(),
+        anchors: vec![anchor],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 0
+        }) && !report.reached_limits.contains(&GraphLimitKind::Nodes)
+            && !report.reached_limits.contains(&GraphLimitKind::Visited),
+        "protected candidate rows triggered a false aggregate limit",
     )?;
     Ok(())
 }
@@ -5959,6 +6008,75 @@ fn analysis_store_with_target(
 fn analysis_store_with_external_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     analysis_store_with_options(true, None, true, 0, false, None, None, None)
+}
+
+fn protected_candidate_page_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("protected-candidate-page");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/a.rs"), "pub fn a() {}\n")?;
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("protected candidate project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let file = GraphEntity::new(
+        project,
+        EntitySelector::File {
+            path: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        },
+        generation,
+    )?;
+    let symbol = GraphEntity::new(
+        project,
+        EntitySelector::Symbol {
+            symbol: SymbolSelector {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                name: GraphIdentityText::new("a")?,
+                kind: SymbolKind::Function,
+                parent: None,
+                signature: GraphIdentityText::new("fn a()")?,
+            },
+        },
+        generation,
+    )?;
+    let coverage = CoverageRecord::new(
+        CoverageScope::Path {
+            path: RepositoryNodePath::new(Path::new("src/a.rs"))?,
+        },
+        None,
+        CoverageState::Complete,
+        1,
+        0,
+        generation,
+        None,
+        None,
+    )?;
+    let mut publication = store.begin_index_publication("protected-candidate-page")?;
+    publication.begin_scan_replacement()?;
+    publication.upsert_scan_node_batch(&[test_node("src/a.rs", "hash-a")])?;
+    publication.upsert_file_content_classification_batch(&[
+        projectatlas_db::FileContentClassification {
+            path: "src/a.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+    ])?;
+    publication.finish_scan_replacement()?;
+    publication.replace_symbol_graph(&SymbolGraph {
+        path: "src/a.rs".to_string(),
+        language: Some("rust".to_string()),
+        parser: ParserKind::TreeSitter,
+        symbols: vec![analysis_symbol("src/a.rs", "a", "fn a()", 1, 1, true)],
+        relations: Vec::new(),
+    })?;
+    publication.replace_repository_graph(project, &[file, symbol], &[], &[], &[coverage])?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
 }
 
 fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>

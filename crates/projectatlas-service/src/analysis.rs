@@ -1551,10 +1551,11 @@ fn load_entrypoint_profile_draft(
     let mut authored_purpose_revision = 0;
     let mut purpose_revision_initialized = false;
     let entity_selected = |node: &DetailedRelationNode| {
-        query.relations.content_selection == ContentSelection::UnspecifiedLegacy
-            || node.classification.is_some_and(|classification| {
-                query.relations.content_selection.includes(classification)
-            })
+        !matches!(node.entity.selector(), EntitySelector::External { .. })
+            && (query.relations.content_selection == ContentSelection::UnspecifiedLegacy
+                || node.classification.is_some_and(|classification| {
+                    query.relations.content_selection.includes(classification)
+                }))
     };
 
     let mut frontier = if complete {
@@ -1827,6 +1828,20 @@ fn load_entrypoint_profile_draft(
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
     }
     if complete {
+        let protected_entity_overhead =
+            u32::try_from(protected_reachable_keys.len()).map_err(|_overflow| {
+                ServiceError::InvalidInput(
+                    "entrypoint protected entity count exceeds the candidate-page budget"
+                        .to_string(),
+                )
+            })?;
+        let candidate_page_limit = entity_limit
+            .checked_add(protected_entity_overhead)
+            .ok_or_else(|| {
+                ServiceError::InvalidInput(
+                    "entrypoint candidate-page limit exceeds the graph row budget".to_string(),
+                )
+            })?;
         #[cfg(test)]
         analysis_test_observer::notify(
             analysis_test_observer::AnalysisPhaseEvent::CandidateEntityHydration {
@@ -1835,16 +1850,16 @@ fn load_entrypoint_profile_draft(
         );
         let read_budget = RepositoryGraphReadBudget::new(
             1,
-            entity_limit,
+            candidate_page_limit,
             remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
-            entity_limit.saturating_add(1).saturating_mul(2),
-            entity_limit.saturating_add(1).saturating_mul(2),
+            candidate_page_limit.saturating_add(1).saturating_mul(2),
+            candidate_page_limit.saturating_add(1).saturating_mul(2),
         )
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
         let all_entities = match store.repository_graph_entrypoint_candidates_page_bounded(
             generation_project(&anchor.entity),
             generation,
-            entity_limit,
+            candidate_page_limit,
             query.relations.content_selection,
             read_budget,
             control,
