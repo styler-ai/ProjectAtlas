@@ -264,15 +264,15 @@ jobs:
             exit 0
           fi
           case "${1:-}" in
-            mcp_advertised_tools_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
+            mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
               binary=e2e_delivery ;;
-            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|installed_candidate_without_git_*|compiler_config_*)
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
               binary=e2e_navigation ;;
-            lint_formats_*|token_tui_*|conditional_purpose_*|persistent_mcp_purpose_*)
+            lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
               binary=e2e_maintenance ;;
             holistic_agent_worktree_*|*watch*|*federation*)
               binary=e2e_worktrees ;;
-            installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|parser_pack_*|linux_btrfs_*)
+            init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*)
               binary=e2e_lifecycle ;;
             *)
               echo "unknown packaged contract test: ${1:-<missing>}" >&2
@@ -294,6 +294,21 @@ jobs:
           tar -czf "$archive" -C dist projectatlas
           mkdir -p release-assets
           mv "$archive" release-assets/
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          archive_digest="$("${digest_command[@]}" "release-assets/$archive" | awk '{print $1}')"
+          runtime_digest="$("${digest_command[@]}" "dist/projectatlas/projectatlas" | awk '{print $1}')"
+          if [ -z "$archive_digest" ] || [ -z "$runtime_digest" ]; then
+            echo "Authoritative packaged digest capture failed." >&2
+            exit 1
+          fi
+          {
+            printf '%s  %s\n' "$archive_digest" "$archive"
+            printf '%s  %s\n' "$runtime_digest" "projectatlas/projectatlas"
+          } > "release-assets/$archive.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -534,10 +549,20 @@ jobs:
           else
             digest_command=(sha256sum)
           fi
+          manifest="release-assets/$archive.sha256"
+          if [ ! -f "$manifest" ]; then
+            echo "Authoritative packaged digest manifest was not found: $manifest" >&2
+            exit 1
+          fi
+          expected_archive_digest="$(awk -v name="$archive" '$2 == name { print $1 }' "$manifest")"
+          expected_runtime_digest="$(awk '$2 == "projectatlas/projectatlas" { print $1 }' "$manifest")"
           archive_digest="$("${digest_command[@]}" "$archive" | awk '{print $1}')"
           runtime_digest="$("${digest_command[@]}" "$runtime" | awk '{print $1}')"
-          if [ -z "$archive_digest" ] || [ -z "$runtime_digest" ]; then
-            echo "Packaged runtime digest capture failed." >&2
+          if ! [[ "$expected_archive_digest" =~ ^[[:xdigit:]]{64}$ ]] \
+            || ! [[ "$expected_runtime_digest" =~ ^[[:xdigit:]]{64}$ ]] \
+            || [ "$archive_digest" != "$expected_archive_digest" ] \
+            || [ "$runtime_digest" != "$expected_runtime_digest" ]; then
+            echo "Packaged candidate digest does not match its authoritative manifest." >&2
             exit 1
           fi
           {
@@ -620,17 +645,34 @@ jobs:
           set -euo pipefail
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           contract="contract-artifacts/projectatlas-packaged-contract"
-          test=scan_and_watch_preserve_atomic_publication_across_roots
           chmod +x "$contract"
           inventory="$("$contract" --list)"
-          matches="$(printf '%s\n' "$inventory" | awk -v expected="$test: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
-          if [ "$matches" -ne 1 ]; then
-            echo "Packaged contract inventory must contain exactly one '$test: test' line; found $matches." >&2
-            exit 1
-          fi
-          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
-          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            "$contract" "$test" --exact --include-ignored --nocapture
+          test=scan_and_watch_preserve_atomic_publication_across_roots
+          for test in "$test" \
+            init_bootstrap_creates_db_scan_report_and_host_configs \
+            installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            mcp_server_stays_bound_to_one_project_database \
+            mcp_clean_shutdown_seals_runtime_instances_across_restarts \
+            parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access \
+            packaged_cli_surface_preserves_frozen_routes_and_defaults \
+            packaged_cli_commands_own_their_real_sqlite_effects \
+            mcp_advertised_tools_own_their_real_sqlite_effects \
+            mcp_stdio_serves_toon_tool_payloads \
+            full_repository_intelligence_flow_indexes_database_and_commands \
+            classified_document_navigation_agrees_across_cli_and_mcp \
+            holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp \
+            token_cli_and_mcp_preserve_average_maximum_edge_accounting \
+            posix_installer_accepts_symlinked_runtime_path
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
 
       - name: Installed-candidate regression and upgrade contracts
         timeout-minutes: 10
