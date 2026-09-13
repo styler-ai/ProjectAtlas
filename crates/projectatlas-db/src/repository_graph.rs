@@ -2514,6 +2514,171 @@ impl AtlasStore {
         )
     }
 
+    /// Check whether a prior adjacency page has any admitted rows remaining.
+    ///
+    /// The continuation is validated against its original project, generation,
+    /// direction, family, and frontier. No relation row is decoded or charged
+    /// to the caller's ordinary page budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale or invalid continuation, cancellation, or a
+    /// SQLite failure.
+    pub fn repository_graph_adjacency_continuation_has_filtered_rows(
+        &self,
+        continuation: &RepositoryGraphAdjacencyContinuation,
+        minimum_confidence: ConfidenceClass,
+        selection: ContentSelection,
+        control: Option<&IndexWorkControl>,
+    ) -> DbResult<bool> {
+        let project = continuation.project;
+        self.require_repository_graph_snapshot(project, continuation.generation)?;
+        if continuation.frontier.is_empty()
+            || continuation.frontier_index as usize >= continuation.frontier.len()
+        {
+            return Err(GraphContractError::InvalidLimits {
+                reason: "graph adjacency continuation has an invalid frontier",
+            }
+            .into());
+        }
+        let (key_column, index_name, endpoint_column) = match continuation.direction {
+            RepositoryGraphDirection::Outbound => (
+                "source_entity_key",
+                "idx_graph_relations_source_kind",
+                "target_entity_key",
+            ),
+            RepositoryGraphDirection::Inbound => (
+                "target_entity_key",
+                "idx_graph_relations_target_kind",
+                "source_entity_key",
+            ),
+        };
+        let confidence_filter = match minimum_confidence {
+            ConfidenceClass::Exact => "AND relation.confidence = 'exact'",
+            ConfidenceClass::High => "AND relation.confidence IN ('exact', 'high')",
+            ConfidenceClass::Medium => "AND relation.confidence IN ('exact', 'high', 'medium')",
+            ConfidenceClass::Low => "",
+        };
+        let endpoint_joins = if selection == ContentSelection::UnspecifiedLegacy {
+            String::new()
+        } else {
+            format!(
+                "LEFT JOIN graph_entities AS endpoint
+                   ON endpoint.project_instance_id = relation.project_instance_id
+                  AND endpoint.entity_key = relation.{endpoint_column}
+                 LEFT JOIN file_content_classifications AS endpoint_classification
+                   ON endpoint_classification.path = CASE endpoint.entity_kind
+                        WHEN 'file' THEN endpoint.repository_path
+                        WHEN 'symbol' THEN endpoint.repository_path
+                        WHEN 'package' THEN endpoint.manifest_path
+                    END"
+            )
+        };
+        let selection_filter = match selection {
+            ContentSelection::UnspecifiedLegacy => "",
+            ContentSelection::Source => {
+                "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR relation.resolution_status = 'external'
+                      OR (relation.relation_scope = 'extended'
+                          AND relation.relation_kind = 'documents')
+                      OR (relation.resolution_status = 'resolved'
+                          AND endpoint_classification.classification = 'source'))"
+            }
+            ContentSelection::Documentation => {
+                "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR relation.resolution_status = 'external'
+                      OR (relation.relation_scope = 'extended'
+                          AND relation.relation_kind = 'documents')
+                      OR (relation.resolution_status = 'resolved'
+                          AND endpoint_classification.classification = 'documentation'))"
+            }
+            ContentSelection::Both => {
+                "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR relation.resolution_status = 'external'
+                      OR (relation.relation_scope = 'extended'
+                          AND relation.relation_kind = 'documents')
+                      OR (relation.resolution_status = 'resolved'
+                          AND endpoint_classification.classification IN ('source', 'documentation')))"
+            }
+        };
+        let relation_filter = continuation.relation.map(|relation| {
+            let (scope, kind) = relation_parts(relation);
+            (scope, kind)
+        });
+        let relation_filter_sql = if relation_filter.is_some() {
+            "AND relation.relation_scope = ? AND relation.relation_kind = ?"
+        } else {
+            ""
+        };
+        let resolution_filter = if continuation.resolved_only {
+            "AND relation.resolution_status = 'resolved'
+             AND relation.target_entity_key IS NOT NULL
+             AND relation.source_entity_key <> relation.target_entity_key"
+        } else {
+            ""
+        };
+        let document_filter = if continuation.relation.is_some() || continuation.include_documents {
+            ""
+        } else {
+            "AND NOT (
+                 relation.relation_scope = 'extended'
+                 AND relation.relation_kind = 'documents'
+             )"
+        };
+        let mut bindings = Vec::new();
+        let branches = (continuation.frontier_index as usize..continuation.frontier.len())
+            .map(|frontier_index| {
+                let is_continuation_frontier =
+                    frontier_index == continuation.frontier_index as usize;
+                let keyset = if is_continuation_frontier {
+                    "AND (relation.relation_scope, relation.relation_kind,
+                          relation.relation_key) > (?, ?, ?)"
+                } else {
+                    ""
+                };
+                bindings.push(Value::Blob(project.as_bytes().to_vec()));
+                bindings.push(Value::Blob(continuation.frontier[frontier_index].to_vec()));
+                if let Some((scope, kind)) = relation_filter {
+                    bindings.push(Value::Text(scope.to_string()));
+                    bindings.push(Value::Text(kind.to_string()));
+                }
+                if is_continuation_frontier {
+                    bindings.push(Value::Text(continuation.relation_scope.clone()));
+                    bindings.push(Value::Text(continuation.relation_kind.clone()));
+                    bindings.push(Value::Blob(continuation.relation_key.to_vec()));
+                }
+                format!(
+                    "SELECT 1
+                       FROM graph_relations AS relation INDEXED BY {index_name}
+                        {endpoint_joins}
+                      WHERE relation.project_instance_id = ?
+                        AND relation.{key_column} = ?
+                        {relation_filter_sql}
+                        {resolution_filter}
+                        {document_filter}
+                        {confidence_filter}
+                        {selection_filter}
+                        {keyset}
+                      LIMIT 1"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM ({branches}) AS pending)");
+        with_sqlite_read_progress(
+            &self.connection,
+            control,
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                self.connection
+                    .query_row(&sql, params_from_iter(bindings.iter()), |row| {
+                        row.get::<_, bool>(0)
+                    })
+                    .map_err(Into::into)
+            },
+        )
+    }
+
     /// Load one optionally family- and local-resolution-filtered adjacency page.
     fn repository_graph_adjacency_page_filtered_by_resolution_bounded(
         &self,

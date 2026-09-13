@@ -101,10 +101,11 @@ mod analysis_test_observer {
     }
 }
 
+#[cfg(test)]
 use super::relations::classification_path;
 use super::relations::{
-    ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
-    resolve_relation_anchor_for_analysis,
+    ExternalRelationIdentity, external_relation_identities, hydrate_single_detailed_node,
+    load_detailed_relations, resolve_relation_anchor_for_analysis,
 };
 use super::{
     CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
@@ -1757,7 +1758,9 @@ fn load_entrypoint_profile_draft(
                     }
                 }
                 for limit in &report.reached_limits {
-                    if !filtered_edge_limit_is_terminal || *limit != GraphLimitKind::Edges {
+                    if !filtered_edge_limit_is_terminal
+                        || (*limit != GraphLimitKind::Edges && *limit != GraphLimitKind::Rows)
+                    {
                         push_limit(&mut reached_limits, *limit);
                     }
                 }
@@ -2330,7 +2333,9 @@ fn load_entrypoint_profile_draft(
                         break;
                     }
                     for limit in &candidate_report.reached_limits {
-                        if !filtered_edge_limit_is_terminal || *limit != GraphLimitKind::Edges {
+                        if !filtered_edge_limit_is_terminal
+                            || (*limit != GraphLimitKind::Edges && *limit != GraphLimitKind::Rows)
+                        {
                             push_limit(&mut reached_limits, *limit);
                         }
                     }
@@ -3054,16 +3059,30 @@ fn entrypoint_filtered_edge_limit_is_terminal(
     content_selection: ContentSelection,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<bool> {
-    if !report.rows.is_empty()
-        || !report.reached_limits.contains(&GraphLimitKind::Edges)
-        || report
-            .reached_limits
-            .iter()
-            .any(|limit| *limit != GraphLimitKind::Edges)
+    if !report.reached_limits.contains(&GraphLimitKind::Edges)
+        || report.reached_limits.iter().any(|limit| {
+            *limit != GraphLimitKind::Edges
+                && (report.rows.is_empty() || *limit != GraphLimitKind::Rows)
+        })
         || report.pruned_incomplete_paths > 0
         || report.pruned_evidence_truncated
     {
         return Ok(false);
+    }
+    if !report.rows.is_empty() {
+        let Some(continuation) = report.adjacency_continuation.as_ref() else {
+            return Ok(false);
+        };
+        let has_rows = store.repository_graph_adjacency_continuation_has_filtered_rows(
+            continuation,
+            minimum_confidence,
+            content_selection,
+            control,
+        )?;
+        validate_entrypoint_generation(generation, store.repository_graph_generation())?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::TerminalProbe);
+        return Ok(!has_rows);
     }
     entrypoint_terminal_adjacency_is_empty(
         store,
@@ -3116,41 +3135,35 @@ fn load_entrypoint_terminal_candidate_coverage(
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<Result<DetailedRelationNode, GraphLimitKind>> {
     check_control(control)?;
-    let path = classification_path(entity).ok_or_else(|| {
-        ServiceError::InvalidInput(
-            "entrypoint terminal candidate has no local coverage path".to_string(),
-        )
-    })?;
-    let path = RepositoryNodePath::new(std::path::Path::new(&path))
-        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
     let remaining_intermediate = budget
         .intermediate_bytes()
         .saturating_sub(relation_work.intermediate_bytes);
     if remaining_intermediate < 64 * 1_024 {
         return Ok(Err(GraphLimitKind::IntermediateBytes));
     }
-    let read_budget = RepositoryGraphReadBudget::new(
-        1,
-        GraphLimits::MAX_ROWS,
-        remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
-        1,
-        1,
-    )
-    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-    let batch = match store.repository_graph_path_coverage_bounded(
-        generation_project(entity),
+    let candidate_budget =
+        budget.with_aggregate_limits(None, None, None, None, Some(remaining_intermediate), None)?;
+    let (node, metadata_work) = match hydrate_single_detailed_node(
+        store,
+        entity,
         generation,
-        std::slice::from_ref(&path),
-        read_budget,
+        content_selection,
+        candidate_budget,
         control,
     ) {
-        Ok(batch) => batch,
-        Err(DbError::GraphContract(
+        Ok(value) => value,
+        Err(ServiceError::Db(DbError::GraphContract(
             projectatlas_core::graph::GraphContractError::InvalidLimits {
                 reason: "graph read decoded bytes exceed the batch budget",
             },
-        )) => return Ok(Err(GraphLimitKind::IntermediateBytes)),
-        Err(
+        ))) => return Ok(Err(GraphLimitKind::IntermediateBytes)),
+        Err(ServiceError::InvalidInput(reason))
+            if reason == "detailed relation intermediate-byte budget is exhausted"
+                || reason == "terminal node metadata exceeded the intermediate-byte budget" =>
+        {
+            return Ok(Err(GraphLimitKind::IntermediateBytes));
+        }
+        Err(ServiceError::Db(
             DbError::GraphContract(
                 projectatlas_core::graph::GraphContractError::GenerationMismatch { .. },
             )
@@ -3158,20 +3171,14 @@ fn load_entrypoint_terminal_candidate_coverage(
                 table: "project_identity",
                 reason: "typed graph generation does not match complete publication",
             },
-        ) => {
+        )) => {
             return Err(ServiceError::RelationCursorStale {
                 field: "entrypoint graph generation",
             });
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     };
-    add_repository_read_work(relation_work, &batch.work)?;
-    if relation_work.intermediate_bytes > budget.intermediate_bytes() {
-        return Ok(Err(GraphLimitKind::IntermediateBytes));
-    }
-    if batch.page.truncated {
-        return Ok(Err(GraphLimitKind::Rows));
-    }
+    add_relation_work(relation_work, &metadata_work)?;
     #[cfg(test)]
     analysis_test_observer::notify(
         analysis_test_observer::AnalysisPhaseEvent::TerminalCandidateCoverageProbe {
@@ -3180,8 +3187,6 @@ fn load_entrypoint_terminal_candidate_coverage(
     );
     validate_entrypoint_generation(generation, store.repository_graph_generation())?;
     check_control(control)?;
-    let mut node = entrypoint_unavailable_node(entity, content_selection);
-    node.coverage = batch.page.rows;
     Ok(Ok(node))
 }
 

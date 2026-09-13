@@ -567,6 +567,9 @@ pub struct DetailedRelationReport {
     pub truncated: bool,
     /// Generation-, purpose-, query-, order-, and budget-bound continuation.
     pub continuation: Option<String>,
+    /// Database keyset retained for bounded entrypoint suffix probes.
+    #[serde(skip)]
+    pub(crate) adjacency_continuation: Option<RepositoryGraphAdjacencyContinuation>,
     /// Exact, lower-bound, or unknown traversal cardinality.
     pub total: RelationTotalState,
     /// Stable unique hard limits reached while constructing the response.
@@ -1526,6 +1529,7 @@ pub fn load_detailed_relation_page(
         pruned_evidence_truncated,
         truncated: continuation.is_some() || terminal_limit || !reached_limits.is_empty(),
         continuation,
+        adjacency_continuation: state.adjacency.clone(),
         total,
         reached_limits,
         work: DetailedRelationWork {
@@ -2203,6 +2207,89 @@ fn detailed_node(
         purpose,
         coverage,
     }
+}
+
+/// Hydrate one exact node with the same classification, purpose, and coverage
+/// authorities used by ordinary detailed relation responses.
+pub(super) fn hydrate_single_detailed_node(
+    store: &AtlasStore,
+    entity: &GraphEntity,
+    generation: IndexGeneration,
+    content_selection: ContentSelection,
+    budget: DetailedRelationBudget,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(DetailedRelationNode, DetailedRelationWork)> {
+    check_relation_control(control)?;
+    let classifications = load_entity_classifications(store, std::iter::once(entity))?;
+    let classification_bytes = serialized_equivalent_bytes(&classifications)?;
+    let remaining_metadata_bytes = budget
+        .intermediate_bytes()
+        .checked_sub(classification_bytes)
+        .ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "terminal node metadata exceeded the intermediate-byte budget".to_string(),
+            )
+        })?;
+    let metadata_budget = budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(remaining_metadata_bytes),
+        None,
+    )?;
+    let mut database_work = RelationDatabaseWork::default();
+    let purposes = load_purposes(
+        store,
+        entity.key().project(),
+        generation,
+        entity,
+        &[],
+        metadata_budget,
+        &mut database_work,
+        0,
+        control,
+    )?;
+    let coverage = load_coverage(
+        store,
+        entity.key().project(),
+        generation,
+        entity,
+        &[],
+        metadata_budget,
+        &mut database_work,
+        0,
+        control,
+    )?;
+    let intermediate_bytes = database_work
+        .decoded_bytes
+        .checked_add(classification_bytes)
+        .ok_or_else(relation_work_overflow)?;
+    if intermediate_bytes > budget.intermediate_bytes() {
+        return Err(ServiceError::InvalidInput(
+            "terminal node metadata exceeded the intermediate-byte budget".to_string(),
+        ));
+    }
+    check_relation_control(control)?;
+    Ok((
+        detailed_node(
+            entity.clone(),
+            content_selection,
+            &classifications,
+            &purposes,
+            &coverage,
+        ),
+        DetailedRelationWork {
+            database_requested_rows: database_work.requested_rows,
+            database_returned_rows: database_work.returned_rows,
+            database_decoded_bytes: database_work.decoded_bytes,
+            hydrated_entities: database_work.hydrated_entities,
+            hydrated_purpose_paths: database_work.hydrated_paths,
+            hydrated_classification_paths: u32::try_from(classifications.len()).unwrap_or(u32::MAX),
+            intermediate_bytes,
+            ..DetailedRelationWork::default()
+        },
+    ))
 }
 
 /// Compose one public traversal row from its internal retained state.

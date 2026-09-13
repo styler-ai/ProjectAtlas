@@ -1272,6 +1272,7 @@ fn entrypoint_page_edge_limits_reconcile_filtered_rows() -> Result<(), Box<dyn E
             terminal_classification,
             false,
             false,
+            false,
         )?;
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
         query.relations.anchor = RelationAnchor::File {
@@ -1338,6 +1339,7 @@ fn entrypoint_page_edge_limits_reconcile_filtered_rows() -> Result<(), Box<dyn E
             terminal_confidence,
             terminal_classification,
             true,
+            false,
             false,
         )?;
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -1418,10 +1420,50 @@ fn entrypoint_page_edge_limits_reconcile_filtered_rows() -> Result<(), Box<dyn E
     }
 
     let (_temp, store) = filtered_page_entrypoint_store(
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        false,
+        false,
+        true,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.anchor = RelationAnchor::File {
+        file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+    };
+    query.relations.minimum_confidence = ConfidenceClass::Exact;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = DetailedRelationBudget::from_graph_limits(
+        projectatlas_core::graph::GraphLimits::new(50, 1, 2, 256 * 1024)?,
+    )
+    .with_aggregate_limits(Some(1), Some(8), Some(8), Some(100), None, None)?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "mixed-filtered-page-tail".to_string(),
+        anchors: vec![query.relations.anchor.clone()],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+            && !report.reached_limits.contains(&GraphLimitKind::Edges)
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.status != AnalysisStatus::Inconclusive),
+        "a mixed filtered page with no admitted suffix was left edge-inconclusive",
+    )?;
+
+    let (_temp, store) = filtered_page_entrypoint_store(
         ConfidenceClass::Low,
         ContentClassification::Source,
         true,
         true,
+        false,
     )?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.anchor = RelationAnchor::File {
@@ -3995,7 +4037,7 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
 #[test]
 fn entrypoint_profile_reuses_terminal_candidate_coverage_across_families()
 -> Result<(), Box<dyn Error>> {
-    let (_temp, store) = terminal_entrypoint_store_with_options(
+    let (temp, initial_store) = terminal_entrypoint_store_with_options(
         false,
         ConfidenceClass::Exact,
         ContentClassification::Source,
@@ -4004,6 +4046,17 @@ fn entrypoint_profile_reuses_terminal_candidate_coverage_across_families()
         false,
         false,
     )?;
+    drop(initial_store);
+    let root = temp.path().join("terminal-entrypoint");
+    let database = root.join("projectatlas.db");
+    let writable = AtlasStore::open_for_project(&database, &root)?;
+    writable.set_purpose(
+        "src/d.rs",
+        "Candidate is not an entrypoint",
+        PurposeSource::Agent,
+    )?;
+    drop(writable);
+    let store = AtlasStore::open_read_only_for_project(&database, &root)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
     query.relations.content_selection = ContentSelection::Source;
@@ -4053,6 +4106,36 @@ fn entrypoint_profile_reuses_terminal_candidate_coverage_across_families()
             }),
         "terminal candidate coverage was not reused across admitted relation families",
     )?;
+    let candidate_node = broad
+        .findings
+        .iter()
+        .find(|finding| {
+            finding.kind == AnalysisFindingKind::EntrypointReachability
+                && finding.status == AnalysisStatus::Candidate
+                && !finding.nodes.is_empty()
+        })
+        .and_then(|finding| finding.nodes.first())
+        .ok_or("terminal candidate metadata was not retained")?;
+    require(
+        candidate_node.node.classification == Some(ContentClassification::Source)
+            && matches!(
+                &candidate_node.node.purpose,
+                RelationPurpose::Approved { purpose, .. }
+                    if purpose == "Candidate is not an entrypoint"
+            ),
+        "terminal candidate did not retain authoritative classification and purpose metadata",
+    )?;
+    let mut direct_query = query.relations.clone();
+    direct_query.anchor = RelationAnchor::File {
+        file: RepositoryFilePath::new(Path::new("src/d.rs"))?,
+    };
+    let direct = super::super::relations::load_detailed_relations(&store, &direct_query, None)?;
+    require(
+        candidate_node.node.classification == direct.anchor.classification
+            && candidate_node.node.purpose == direct.anchor.purpose
+            && candidate_node.node.coverage == direct.anchor.coverage,
+        "terminal candidate metadata did not match the ordinary detailed anchor projection",
+    )?;
 
     let first_coverage_intermediate_bytes = broad_probe_work
         .get()
@@ -4093,6 +4176,56 @@ fn entrypoint_profile_reuses_terminal_candidate_coverage_across_families()
                 .reached_limits
                 .contains(&GraphLimitKind::IntermediateBytes),
         "repeated terminal candidate coverage exceeded its aggregate byte boundary",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_reports_terminal_metadata_exhaustion_as_inconclusive()
+-> Result<(), Box<dyn Error>> {
+    let (temp, initial_store) = terminal_entrypoint_store(false)?;
+    drop(initial_store);
+    let root = temp.path().join("terminal-entrypoint");
+    let database = root.join("projectatlas.db");
+    let writable = AtlasStore::open_for_project(&database, &root)?;
+    let oversized_purpose = "x".repeat(512 * 1024);
+    writable.set_purpose("src/d.rs", &oversized_purpose, PurposeSource::Agent)?;
+    drop(writable);
+    let store = AtlasStore::open_read_only_for_project(&database, &root)?;
+
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "terminal-metadata-budget-boundary".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "terminal metadata exhaustion did not produce a typed inconclusive result",
     )?;
     Ok(())
 }
@@ -7181,6 +7314,7 @@ fn filtered_page_entrypoint_store(
     terminal_classification: ContentClassification,
     include_anchor_edge: bool,
     partial_candidate_coverage: bool,
+    mixed_filtered_tail: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("filtered-page-entrypoint");
@@ -7229,9 +7363,24 @@ fn filtered_page_entrypoint_store(
     relations.extend([
         relation(&b, &c, terminal_confidence)?,
         relation(&b, &e, terminal_confidence)?,
-        relation(&d, &c, terminal_confidence)?,
-        relation(&d, &e, terminal_confidence)?,
     ]);
+    if !mixed_filtered_tail {
+        relations.extend([
+            relation(&d, &c, terminal_confidence)?,
+            relation(&d, &e, terminal_confidence)?,
+        ]);
+    }
+    let mixed_admitted_path = if mixed_filtered_tail {
+        let c_relation = relation(&b, &c, terminal_confidence)?;
+        let e_relation = relation(&b, &e, terminal_confidence)?;
+        if c_relation.key().digest() < e_relation.key().digest() {
+            "src/c.rs"
+        } else {
+            "src/e.rs"
+        }
+    } else {
+        ""
+    };
     let entities = vec![a, b, c, d, e, f];
     let mut coverage = entities
         .iter()
@@ -7287,7 +7436,23 @@ fn filtered_page_entrypoint_store(
                 };
                 projectatlas_db::FileContentClassification {
                     path: path.as_str().to_string(),
-                    classification: if matches!(path.as_str(), "src/c.rs" | "src/e.rs") {
+                    classification: if mixed_filtered_tail
+                        && matches!(path.as_str(), "src/c.rs" | "src/e.rs")
+                    {
+                        if path.as_str() == mixed_admitted_path {
+                            terminal_classification
+                        } else {
+                            match terminal_classification {
+                                ContentClassification::Source => {
+                                    ContentClassification::Documentation
+                                }
+                                ContentClassification::Documentation => {
+                                    ContentClassification::Source
+                                }
+                                classification => classification,
+                            }
+                        }
+                    } else if matches!(path.as_str(), "src/c.rs" | "src/e.rs") {
                         terminal_classification
                     } else if path.as_str() == "src/f.rs"
                         || (include_anchor_edge && path.as_str() == "src/b.rs")
