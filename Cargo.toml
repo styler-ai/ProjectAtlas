@@ -138,5 +138,5 @@ tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
 zstd = "=0.13.3"
 tree-sitter-zig = "=1.1.2"
-whichdisk = { version = "0.5.0", default-features = false, features = ["list"] }
+whichdisk = { version = "0.6.0", default-features = false, features = ["list"] }
 yaml-rust2 = "0.12"
