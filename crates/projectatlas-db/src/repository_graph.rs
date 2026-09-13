@@ -9253,7 +9253,7 @@ mod tests {
             &[
                 doc_source.clone(),
                 source_target.clone(),
-                source_source.clone(),
+                source_source,
                 doc_target.clone(),
             ],
             &relations,
