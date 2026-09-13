@@ -534,15 +534,6 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/projectatlas-prepublish"
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           chmod +x "$runtime"
-          project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
-          if [ -e "$project_root" ]; then
-            echo "Packaged lifecycle project root was not clean: $project_root" >&2
-            exit 1
-          fi
-          mkdir -p "$project_root"
-          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
-            bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
-          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
           if command -v shasum >/dev/null 2>&1; then
             digest_command=(shasum -a 256)
           else
@@ -565,6 +556,15 @@ jobs:
             echo "Packaged candidate digest does not match its authoritative manifest." >&2
             exit 1
           fi
+          project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
+          if [ -e "$project_root" ]; then
+            echo "Packaged lifecycle project root was not clean: $project_root" >&2
+            exit 1
+          fi
+          mkdir -p "$project_root"
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
+            bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
+          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
           {
             echo
             echo "- packaged archive: $archive"

@@ -4696,6 +4696,22 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
 
+    let digest_gate = unix_prepublish
+        .find("archive_name=\"${archive##*/}\"")
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted the digest gate"))?;
+    let installer_invocation = unix_prepublish
+        .find("bash ./plugins/projectatlas/scripts/install-runtime.sh")
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted packaged installation"))?;
+    let runtime_invocation = unix_prepublish
+        .find("runtime-info")
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted packaged runtime validation"))?;
+    if digest_gate >= installer_invocation || digest_gate >= runtime_invocation {
+        return Err(io::Error::other(
+            "Unix prepublish must verify the packaged digest before installation or execution",
+        )
+        .into());
+    }
+
     if !template.contains("Refs #NNN")
         || !template.contains("Use `Closes #NNN` only when this pull request completes the issue.")
         || template.contains("every OpenSpec task is checked off before merge")
