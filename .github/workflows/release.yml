@@ -504,7 +504,6 @@ jobs:
             echo "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1"
             echo "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1"
             echo "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1"
-            echo "PROJECTATLAS_NO_TELEMETRY=1"
           } >> "$GITHUB_ENV"
           {
             echo "### Clean macOS arm64 installed lifecycle"
@@ -640,14 +639,11 @@ jobs:
       - name: Clean macOS arm64 holistic packaged lifecycle
         if: matrix.label == 'macos-arm64-posix'
         timeout-minutes: 15
-        env:
-          PROJECTATLAS_NO_TELEMETRY: "1"
         run: |
           set -euo pipefail
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           contract="contract-artifacts/projectatlas-packaged-contract"
           chmod +x "$contract"
-          export CARGO_BIN_EXE_projectatlas="$runtime"
           inventory="$("$contract" --list)"
           test=scan_and_watch_preserve_atomic_publication_across_roots
           for test in "$test" \

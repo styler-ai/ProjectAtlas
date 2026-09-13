@@ -1357,13 +1357,14 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
 
 #[test]
 fn token_cli_and_mcp_preserve_average_maximum_edge_accounting() -> Result<(), Box<dyn Error>> {
+    let executable = mcp_contract_executable();
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let db = atlas_dir.join("projectatlas.db");
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::write(repo.join(SRC_DIR_NAME).join("main.rs"), "fn main() {}\n")?;
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .arg("--db")
@@ -1391,7 +1392,7 @@ fn token_cli_and_mcp_preserve_average_maximum_edge_accounting() -> Result<(), Bo
     }
     drop(store);
 
-    let token = Command::cargo_bin("projectatlas")?
+    let token = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "--db"])
         .arg(&db)
@@ -1407,7 +1408,6 @@ fn token_cli_and_mcp_preserve_average_maximum_edge_accounting() -> Result<(), Bo
     require_json_i64(&token_json, &["tokens_avoided"], -1)?;
     require_json_usize(&token_json, &["repeated_baselines_deduped"], 1)?;
 
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let mut mcp = McpContractSession::spawn(&executable, &repo, &db)?;
     let mcp_result = (|| -> Result<(), Box<dyn Error>> {
         let report = mcp.call_tool("atlas_token_report", &json!({}))?;
@@ -1444,7 +1444,7 @@ fn token_cli_and_mcp_preserve_average_maximum_edge_accounting() -> Result<(), Bo
     }
     drop(store);
 
-    let overflow = Command::cargo_bin("projectatlas")?
+    let overflow = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "--db"])
         .arg(&db)

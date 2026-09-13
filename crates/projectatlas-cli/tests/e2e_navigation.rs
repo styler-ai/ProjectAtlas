@@ -7119,8 +7119,9 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         "pub fn library_entry() -> &'static str {\n    \"atlas\"\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
+    let executable = mcp_contract_executable();
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7135,7 +7136,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         return Err(io::Error::other("ProjectAtlas database was not created").into());
     }
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7144,7 +7145,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("crates/atlas_core"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7153,7 +7154,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("src/service.rs"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7172,7 +7173,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("src/main.rs"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7181,7 +7182,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("dependency"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7198,7 +7199,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .stdout(predicate::str::contains("Runner"))
         .stdout(predicate::str::contains("execute"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7207,7 +7208,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("helper"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7223,7 +7224,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("src/service.rs"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7232,7 +7233,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("helper();"));
 
-    let raw_summary = Command::cargo_bin("projectatlas")?
+    let raw_summary = Command::new(&executable)
         .current_dir(&repo)
         .arg("--format")
         .arg("json")
@@ -7254,7 +7255,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
     require_json_array_len(&summary_json, &["methods"], 1)?;
     require_json_array_len(&summary_json, &["types"], 1)?;
 
-    let cross_file_summary = Command::cargo_bin("projectatlas")?
+    let cross_file_summary = Command::new(&executable)
         .current_dir(&repo)
         .arg("--format")
         .arg("json")
@@ -7272,7 +7273,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         "src/main.rs::main",
     )?;
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7281,7 +7282,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("health_findings"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7290,7 +7291,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("estimated_saved"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7303,7 +7304,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         ))
         .stdout(predicate::str::contains("5 suggested"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)

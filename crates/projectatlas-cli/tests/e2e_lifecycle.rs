@@ -691,90 +691,92 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
 
     let release_root = temp.path().join("release-verifier");
     fs::create_dir(&release_root)?;
-    for (label, archive, context, proof) in [
-        (
-            "missing archive and context",
-            release_root.join("missing/archive.tar.zst"),
-            release_root.join("missing/runner-context.json"),
-            release_root.join("missing/output/platform-proof.json"),
-        ),
-        (
-            "invalid archive and context",
-            release_root.join("invalid/archive.tar.zst"),
-            release_root.join("invalid/runner-context.json"),
-            release_root.join("invalid/output/platform-proof.json"),
-        ),
-        (
-            "unreadable archive and context",
-            release_root.join("unreadable/archive.tar.zst"),
-            release_root.join("unreadable/runner-context.json"),
-            release_root.join("unreadable/output/platform-proof.json"),
-        ),
-    ] {
-        let case_root = archive
-            .parent()
-            .ok_or_else(|| io::Error::other("release verifier case has no parent"))?;
-        fs::create_dir_all(case_root)?;
-        let temp_root = case_root.join("temp");
-        let home_root = case_root.join("home");
-        fs::create_dir(&temp_root)?;
-        fs::create_dir(&home_root)?;
-        match label {
-            "invalid archive and context" => {
-                fs::write(&archive, b"not a parser-pack archive")?;
-                fs::write(&context, b"not runner context")?;
-                fs::create_dir(
-                    proof
-                        .parent()
-                        .ok_or_else(|| io::Error::other("invalid release proof has no parent"))?,
-                )?;
+    if std::env::var_os(MCP_CONTRACT_EXECUTABLE_ENV).is_none() {
+        for (label, archive, context, proof) in [
+            (
+                "missing archive and context",
+                release_root.join("missing/archive.tar.zst"),
+                release_root.join("missing/runner-context.json"),
+                release_root.join("missing/output/platform-proof.json"),
+            ),
+            (
+                "invalid archive and context",
+                release_root.join("invalid/archive.tar.zst"),
+                release_root.join("invalid/runner-context.json"),
+                release_root.join("invalid/output/platform-proof.json"),
+            ),
+            (
+                "unreadable archive and context",
+                release_root.join("unreadable/archive.tar.zst"),
+                release_root.join("unreadable/runner-context.json"),
+                release_root.join("unreadable/output/platform-proof.json"),
+            ),
+        ] {
+            let case_root = archive
+                .parent()
+                .ok_or_else(|| io::Error::other("release verifier case has no parent"))?;
+            fs::create_dir_all(case_root)?;
+            let temp_root = case_root.join("temp");
+            let home_root = case_root.join("home");
+            fs::create_dir(&temp_root)?;
+            fs::create_dir(&home_root)?;
+            match label {
+                "invalid archive and context" => {
+                    fs::write(&archive, b"not a parser-pack archive")?;
+                    fs::write(&context, b"not runner context")?;
+                    fs::create_dir(
+                        proof.parent().ok_or_else(|| {
+                            io::Error::other("invalid release proof has no parent")
+                        })?,
+                    )?;
+                }
+                "unreadable archive and context" => {
+                    fs::create_dir(&archive)?;
+                    fs::create_dir(&context)?;
+                }
+                _ => {}
             }
-            "unreadable archive and context" => {
-                fs::create_dir(&archive)?;
-                fs::create_dir(&context)?;
-            }
-            _ => {}
-        }
-        let output = Command::cargo_bin("optional_parser_pack_release")?
-            .current_dir(&release_root)
-            .env("HOME", &home_root)
-            .env("TMPDIR", &temp_root)
-            .args([
-                OsStr::new("verify"),
-                archive.as_os_str(),
-                context.as_os_str(),
-                proof.as_os_str(),
-            ])
-            .output()?;
-        if output.status.success()
-            || !String::from_utf8_lossy(&output.stderr).contains("unsupported_containment")
-        {
-            return Err(io::Error::other(format!(
+            let output = Command::cargo_bin("optional_parser_pack_release")?
+                .current_dir(&release_root)
+                .env("HOME", &home_root)
+                .env("TMPDIR", &temp_root)
+                .args([
+                    OsStr::new("verify"),
+                    archive.as_os_str(),
+                    context.as_os_str(),
+                    proof.as_os_str(),
+                ])
+                .output()?;
+            if output.status.success()
+                || !String::from_utf8_lossy(&output.stderr).contains("unsupported_containment")
+            {
+                return Err(io::Error::other(format!(
                 "macOS release verifier {label} did not refuse typed unsupported containment: {}",
                 String::from_utf8_lossy(&output.stderr)
             ))
             .into());
-        }
-        if proof.exists()
-            || fs::read_dir(&temp_root)?.next().is_some()
-            || fs::read_dir(&home_root)?.next().is_some()
-        {
-            return Err(io::Error::other(format!(
-                "macOS release verifier {label} touched proof, temporary, or payload state"
-            ))
-            .into());
-        }
-        if archive.is_file() && fs::read(&archive)?.as_slice() != b"not a parser-pack archive" {
-            return Err(io::Error::other(format!(
-                "macOS release verifier {label} changed the invalid archive"
-            ))
-            .into());
-        }
-        if context.is_file() && fs::read(&context)?.as_slice() != b"not runner context" {
-            return Err(io::Error::other(format!(
-                "macOS release verifier {label} changed runner context"
-            ))
-            .into());
+            }
+            if proof.exists()
+                || fs::read_dir(&temp_root)?.next().is_some()
+                || fs::read_dir(&home_root)?.next().is_some()
+            {
+                return Err(io::Error::other(format!(
+                    "macOS release verifier {label} touched proof, temporary, or payload state"
+                ))
+                .into());
+            }
+            if archive.is_file() && fs::read(&archive)?.as_slice() != b"not a parser-pack archive" {
+                return Err(io::Error::other(format!(
+                    "macOS release verifier {label} changed the invalid archive"
+                ))
+                .into());
+            }
+            if context.is_file() && fs::read(&context)?.as_slice() != b"not runner context" {
+                return Err(io::Error::other(format!(
+                    "macOS release verifier {label} changed runner context"
+                ))
+                .into());
+            }
         }
     }
 
@@ -817,7 +819,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
         ),
     ];
     for (operation, arguments) in commands {
-        let output = Command::cargo_bin("projectatlas")?
+        let output = Command::new(mcp_contract_executable())
             .current_dir(&repo)
             .env("HOME", &home)
             .env_remove("LOCALAPPDATA")
@@ -856,7 +858,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
     )?;
     fs::write(&selection, selection_bytes)?;
     fs::write(&source, source_bytes)?;
-    let scan = Command::cargo_bin("projectatlas")?
+    let scan = Command::new(mcp_contract_executable())
         .current_dir(&repo)
         .env("HOME", &home)
         .env_remove("LOCALAPPDATA")
@@ -882,7 +884,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
     }
 
     for expected_changed in [true, false] {
-        let remove = Command::cargo_bin("projectatlas")?
+        let remove = Command::new(mcp_contract_executable())
             .current_dir(&repo)
             .env("HOME", &home)
             .env_remove("LOCALAPPDATA")
@@ -2679,9 +2681,6 @@ fn assert_cli_migrates_released_schema_layout(
 #[test]
 fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Box<dyn Error>> {
     const RESTART_COUNT: usize = 2;
-    if std::env::var_os("PROJECTATLAS_NO_TELEMETRY").is_some() {
-        return Ok(());
-    }
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
@@ -2689,7 +2688,7 @@ fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Bo
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn owner() {}\n",
     )?;
-    Command::cargo_bin("projectatlas")?
+    Command::new(mcp_contract_executable())
         .current_dir(&repo)
         .arg("init")
         .assert()
@@ -2755,7 +2754,7 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
         "pub fn indexed() {}\n",
     )?;
 
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(&repo)
         .args(["--format", "json", "init"])
         .output()?;
@@ -4256,7 +4255,7 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
     }
 
     for (repo, db) in [(&repo_a, &db_a), (&repo_b, &db_b)] {
-        Command::cargo_bin("projectatlas")?
+        Command::new(mcp_contract_executable())
             .current_dir(repo)
             .arg("--db")
             .arg(db)
@@ -5905,7 +5904,7 @@ fn token_call_count(repo: &std::path::Path, db: &std::path::Path) -> Result<u64,
 
 /// Generate one harness-specific MCP config document.
 fn mcp_config_for_harness(repo: &Path, db: &Path, harness: &str) -> Result<Value, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .arg("--format")
         .arg("json")
@@ -5951,7 +5950,7 @@ fn projectatlas_json(
     host_state: &Path,
     arguments: &[&OsStr],
 ) -> Result<Value, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .env("HOME", host_state.join(PARSER_PACK_TEST_HOME_DIR))
         .env(
