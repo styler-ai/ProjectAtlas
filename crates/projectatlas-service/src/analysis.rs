@@ -41,6 +41,8 @@ mod analysis_test_observer {
         TerminalProbe,
         /// Occurrence evidence was probed before its generation was rechecked.
         OccurrenceProbe,
+        /// The occurrence evidence query was about to validate its generation.
+        OccurrenceProbeBeforeRead,
         /// The repository-wide candidate entity page is about to run.
         CandidateEntityHydration {
             /// Intermediate bytes left after relation traversal.
@@ -1781,18 +1783,7 @@ fn load_entrypoint_profile_draft(
     let anchor = first_anchor
         .or_else(|| {
             first_resolved_anchor.map(|entity| {
-                let path = entity_path(&entity).map(str::to_string);
-                DetailedRelationNode {
-                    entity,
-                    classification: None,
-                    content_selection: query
-                        .relations
-                        .content_selection
-                        .explicit_value()
-                        .map(|_| query.relations.content_selection),
-                    purpose: RelationPurpose::Unavailable { path },
-                    coverage: Vec::new(),
-                }
+                entrypoint_unavailable_node(&entity, query.relations.content_selection)
             })
         })
         .ok_or_else(|| {
@@ -1944,23 +1935,13 @@ fn load_entrypoint_profile_draft(
                                 control,
                             )? =>
                         {
-                            match entrypoint_step_budget(
-                                budget,
-                                &relation_work,
-                                reachable.len(),
-                                accounted_candidates,
-                                anchor_is_retained,
-                                true,
-                                collect_occurrences,
-                                Some(1),
-                            )? {
-                                Ok(step_budget) => step_budget,
-                                Err(limit) => {
-                                    complete = false;
-                                    push_limit(&mut reached_limits, limit);
-                                    break;
-                                }
-                            }
+                            candidate_report_anchor.get_or_insert_with(|| {
+                                entrypoint_unavailable_node(
+                                    entity,
+                                    query.relations.content_selection,
+                                )
+                            });
+                            continue;
                         }
                         Err(limit) => {
                             complete = false;
@@ -2544,6 +2525,10 @@ fn entrypoint_occurrence_evidence_is_incomplete(
             batch_rows.saturating_mul(2).max(1),
         )
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::OccurrenceProbeBeforeRead,
+        );
         let batch = match store.repository_graph_occurrence_pages_bounded(
             &relations,
             1,
@@ -2556,6 +2541,19 @@ fn entrypoint_occurrence_evidence_is_incomplete(
                     reason: "graph read decoded bytes exceed the batch budget",
                 },
             )) => return Ok(Err(GraphLimitKind::IntermediateBytes)),
+            Err(
+                DbError::GraphContract(
+                    projectatlas_core::graph::GraphContractError::GenerationMismatch { .. },
+                )
+                | DbError::GraphRowShape {
+                    table: "project_identity",
+                    reason: "typed graph generation does not match complete publication",
+                },
+            ) => {
+                return Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation",
+                });
+            }
             Err(error) => return Err(error.into()),
         };
         add_repository_read_work(relation_work, &batch.work)?;
@@ -2592,6 +2590,23 @@ fn entrypoint_occurrence_evidence_is_incomplete(
         }
     }
     Ok(Ok(false))
+}
+
+/// Retain one resolved entity when no relation page was needed for it.
+fn entrypoint_unavailable_node(
+    entity: &GraphEntity,
+    content_selection: ContentSelection,
+) -> DetailedRelationNode {
+    let path = entity_path(entity).map(str::to_string);
+    DetailedRelationNode {
+        entity: entity.clone(),
+        classification: None,
+        content_selection: content_selection
+            .explicit_value()
+            .map(|_| content_selection),
+        purpose: RelationPurpose::Unavailable { path },
+        coverage: Vec::new(),
+    }
 }
 
 /// Protect every indexed symbol that encloses a reachable symbol.

@@ -1928,6 +1928,66 @@ fn entrypoint_profile_rejects_generation_change_after_occurrence_probe()
 }
 
 #[test]
+fn entrypoint_profile_rejects_generation_change_before_occurrence_probe()
+-> Result<(), Box<dyn Error>> {
+    let (temp, stale_store) = branching_entrypoint_store(true, 1)?;
+    let root = temp.path().join("branching-entrypoint");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let probed = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let probed_for_observer = Rc::clone(&probed);
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.include_occurrences = true;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(10),
+        Some(8),
+        Some(8),
+        Some(1),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "occurrence-probe-before-read-stale".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::OccurrenceProbeBeforeRead
+                && !probed_for_observer.replace(true)
+                && let Some(mut writer) = writer_for_observer.borrow_mut().take()
+                && let Ok(refresh) = writer.begin_index_projection_refresh("branching-entrypoint")
+            {
+                drop(refresh.complete());
+            }
+        },
+        || load_relation_analysis(&stale_store, &query, None),
+    );
+    require(
+        probed.get()
+            && stale.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error,
+                    ServiceError::RelationCursorStale {
+                        field: "entrypoint graph generation"
+                    }
+                )
+            }),
+        "occurrence evidence generation mismatch was exposed as a raw database error",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_does_not_use_disabled_occurrences_as_row_budget() -> Result<(), Box<dyn Error>>
 {
     let (_temp, store) = analysis_store_with_external_candidate()?;
@@ -2533,6 +2593,7 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
             confidence,
             base_classification,
             terminal_classification,
+            true,
         )?;
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
         query.relations.resolution = RelationResolutionFilter::Any;
@@ -4899,6 +4960,7 @@ fn terminal_entrypoint_store(
         ConfidenceClass::Exact,
         ContentClassification::Source,
         ContentClassification::Source,
+        false,
     )
 }
 
@@ -4907,6 +4969,7 @@ fn terminal_entrypoint_store_with_options(
     terminal_edge_confidence: ConfidenceClass,
     base_classification: ContentClassification,
     terminal_edge_classification: ContentClassification,
+    include_candidate_edge: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("terminal-entrypoint");
@@ -4963,6 +5026,16 @@ fn terminal_entrypoint_store_with_options(
             Completeness::Complete,
             generation,
         )?);
+        if include_candidate_edge {
+            relations.push(LogicalRelation::new(
+                &d,
+                calls,
+                RelationResolution::resolved(c)?,
+                terminal_edge_confidence,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
     }
     let mut entities = vec![a, b, d];
     if let Some(c) = c.as_ref() {
