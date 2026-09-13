@@ -2692,6 +2692,7 @@ fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Bo
     )?;
     Command::new(mcp_contract_executable())
         .current_dir(&repo)
+        .env_remove("PROJECTATLAS_NO_TELEMETRY")
         .arg("init")
         .assert()
         .success();
@@ -2708,7 +2709,13 @@ fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Bo
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
     ];
     for _ in 0..RESTART_COUNT {
-        let stdout = run_mcp_stdio(&command, &repo, &args, &messages)?;
+        let stdout = run_mcp_stdio_with_env(
+            &command,
+            &repo,
+            &args,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", None)],
+        )?;
         if !mcp_tool_text(&stdout, 2)?.contains("overview:") {
             return Err(io::Error::other("restarted MCP overview did not succeed").into());
         }
