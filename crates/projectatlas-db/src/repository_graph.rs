@@ -2457,24 +2457,24 @@ impl AtlasStore {
             ContentSelection::UnspecifiedLegacy => "",
             ContentSelection::Source => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR (relation.relation_scope = 'extended'
+                          AND relation.relation_kind = 'documents')
                       OR (relation.resolution_status = 'resolved'
-                          AND (relation.relation_scope = 'extended'
-                               AND relation.relation_kind = 'documents'
-                                OR endpoint_classification.classification = 'source')))"
+                          AND endpoint_classification.classification = 'source'))"
             }
             ContentSelection::Documentation => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR (relation.relation_scope = 'extended'
+                          AND relation.relation_kind = 'documents')
                       OR (relation.resolution_status = 'resolved'
-                          AND (relation.relation_scope = 'extended'
-                               AND relation.relation_kind = 'documents'
-                                OR endpoint_classification.classification = 'documentation')))"
+                          AND endpoint_classification.classification = 'documentation'))"
             }
             ContentSelection::Both => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR (relation.relation_scope = 'extended'
+                          AND relation.relation_kind = 'documents')
                       OR (relation.resolution_status = 'resolved'
-                          AND (relation.relation_scope = 'extended'
-                               AND relation.relation_kind = 'documents'
-                                OR endpoint_classification.classification IN ('source', 'documentation'))))"
+                          AND endpoint_classification.classification IN ('source', 'documentation')))"
             }
         };
         let sql = format!(
@@ -9199,7 +9199,18 @@ mod tests {
             },
             generation,
         )?;
+        let external_document_target = GraphEntity::new(
+            project,
+            EntitySelector::External {
+                external: ExternalSelector {
+                    system: GraphIdentityText::new("docs.example")?,
+                    identity: GraphIdentityText::new("external-page")?,
+                },
+            },
+            generation,
+        )?;
         let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+        let documents = GraphRelationKind::Extended(ExtendedRelationKind::Documents);
         let relations = vec![
             LogicalRelation::new(
                 &doc_source,
@@ -9213,6 +9224,14 @@ mod tests {
                 &source_source,
                 calls,
                 RelationResolution::resolved(&doc_target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &doc_source,
+                documents,
+                RelationResolution::external(&external_document_target)?,
                 ConfidenceClass::Exact,
                 Completeness::Complete,
                 generation,
@@ -9255,6 +9274,7 @@ mod tests {
                 source_target.clone(),
                 source_source,
                 doc_target.clone(),
+                external_document_target,
             ],
             &relations,
             &[],
@@ -9294,6 +9314,17 @@ mod tests {
                 None,
             )?,
             "outbound source-target endpoint was excluded under source selection",
+        )?;
+        require(
+            !store.repository_graph_adjacency_is_empty_filtered(
+                doc_source.key(),
+                RepositoryGraphDirection::Outbound,
+                documents,
+                ConfidenceClass::Exact,
+                ContentSelection::Source,
+                None,
+            )?,
+            "external document endpoint was hidden under source selection",
         )?;
         Ok(())
     }
