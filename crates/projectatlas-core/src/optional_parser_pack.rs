@@ -38,7 +38,7 @@ pub const OPTIONAL_GRAMMAR_CATALOG_SOURCE_BUNDLE_SHA256: &str =
 /// Exact `ProjectAtlas` release line selected to consume the first pack.
 pub const OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION: &str = "0.4.5";
 /// Exact Tree-sitter runtime selected by the consuming parser worker.
-pub const OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION: &str = "0.26.9";
+pub const OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION: &str = "0.26.13";
 /// Oldest grammar ABI accepted by the selected Tree-sitter runtime.
 pub const OPTIONAL_PARSER_PACK_MINIMUM_ABI: u32 = 13;
 /// Newest grammar ABI accepted by the selected Tree-sitter runtime.
@@ -2955,7 +2955,7 @@ mod tests {
             OptionalParserPackRuntime {
                 consumer: ParserPackConsumer::ProjectAtlasParserWorker,
                 projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_string(),
-                tree_sitter_version: "0.26.9".to_string(),
+                tree_sitter_version: OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION.to_string(),
                 minimum_abi: 13,
                 maximum_abi: 15,
             },
