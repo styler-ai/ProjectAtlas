@@ -141,7 +141,14 @@ impl VerifiedMutationAdmission {
     pub(crate) fn verify(&self) -> Result<(), CliError> {
         match &self.witness {
             MutationSourceWitness::Observed { entry, epoch } => {
-                Self::verify_observed(entry, epoch, &self.control)
+                Self::verify_observed(entry, epoch, &self.control, || {
+                    verify_saved_source_matches_index_controlled(
+                        &entry.binding.database,
+                        &entry.binding.root,
+                        entry.binding.config.as_deref(),
+                        &self.control,
+                    )
+                })
             }
             MutationSourceWitness::Exact {
                 binding,
@@ -163,22 +170,22 @@ impl VerifiedMutationAdmission {
         entry: &SourceObservationEntry,
         epoch: &VerifiedSourceEpoch,
         control: &IndexWorkControl,
+        verify_source: impl FnOnce() -> Result<(), CliError>,
     ) -> Result<(), CliError> {
         if let Err(error) = Self::verify_observation(entry, epoch, control) {
-            entry.invalidate();
+            entry.invalidate_epoch(epoch);
             return Err(error);
         }
-        if let Err(error) = verify_saved_source_matches_index_controlled(
-            &entry.binding.database,
-            &entry.binding.root,
-            entry.binding.config.as_deref(),
-            control,
-        ) {
-            entry.invalidate();
+        if let Err(error) = verify_source() {
+            if matches!(error, CliError::RefreshRequired(_)) {
+                entry.invalidate_after_proven_source_mismatch()?;
+            } else {
+                entry.invalidate_epoch(epoch);
+            }
             return Err(error);
         }
         if let Err(error) = Self::verify_observation(entry, epoch, control) {
-            entry.invalidate();
+            entry.invalidate_epoch(epoch);
             return Err(error);
         }
         Ok(())
@@ -191,8 +198,10 @@ impl VerifiedMutationAdmission {
         control: &IndexWorkControl,
     ) -> Result<(), CliError> {
         match SourceObservationRegistry::accepts_observed_result(entry, epoch, control) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(source_changed_during_derivation(&entry.binding.root, ".")),
+            Ok(ObservedAcceptance::Accepted) => Ok(()),
+            Ok(ObservedAcceptance::Superseded | ObservedAcceptance::Invalidated) => {
+                Err(source_changed_during_derivation(&entry.binding.root, "."))
+            }
             Err(error) => Err(error),
         }
     }
@@ -238,6 +247,17 @@ impl VerifiedMutationAdmission {
             Err(source_changed_during_derivation(&binding.root, "."))
         }
     }
+}
+
+/// Acceptance of one observed result against the shared source epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservedAcceptance {
+    /// The retained witness is still current.
+    Accepted,
+    /// Another reconciliation replaced the witness without invalid source evidence.
+    Superseded,
+    /// Source, policy, or observation continuity no longer supports the witness.
+    Invalidated,
 }
 
 /// Exact root/database/config identity used to isolate one observer.
@@ -335,7 +355,7 @@ struct SourceObservationEntry {
     /// One event injected after an acceptance drain for owning race tests.
     acceptance_event: Mutex<Option<Event>>,
     #[cfg(test)]
-    /// Continuity loss injected between the drain fast check and lock for owning race tests.
+    /// Continuity loss injected during the next locked event drain for owning race tests.
     drain_continuity_invalidations: AtomicU64,
 }
 
@@ -437,14 +457,37 @@ impl SourceObservationEntry {
         }
     }
 
+    /// Discard only the failed operation's epoch without clearing a successor.
+    fn invalidate_epoch(&self, epoch: &VerifiedSourceEpoch) {
+        if let Ok(mut state) = self.state.lock()
+            && state
+                .verified
+                .as_ref()
+                .is_some_and(|current| current.stamp == epoch.stamp)
+        {
+            state.verified = None;
+        }
+    }
+
+    /// Reject all cached and in-flight evidence after exact source verification fails.
+    fn invalidate_after_proven_source_mismatch(&self) -> Result<(), CliError> {
+        let _receiver = self
+            .receiver
+            .lock()
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
+        self.continuity_lost.store(true, Ordering::Release);
+        self.invalidate();
+        Ok(())
+    }
+
     /// Reset continuity and drain events before sampling exact source truth.
     fn clear_before_exact_verification(&self) -> Result<(), CliError> {
-        self.invalidate();
-        self.continuity_lost.store(false, Ordering::Release);
         let receiver = self
             .receiver
             .lock()
             .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
+        self.invalidate();
+        self.continuity_lost.store(false, Ordering::Release);
         loop {
             match receiver.try_recv() {
                 Ok(_event) => {}
@@ -462,9 +505,19 @@ impl SourceObservationEntry {
         &self,
         scan_options: &projectatlas_fs::ScanOptions,
     ) -> Result<bool, CliError> {
-        if self.continuity_lost.load(Ordering::Acquire) {
-            return Ok(true);
-        }
+        let receiver = self
+            .receiver
+            .lock()
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
+        self.drain_source_events(&receiver, scan_options)
+    }
+
+    /// Drain and invalidate atomically with callback publication and epoch installation.
+    fn drain_source_events(
+        &self,
+        receiver: &Receiver<Event>,
+        scan_options: &projectatlas_fs::ScanOptions,
+    ) -> Result<bool, CliError> {
         #[cfg(test)]
         if self
             .drain_continuity_invalidations
@@ -475,11 +528,8 @@ impl SourceObservationEntry {
         {
             self.continuity_lost.store(true, Ordering::Release);
         }
-        let receiver = self
-            .receiver
-            .lock()
-            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
         if self.continuity_lost.load(Ordering::Acquire) {
+            self.invalidate();
             return Ok(true);
         }
         let mut changes = WatchChangeSet::default();
@@ -501,12 +551,17 @@ impl SourceObservationEntry {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.continuity_lost.store(true, Ordering::Release);
+                    self.invalidate();
                     return Ok(true);
                 }
             }
         }
         let changed = changes.requires_full_scan || !changes.paths.is_empty();
-        if !changed {
+        if changed {
+            // Preserve consumed changes for an exact verification already in flight.
+            self.continuity_lost.store(true, Ordering::Release);
+            self.invalidate();
+        } else {
             let acknowledged = self.ingress_sequence.load(Ordering::Acquire);
             let mut state = self
                 .state
@@ -517,6 +572,25 @@ impl SourceObservationEntry {
             }
         }
         Ok(changed)
+    }
+
+    /// Consume events only while the sampled epoch still owns their selection policy.
+    fn drain_epoch_events(
+        &self,
+        receiver: &Receiver<Event>,
+        epoch: &VerifiedSourceEpoch,
+        scan_options: &projectatlas_fs::ScanOptions,
+    ) -> Result<ObservedAcceptance, CliError> {
+        let Some(current) = self.current_epoch()? else {
+            return Ok(ObservedAcceptance::Invalidated);
+        };
+        if current.stamp != epoch.stamp {
+            return Ok(ObservedAcceptance::Superseded);
+        }
+        if self.drain_source_events(receiver, scan_options)? {
+            return Ok(ObservedAcceptance::Invalidated);
+        }
+        Ok(ObservedAcceptance::Accepted)
     }
 
     /// Install a new verified epoch after exact source and policy reconciliation.
@@ -734,25 +808,24 @@ impl SourceObservationRegistry {
         let Some(entry) = self.entry(binding.clone())? else {
             return self.admit_exact_mutation(binding, control);
         };
-        // Mutation authority always starts from exact saved source; watcher delivery is advisory.
-        entry.invalidate();
         let mut work = VerifiedReadWork::default();
-        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+        for attempt in 0..VERIFIED_READ_ATTEMPTS {
             if let Err(error) = control.check(IndexWorkStage::Publication) {
                 entry.invalidate();
                 return Err(error.into());
             }
-            let (store, epoch) = match self.prepare_observed_store(&entry, control, &mut work) {
-                Ok(Some(prepared)) => prepared,
-                Ok(None) => {
-                    entry.invalidate();
-                    return self.admit_exact_mutation(binding, control);
-                }
-                Err(error) => {
-                    entry.invalidate();
-                    return Err(error);
-                }
-            };
+            let (store, epoch) =
+                match self.prepare_observed_store(&entry, control, &mut work, attempt == 0) {
+                    Ok(Some(prepared)) => prepared,
+                    Ok(None) => {
+                        entry.invalidate();
+                        return self.admit_exact_mutation(binding, control);
+                    }
+                    Err(error) => {
+                        entry.invalidate();
+                        return Err(error);
+                    }
+                };
             #[cfg(test)]
             if self
                 .mutation_acceptance_invalidations
@@ -764,9 +837,9 @@ impl SourceObservationRegistry {
                 entry.continuity_lost.store(true, Ordering::Release);
             }
             match Self::accepts_observed_result(&entry, &epoch, control) {
-                Ok(true) => {
+                Ok(ObservedAcceptance::Accepted) => {
                     if let Err(error) = store.finish_index_read_snapshot() {
-                        entry.invalidate();
+                        entry.invalidate_epoch(&epoch);
                         return Err(error.into());
                     }
                     return Ok(VerifiedMutationAdmission {
@@ -774,14 +847,13 @@ impl SourceObservationRegistry {
                         control: control.clone(),
                     });
                 }
-                Ok(false) => {}
+                Ok(ObservedAcceptance::Superseded | ObservedAcceptance::Invalidated) => {}
                 Err(error) => {
-                    entry.invalidate();
+                    entry.invalidate_epoch(&epoch);
                     drop(store.finish_index_read_snapshot());
                     return Err(error);
                 }
             }
-            entry.invalidate();
             drop(store.finish_index_read_snapshot());
         }
         self.admit_exact_mutation(binding, control)
@@ -899,7 +971,8 @@ impl SourceObservationRegistry {
                 entry.invalidate();
                 return Err(error.into());
             }
-            let (store, epoch) = match self.prepare_observed_store(entry, control, &mut work) {
+            let (store, epoch) = match self.prepare_observed_store(entry, control, &mut work, false)
+            {
                 Ok(Some(prepared)) => prepared,
                 Ok(None) => {
                     entry.invalidate();
@@ -914,14 +987,14 @@ impl SourceObservationRegistry {
                 Ok(value) => value,
                 Err(error) => {
                     if matches!(error, CliError::IndexWork(_)) {
-                        entry.invalidate();
+                        entry.invalidate_epoch(&epoch);
                     }
                     drop(store.finish_index_read_snapshot());
                     return Err(error);
                 }
             };
             match Self::accepts_observed_result(entry, &epoch, control) {
-                Ok(true) => {
+                Ok(ObservedAcceptance::Accepted) => {
                     store.finish_index_read_snapshot()?;
                     work.elapsed = started.elapsed();
                     return Ok(VerifiedReadOutcome {
@@ -930,14 +1003,13 @@ impl SourceObservationRegistry {
                         work,
                     });
                 }
-                Ok(false) => {}
+                Ok(ObservedAcceptance::Superseded | ObservedAcceptance::Invalidated) => {}
                 Err(error) => {
-                    entry.invalidate();
+                    entry.invalidate_epoch(&epoch);
                     drop(store.finish_index_read_snapshot());
                     return Err(error);
                 }
             }
-            entry.invalidate();
             drop(store.finish_index_read_snapshot());
             if attempt + 1 < VERIFIED_READ_ATTEMPTS {
                 work.retries = work.retries.saturating_add(1);
@@ -952,11 +1024,16 @@ impl SourceObservationRegistry {
         entry: &SourceObservationEntry,
         control: &IndexWorkControl,
         work: &mut VerifiedReadWork,
+        force_exact: bool,
     ) -> Result<Option<(AtlasStore, VerifiedSourceEpoch)>, CliError> {
         let _reconcile = entry
             .reconcile
             .lock()
             .map_err(|_poisoned| lock_error(&entry.binding.root, "source reconciliation"))?;
+        // Mutation authority starts from exact saved source under the reconciliation lock.
+        if force_exact {
+            entry.invalidate();
+        }
         let plan = ScanRuntimePlan::for_path_controlled(
             entry.binding.config.as_deref(),
             &entry.binding.root,
@@ -964,9 +1041,7 @@ impl SourceObservationRegistry {
             control,
         )
         .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-        if entry.changed_since_exact_verification(&plan.scan_options)? {
-            entry.invalidate();
-        }
+        entry.changed_since_exact_verification(&plan.scan_options)?;
         let contract_fingerprint = plan.publication_contract_fingerprint();
         let policy_witness = source_policy_witness(&plan, control)?;
         if let Some(epoch) = entry.current_epoch()?
@@ -1030,10 +1105,9 @@ impl SourceObservationRegistry {
                 })
                 .is_ok()
             {
-                entry.continuity_lost.store(true, Ordering::Release);
+                entry.invalidate_after_proven_source_mismatch()?;
             }
-            let changed = entry.changed_since_exact_verification(&after_plan.scan_options)?;
-            if changed || before_contract != after_contract || before_policy != after_policy {
+            if before_contract != after_contract || before_policy != after_policy {
                 drop(exact.store.finish_index_read_snapshot());
                 continue;
             }
@@ -1043,6 +1117,14 @@ impl SourceObservationRegistry {
                 .ok_or_else(|| source_changed_during_derivation(&entry.binding.root, "."))?;
             let captured = exact.store.captured_project_binding()?;
             work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+            let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                lock_error(&entry.binding.root, "source observation receiver")
+            })?;
+            if entry.drain_source_events(&receiver, &after_plan.scan_options)? {
+                drop(receiver);
+                drop(exact.store.finish_index_read_snapshot());
+                continue;
+            }
             let ingress_sequence = entry.ingress_sequence.load(Ordering::Acquire);
             let epoch = entry.install_epoch(
                 self.process_nonce,
@@ -1062,12 +1144,12 @@ impl SourceObservationRegistry {
         entry: &SourceObservationEntry,
         epoch: &VerifiedSourceEpoch,
         control: &IndexWorkControl,
-    ) -> Result<bool, CliError> {
+    ) -> Result<ObservedAcceptance, CliError> {
         for _attempt in 0..VERIFIED_READ_ATTEMPTS {
             control.check(IndexWorkStage::Publication)?;
-            if entry.continuity_lost.load(Ordering::Acquire) {
-                return Ok(false);
-            }
+            let Some(sampled) = entry.current_epoch()? else {
+                return Ok(ObservedAcceptance::Invalidated);
+            };
             let plan = ScanRuntimePlan::for_path_controlled(
                 entry.binding.config.as_deref(),
                 &entry.binding.root,
@@ -1075,11 +1157,17 @@ impl SourceObservationRegistry {
                 control,
             )
             .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-            if entry.changed_since_exact_verification(&plan.scan_options)?
-                || plan.publication_contract_fingerprint() != epoch.contract_fingerprint
-                || source_policy_witness(&plan, control)? != epoch.policy_witness
+            let contract = plan.publication_contract_fingerprint();
+            let policy = source_policy_witness(&plan, control)?;
             {
-                return Ok(false);
+                let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                    lock_error(&entry.binding.root, "source observation receiver")
+                })?;
+                match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+                    ObservedAcceptance::Accepted => {}
+                    ObservedAcceptance::Superseded => continue,
+                    ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
+                }
             }
             #[cfg(test)]
             if let Some(event) = entry
@@ -1090,26 +1178,37 @@ impl SourceObservationRegistry {
             {
                 entry.publish_test_event(event)?;
             }
-            let _receiver = entry.receiver.lock().map_err(|_poisoned| {
+            let receiver = entry.receiver.lock().map_err(|_poisoned| {
                 lock_error(&entry.binding.root, "source observation receiver")
             })?;
-            if entry.continuity_lost.load(Ordering::Acquire) {
-                return Ok(false);
+            match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+                ObservedAcceptance::Accepted => {}
+                ObservedAcceptance::Superseded => continue,
+                ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
             }
-            let Some(current) = entry.current_epoch()? else {
-                return Ok(false);
+            let mut state = entry
+                .state
+                .lock()
+                .map_err(|_poisoned| lock_error(&entry.binding.root, "source observation state"))?;
+            let Some(current) = state.verified.as_ref() else {
+                return Ok(ObservedAcceptance::Invalidated);
             };
-            if current.stamp != epoch.stamp
-                || current.contract_fingerprint != epoch.contract_fingerprint
-                || current.policy_witness != epoch.policy_witness
-            {
-                return Ok(false);
+            // A reconciliation during policy sampling requires fresh policy evidence.
+            if current.stamp != sampled.stamp {
+                continue;
+            }
+            if current.contract_fingerprint != contract || current.policy_witness != policy {
+                state.verified = None;
+                return Ok(ObservedAcceptance::Invalidated);
+            }
+            if current.stamp != epoch.stamp {
+                return Ok(ObservedAcceptance::Superseded);
             }
             if current.ingress_sequence == entry.ingress_sequence.load(Ordering::Acquire) {
-                return Ok(true);
+                return Ok(ObservedAcceptance::Accepted);
             }
         }
-        Ok(false)
+        Ok(ObservedAcceptance::Invalidated)
     }
 
     /// Exact-per-call compatibility path when a native observer cannot be admitted.
@@ -1776,6 +1875,263 @@ mod tests {
     }
 
     #[test]
+    fn observed_acceptance_does_not_wait_for_exact_reconciliation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let entry = registry
+            .entry(SourceBinding::new(&database, temp.path(), None)?)?
+            .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
+        let (store, epoch) = registry
+            .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
+            .ok_or_else(|| std::io::Error::other("read epoch unavailable"))?;
+        let reconcile = entry
+            .reconcile
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("source reconciliation lock poisoned"))?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let accepted = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let accepted = matches!(
+                    SourceObservationRegistry::accepts_observed_result(&entry, &epoch, &control),
+                    Ok(ObservedAcceptance::Accepted)
+                );
+                let _sent = sender.send(accepted);
+            });
+            let result = receiver.recv_timeout(Duration::from_secs(5));
+            // Release even on failure so the regression cannot strand the test worker.
+            drop(reconcile);
+            result
+        });
+        require(
+            accepted == Ok(true),
+            "observed acceptance waited for exact reconciliation or rejected valid evidence",
+        )?;
+        store.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn older_read_acceptance_preserves_newer_mutation_witness() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let before = fs::read(&source)?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let mut admission = None;
+        registry.with_verified_read(&database, temp.path(), None, &control, |store, _stamp| {
+            if admission.is_none() {
+                admission =
+                    Some(registry.admit_mutation(&database, temp.path(), None, &control)?);
+            }
+            Ok(store.overview()?)
+        })?;
+        require(
+            fs::read(&source)? == before,
+            "source changed during read admission",
+        )?;
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(
+            "source.rs",
+            "Accepted concurrent purpose",
+            PurposeSource::Agent,
+        )?;
+        admission
+            .ok_or_else(|| std::io::Error::other("mutation admission missing"))?
+            .verify()?;
+        transaction.commit()?;
+        require(
+            store.load_node_by_path("source.rs")?.is_some_and(|node| {
+                node.purpose.purpose.as_deref() == Some("Accepted concurrent purpose")
+            }),
+            "valid concurrent mutation did not commit its purpose",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn superseded_mutation_cleanup_preserves_successor_witness() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let previous = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let current = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        require(
+            matches!(previous.verify(), Err(CliError::RefreshRequired(_))),
+            "superseded mutation witness was unexpectedly accepted",
+        )?;
+        current.verify()?;
+        Ok(())
+    }
+
+    #[test]
+    fn exact_source_mismatch_invalidates_successor_without_observer_delivery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let mut observer = SourceObservationEntry::start(binding.clone())?;
+        observer.watcher.unwatch(&binding.root)?;
+        observer.watcher.configure(notify::Config::default())?;
+        let entry = Arc::new(observer);
+        registry
+            .entries
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("observer registry lock poisoned"))?
+            .insert(binding, Arc::clone(&entry));
+        let control = test_control();
+        let previous = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let MutationSourceWitness::Observed { epoch, .. } = &previous.witness else {
+            return Err(std::io::Error::other("observed mutation missing").into());
+        };
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before_revision = store.authored_purpose_revision()?;
+        let transaction = store.begin_purpose_mutation()?;
+        let mut successor = None;
+        let result = VerifiedMutationAdmission::verify_observed(&entry, epoch, &control, || {
+            successor = Some(registry.admit_mutation(&database, temp.path(), None, &control)?);
+            store.set_purpose("source.rs", "Uncommitted purpose", PurposeSource::Agent)?;
+            fs::write(&source, "fn changed_after_successor() {}\n").map_err(|error| {
+                CliError::Io {
+                    path: source.clone(),
+                    source: error,
+                }
+            })?;
+            verify_saved_source_matches_index_controlled(&database, temp.path(), None, &control)
+        });
+        drop(transaction);
+        require(
+            matches!(result, Err(CliError::RefreshRequired(_))),
+            "exact source mismatch did not reject the previous mutation",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision,
+            "rejected mutation changed the authored-purpose revision",
+        )?;
+        require(
+            entry.current_epoch()?.is_none(),
+            "proven saved-source mismatch left successor evidence reusable",
+        )?;
+        let successor =
+            successor.ok_or_else(|| std::io::Error::other("successor admission missing"))?;
+        require(
+            matches!(successor.verify(), Err(CliError::RefreshRequired(_))),
+            "successor survived a proven saved-source mismatch",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_exact_verification_preserves_successor_witness() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), Some(Duration::from_secs(30)));
+        let previous = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let MutationSourceWitness::Observed { entry, epoch } = &previous.witness else {
+            return Err(std::io::Error::other("observed mutation missing").into());
+        };
+        let mut successor = None;
+        let result = VerifiedMutationAdmission::verify_observed(entry, epoch, &control, || {
+            successor =
+                Some(registry.admit_mutation(&database, temp.path(), None, &test_control())?);
+            cancellation.cancel();
+            verify_saved_source_matches_index_controlled(&database, temp.path(), None, &control)
+        });
+        require(
+            matches!(result, Err(CliError::IndexWork(_))),
+            "exact verification did not return cancellation",
+        )?;
+        successor
+            .ok_or_else(|| std::io::Error::other("successor admission missing"))?
+            .verify()?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_read_source_event_invalidates_newer_mutation_and_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let entry = registry
+            .entry(SourceBinding::new(&database, temp.path(), None)?)?
+            .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
+        let (read_store, old_epoch) = registry
+            .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
+            .ok_or_else(|| std::io::Error::other("read epoch unavailable"))?;
+        let admission = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let before_revision = store.authored_purpose_revision()?;
+        let before_purpose = store
+            .load_node_by_path("source.rs")?
+            .ok_or_else(|| std::io::Error::other("indexed source missing"))?
+            .purpose;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(
+            "source.rs",
+            "Rejected concurrent purpose",
+            PurposeSource::Agent,
+        )?;
+        let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source);
+        let previous_options = projectatlas_fs::ScanOptions {
+            exclude_path_prefixes: vec!["source.rs".to_owned()],
+            ..projectatlas_fs::ScanOptions::default()
+        };
+        let ignored = observer_event_changes(&entry.binding, &previous_options, &event);
+        require(
+            ignored.paths.is_empty() && !ignored.requires_full_scan,
+            "previous policy did not exclude the event in the regression fixture",
+        )?;
+        entry.publish_test_event(event)?;
+        {
+            let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                std::io::Error::other("source observation receiver lock poisoned")
+            })?;
+            require(
+                entry.drain_epoch_events(&receiver, &old_epoch, &previous_options)?
+                    == ObservedAcceptance::Superseded,
+                "older policy consumed an event belonging to a successor epoch",
+            )?;
+        }
+        require(
+            SourceObservationRegistry::accepts_observed_result(&entry, &old_epoch, &control)?
+                == ObservedAcceptance::Invalidated,
+            "stale reader treated a source event as mere supersession",
+        )?;
+        require(
+            entry.current_epoch()?.is_none(),
+            "source event left newer evidence installed",
+        )?;
+        let plan = ScanRuntimePlan::for_path_controlled(None, temp.path(), None, &control)?;
+        require(
+            entry.changed_since_exact_verification(&plan.scan_options)?,
+            "consumed source event was lost to concurrent exact verification",
+        )?;
+        read_store.finish_index_read_snapshot()?;
+        let verification = admission.verify();
+        transaction.rollback()?;
+        require(
+            matches!(verification, Err(CliError::RefreshRequired(_))),
+            "consumed source event did not reject the mutation witness",
+        )?;
+        require(
+            store.authored_purpose_revision()? == before_revision
+                && store
+                    .load_node_by_path("source.rs")?
+                    .is_some_and(|node| node.purpose == before_purpose),
+            "rejected mutation changed authored purpose state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn mutation_admission_reconciles_saved_source_without_waiting_for_observer_delivery()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -1868,7 +2224,8 @@ mod tests {
     }
 
     #[test]
-    fn preparation_continuity_loss_falls_back_only_for_mutations() -> Result<(), Box<dyn Error>> {
+    fn exact_mismatch_during_preparation_prevents_observed_installation()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, _source) = indexed_project(temp.path())?;
         let registry = SourceObservationRegistry::default();

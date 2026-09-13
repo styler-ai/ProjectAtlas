@@ -2237,14 +2237,25 @@ function Enter-ProjectAtlasAtlasForwarderLifecycleLockSet {
     $locks = [System.Collections.Generic.List[object]]::new()
     try {
         foreach ($key in $keys) {
-            $remainingTicks = $deadline - [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $waitStarted = [System.Diagnostics.Stopwatch]::GetTimestamp()
+            $remainingTicks = $deadline - $waitStarted
             $remainingMilliseconds = [long][Math]::Ceiling(
                 ($remainingTicks * 1000.0) / [System.Diagnostics.Stopwatch]::Frequency)
             if ($remainingMilliseconds -le 0) {
                 throw "ProjectAtlas atlas forwarder lifecycle lock deadline expired before acquiring $($key.ForwarderPath)."
             }
+            if ($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE) {
+                [System.IO.File]::AppendAllText(
+                    $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE,
+                    "request $($locks.Count) $deadline $waitStarted $remainingMilliseconds $([System.Diagnostics.Stopwatch]::Frequency)`n")
+            }
             $lock = Enter-ProjectAtlasAtlasForwarderLifecycleLockKey $key $remainingMilliseconds
             $locks.Add($lock) | Out-Null
+            if ($env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE) {
+                [System.IO.File]::AppendAllText(
+                    $env:PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE,
+                    "acquired $($locks.Count - 1) $([System.Diagnostics.Stopwatch]::GetTimestamp())`n")
+            }
         }
         return [pscustomobject]@{
             Locks = $locks
@@ -4305,11 +4316,15 @@ function Get-ProjectAtlasCodexPluginSourceManifestVersion {
     param(
         [object]$ProjectAtlasPlugin
     )
-    $pluginSourcePath = Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin
-    if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
+    return Get-ProjectAtlasCodexPluginManifestVersion (Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin)
+}
+
+function Get-ProjectAtlasCodexPluginManifestVersion {
+    param([string]$PluginRoot)
+    if ([string]::IsNullOrWhiteSpace($PluginRoot)) {
         return $null
     }
-    $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
+    $manifestPath = Join-Path $PluginRoot ".codex-plugin\plugin.json"
     if (-not (Test-Path -LiteralPath $manifestPath)) {
         return ""
     }
@@ -4381,6 +4396,10 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
     $manifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
     if ($manifestVersion -ne $runtimeVersion) {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$manifestVersion' does not match $runtimeVersion."
+        return
+    }
+    if (-not (Test-ProjectAtlasCodexPluginArtifacts $projectAtlasPlugin $runtimeVersion)) {
+        Write-Warning "Codex ProjectAtlas plugin skill verification failed: plugin source or cache artifacts do not match the installer at $pluginSourcePath."
         return
     }
     Write-Output "Codex ProjectAtlas plugin skill verified at $skillPath for $runtimeVersion."
@@ -4485,6 +4504,7 @@ function Update-ProjectAtlasCodexPlugin {
         $projectAtlasPlugin = $pluginInventory.Plugin
         $currentPluginVersion = if ($projectAtlasPlugin -and $projectAtlasPlugin.version -is [string]) { $projectAtlasPlugin.version } else { $null }
         $currentSourceManifestMatches = Test-ProjectAtlasCodexPluginSourceManifest $projectAtlasPlugin $runtimeVersion
+        $currentSourceArtifactsReady = $currentSourceManifestMatches -and (Test-ProjectAtlasCodexSkillArtifacts (Get-ProjectAtlasCodexPluginSourcePath $projectAtlasPlugin))
         $currentPluginReady = Test-ProjectAtlasCodexPluginReady $ExpectedVersion
         if ($previousRef -eq $releaseTag `
             -and $currentPluginVersion -eq $runtimeVersion `
@@ -4499,31 +4519,32 @@ function Update-ProjectAtlasCodexPlugin {
             $script:ProjectAtlasCodexPluginUpdatePreservedPriorState = $true
             return
         }
+        if (-not $currentPluginVersion) {
+            $marketplacePluginSourcePath = Join-Path $stateSnapshot.MarketplaceRootPath "plugins\projectatlas"
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $marketplacePluginSourcePath) -eq $runtimeVersion `
+                -and (Test-ProjectAtlasCodexSkillArtifacts $marketplacePluginSourcePath)) {
+                $currentSourceArtifactsReady = $true
+            }
+        }
         $updateSucceeded = $false
         $restoreSucceeded = $false
         try {
-            $marketplaceGit = Join-Path $stateSnapshot.MarketplaceRootPath ".git"
-            if (Test-Path -LiteralPath $marketplaceGit) {
-                if (-not (Get-ProjectAtlasShellCommand git -CommandType Application)) {
-                    Write-Warning "Codex ProjectAtlas plugin update failed: git is unavailable to fetch release tag $releaseTag."
-                    return
-                }
-                & git -C $stateSnapshot.MarketplaceRootPath rev-parse --verify --quiet "refs/tags/$releaseTag^{commit}" 2>$null | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    & git -C $stateSnapshot.MarketplaceRootPath fetch --force --no-tags https://github.com/styler-ai/ProjectAtlas.git "refs/tags/${releaseTag}:refs/tags/${releaseTag}" 2>$null | Out-Null
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Warning "Codex ProjectAtlas plugin update failed: could not fetch release tag $releaseTag."
-                        return
-                    }
-                }
-            }
             if ($previousRef -eq $releaseTag) {
             if ($currentPluginVersion -eq $runtimeVersion -and -not $currentSourceManifestMatches) {
                 $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
                 Write-Output "Codex ProjectAtlas plugin source manifest version '$sourceManifestVersion' does not match $runtimeVersion; refreshing official projectatlas plugin cache."
             }
             elseif ($currentPluginVersion -eq $runtimeVersion -and -not $currentPluginReady) {
-                Write-Output "Codex ProjectAtlas plugin skill artifact does not match $runtimeVersion; refreshing official projectatlas plugin cache."
+                Write-Output "Codex ProjectAtlas plugin skill artifact does not match $runtimeVersion; repairing the installed plugin cache."
+            }
+            $refreshSucceeded = $currentSourceArtifactsReady
+            if (-not $refreshSucceeded) {
+                & $codexCommandPath plugin marketplace upgrade projectatlas --json | Out-Null
+                $refreshSucceeded = $LASTEXITCODE -eq 0
+            }
+            if (-not $refreshSucceeded) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: could not refresh the configured projectatlas marketplace source."
+                return
             }
             & $codexCommandPath plugin remove projectatlas --marketplace projectatlas --json | Out-Null
             & $codexCommandPath plugin add projectatlas --marketplace projectatlas --json | Out-Null
@@ -4547,12 +4568,31 @@ function Update-ProjectAtlasCodexPlugin {
                 Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
                 return
             }
+            if (-not (Test-ProjectAtlasCodexPluginArtifacts $installedPlugin $runtimeVersion)) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: plugin source or cache artifacts do not match $runtimeVersion after refresh."
+                return
+            }
             $updateSucceeded = $true
             Write-Output "Codex ProjectAtlas plugin marketplace updated to $releaseTag."
             Confirm-ProjectAtlasCodexSkillArtifact $codexCommandPath $ExpectedVersion
             return
         }
 
+        $marketplaceGit = Join-Path $stateSnapshot.MarketplaceRootPath ".git"
+        if (Test-Path -LiteralPath $marketplaceGit) {
+            if (-not (Get-ProjectAtlasShellCommand git -CommandType Application)) {
+                Write-Warning "Codex ProjectAtlas plugin update failed: git is unavailable to fetch release tag $releaseTag."
+                return
+            }
+            & git -C $stateSnapshot.MarketplaceRootPath rev-parse --verify --quiet "refs/tags/$releaseTag^{commit}" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                & git -C $stateSnapshot.MarketplaceRootPath fetch --force --no-tags https://github.com/styler-ai/ProjectAtlas.git "refs/tags/${releaseTag}:refs/tags/${releaseTag}" 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "Codex ProjectAtlas plugin update failed: could not fetch release tag $releaseTag."
+                    return
+                }
+            }
+        }
         & $codexCommandPath plugin marketplace remove projectatlas --json | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Codex ProjectAtlas plugin update failed: could not remove stale projectatlas marketplace."
@@ -4583,6 +4623,10 @@ function Update-ProjectAtlasCodexPlugin {
         if (-not (Test-ProjectAtlasCodexPluginSourceManifest $installedPlugin $runtimeVersion)) {
             $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $installedPlugin
             Write-Warning "Codex ProjectAtlas plugin update failed: source manifest version '$sourceManifestVersion' does not match $runtimeVersion after refresh."
+            return
+        }
+        if (-not (Test-ProjectAtlasCodexPluginArtifacts $installedPlugin $runtimeVersion)) {
+            Write-Warning "Codex ProjectAtlas plugin update failed: plugin source or cache artifacts do not match $runtimeVersion after refresh."
             return
         }
         $updateSucceeded = $true
@@ -4714,6 +4758,55 @@ function Test-ProjectAtlasCodexMcpRegistryEntry {
     return Test-ProjectAtlasExactArguments $actualArguments $expected
 }
 
+function Test-ProjectAtlasCodexSkillArtifacts {
+    param([string]$PluginSourcePath)
+    try {
+        $installerPluginRoot = Split-Path -Parent $PSScriptRoot
+        foreach ($skillAsset in @("SKILL.md", "references\language-support.md")) {
+            $skillPath = Join-Path $PluginSourcePath "skills\projectatlas\$skillAsset"
+            $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\$skillAsset"
+            if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf) `
+                -or -not (Test-Path -LiteralPath $installerSkillPath -PathType Leaf) `
+                -or (Get-ProjectAtlasSha256 $skillPath) -ne (Get-ProjectAtlasSha256 $installerSkillPath)) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-ProjectAtlasCodexPluginArtifacts {
+    param(
+        [object]$ProjectAtlasPlugin,
+        [string]$ExpectedVersion
+    )
+    try {
+        if ($ExpectedVersion -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
+            return $false
+        }
+        $configPath = Get-ProjectAtlasCodexConfigPath
+        if ([string]::IsNullOrWhiteSpace($configPath)) {
+            return $false
+        }
+        $codexRoot = Split-Path -Parent $configPath
+        $cachePath = Join-Path $codexRoot ("plugins\cache\projectatlas\projectatlas\" + $ExpectedVersion)
+        Assert-ProjectAtlasCodexDirectAncestry $cachePath "installed projectatlas plugin cache" $codexRoot
+        foreach ($artifactRoot in @((Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin), $cachePath)) {
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $artifactRoot) -ne $ExpectedVersion `
+                -or -not (Test-ProjectAtlasCodexSkillArtifacts $artifactRoot)) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-ProjectAtlasCodexPluginReady {
     param(
         [string]$ExpectedVersion
@@ -4745,15 +4838,10 @@ function Test-ProjectAtlasCodexPluginReady {
             return $false
         }
         $manifestPath = Join-Path $pluginSourcePath ".codex-plugin\plugin.json"
-        $skillPath = Join-Path $pluginSourcePath "skills\projectatlas\SKILL.md"
-        $installerPluginRoot = Split-Path -Parent $PSScriptRoot
-        $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\SKILL.md"
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) `
-            -or -not (Test-Path -LiteralPath $skillPath -PathType Leaf) `
-            -or -not (Test-Path -LiteralPath $installerSkillPath -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             return $false
         }
-        return (Get-ProjectAtlasSha256 $skillPath) -eq (Get-ProjectAtlasSha256 $installerSkillPath)
+        return Test-ProjectAtlasCodexPluginArtifacts $plugin $runtimeVersion
     }
     catch {
         return $false

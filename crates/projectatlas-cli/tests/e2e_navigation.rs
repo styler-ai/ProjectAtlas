@@ -9117,12 +9117,32 @@ fn require_json_i64_greater_than(
 fn composer_shaped_php_cli_mcp_and_incremental_refresh_agree() -> Result<(), Box<dyn Error>> {
     const PHP_NAMESPACE_DIR: &str = "Atlas";
     const COMPOSER_VENDOR_DIR: &str = "vendor";
+    let guidance_sources = [
+        (
+            "src/page.php",
+            "<main>static</main><?php function render(): void { helper(); } ?>",
+            "render",
+        ),
+        (
+            "src/broken.php",
+            "<?php function recovered(): void {} function broken( { $unknown->();",
+            "recovered",
+        ),
+    ];
 
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir_all(repo.join(SRC_DIR_NAME).join(PHP_NAMESPACE_DIR))?;
     fs::create_dir_all(repo.join(COMPOSER_VENDOR_DIR))?;
+    fs::create_dir(repo.join("generated"))?;
+    fs::write(repo.join(".gitignore"), "/generated/\n")?;
+    let generated_path = repo.join("generated/container.php");
+    let generated_source = "<?php // Generated; edit the authored service definition.\nfunction generatedOnlyBinding(): void {}\n";
+    fs::write(&generated_path, generated_source)?;
+    for (path, source, _) in guidance_sources {
+        fs::write(repo.join(path), source)?;
+    }
     fs::write(
         repo.join("composer.json"),
         r#"{
@@ -9449,6 +9469,62 @@ function save(): void {}
 
     let mut mcp = McpContractSession::spawn(&executable, &repo, &db)?;
     let operation = (|| -> Result<(), Box<dyn Error>> {
+        let generated_search = Command::new(&executable)
+            .current_dir(&repo)
+            .arg("--format")
+            .arg("json")
+            .arg("--db")
+            .arg(&db)
+            .args(["search", "generatedOnlyBinding", "--file-pattern", "*.php"])
+            .output()?;
+        if !generated_search.status.success() {
+            return Err(io::Error::other(format!(
+                "PHP generated-source search failed: {}",
+                String::from_utf8_lossy(&generated_search.stderr)
+            ))
+            .into());
+        }
+        let cli_search: Value = serde_json::from_slice(&generated_search.stdout)?;
+        let mcp_search: Value = toon_format::decode_default(&mcp.call_tool(
+            "atlas_search",
+            &json!({"pattern": "generatedOnlyBinding", "file_pattern": "*.php"}),
+        )?)?;
+        require_json_usize(&cli_search, &["total"], 0)?;
+        require_json_usize(&mcp_search, &["search", "total"], 0)?;
+        if fs::read_to_string(&generated_path)? != generated_source {
+            return Err(io::Error::other("PHP navigation changed generated source").into());
+        }
+        for (path, source, declaration) in guidance_sources {
+            let cli = json_summary_command(&repo, &db, path)?;
+            let response: Value = toon_format::decode_default(
+                &mcp.call_tool("atlas_file_summary", &json!({"file": path, "limit": 20}))?,
+            )?;
+            let mcp_summary = json_at(&response, &["file_summary"])?;
+            for summary in [&cli, mcp_summary] {
+                require_json_string_from_value(summary, "language", "php")?;
+                if path == "src/broken.php" {
+                    require_json_string_from_value(summary, "summary_status", "fallback")?;
+                }
+                let functions = json_at(summary, &["functions"])?
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("PHP guidance functions are missing"))?;
+                if !functions
+                    .iter()
+                    .any(|symbol| symbol.get("name").and_then(Value::as_str) == Some(declaration))
+                {
+                    return Err(io::Error::other(format!(
+                        "PHP guidance lost the navigable declaration {path}:{declaration}"
+                    ))
+                    .into());
+                }
+            }
+            let slice: Value = toon_format::decode_default(&mcp.call_tool(
+                "atlas_slice",
+                &json!({"file": path, "start_line": 1, "end_line": 1}),
+            )?)?;
+            require_json_string(&slice, &["slice", "path"], path)?;
+            require_json_contains(&slice, &["slice", "content"], source)?;
+        }
         let initialized_summary: Value = toon_format::decode_default(&mcp.call_tool(
             "atlas_file_summary",
             &json!({"file": "src/Atlas/Service.php", "limit": 20}),

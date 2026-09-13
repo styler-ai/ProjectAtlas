@@ -2771,6 +2771,12 @@ mod tests {
         require_test(
             include_str!("../../../docs/language-support.md") == rendered,
             "checked-in language support document is stale",
+        )?;
+        require_test(
+            include_str!(
+                "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+            ) == rendered,
+            "bundled skill language support reference is stale",
         )
     }
 
