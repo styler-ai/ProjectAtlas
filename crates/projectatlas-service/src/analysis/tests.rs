@@ -914,7 +914,7 @@ fn entrypoint_profile_accounts_for_pruned_relation_evidence() -> Result<(), Box<
     };
 
     let (_temp, store) = pruned_relation_entrypoint_store(Completeness::Complete, 0)?;
-    let complete = fitted_report(&store, &query(false)?)?;
+    let complete = fitted_report(&store, &query(true)?)?;
     require(
         complete.entrypoint_profile.as_ref().is_some_and(|profile| {
             profile.coverage == EntrypointProfileCoverage::Complete

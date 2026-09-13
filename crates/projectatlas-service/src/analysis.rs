@@ -1723,6 +1723,10 @@ fn load_entrypoint_profile_draft(
                 if report.pruned_incomplete_paths > 0 {
                     complete = false;
                 }
+                if report.pruned_evidence_truncated {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                }
                 if query.relations.include_occurrences
                     && (!collect_occurrences || !report.pruned_relations.is_empty())
                 {
@@ -2222,6 +2226,10 @@ fn load_entrypoint_profile_draft(
                         });
                     }
                     add_relation_work(&mut relation_work, &candidate_report.work)?;
+                    if candidate_report.pruned_evidence_truncated {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    }
                     if query.relations.include_occurrences
                         && (!collect_occurrences || !candidate_report.pruned_relations.is_empty())
                     {
@@ -3159,6 +3167,7 @@ fn entrypoint_report_complete(
         && report.continuation.is_none()
         && report.reached_limits.is_empty()
         && report.pruned_incomplete_paths == 0
+        && !report.pruned_evidence_truncated
         && trusted_node_coverage(&report.anchor, admitted_relations)
         && report.rows.iter().all(|row| {
             matches!(

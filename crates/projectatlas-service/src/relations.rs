@@ -560,6 +560,9 @@ pub struct DetailedRelationReport {
     /// Pruned relations retained only for bounded entrypoint trust probes.
     #[serde(skip)]
     pub(crate) pruned_relations: Vec<projectatlas_core::graph::LogicalRelation>,
+    /// Whether a relation-evidence sidecar was omitted at the byte boundary.
+    #[serde(skip)]
+    pub(crate) pruned_evidence_truncated: bool,
     /// Whether any declared result boundary stopped the traversal.
     pub truncated: bool,
     /// Generation-, purpose-, query-, order-, and budget-bound continuation.
@@ -1065,6 +1068,8 @@ pub fn load_detailed_relation_page(
     let mut exhausted = false;
     let mut pruned_incomplete_paths = 0_u64;
     let mut pruned_relations = Vec::new();
+    let mut pruned_evidence_truncated = false;
+    let mut pruned_relation_bytes = 0_u64;
 
     while selected.len() < budget.page_rows() as usize {
         if relation_deadline_elapsed(deadline) {
@@ -1227,7 +1232,20 @@ pub fn load_detailed_relation_page(
                     if row.detail.relation.completeness() != Completeness::Complete {
                         pruned_incomplete_paths = pruned_incomplete_paths.saturating_add(1);
                     }
-                    pruned_relations.push(row.detail.relation.clone());
+                    if query.include_occurrences {
+                        let relation_bytes = serialized_equivalent_bytes(&row.detail.relation)?;
+                        let state_bytes =
+                            encoded_relation_state_bytes(&cursor_binding, &state, budget)?;
+                        let reserved = database_work.decoded_bytes.saturating_add(state_bytes);
+                        let prospective = pruned_relation_bytes.saturating_add(relation_bytes);
+                        if prospective > budget.intermediate_bytes().saturating_sub(reserved) {
+                            pruned_evidence_truncated = true;
+                            push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                        } else {
+                            pruned_relation_bytes = prospective;
+                            pruned_relations.push(row.detail.relation.clone());
+                        }
+                    }
                     continue;
                 }
                 if state.nodes.len() >= budget.nodes() as usize {
@@ -1390,7 +1408,8 @@ pub fn load_detailed_relation_page(
         control,
         &mut reached_limits,
     )?;
-    let working_composition_bytes = relation_working_composition_bytes(
+    let pruned_evidence_bytes = serialized_equivalent_bytes(&pruned_relations)?;
+    let mut working_composition_bytes = relation_working_composition_bytes(
         &entities,
         &retained,
         query.direction,
@@ -1398,13 +1417,26 @@ pub fn load_detailed_relation_page(
         &coverage,
         &classifications,
         &occurrence_pages,
+        &pruned_relations,
     )?;
-    let precomposition_bytes = relation_intermediate_bytes(
+    let mut precomposition_bytes = relation_intermediate_bytes(
         database_work.decoded_bytes,
         retained_cursor_bytes,
         working_composition_bytes,
         0,
     )?;
+    if precomposition_bytes > budget.intermediate_bytes() && !pruned_relations.is_empty() {
+        pruned_relations.clear();
+        working_composition_bytes = working_composition_bytes.saturating_sub(pruned_evidence_bytes);
+        pruned_evidence_truncated = true;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+        precomposition_bytes = relation_intermediate_bytes(
+            database_work.decoded_bytes,
+            retained_cursor_bytes,
+            working_composition_bytes,
+            0,
+        )?;
+    }
     if precomposition_bytes > budget.intermediate_bytes() {
         return Err(ServiceError::InvalidInput(
             "detailed relation aggregate intermediate-byte budget was exhausted before composition"
@@ -1437,12 +1469,24 @@ pub fn load_detailed_relation_page(
         .map_or(serialized_relation_state_bytes(&state)?, |cursor| {
             cursor.len() as u64
         });
-    let intermediate_bytes = relation_intermediate_bytes(
+    let mut intermediate_bytes = relation_intermediate_bytes(
         database_work.decoded_bytes,
         cursor_bytes,
         working_composition_bytes,
         retained_composition_bytes,
     )?;
+    if intermediate_bytes > budget.intermediate_bytes() && !pruned_relations.is_empty() {
+        pruned_relations.clear();
+        working_composition_bytes = working_composition_bytes.saturating_sub(pruned_evidence_bytes);
+        pruned_evidence_truncated = true;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+        intermediate_bytes = relation_intermediate_bytes(
+            database_work.decoded_bytes,
+            cursor_bytes,
+            working_composition_bytes,
+            retained_composition_bytes,
+        )?;
+    }
     if intermediate_bytes > budget.intermediate_bytes() {
         return Err(ServiceError::InvalidInput(
             "detailed relation aggregate intermediate-byte budget was exhausted before composition"
@@ -1479,6 +1523,7 @@ pub fn load_detailed_relation_page(
         pruned_paths: state.pruned_paths,
         pruned_incomplete_paths,
         pruned_relations,
+        pruned_evidence_truncated,
         truncated: continuation.is_some() || terminal_limit || !reached_limits.is_empty(),
         continuation,
         total,
@@ -2617,6 +2662,7 @@ fn relation_working_composition_bytes(
     coverage: &BTreeMap<String, Vec<CoverageRecord>>,
     classifications: &BTreeMap<String, ContentClassification>,
     occurrence_pages: &[(Vec<RelationOccurrence>, bool)],
+    pruned_relations: &[LogicalRelation],
 ) -> ServiceResult<u64> {
     let parts = [
         serialized_equivalent_bytes(entities)?,
@@ -2624,6 +2670,7 @@ fn relation_working_composition_bytes(
         serialized_equivalent_bytes(coverage)?,
         serialized_equivalent_bytes(classifications)?,
         serialized_equivalent_bytes(occurrence_pages)?,
+        serialized_equivalent_bytes(pruned_relations)?,
     ];
     let mut bytes = 0_u64;
     for part in parts {
