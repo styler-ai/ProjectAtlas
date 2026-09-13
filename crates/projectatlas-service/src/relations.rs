@@ -2,8 +2,8 @@
 
 use super::{ServiceError, ServiceResult, canonical_root_digest, selected_project_binding};
 use projectatlas_core::graph::{
-    ConfidenceClass, CoverageRecord, CoverageScope, DocumentTargetUnresolvedReason, EntitySelector,
-    ExtendedRelationKind, GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits,
+    Completeness, ConfidenceClass, CoverageRecord, CoverageScope, DocumentTargetUnresolvedReason,
+    EntitySelector, ExtendedRelationKind, GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits,
     GraphRelationKind, LogicalRelation, RelationOccurrence, RelationResolution, RepositoryFilePath,
     RepositoryNodePath, SymbolSelector,
 };
@@ -554,6 +554,12 @@ pub struct DetailedRelationReport {
     pub returned: u32,
     /// Number of cyclic or lower-ranked duplicate-node paths pruned.
     pub pruned_paths: u64,
+    /// Number of pruned relations whose producer coverage was partial.
+    #[serde(skip)]
+    pub(crate) pruned_incomplete_paths: u64,
+    /// Pruned relations retained only for bounded entrypoint trust probes.
+    #[serde(skip)]
+    pub(crate) pruned_relations: Vec<projectatlas_core::graph::LogicalRelation>,
     /// Whether any declared result boundary stopped the traversal.
     pub truncated: bool,
     /// Generation-, purpose-, query-, order-, and budget-bound continuation.
@@ -1057,6 +1063,8 @@ pub fn load_detailed_relation_page(
     let mut reached_limits = Vec::new();
     let mut terminal_limit = false;
     let mut exhausted = false;
+    let mut pruned_incomplete_paths = 0_u64;
+    let mut pruned_relations = Vec::new();
 
     while selected.len() < budget.page_rows() as usize {
         if relation_deadline_elapsed(deadline) {
@@ -1216,6 +1224,10 @@ pub fn load_detailed_relation_page(
                 let digest = next.key().digest_bytes().map_err(invalid_graph_input)?;
                 if visited.contains_key(&digest) {
                     state.pruned_paths = state.pruned_paths.saturating_add(1);
+                    if row.detail.relation.completeness() != Completeness::Complete {
+                        pruned_incomplete_paths = pruned_incomplete_paths.saturating_add(1);
+                    }
+                    pruned_relations.push(row.detail.relation.clone());
                     continue;
                 }
                 if state.nodes.len() >= budget.nodes() as usize {
@@ -1465,6 +1477,8 @@ pub fn load_detailed_relation_page(
             .map(|_| query.content_selection),
         returned,
         pruned_paths: state.pruned_paths,
+        pruned_incomplete_paths,
+        pruned_relations,
         truncated: continuation.is_some() || terminal_limit || !reached_limits.is_empty(),
         continuation,
         total,

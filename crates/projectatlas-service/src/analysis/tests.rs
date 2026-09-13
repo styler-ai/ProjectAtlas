@@ -1,9 +1,9 @@
 use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
-    CoverageRecord, CoverageScope, CoverageState, ExternalSelector, GraphIdentityText,
-    LogicalRelation, PackageSelector, RelationOccurrence, RelationResolution, RepositoryFilePath,
-    RepositoryNodePath, SourceSpan, SymbolSelector,
+    Completeness, CoverageRecord, CoverageScope, CoverageState, ExternalSelector,
+    GraphIdentityText, LogicalRelation, PackageSelector, RelationOccurrence, RelationResolution,
+    RepositoryFilePath, RepositoryNodePath, SourceSpan, SymbolSelector,
 };
 use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::{ParserKind, SymbolGraph, SymbolKind};
@@ -883,6 +883,81 @@ fn entrypoint_profile_reports_reachable_and_unreachable_without_persistence()
     require(
         store.index_publication()? == before,
         "entrypoint profile changed the authoritative publication",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_accounts_for_pruned_relation_evidence() -> Result<(), Box<dyn Error>> {
+    let query = |include_occurrences| -> Result<RelationAnalysisQuery, Box<dyn Error>> {
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.include_occurrences = include_occurrences;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(20),
+            Some(20),
+            Some(256),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "pruned-relation-evidence".to_string(),
+            anchors: vec![RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            }],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        Ok(query)
+    };
+
+    let (_temp, store) = pruned_relation_entrypoint_store(Completeness::Complete, 0)?;
+    let complete = fitted_report(&store, &query(false)?)?;
+    require(
+        complete.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 1
+        }) && complete
+            .findings
+            .iter()
+            .all(|finding| finding.status != AnalysisStatus::Inconclusive),
+        "a complete zero-occurrence pruned cycle was not trusted",
+    )?;
+
+    let (_temp, store) = pruned_relation_entrypoint_store(Completeness::Partial, 0)?;
+    let partial = fitted_report(&store, &query(false)?)?;
+    require(
+        partial.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Partial
+                && profile.unreachable_candidates == 0
+        }) && partial
+            .findings
+            .iter()
+            .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "a pruned partial relation produced deletion-safe entrypoint evidence",
+    )?;
+
+    let (_temp, store) = pruned_relation_entrypoint_store(Completeness::Complete, 2)?;
+    let occurrence_limited = fitted_report(&store, &query(true)?)?;
+    require(
+        occurrence_limited
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| {
+                profile.coverage == EntrypointProfileCoverage::Partial
+                    && profile.unreachable_candidates == 0
+            })
+            && occurrence_limited
+                .reached_limits
+                .contains(&GraphLimitKind::Occurrences)
+            && occurrence_limited
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "pruned relation occurrences were not bounded as incomplete evidence",
     )?;
     Ok(())
 }
@@ -6200,6 +6275,111 @@ fn branching_entrypoint_store(
         project,
         &entities,
         &relations,
+        &occurrences,
+        &coverage,
+    )?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
+}
+
+fn pruned_relation_entrypoint_store(
+    completeness: Completeness,
+    occurrence_count: u8,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("pruned-relation-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/a.rs"), "pub fn a() {}\n")?;
+    fs::write(root.join("src/b.rs"), "pub fn b() {}\n")?;
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("pruned relation project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let entity = |path: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(path))?,
+            },
+            generation,
+        )
+    };
+    let a = entity("src/a.rs")?;
+    let b = entity("src/b.rs")?;
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let relation = LogicalRelation::new(
+        &a,
+        calls,
+        RelationResolution::resolved(&a)?,
+        ConfidenceClass::Exact,
+        completeness,
+        generation,
+    )?;
+    let occurrences = (0..occurrence_count)
+        .map(|index| {
+            RelationOccurrence::new(
+                &relation,
+                RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                SourceSpan::new(1, u32::from(index) * 5, 1, u32::from(index) * 5 + 4)?,
+                generation,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let entities = vec![a, b];
+    let coverage = entities
+        .iter()
+        .map(|entity| {
+            let EntitySelector::File { path } = entity.selector() else {
+                unreachable!("pruned relation fixture only contains files")
+            };
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(path.as_str()))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut publication = store.begin_index_publication("pruned-relation-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    publication.upsert_scan_node_batch(
+        &entities
+            .iter()
+            .map(|entity| match entity.selector() {
+                EntitySelector::File { path } => test_node(path.as_str(), path.as_str()),
+                _ => unreachable!("pruned relation fixture only contains files"),
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    publication.upsert_file_content_classification_batch(
+        &entities
+            .iter()
+            .map(|entity| match entity.selector() {
+                EntitySelector::File { path } => projectatlas_db::FileContentClassification {
+                    path: path.as_str().to_string(),
+                    classification: ContentClassification::Source,
+                },
+                _ => unreachable!("pruned relation fixture only contains files"),
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(
+        project,
+        &entities,
+        &[relation],
         &occurrences,
         &coverage,
     )?;

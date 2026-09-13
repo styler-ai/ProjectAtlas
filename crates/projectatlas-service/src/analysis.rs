@@ -1720,7 +1720,12 @@ fn load_entrypoint_profile_draft(
                 authored_purpose_revision = report.authored_purpose_revision;
                 purpose_revision_initialized = true;
                 add_relation_work(&mut relation_work, &report.work)?;
-                if query.relations.include_occurrences && !collect_occurrences {
+                if report.pruned_incomplete_paths > 0 {
+                    complete = false;
+                }
+                if query.relations.include_occurrences
+                    && (!collect_occurrences || !report.pruned_relations.is_empty())
+                {
                     match entrypoint_occurrence_evidence_is_incomplete(
                         store,
                         &report,
@@ -1728,6 +1733,7 @@ fn load_entrypoint_profile_draft(
                         budget,
                         &mut relation_work,
                         control,
+                        !collect_occurrences,
                     )? {
                         Ok(true) => {
                             complete = false;
@@ -2216,7 +2222,9 @@ fn load_entrypoint_profile_draft(
                         });
                     }
                     add_relation_work(&mut relation_work, &candidate_report.work)?;
-                    if query.relations.include_occurrences && !collect_occurrences {
+                    if query.relations.include_occurrences
+                        && (!collect_occurrences || !candidate_report.pruned_relations.is_empty())
+                    {
                         match entrypoint_occurrence_evidence_is_incomplete(
                             store,
                             &candidate_report,
@@ -2224,6 +2232,7 @@ fn load_entrypoint_profile_draft(
                             budget,
                             &mut relation_work,
                             control,
+                            !collect_occurrences,
                         )? {
                             Ok(true) => {
                                 complete = false;
@@ -2742,11 +2751,22 @@ fn entrypoint_occurrence_evidence_is_incomplete(
     budget: DetailedRelationBudget,
     relation_work: &mut DetailedRelationWork,
     control: Option<&IndexWorkControl>,
+    include_report_rows: bool,
 ) -> ServiceResult<Result<bool, GraphLimitKind>> {
-    if report.rows.is_empty() {
+    let mut admitted_relations = if include_report_rows {
+        report
+            .rows
+            .iter()
+            .map(|row| row.relation.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    admitted_relations.extend(report.pruned_relations.iter().cloned());
+    if admitted_relations.is_empty() {
         return Ok(Ok(false));
     }
-    for chunk in report.rows.chunks(MAX_REPOSITORY_GRAPH_FRONTIER) {
+    for chunk in admitted_relations.chunks(MAX_REPOSITORY_GRAPH_FRONTIER) {
         check_control(control)?;
         let remaining_intermediate = budget
             .intermediate_bytes()
@@ -2754,10 +2774,7 @@ fn entrypoint_occurrence_evidence_is_incomplete(
         if remaining_intermediate < 64 * 1_024 {
             return Ok(Err(GraphLimitKind::IntermediateBytes));
         }
-        let relations = chunk
-            .iter()
-            .map(|row| row.relation.clone())
-            .collect::<Vec<_>>();
+        let relations = chunk.to_vec();
         let batch_rows = u32::try_from(relations.len()).map_err(|_overflow| {
             ServiceError::InvalidInput("occurrence evidence batch size overflowed".to_string())
         })?;
@@ -3141,6 +3158,7 @@ fn entrypoint_report_complete(
     ) && !report.truncated
         && report.continuation.is_none()
         && report.reached_limits.is_empty()
+        && report.pruned_incomplete_paths == 0
         && trusted_node_coverage(&report.anchor, admitted_relations)
         && report.rows.iter().all(|row| {
             matches!(
