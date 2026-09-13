@@ -1724,6 +1724,15 @@ fn load_entrypoint_profile_draft(
                     complete = false;
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                 }
+                let filtered_edge_limit_is_terminal = entrypoint_filtered_edge_limit_is_terminal(
+                    store,
+                    generation,
+                    &report,
+                    *relation,
+                    query.relations.minimum_confidence,
+                    query.relations.content_selection,
+                    control,
+                )?;
                 if query.relations.include_occurrences
                     && (!collect_occurrences || !report.pruned_relations.is_empty())
                 {
@@ -1748,7 +1757,9 @@ fn load_entrypoint_profile_draft(
                     }
                 }
                 for limit in &report.reached_limits {
-                    push_limit(&mut reached_limits, *limit);
+                    if !filtered_edge_limit_is_terminal || *limit != GraphLimitKind::Edges {
+                        push_limit(&mut reached_limits, *limit);
+                    }
                 }
                 if relation_work.inspected_edges > budget.edges() {
                     complete = false;
@@ -1843,12 +1854,15 @@ fn load_entrypoint_profile_draft(
                     break 'profile;
                 }
                 if report.continuation.is_some() {
-                    complete = false;
-                    push_limit(&mut reached_limits, GraphLimitKind::Rows);
+                    if !filtered_edge_limit_is_terminal {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Rows);
+                    }
                 } else {
-                    complete &= !report.truncated
-                        && report.reached_limits.is_empty()
-                        && matches!(report.total, RelationTotalState::Exact(_));
+                    complete &= filtered_edge_limit_is_terminal
+                        || (!report.truncated
+                            && report.reached_limits.is_empty()
+                            && matches!(report.total, RelationTotalState::Exact(_)));
                 }
             }
         }
@@ -2244,6 +2258,16 @@ fn load_entrypoint_profile_draft(
                         complete = false;
                         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     }
+                    let filtered_edge_limit_is_terminal =
+                        entrypoint_filtered_edge_limit_is_terminal(
+                            store,
+                            generation,
+                            &candidate_report,
+                            *relation,
+                            query.relations.minimum_confidence,
+                            query.relations.content_selection,
+                            control,
+                        )?;
                     if query.relations.include_occurrences
                         && (!collect_occurrences || !candidate_report.pruned_relations.is_empty())
                     {
@@ -2306,12 +2330,17 @@ fn load_entrypoint_profile_draft(
                         break;
                     }
                     for limit in &candidate_report.reached_limits {
-                        push_limit(&mut reached_limits, *limit);
+                        if !filtered_edge_limit_is_terminal || *limit != GraphLimitKind::Edges {
+                            push_limit(&mut reached_limits, *limit);
+                        }
                     }
-                    if candidate_report.continuation.is_some() {
+                    if candidate_report.continuation.is_some() && !filtered_edge_limit_is_terminal {
                         push_limit(&mut reached_limits, GraphLimitKind::Rows);
                     }
-                    if !entrypoint_report_complete(&candidate_report, &profile.relations) {
+                    if !trusted_node_coverage(&candidate_report.anchor, &profile.relations)
+                        || (!filtered_edge_limit_is_terminal
+                            && !entrypoint_report_complete(&candidate_report, &profile.relations))
+                    {
                         complete = false;
                         break;
                     }
@@ -3013,6 +3042,38 @@ fn entrypoint_step_budget(
 /// Return the typed error for aggregate entrypoint work overflow.
 fn entrypoint_work_overflow() -> ServiceError {
     ServiceError::InvalidInput("entrypoint relation work overflowed".to_string())
+}
+
+/// Reconcile a raw edge limit when every row in the page was filtered out.
+fn entrypoint_filtered_edge_limit_is_terminal(
+    store: &AtlasStore,
+    generation: projectatlas_core::IndexGeneration,
+    report: &DetailedRelationReport,
+    relation: GraphRelationKind,
+    minimum_confidence: ConfidenceClass,
+    content_selection: ContentSelection,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<bool> {
+    if !report.rows.is_empty()
+        || !report.reached_limits.contains(&GraphLimitKind::Edges)
+        || report
+            .reached_limits
+            .iter()
+            .any(|limit| *limit != GraphLimitKind::Edges)
+        || report.pruned_incomplete_paths > 0
+        || report.pruned_evidence_truncated
+    {
+        return Ok(false);
+    }
+    entrypoint_terminal_adjacency_is_empty(
+        store,
+        generation,
+        report.anchor.entity.key(),
+        relation,
+        minimum_confidence,
+        content_selection,
+        control,
+    )
 }
 
 /// Return the project identity for an already generation-bound graph entity.

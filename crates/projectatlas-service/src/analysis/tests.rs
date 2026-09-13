@@ -1245,6 +1245,234 @@ fn entrypoint_local_edge_state_stays_within_the_intermediate_budget() -> Result<
 }
 
 #[test]
+fn entrypoint_page_edge_limits_reconcile_filtered_rows() -> Result<(), Box<dyn Error>> {
+    let scenarios = [
+        (
+            "confidence-filter",
+            ConfidenceClass::Low,
+            ContentSelection::Source,
+            ContentClassification::Source,
+        ),
+        (
+            "content-filter",
+            ConfidenceClass::Exact,
+            ContentSelection::Source,
+            ContentClassification::Documentation,
+        ),
+        (
+            "admitted-edge",
+            ConfidenceClass::Exact,
+            ContentSelection::Source,
+            ContentClassification::Source,
+        ),
+    ];
+    for (name, terminal_confidence, selection, terminal_classification) in scenarios {
+        let (_temp, store) = filtered_page_entrypoint_store(
+            terminal_confidence,
+            terminal_classification,
+            false,
+            false,
+        )?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.anchor = RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/b.rs"))?,
+        };
+        query.relations.minimum_confidence = ConfidenceClass::Exact;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.content_selection = selection;
+        query.relations.budget = DetailedRelationBudget::from_graph_limits(
+            projectatlas_core::graph::GraphLimits::new(50, 1, 1, 256 * 1024)?,
+        )
+        .with_aggregate_limits(Some(1), Some(8), Some(8), Some(100), None, None)?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: name.to_string(),
+            anchors: vec![query.relations.anchor.clone()],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        let report = fitted_report(&store, &query)?;
+        if name == "admitted-edge" {
+            require(
+                report
+                    .entrypoint_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                    && report.reached_limits.contains(&GraphLimitKind::Edges)
+                    && report
+                        .findings
+                        .iter()
+                        .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+                "an admitted pending relation was not preserved as edge-limit incompleteness",
+            )?;
+        } else {
+            require(
+                report
+                    .entrypoint_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+                    && !report.reached_limits.contains(&GraphLimitKind::Edges)
+                    && report
+                        .findings
+                        .iter()
+                        .all(|finding| finding.status != AnalysisStatus::Inconclusive),
+                &format!(
+                    "{name}: filtered-out page rows made a complete entrypoint profile inconclusive: coverage={:?}, limits={:?}, findings={:?}",
+                    report
+                        .entrypoint_profile
+                        .as_ref()
+                        .map(|profile| profile.coverage),
+                    report.reached_limits,
+                    report
+                        .findings
+                        .iter()
+                        .map(|finding| finding.status)
+                        .collect::<Vec<_>>(),
+                ),
+            )?;
+        }
+    }
+
+    for (name, terminal_confidence, selection, terminal_classification) in scenarios {
+        let (_temp, store) = filtered_page_entrypoint_store(
+            terminal_confidence,
+            terminal_classification,
+            true,
+            false,
+        )?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.anchor = RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        };
+        query.relations.minimum_confidence = ConfidenceClass::Exact;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.content_selection = selection;
+        query.relations.budget = DetailedRelationBudget::from_graph_limits(
+            projectatlas_core::graph::GraphLimits::new(50, 1, 1, 256 * 1024)?,
+        )
+        .with_aggregate_limits(Some(2), Some(8), Some(8), Some(100), None, None)?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: format!("candidate-{name}"),
+            anchors: vec![query.relations.anchor.clone()],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        let edge_limited_report_seen = Rc::new(Cell::new(false));
+        let observer_seen = Rc::clone(&edge_limited_report_seen);
+        let report = observe_analysis_phase(
+            move |event| {
+                if let AnalysisPhaseEvent::CandidateReport {
+                    has_edges_limit: true,
+                    ..
+                } = event
+                {
+                    observer_seen.set(true);
+                }
+            },
+            || fitted_report(&store, &query),
+        )?;
+        require(
+            edge_limited_report_seen.get(),
+            "candidate page edge-limit fixture did not reach candidate traversal",
+        )?;
+        if name == "admitted-edge" {
+            require(
+                report
+                    .entrypoint_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                    && report.reached_limits.contains(&GraphLimitKind::Edges)
+                    && report
+                        .findings
+                        .iter()
+                        .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+                "candidate admitted pending relation was not preserved as edge-limit incompleteness",
+            )?;
+        } else {
+            require(
+                report
+                    .entrypoint_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete)
+                    && !report.reached_limits.contains(&GraphLimitKind::Edges)
+                    && report
+                        .findings
+                        .iter()
+                        .all(|finding| finding.status != AnalysisStatus::Inconclusive),
+                &format!(
+                    "candidate-{name}: filtered-out page rows made a complete profile inconclusive: coverage={:?}, limits={:?}, findings={:?}",
+                    report
+                        .entrypoint_profile
+                        .as_ref()
+                        .map(|profile| profile.coverage),
+                    report.reached_limits,
+                    report
+                        .findings
+                        .iter()
+                        .map(|finding| finding.status)
+                        .collect::<Vec<_>>(),
+                ),
+            )?;
+        }
+    }
+
+    let (_temp, store) = filtered_page_entrypoint_store(
+        ConfidenceClass::Low,
+        ContentClassification::Source,
+        true,
+        true,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.anchor = RelationAnchor::File {
+        file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+    };
+    query.relations.minimum_confidence = ConfidenceClass::Exact;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = DetailedRelationBudget::from_graph_limits(
+        projectatlas_core::graph::GraphLimits::new(50, 1, 1, 256 * 1024)?,
+    )
+    .with_aggregate_limits(Some(2), Some(8), Some(8), Some(100), None, None)?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-partial-coverage".to_string(),
+        anchors: vec![query.relations.anchor.clone()],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let edge_limited_report_seen = Rc::new(Cell::new(false));
+    let observer_seen = Rc::clone(&edge_limited_report_seen);
+    let report = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CandidateReport {
+                has_edges_limit: true,
+                ..
+            } = event
+            {
+                observer_seen.set(true);
+            }
+        },
+        || fitted_report(&store, &query),
+    )?;
+    require(
+        edge_limited_report_seen.get(),
+        "partial candidate fixture did not reach candidate traversal",
+    )?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Partial
+                && profile.unreachable_candidates == 0
+        }) && report
+            .findings
+            .iter()
+            .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "partial candidate coverage was accepted as an unreachable deletion candidate",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_rechecks_terminal_frontier_at_exact_edge_limit() -> Result<(), Box<dyn Error>>
 {
     let (_temp, store) = terminal_entrypoint_store(false)?;
@@ -6275,7 +6503,7 @@ fn terminal_entrypoint_store_with_options(
     ] {
         fs::write(root.join(path), contents)?;
     }
-    if include_terminal_edge {
+    if include_terminal_edge || include_candidate_edge {
         fs::write(root.join("src/c.rs"), "pub fn c() {}\n")?;
     }
     let database = root.join("projectatlas.db");
@@ -6296,7 +6524,7 @@ fn terminal_entrypoint_store_with_options(
     let a = entity("src/a.rs")?;
     let b = entity("src/b.rs")?;
     let d = entity("src/d.rs")?;
-    let c = include_terminal_edge
+    let c = (include_terminal_edge || include_candidate_edge)
         .then(|| entity("src/c.rs"))
         .transpose()?;
     let external = include_external_terminal_edge
@@ -6326,14 +6554,16 @@ fn terminal_entrypoint_store_with_options(
     };
     let mut relations = vec![relation(&a, &b)?];
     if let Some(c) = c.as_ref() {
-        relations.push(LogicalRelation::new(
-            &b,
-            calls,
-            RelationResolution::resolved(c)?,
-            terminal_edge_confidence,
-            Completeness::Complete,
-            generation,
-        )?);
+        if include_terminal_edge {
+            relations.push(LogicalRelation::new(
+                &b,
+                calls,
+                RelationResolution::resolved(c)?,
+                terminal_edge_confidence,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
         if include_candidate_edge {
             relations.push(LogicalRelation::new(
                 &d,
@@ -6943,6 +7173,140 @@ fn long_local_edge_entrypoint_store(
         AtlasStore::open_read_only_for_project(&database, &root)?,
         anchors,
         u32::try_from(anchor_count)?,
+    ))
+}
+
+fn filtered_page_entrypoint_store(
+    terminal_confidence: ConfidenceClass,
+    terminal_classification: ContentClassification,
+    include_anchor_edge: bool,
+    partial_candidate_coverage: bool,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("filtered-page-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    for path in [
+        "src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs", "src/e.rs", "src/f.rs",
+    ] {
+        fs::write(root.join(path), format!("pub fn {}() {{}}\n", &path[4..5]))?;
+    }
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("filtered page project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let entity = |path: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new(path))?,
+            },
+            generation,
+        )
+    };
+    let a = entity("src/a.rs")?;
+    let b = entity("src/b.rs")?;
+    let c = entity("src/c.rs")?;
+    let d = entity("src/d.rs")?;
+    let e = entity("src/e.rs")?;
+    let f = entity("src/f.rs")?;
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let relation = |source: &GraphEntity, target: &GraphEntity, confidence| {
+        LogicalRelation::new(
+            source,
+            calls,
+            RelationResolution::resolved(target)?,
+            confidence,
+            Completeness::Complete,
+            generation,
+        )
+    };
+    let mut relations = Vec::new();
+    if include_anchor_edge {
+        relations.push(relation(&a, &f, ConfidenceClass::Exact)?);
+    }
+    relations.extend([
+        relation(&b, &c, terminal_confidence)?,
+        relation(&b, &e, terminal_confidence)?,
+        relation(&d, &c, terminal_confidence)?,
+        relation(&d, &e, terminal_confidence)?,
+    ]);
+    let entities = vec![a, b, c, d, e, f];
+    let mut coverage = entities
+        .iter()
+        .map(|entity| {
+            let EntitySelector::File { path } = entity.selector() else {
+                unreachable!("filtered page fixture only contains files")
+            };
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(path.as_str()))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if partial_candidate_coverage {
+        coverage.push(CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/d.rs"))?,
+            },
+            Some(calls),
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("partial calls fixture")?),
+            None,
+        )?);
+    }
+    let mut publication = store.begin_index_publication("filtered-page-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    publication.upsert_scan_node_batch(
+        &entities
+            .iter()
+            .map(|entity| match entity.selector() {
+                EntitySelector::File { path } => test_node(path.as_str(), path.as_str()),
+                _ => unreachable!("filtered page fixture only contains files"),
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    publication.upsert_file_content_classification_batch(
+        &entities
+            .iter()
+            .map(|entity| {
+                let EntitySelector::File { path } = entity.selector() else {
+                    unreachable!("filtered page fixture only contains files")
+                };
+                projectatlas_db::FileContentClassification {
+                    path: path.as_str().to_string(),
+                    classification: if matches!(path.as_str(), "src/c.rs" | "src/e.rs") {
+                        terminal_classification
+                    } else if path.as_str() == "src/f.rs"
+                        || (include_anchor_edge && path.as_str() == "src/b.rs")
+                    {
+                        ContentClassification::Documentation
+                    } else {
+                        ContentClassification::Source
+                    },
+                }
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
     ))
 }
 
