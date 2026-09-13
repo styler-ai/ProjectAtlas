@@ -3083,12 +3083,23 @@ fn trusted_node_coverage(
             .relation()
             .is_none_or(|relation| admitted_relations.contains(&relation))
     };
-    node.coverage.iter().any(&applies)
-        && node
-            .coverage
+    let applicable = node
+        .coverage
+        .iter()
+        .filter(|coverage| applies(coverage))
+        .collect::<Vec<_>>();
+    !applicable.is_empty()
+        && applicable
             .iter()
-            .filter(|coverage| applies(coverage))
             .all(|coverage| coverage_trust(coverage.state()) == CoverageTrustState::Trusted)
+        && (applicable
+            .iter()
+            .any(|coverage| coverage.relation().is_none())
+            || admitted_relations.iter().all(|relation| {
+                applicable
+                    .iter()
+                    .any(|coverage| coverage.relation() == Some(*relation))
+            }))
 }
 
 /// Return whether every local endpoint in one relation row has trusted coverage.

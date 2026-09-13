@@ -1403,8 +1403,17 @@ fn entrypoint_profile_charges_multi_anchor_preflight_bytes() -> Result<(), Box<d
 #[test]
 fn entrypoint_profile_bounds_each_initial_anchor_by_remaining_bytes() -> Result<(), Box<dyn Error>>
 {
-    let (_temp, store) =
-        analysis_store_with_options(true, None, false, 8, false, None, None, Some("tools/c.rs"))?;
+    let (_temp, store) = analysis_store_with_options(
+        true,
+        None,
+        false,
+        8,
+        false,
+        None,
+        None,
+        Some("tools/c.rs"),
+        None,
+    )?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
     query.relations.budget = query.relations.budget.with_aggregate_limits(
@@ -1469,8 +1478,17 @@ fn entrypoint_profile_bounds_each_initial_anchor_by_remaining_bytes() -> Result<
 #[test]
 fn entrypoint_profile_reports_first_anchor_byte_limit_without_anchor() -> Result<(), Box<dyn Error>>
 {
-    let (_temp, store) =
-        analysis_store_with_options(true, None, false, 8, false, None, None, Some("tools/c.rs"))?;
+    let (_temp, store) = analysis_store_with_options(
+        true,
+        None,
+        false,
+        8,
+        false,
+        None,
+        None,
+        Some("tools/c.rs"),
+        None,
+    )?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
     query.relations.budget = query.relations.budget.with_aggregate_limits(
@@ -2608,8 +2626,7 @@ fn entrypoint_profile_reconciles_candidate_node_and_visited_limits_independently
 
 #[test]
 fn entrypoint_profile_scopes_coverage_to_admitted_relations() -> Result<(), Box<dyn Error>> {
-    let run = |partial_calls| -> Result<RelationAnalysisReport, Box<dyn Error>> {
-        let (_temp, store) = analysis_store_with_relation_coverage(partial_calls)?;
+    let query_for = |relations| -> Result<RelationAnalysisQuery, Box<dyn Error>> {
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
         query.relations.resolution = RelationResolutionFilter::Any;
         query.relations.budget = query.relations.budget.with_aggregate_limits(
@@ -2627,8 +2644,13 @@ fn entrypoint_profile_scopes_coverage_to_admitted_relations() -> Result<(), Box<
             anchors: vec![RelationAnchor::File {
                 file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
             }],
-            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+            relations,
         });
+        Ok(query)
+    };
+    let run = |partial_calls| -> Result<RelationAnalysisReport, Box<dyn Error>> {
+        let (_temp, store) = analysis_store_with_relation_coverage(partial_calls)?;
+        let query = query_for(vec![GraphRelationKind::Legacy(RelationKind::Calls)])?;
         fitted_report(&store, &query)
     };
 
@@ -2651,6 +2673,53 @@ fn entrypoint_profile_scopes_coverage_to_admitted_relations() -> Result<(), Box<
                     && finding.status == AnalysisStatus::Inconclusive
             }),
         "partial admitted Calls coverage did not remain inconclusive",
+    )?;
+
+    let (_temp, store) = analysis_store_with_missing_admitted_relation_coverage()?;
+    let calls_only = fitted_report(
+        &store,
+        &query_for(vec![GraphRelationKind::Legacy(RelationKind::Calls)])?,
+    )?;
+    require(
+        calls_only
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete),
+        "complete relation-specific coverage did not support its admitted Calls profile",
+    )?;
+    let missing_documents = fitted_report(
+        &store,
+        &query_for(vec![
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+        ])?,
+    )?;
+    require(
+        missing_documents
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && missing_documents.findings.iter().all(|finding| {
+                finding.kind == AnalysisFindingKind::EntrypointReachability
+                    && finding.status == AnalysisStatus::Inconclusive
+            }),
+        "missing admitted relation-family coverage produced a confirmed finding",
+    )?;
+
+    let (_temp, store) = analysis_store_with_coverage(true)?;
+    let generic = fitted_report(
+        &store,
+        &query_for(vec![
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+        ])?,
+    )?;
+    require(
+        generic
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Complete),
+        "trusted generic coverage did not support a complete multi-family profile",
     )?;
     Ok(())
 }
@@ -6209,6 +6278,7 @@ fn analysis_store_with_coverage(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -6224,12 +6294,13 @@ fn analysis_store_with_target(
         None,
         None,
         None,
+        None,
     )
 }
 
 fn analysis_store_with_external_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, true, 0, false, None, None, None)
+    analysis_store_with_options(true, None, true, 0, false, None, None, None, None)
 }
 
 fn protected_candidate_page_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
@@ -6303,34 +6374,79 @@ fn protected_candidate_page_store() -> Result<(tempfile::TempDir, AtlasStore), B
 
 fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 20, false, None, None, None)
+    analysis_store_with_options(true, None, false, 20, false, None, None, None, None)
 }
 
 fn analysis_store_with_large_candidate_relations()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, false, 1, false, None, None, Some("candidate"))
+    analysis_store_with_options(
+        true,
+        None,
+        false,
+        1,
+        false,
+        None,
+        None,
+        Some("candidate"),
+        None,
+    )
 }
 
 fn analysis_store_with_large_reachable_page()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, false, 20, false, None, None, Some("reachable"))
+    analysis_store_with_options(
+        true,
+        None,
+        false,
+        20,
+        false,
+        None,
+        None,
+        Some("reachable"),
+        None,
+    )
 }
 
 fn analysis_store_with_document_relation() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
-    analysis_store_with_options(true, None, false, 0, true, None, None, None)
+    analysis_store_with_options(true, None, false, 0, true, None, None, None, None)
 }
 
 fn analysis_store_with_candidate_relation(
     target: &str,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, false, 0, false, Some(target), None, None)
+    analysis_store_with_options(true, None, false, 0, false, Some(target), None, None, None)
 }
 
 fn analysis_store_with_relation_coverage(
     partial_calls: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    analysis_store_with_options(true, None, false, 0, false, None, Some(partial_calls), None)
+    analysis_store_with_options(
+        true,
+        None,
+        false,
+        0,
+        false,
+        None,
+        Some(partial_calls),
+        None,
+        None,
+    )
+}
+
+fn analysis_store_with_missing_admitted_relation_coverage()
+-> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(
+        true,
+        None,
+        false,
+        0,
+        false,
+        None,
+        None,
+        None,
+        Some(GraphRelationKind::Legacy(RelationKind::Calls)),
+    )
 }
 
 fn analysis_store_with_options(
@@ -6342,6 +6458,7 @@ fn analysis_store_with_options(
     candidate_relation_target: Option<&str>,
     relation_coverage_partial_calls: Option<bool>,
     secondary_large_candidate_path: Option<&str>,
+    coverage_relation_override: Option<GraphRelationKind>,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("analysis-service");
@@ -6647,6 +6764,7 @@ fn analysis_store_with_options(
     {
         coverage_paths.push("src");
     }
+    let coverage_relation = coverage_relation_override;
     let mut coverage = coverage_paths
         .iter()
         .copied()
@@ -6656,7 +6774,7 @@ fn analysis_store_with_options(
                 CoverageScope::Path {
                     path: RepositoryNodePath::new(Path::new(path))?,
                 },
-                None,
+                coverage_relation,
                 CoverageState::Complete,
                 1,
                 0,
@@ -6667,28 +6785,30 @@ fn analysis_store_with_options(
             .map_err(Into::into)
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    coverage.extend(
-        coverage_paths
-            .iter()
-            .copied()
-            .filter(|path| include_tools_coverage || *path != "tools/c.rs")
-            .map(|path| {
-                CoverageRecord::new(
-                    CoverageScope::Path {
-                        path: RepositoryNodePath::new(Path::new(path))?,
-                    },
-                    Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
-                    CoverageState::NoCandidates,
-                    0,
-                    0,
-                    generation,
-                    None,
-                    None,
-                )
-                .map_err(Into::into)
-            })
-            .collect::<Result<Vec<_>, Box<dyn Error>>>()?,
-    );
+    if coverage_relation_override.is_none() {
+        coverage.extend(
+            coverage_paths
+                .iter()
+                .copied()
+                .filter(|path| include_tools_coverage || *path != "tools/c.rs")
+                .map(|path| {
+                    CoverageRecord::new(
+                        CoverageScope::Path {
+                            path: RepositoryNodePath::new(Path::new(path))?,
+                        },
+                        Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                        CoverageState::NoCandidates,
+                        0,
+                        0,
+                        generation,
+                        None,
+                        None,
+                    )
+                    .map_err(Into::into)
+                })
+                .collect::<Result<Vec<_>, Box<dyn Error>>>()?,
+        );
+    }
     if let Some(partial_calls) = relation_coverage_partial_calls {
         let (calls_state, calls_covered, calls_omitted, calls_reason) = if partial_calls {
             (
