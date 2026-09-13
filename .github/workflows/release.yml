@@ -549,12 +549,13 @@ jobs:
           else
             digest_command=(sha256sum)
           fi
-          manifest="release-assets/$archive.sha256"
+          archive_name="${archive##*/}"
+          manifest="$archive.sha256"
           if [ ! -f "$manifest" ]; then
             echo "Authoritative packaged digest manifest was not found: $manifest" >&2
             exit 1
           fi
-          expected_archive_digest="$(awk -v name="$archive" '$2 == name { print $1 }' "$manifest")"
+          expected_archive_digest="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$manifest")"
           expected_runtime_digest="$(awk '$2 == "projectatlas/projectatlas" { print $1 }' "$manifest")"
           archive_digest="$("${digest_command[@]}" "$archive" | awk '{print $1}')"
           runtime_digest="$("${digest_command[@]}" "$runtime" | awk '{print $1}')"
@@ -646,6 +647,7 @@ jobs:
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           contract="contract-artifacts/projectatlas-packaged-contract"
           chmod +x "$contract"
+          export CARGO_BIN_EXE_projectatlas="$runtime"
           inventory="$("$contract" --list)"
           test=scan_and_watch_preserve_atomic_publication_across_roots
           for test in "$test" \
