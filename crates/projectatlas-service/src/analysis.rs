@@ -2033,7 +2033,19 @@ fn load_entrypoint_profile_draft(
                         analysis_test_observer::AnalysisPhaseEvent::CandidateTraversal,
                     );
                     let candidate_report =
-                        load_detailed_relations(store, &candidate_query, control)?;
+                        match load_detailed_relations(store, &candidate_query, control) {
+                            Ok(report) => report,
+                            Err(ServiceError::Db(DbError::GraphContract(
+                                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                                    reason: "graph read decoded bytes exceed the batch budget",
+                                },
+                            ))) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        };
                     #[cfg(test)]
                     analysis_test_observer::notify(
                         analysis_test_observer::AnalysisPhaseEvent::CandidateReport {

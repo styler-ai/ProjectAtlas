@@ -2658,6 +2658,100 @@ fn entrypoint_profile_translates_candidate_decoded_byte_exhaustion() -> Result<(
 }
 
 #[test]
+fn entrypoint_profile_translates_candidate_traversal_decoded_byte_exhaustion()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_large_candidate_relations()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(30),
+        Some(30),
+        Some(100),
+        Some(DetailedRelationBudget::MAX_INTERMEDIATE_BYTES),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-traversal-decoded-byte-boundary".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let remaining = Rc::new(Cell::new(None));
+    let remaining_for_observer = Rc::clone(&remaining);
+    observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::CandidateEntityHydration {
+                remaining_intermediate_bytes,
+            } = event
+            {
+                remaining_for_observer.set(Some(remaining_intermediate_bytes));
+            }
+        },
+        || load_relation_analysis(&store, &query, None),
+    )?;
+    let remaining = remaining
+        .get()
+        .ok_or("candidate entity hydration did not expose its remaining budget")?;
+    let pre_candidate_work = query
+        .relations
+        .budget
+        .intermediate_bytes()
+        .checked_sub(remaining)
+        .ok_or("candidate byte probe exceeded its budget")?;
+    let bounded_budget = pre_candidate_work
+        .checked_add(160 * 1024)
+        .ok_or("candidate byte boundary overflowed")?;
+    let mut bounded_query = query;
+    bounded_query.relations.budget = bounded_query.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(bounded_budget),
+        None,
+    )?;
+    let candidate_traversal_seen = Rc::new(Cell::new(false));
+    let candidate_traversal_for_observer = Rc::clone(&candidate_traversal_seen);
+    let report = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::CandidateTraversal {
+                candidate_traversal_for_observer.set(true);
+            }
+        },
+        || load_relation_analysis(&store, &bounded_query, None),
+    )?;
+    require(
+        candidate_traversal_seen.get()
+            && remaining > 0
+            && report
+                .report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| {
+                    profile.coverage == EntrypointProfileCoverage::Partial
+                        && profile.unreachable_candidates == 0
+                })
+            && report
+                .report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && report
+                .report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+            && report.report.work.peak_intermediate_bytes <= bounded_budget,
+        "candidate traversal decoded-byte exhaustion escaped as an error or exceeded its budget",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_translates_reachable_decoded_byte_exhaustion() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store_with_large_reachable_page()?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -5872,6 +5966,11 @@ fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasSto
     analysis_store_with_options(true, None, false, 20, false, None, None, None)
 }
 
+fn analysis_store_with_large_candidate_relations()
+-> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(true, None, false, 1, false, None, None, Some("candidate"))
+}
+
 fn analysis_store_with_large_reachable_page()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     analysis_store_with_options(true, None, false, 20, false, None, None, Some("reachable"))
@@ -6018,7 +6117,7 @@ fn analysis_store_with_options(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let secondary_large_candidates = secondary_large_candidate_path
-        .filter(|path| *path != "reachable")
+        .filter(|path| *path != "reachable" && *path != "candidate")
         .map(|path| {
             (0..large_candidate_count)
                 .map(|index| {
@@ -6032,6 +6131,16 @@ fn analysis_store_with_options(
         })
         .transpose()?
         .unwrap_or_default();
+    let large_candidate_relation_references = if secondary_large_candidate_path == Some("candidate")
+    {
+        (0..40)
+            .map(|index| {
+                GraphIdentityText::new(format!("candidate-relation-{index}_{}", "x".repeat(4_000)))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let relation = |source: &GraphEntity, target: &GraphEntity, kind| {
         LogicalRelation::new(
             source,
@@ -6100,6 +6209,22 @@ fn analysis_store_with_options(
                 &a,
                 candidate,
                 GraphRelationKind::Legacy(RelationKind::Calls),
+            )?);
+        }
+    }
+    if secondary_large_candidate_path == Some("candidate")
+        && let Some(candidate) = large_candidates.first()
+    {
+        for reference in &large_candidate_relation_references {
+            relations.push(LogicalRelation::new(
+                candidate,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::Unresolved {
+                    reference: reference.clone(),
+                },
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
             )?);
         }
     }
