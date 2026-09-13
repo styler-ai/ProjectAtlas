@@ -2643,6 +2643,7 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
             terminal_classification,
             true,
             false,
+            false,
         )?;
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
         query.relations.resolution = RelationResolutionFilter::Any;
@@ -2681,6 +2682,7 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
         ContentClassification::Source,
         false,
         true,
+        false,
     )?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
@@ -2708,6 +2710,89 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
             profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 2
         }) && !report.reached_limits.contains(&GraphLimitKind::Edges),
         "selected terminal probing treated an external endpoint as a pending local edge",
+    )?;
+
+    let (_temp, store) = terminal_entrypoint_store_with_options(
+        false,
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        ContentClassification::Source,
+        false,
+        false,
+        true,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "partial-terminal-candidate-coverage".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Partial
+                && profile.unreachable_candidates == 0
+        }) && report
+            .findings
+            .iter()
+            .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "filtered terminal probing treated partial candidate coverage as a safe negative",
+    )?;
+
+    let (_temp, store) = terminal_entrypoint_store_with_options(
+        false,
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        ContentClassification::Source,
+        false,
+        false,
+        false,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(3),
+        Some(2),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "visited-terminal-candidate-bound".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Partial
+                && profile.unreachable_candidates == 0
+        }) && report.reached_limits.contains(&GraphLimitKind::Visited)
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "filtered terminal probing bypassed the aggregate visited limit",
     )?;
     Ok(())
 }
@@ -5047,9 +5132,11 @@ fn terminal_entrypoint_store(
         ContentClassification::Source,
         false,
         false,
+        false,
     )
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn terminal_entrypoint_store_with_options(
     include_terminal_edge: bool,
     terminal_edge_confidence: ConfidenceClass,
@@ -5057,6 +5144,7 @@ fn terminal_entrypoint_store_with_options(
     terminal_edge_classification: ContentClassification,
     include_candidate_edge: bool,
     include_external_terminal_edge: bool,
+    partial_candidate_coverage: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("terminal-entrypoint");
@@ -5155,7 +5243,7 @@ fn terminal_entrypoint_store_with_options(
     if let Some(external) = external {
         entities.push(external);
     }
-    let coverage = entities
+    let mut coverage = entities
         .iter()
         .filter_map(|entity| match entity.selector() {
             EntitySelector::File { path } => {
@@ -5174,6 +5262,20 @@ fn terminal_entrypoint_store_with_options(
             _ => None,
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if partial_candidate_coverage {
+        coverage.push(CoverageRecord::new(
+            CoverageScope::Path {
+                path: RepositoryNodePath::new(Path::new("src/d.rs"))?,
+            },
+            Some(calls),
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("partial calls fixture")?),
+            None,
+        )?);
+    }
     let mut publication = store.begin_index_publication("terminal-entrypoint")?;
     publication.begin_scan_replacement()?;
     let scan_nodes = entities
