@@ -2419,13 +2419,17 @@ impl AtlasStore {
             return Ok(true);
         }
         let digest = key.digest_bytes()?;
-        let (key_column, index_name) = match direction {
-            RepositoryGraphDirection::Outbound => {
-                ("source_entity_key", "idx_graph_relations_source_kind")
-            }
-            RepositoryGraphDirection::Inbound => {
-                ("target_entity_key", "idx_graph_relations_target_kind")
-            }
+        let (key_column, index_name, endpoint_column) = match direction {
+            RepositoryGraphDirection::Outbound => (
+                "source_entity_key",
+                "idx_graph_relations_source_kind",
+                "target_entity_key",
+            ),
+            RepositoryGraphDirection::Inbound => (
+                "target_entity_key",
+                "idx_graph_relations_target_kind",
+                "source_entity_key",
+            ),
         };
         let (scope, kind) = relation_parts(relation);
         let confidence_filter = match minimum_confidence {
@@ -2434,18 +2438,20 @@ impl AtlasStore {
             ConfidenceClass::Medium => "AND relation.confidence IN ('exact', 'high', 'medium')",
             ConfidenceClass::Low => "",
         };
-        let target_joins = if selection == ContentSelection::UnspecifiedLegacy {
-            ""
+        let endpoint_joins = if selection == ContentSelection::UnspecifiedLegacy {
+            String::new()
         } else {
-            "LEFT JOIN graph_entities AS target
-               ON target.project_instance_id = relation.project_instance_id
-              AND target.entity_key = relation.target_entity_key
-             LEFT JOIN file_content_classifications AS target_classification
-               ON target_classification.path = CASE target.entity_kind
-                    WHEN 'file' THEN target.repository_path
-                    WHEN 'symbol' THEN target.repository_path
-                    WHEN 'package' THEN target.manifest_path
-                END"
+            format!(
+                "LEFT JOIN graph_entities AS endpoint
+                   ON endpoint.project_instance_id = relation.project_instance_id
+                  AND endpoint.entity_key = relation.{endpoint_column}
+                 LEFT JOIN file_content_classifications AS endpoint_classification
+                   ON endpoint_classification.path = CASE endpoint.entity_kind
+                        WHEN 'file' THEN endpoint.repository_path
+                        WHEN 'symbol' THEN endpoint.repository_path
+                        WHEN 'package' THEN endpoint.manifest_path
+                    END"
+            )
         };
         let selection_filter = match selection {
             ContentSelection::UnspecifiedLegacy => "",
@@ -2454,28 +2460,28 @@ impl AtlasStore {
                       OR (relation.resolution_status = 'resolved'
                           AND (relation.relation_scope = 'extended'
                                AND relation.relation_kind = 'documents'
-                               OR target_classification.classification = 'source')))"
+                                OR endpoint_classification.classification = 'source')))"
             }
             ContentSelection::Documentation => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
                       OR (relation.resolution_status = 'resolved'
                           AND (relation.relation_scope = 'extended'
                                AND relation.relation_kind = 'documents'
-                               OR target_classification.classification = 'documentation')))"
+                                OR endpoint_classification.classification = 'documentation')))"
             }
             ContentSelection::Both => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
                       OR (relation.resolution_status = 'resolved'
                           AND (relation.relation_scope = 'extended'
                                AND relation.relation_kind = 'documents'
-                               OR target_classification.classification IN ('source', 'documentation'))))"
+                                OR endpoint_classification.classification IN ('source', 'documentation'))))"
             }
         };
         let sql = format!(
             "SELECT EXISTS(
                  SELECT 1
                    FROM graph_relations AS relation INDEXED BY {index_name}
-                   {target_joins}
+                    {endpoint_joins}
                   WHERE relation.project_instance_id = ?1
                     AND relation.{key_column} = ?2
                     AND relation.relation_scope = ?3
@@ -9151,6 +9157,143 @@ mod tests {
                 DbError::GraphContract(GraphContractError::InvalidLimits { .. })
             ),
             "zero classified family limit returned the wrong error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn filtered_terminal_probe_classifies_the_directional_endpoint() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("filtered-terminal-probe");
+        fs::create_dir_all(&root)?;
+        let mut store = AtlasStore::open_for_project(&root.join("projectatlas.db"), &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("filtered probe fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let doc_source = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("docs/source.md"))?,
+            },
+            generation,
+        )?;
+        let source_target = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/target.rs"))?,
+            },
+            generation,
+        )?;
+        let source_source = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/source.rs"))?,
+            },
+            generation,
+        )?;
+        let doc_target = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("docs/target.md"))?,
+            },
+            generation,
+        )?;
+        let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+        let relations = vec![
+            LogicalRelation::new(
+                &doc_source,
+                calls,
+                RelationResolution::resolved(&source_target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+            LogicalRelation::new(
+                &source_source,
+                calls,
+                RelationResolution::resolved(&doc_target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
+        ];
+        let mut publication = store.begin_index_publication("filtered-terminal-probe")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("src", NodeKind::Folder, Some(".")),
+            graph_node("docs", NodeKind::Folder, Some(".")),
+            graph_node("src/target.rs", NodeKind::File, Some("src")),
+            graph_node("src/source.rs", NodeKind::File, Some("src")),
+            graph_node("docs/source.md", NodeKind::File, Some("docs")),
+            graph_node("docs/target.md", NodeKind::File, Some("docs")),
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.upsert_file_content_classification_batch(&[
+            crate::FileContentClassification {
+                path: "docs/source.md".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+            crate::FileContentClassification {
+                path: "src/target.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+            crate::FileContentClassification {
+                path: "src/source.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+            crate::FileContentClassification {
+                path: "docs/target.md".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+        ])?;
+        publication.replace_repository_graph(
+            project,
+            &[
+                doc_source.clone(),
+                source_target.clone(),
+                source_source.clone(),
+                doc_target.clone(),
+            ],
+            &relations,
+            &[],
+            &[],
+        )?;
+        publication.complete()?;
+
+        require(
+            store.repository_graph_adjacency_is_empty_filtered(
+                source_target.key(),
+                RepositoryGraphDirection::Inbound,
+                calls,
+                ConfidenceClass::Exact,
+                ContentSelection::Source,
+                None,
+            )?,
+            "inbound documentation source was admitted under source selection",
+        )?;
+        require(
+            !store.repository_graph_adjacency_is_empty_filtered(
+                doc_target.key(),
+                RepositoryGraphDirection::Inbound,
+                calls,
+                ConfidenceClass::Exact,
+                ContentSelection::Source,
+                None,
+            )?,
+            "inbound source endpoint was excluded under source selection",
+        )?;
+        require(
+            !store.repository_graph_adjacency_is_empty_filtered(
+                doc_source.key(),
+                RepositoryGraphDirection::Outbound,
+                calls,
+                ConfidenceClass::Exact,
+                ContentSelection::Source,
+                None,
+            )?,
+            "outbound source-target endpoint was excluded under source selection",
         )?;
         Ok(())
     }
