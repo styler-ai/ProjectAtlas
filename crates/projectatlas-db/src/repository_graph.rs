@@ -2457,6 +2457,7 @@ impl AtlasStore {
             ContentSelection::UnspecifiedLegacy => "",
             ContentSelection::Source => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR relation.resolution_status = 'external'
                       OR (relation.relation_scope = 'extended'
                           AND relation.relation_kind = 'documents')
                       OR (relation.resolution_status = 'resolved'
@@ -2464,6 +2465,7 @@ impl AtlasStore {
             }
             ContentSelection::Documentation => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR relation.resolution_status = 'external'
                       OR (relation.relation_scope = 'extended'
                           AND relation.relation_kind = 'documents')
                       OR (relation.resolution_status = 'resolved'
@@ -2471,6 +2473,7 @@ impl AtlasStore {
             }
             ContentSelection::Both => {
                 "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR relation.resolution_status = 'external'
                       OR (relation.relation_scope = 'extended'
                           AND relation.relation_kind = 'documents')
                       OR (relation.resolution_status = 'resolved'
@@ -9236,6 +9239,14 @@ mod tests {
                 Completeness::Complete,
                 generation,
             )?,
+            LogicalRelation::new(
+                &source_source,
+                calls,
+                RelationResolution::external(&external_document_target)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?,
         ];
         let mut publication = store.begin_index_publication("filtered-terminal-probe")?;
         publication.begin_scan_replacement()?;
@@ -9272,7 +9283,7 @@ mod tests {
             &[
                 doc_source.clone(),
                 source_target.clone(),
-                source_source,
+                source_source.clone(),
                 doc_target.clone(),
                 external_document_target,
             ],
@@ -9325,6 +9336,17 @@ mod tests {
                 None,
             )?,
             "external document endpoint was hidden under source selection",
+        )?;
+        require(
+            !store.repository_graph_adjacency_is_empty_filtered(
+                source_source.key(),
+                RepositoryGraphDirection::Outbound,
+                calls,
+                ConfidenceClass::Exact,
+                ContentSelection::Source,
+                None,
+            )?,
+            "external non-document endpoint was hidden under source selection",
         )?;
         Ok(())
     }
