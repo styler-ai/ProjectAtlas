@@ -4705,6 +4705,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         )
         .into());
     }
+    if release.matches("cargo test --locked --release --all-features -p projectatlas-cli")
+        .count()
+        != 2
+    {
+        return Err(io::Error::other(
+            "Unix and Windows packaged contract runners must compile all feature-gated contracts",
+        )
+        .into());
+    }
     let declared_channel = toolchain
         .lines()
         .find(|line| line.trim_start().starts_with("channel ="))

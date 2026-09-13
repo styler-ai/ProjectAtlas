@@ -240,7 +240,7 @@ jobs:
 
       - name: Build packaged contract runner
         run: |
-          cargo test --locked --release -p projectatlas-cli \
+          cargo test --locked --release --all-features -p projectatlas-cli \
             --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
             --test e2e_worktrees --test e2e_maintenance --no-run
           mkdir -p contract-artifacts
@@ -348,7 +348,7 @@ jobs:
       - name: Build packaged contract runner
         shell: pwsh
         run: |
-          cargo test --locked --release -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
+           cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
           foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
