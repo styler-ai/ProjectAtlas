@@ -2045,6 +2045,86 @@ fn entrypoint_profile_rejects_generation_change_after_empty_candidate_page()
 }
 
 #[test]
+fn entrypoint_profile_rejects_purpose_change_after_empty_candidate_page()
+-> Result<(), Box<dyn Error>> {
+    let query = || -> Result<RelationAnalysisQuery, Box<dyn Error>> {
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(8),
+            Some(8),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "empty-candidate-purpose-stale".to_string(),
+            anchors: vec![
+                RelationAnchor::File {
+                    file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+                },
+                RelationAnchor::File {
+                    file: RepositoryFilePath::new(Path::new("src/d.rs"))?,
+                },
+            ],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        Ok(query)
+    };
+
+    let (_temp, store) = terminal_entrypoint_store(false)?;
+    let positive = fitted_report(&store, &query()?)?;
+    require(
+        positive.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.unreachable_candidates == 0
+        }),
+        "the empty candidate page positive control was not complete",
+    )?;
+
+    let (temp, stale_store) = terminal_entrypoint_store(false)?;
+    let root = temp.path().join("terminal-entrypoint");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let revised = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let revised_for_observer = Rc::clone(&revised);
+    let stale_query = query()?;
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::CandidateEnumeration
+                && !revised_for_observer.replace(true)
+                && let Some(writer) = writer_for_observer.borrow_mut().take()
+            {
+                drop(writer.set_purpose(
+                    "src/a.rs",
+                    "purpose changed after candidate enumeration",
+                    PurposeSource::Agent,
+                ));
+            }
+        },
+        || load_relation_analysis(&stale_store, &stale_query, None),
+    );
+    require(
+        revised.get()
+            && matches!(
+                stale,
+                Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint authored purpose revision"
+                })
+            ),
+        "empty candidate enumeration did not reject a purpose revision transition",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_rejects_generation_change_after_terminal_probe() -> Result<(), Box<dyn Error>>
 {
     let (temp, stale_store) = terminal_entrypoint_store(false)?;

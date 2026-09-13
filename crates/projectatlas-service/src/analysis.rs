@@ -2287,6 +2287,13 @@ fn load_entrypoint_profile_draft(
     }
     if complete {
         validate_entrypoint_generation(generation, store.repository_graph_generation())?;
+        if purpose_revision_initialized
+            && store.authored_purpose_revision()? != authored_purpose_revision
+        {
+            return Err(ServiceError::RelationCursorStale {
+                field: "entrypoint authored purpose revision",
+            });
+        }
     }
     let coverage = if complete {
         EntrypointProfileCoverage::Complete
