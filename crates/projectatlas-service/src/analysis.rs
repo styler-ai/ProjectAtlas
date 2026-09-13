@@ -2105,21 +2105,28 @@ fn load_entrypoint_profile_draft(
                                     break;
                                 }
                             }
-                            let candidate_node = match load_entrypoint_terminal_candidate_coverage(
-                                store,
-                                entity,
-                                generation,
-                                budget,
-                                &mut relation_work,
-                                query.relations.content_selection,
-                                control,
-                            )? {
-                                Ok(node) => node,
-                                Err(limit) => {
-                                    complete = false;
-                                    push_limit(&mut reached_limits, limit);
-                                    break;
-                                }
+                            let candidate_node = if let Some(node) = candidate_report_anchor.clone()
+                            {
+                                node
+                            } else {
+                                let node = match load_entrypoint_terminal_candidate_coverage(
+                                    store,
+                                    entity,
+                                    generation,
+                                    budget,
+                                    &mut relation_work,
+                                    query.relations.content_selection,
+                                    control,
+                                )? {
+                                    Ok(node) => node,
+                                    Err(limit) => {
+                                        complete = false;
+                                        push_limit(&mut reached_limits, limit);
+                                        break;
+                                    }
+                                };
+                                candidate_report_anchor = Some(node.clone());
+                                node
                             };
                             if !trusted_node_coverage(&candidate_node, &profile.relations) {
                                 complete = false;
