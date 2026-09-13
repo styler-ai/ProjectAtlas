@@ -3242,9 +3242,13 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
     let report = fitted_report(&store, &query)?;
     require(
         report.entrypoint_profile.as_ref().is_some_and(|profile| {
-            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 2
-        }) && !report.reached_limits.contains(&GraphLimitKind::Edges),
-        "selected terminal probing treated an external endpoint as a pending local edge",
+            profile.coverage == EntrypointProfileCoverage::Partial && profile.reachable == 2
+        }) && report.reached_limits.contains(&GraphLimitKind::Edges)
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "selected terminal probing did not preserve external edge completeness evidence",
     )?;
 
     let (_temp, store) = terminal_entrypoint_store_with_options(
