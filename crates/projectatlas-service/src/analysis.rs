@@ -1814,6 +1814,23 @@ fn load_entrypoint_profile_draft(
                     if let Some(edge) =
                         local_edge(&row.relation, &row.source.entity, row.target.as_ref())
                     {
+                        let edge_bytes = u64::try_from(edge.source.len())
+                            .unwrap_or(u64::MAX)
+                            .checked_add(u64::try_from(edge.target.len()).unwrap_or(u64::MAX))
+                            .and_then(|bytes| {
+                                bytes.checked_add(std::mem::size_of::<LocalEdge>() as u64)
+                            })
+                            .ok_or_else(entrypoint_work_overflow)?;
+                        let retained_edge_bytes = relation_work
+                            .intermediate_bytes
+                            .checked_add(edge_bytes)
+                            .ok_or_else(entrypoint_work_overflow)?;
+                        if retained_edge_bytes > budget.intermediate_bytes() {
+                            complete = false;
+                            push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                            break 'profile;
+                        }
+                        relation_work.intermediate_bytes = retained_edge_bytes;
                         edges.push(edge);
                     }
                 }

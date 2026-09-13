@@ -1182,6 +1182,69 @@ fn entrypoint_pruned_sidecar_overflow_stays_inconclusive() -> Result<(), Box<dyn
 }
 
 #[test]
+fn entrypoint_local_edge_state_stays_within_the_intermediate_budget() -> Result<(), Box<dyn Error>>
+{
+    let (_temp, store, anchors, expected_edges) = long_local_edge_entrypoint_store(20)?;
+    let budgets = [
+        64 * 1_024_u64,
+        96 * 1_024,
+        128 * 1_024,
+        160 * 1_024,
+        192 * 1_024,
+        256 * 1_024,
+        384 * 1_024,
+        512 * 1_024,
+    ];
+    for intermediate_bytes in budgets {
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.include_occurrences = false;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(100),
+            Some(100),
+            Some(100),
+            Some(100),
+            Some(intermediate_bytes),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "local-edge-state-budget".to_string(),
+            anchors: anchors.clone(),
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        let Ok(draft) = load_relation_analysis(&store, &query, None) else {
+            continue;
+        };
+        let Ok((report, _encoded)) = draft.fit_output::<_, ServiceError, _>(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        }) else {
+            continue;
+        };
+        if report.work.analyzed_edges < expected_edges
+            && report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+        {
+            require(
+                report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                    profile.coverage == EntrypointProfileCoverage::Partial
+                        && profile.unreachable_candidates == 0
+                }) && report
+                    .findings
+                    .iter()
+                    .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+                    && report.work.peak_intermediate_bytes <= intermediate_bytes,
+                "retained entrypoint local-edge state escaped its aggregate byte budget",
+            )?;
+            return Ok(());
+        }
+    }
+    Err("no budget exercised bounded local-edge state retention".into())
+}
+
+#[test]
 fn entrypoint_profile_rechecks_terminal_frontier_at_exact_edge_limit() -> Result<(), Box<dyn Error>>
 {
     let (_temp, store) = terminal_entrypoint_store(false)?;
@@ -6778,6 +6841,108 @@ fn symbol_pruned_relation_overflow_store(
     Ok((
         temp,
         AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
+}
+
+fn long_local_edge_entrypoint_store(
+    anchor_count: usize,
+) -> Result<(tempfile::TempDir, AtlasStore, Vec<RelationAnchor>, u32), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("local-edge-state-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/a.rs"), "fn entry() {}\n")?;
+    fs::write(root.join("src/b.rs"), "fn target() {}\n")?;
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("local edge state project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let symbol = |file: &str, name: &str, parent: &str, signature: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::Symbol {
+                symbol: SymbolSelector {
+                    file: RepositoryFilePath::new(Path::new(file))?,
+                    name: GraphIdentityText::new(name)?,
+                    kind: SymbolKind::Function,
+                    parent: Some(GraphIdentityText::new(parent)?),
+                    signature: GraphIdentityText::new(signature)?,
+                },
+            },
+            generation,
+        )
+    };
+    let target = symbol("src/b.rs", "target", "Target", "fn target()")?;
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let mut entities = Vec::with_capacity(anchor_count.saturating_add(1));
+    let mut anchors = Vec::with_capacity(anchor_count);
+    let mut relations = Vec::with_capacity(anchor_count);
+    for index in 0..anchor_count {
+        let name = format!("entry_{index}");
+        let parent = format!("AnchorParent::{index}::{}", "p".repeat(600));
+        let signature = format!("fn entry_{index}({})", "s".repeat(600));
+        let entity = symbol("src/a.rs", &name, &parent, &signature)?;
+        anchors.push(RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            name,
+            symbol_kind: Some(SymbolKind::Function),
+            parent: Some(parent),
+            signature: Some(signature),
+        });
+        relations.push(LogicalRelation::new(
+            &entity,
+            calls,
+            RelationResolution::resolved(&target)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+        entities.push(entity);
+    }
+    entities.push(target);
+    let coverage = ["src/a.rs", "src/b.rs"]
+        .into_iter()
+        .map(|path| {
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(path))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut publication = store.begin_index_publication("local-edge-state-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    publication.upsert_scan_node_batch(&[
+        test_node("src/a.rs", "src/a.rs"),
+        test_node("src/b.rs", "src/b.rs"),
+    ])?;
+    publication.upsert_file_content_classification_batch(&[
+        projectatlas_db::FileContentClassification {
+            path: "src/a.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+        projectatlas_db::FileContentClassification {
+            path: "src/b.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+    ])?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+        anchors,
+        u32::try_from(anchor_count)?,
     ))
 }
 
