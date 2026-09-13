@@ -723,8 +723,6 @@ impl RelationAnalysisDraft {
         check_control(Some(&self.control)).map_err(E::from)?;
         #[cfg(test)]
         analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OutputRendering);
-        let original_report_bytes =
-            serialized_bytes_controlled(&self.report, Some(&self.control)).map_err(E::from)?;
         let mut candidate = self.report;
         let mut encoded = encode(&candidate, &self.control)?;
         for _ in 0..8 {
@@ -736,9 +734,8 @@ impl RelationAnalysisDraft {
             })?;
             let candidate_report_bytes =
                 serialized_bytes_controlled(&candidate, Some(&self.control)).map_err(E::from)?;
-            let fitting_peak = original_report_bytes
-                .checked_add(candidate_report_bytes)
-                .and_then(|bytes| bytes.checked_add(rendered))
+            let fitting_peak = candidate_report_bytes
+                .checked_add(rendered)
                 .ok_or_else(|| {
                     E::from(ServiceError::InvalidInput(
                         "entrypoint output fitting byte count overflowed".to_string(),

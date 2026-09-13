@@ -1,7 +1,7 @@
 use super::analysis_test_observer::{AnalysisPhaseEvent, observe_analysis_phase};
 use super::*;
 use projectatlas_core::graph::{
-    Completeness, CoverageRecord, CoverageScope, CoverageState, ExternalSelector,
+    Completeness, ConfidenceClass, CoverageRecord, CoverageScope, CoverageState, ExternalSelector,
     GraphIdentityText, LogicalRelation, PackageSelector, RelationOccurrence, RelationResolution,
     RepositoryFilePath, RepositoryNodePath, SourceSpan, SymbolSelector,
 };
@@ -958,6 +958,225 @@ fn entrypoint_profile_accounts_for_pruned_relation_evidence() -> Result<(), Box<
                 .iter()
                 .all(|finding| finding.status == AnalysisStatus::Inconclusive),
         "pruned relation occurrences were not bounded as incomplete evidence",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_output_fitting_charges_the_moved_report_once() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "moved-report-fitting".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+
+    let draft = load_relation_analysis(&store, &query, None)?;
+    let construction_peak = draft.candidate_report().work.peak_intermediate_bytes;
+    let (wide_report, wide_encoded) =
+        draft.fit_output::<_, ServiceError, _>(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        })?;
+    let moved_report_fitting_peak = serialized_bytes_controlled(&wide_report, None)?
+        .checked_add(wide_encoded.len() as u64)
+        .ok_or("moved report fitting peak overflowed")?;
+    let bounded_budget = construction_peak.max(moved_report_fitting_peak);
+
+    let mut bounded = load_relation_analysis(&store, &query, None)?;
+    bounded.budget =
+        bounded
+            .budget
+            .with_aggregate_limits(None, None, None, None, Some(bounded_budget), None)?;
+    let (report, encoded) = bounded.fit_output::<_, ServiceError, _>(|report, _control| {
+        serde_json::to_vec(report).map_err(ServiceError::from)
+    })?;
+    require(
+        report.work.peak_intermediate_bytes <= bounded_budget
+            && report.work.rendered_output_bytes == encoded.len() as u64,
+        "entrypoint output fitting double-charged the moved report",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_pruned_sidecar_overflow_stays_inconclusive() -> Result<(), Box<dyn Error>> {
+    let entry_name = "entry".to_string();
+    let entry_parent = "p".repeat(3_500);
+    let entry_signature = "s".repeat(3_500);
+    let entry_anchor = RelationAnchor::Symbol {
+        file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        name: entry_name.clone(),
+        symbol_kind: Some(SymbolKind::Function),
+        parent: Some(entry_parent.clone()),
+        signature: Some(entry_signature.clone()),
+    };
+    let query_for =
+        |intermediate_bytes, relations| -> Result<RelationAnalysisQuery, Box<dyn Error>> {
+            let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+            query.relations.anchor = entry_anchor.clone();
+            query.relations.resolution = RelationResolutionFilter::Any;
+            query.relations.include_occurrences = true;
+            query.relations.budget = query.relations.budget.with_aggregate_limits(
+                Some(100),
+                Some(20),
+                Some(20),
+                Some(100),
+                Some(intermediate_bytes),
+                None,
+            )?;
+            query.include_communities = false;
+            query.include_cycles = false;
+            query.entrypoint_profile = Some(EntrypointProfile {
+                name: "pruned-sidecar-overflow".to_string(),
+                anchors: vec![entry_anchor.clone()],
+                relations,
+            });
+            Ok(query)
+        };
+    let budgets = [
+        64 * 1_024_u64,
+        96 * 1_024,
+        128 * 1_024,
+        192 * 1_024,
+        256 * 1_024,
+    ];
+    let run =
+        |include_candidate_relation| -> Result<(RelationAnalysisReport, u64), Box<dyn Error>> {
+            let (_temp, store) = symbol_pruned_relation_overflow_store(
+                include_candidate_relation,
+                &entry_name,
+                &entry_parent,
+                &entry_signature,
+            )?;
+            for budget in budgets
+                .into_iter()
+                .filter(|budget| !include_candidate_relation || *budget > 64 * 1_024)
+            {
+                let relations = if include_candidate_relation {
+                    vec![GraphRelationKind::Legacy(RelationKind::Calls)]
+                } else {
+                    GraphRelationKind::ALL.to_vec()
+                };
+                let query = query_for(budget, relations)?;
+                let candidate_traversal_seen = Rc::new(Cell::new(false));
+                let observer = Rc::clone(&candidate_traversal_seen);
+                let draft_result = if include_candidate_relation {
+                    observe_analysis_phase(
+                        move |event| {
+                            if event == AnalysisPhaseEvent::CandidateTraversal {
+                                observer.set(true);
+                            }
+                        },
+                        || load_relation_analysis(&store, &query, None),
+                    )
+                } else {
+                    load_relation_analysis(&store, &query, None)
+                };
+                let Ok(draft) = draft_result else {
+                    continue;
+                };
+                let Ok((report, _encoded)) =
+                    draft.fit_output::<_, ServiceError, _>(|report, _control| {
+                        serde_json::to_vec(report).map_err(ServiceError::from)
+                    })
+                else {
+                    continue;
+                };
+                if report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                    profile.coverage == EntrypointProfileCoverage::Partial
+                        && profile.unreachable_candidates == 0
+                }) && report
+                    .reached_limits
+                    .contains(&GraphLimitKind::IntermediateBytes)
+                    && report
+                        .findings
+                        .iter()
+                        .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+                    && report.work.peak_intermediate_bytes <= budget
+                    && (!include_candidate_relation || candidate_traversal_seen.get())
+                {
+                    return Ok((report, budget));
+                }
+            }
+            Err("no bounded budget exercised pruned sidecar overflow".into())
+        };
+
+    let (_direct, _direct_budget) = run(false)?;
+    let (_direct_temp, direct_store) =
+        symbol_pruned_relation_overflow_store(false, &entry_name, &entry_parent, &entry_signature)?;
+    let mut direct_detail = None;
+    for budget in budgets {
+        let mut direct_query = query_for(budget, GraphRelationKind::ALL.to_vec())?;
+        direct_query.relations.relation = Some(GraphRelationKind::Legacy(RelationKind::Calls));
+        if let Ok(detail) = load_detailed_relations(&direct_store, &direct_query.relations, None)
+            && detail.pruned_evidence_truncated
+        {
+            direct_detail = Some((detail, budget));
+            break;
+        }
+    }
+    let (direct_detail, direct_detail_budget) =
+        direct_detail.ok_or("no direct sidecar overflow")?;
+    require(
+        direct_detail.pruned_evidence_truncated
+            && direct_detail
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && direct_detail.pruned_relations.is_empty()
+            && direct_detail.work.intermediate_bytes <= direct_detail_budget,
+        "direct detailed relation sidecar overflow was not typed and bounded",
+    )?;
+    let (candidate, candidate_budget) = run(true)?;
+    let (_candidate_temp, candidate_store) =
+        symbol_pruned_relation_overflow_store(true, &entry_name, &entry_parent, &entry_signature)?;
+    let candidate_traversal_seen = Rc::new(Cell::new(false));
+    let candidate_traversal_observer = Rc::clone(&candidate_traversal_seen);
+    let candidate_query = query_for(
+        candidate_budget,
+        vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    )?;
+    let candidate_draft = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::CandidateTraversal {
+                candidate_traversal_observer.set(true);
+            }
+        },
+        || load_relation_analysis(&candidate_store, &candidate_query, None),
+    )?;
+    let (candidate_checked, _encoded) =
+        candidate_draft.fit_output::<_, ServiceError, _>(|report, _control| {
+            serde_json::to_vec(report).map_err(ServiceError::from)
+        })?;
+    require(
+        candidate_traversal_seen.get(),
+        "candidate-validation sidecar overflow did not traverse the candidate path",
+    )?;
+    require(
+        candidate
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial),
+        "candidate-validation sidecar overflow was not partial",
+    )?;
+    require(
+        candidate_checked
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && candidate_checked
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes)
+            && candidate_checked
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive),
+        "candidate-validation sidecar overflow did not traverse the candidate path",
     )?;
     Ok(())
 }
@@ -6290,6 +6509,28 @@ fn pruned_relation_entrypoint_store(
     completeness: Completeness,
     occurrence_count: u8,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    pruned_relation_entrypoint_store_with_candidate(completeness, occurrence_count, false)
+}
+
+fn pruned_relation_entrypoint_store_with_candidate(
+    completeness: Completeness,
+    occurrence_count: u8,
+    include_candidate_relation: bool,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    pruned_relation_entrypoint_store_with_kinds(
+        completeness,
+        occurrence_count,
+        include_candidate_relation,
+        &[GraphRelationKind::Legacy(RelationKind::Calls)],
+    )
+}
+
+fn pruned_relation_entrypoint_store_with_kinds(
+    completeness: Completeness,
+    occurrence_count: u8,
+    include_candidate_relation: bool,
+    relation_kinds: &[GraphRelationKind],
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("pruned-relation-entrypoint");
     fs::create_dir_all(root.join("src"))?;
@@ -6321,6 +6562,40 @@ fn pruned_relation_entrypoint_store(
         completeness,
         generation,
     )?;
+    let mut relations = relation_kinds
+        .iter()
+        .copied()
+        .filter(|kind| *kind != calls)
+        .map(|kind| {
+            LogicalRelation::new(
+                &a,
+                kind,
+                RelationResolution::resolved(&a)?,
+                ConfidenceClass::Exact,
+                completeness,
+                generation,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    relations.insert(0, relation.clone());
+    if include_candidate_relation {
+        relations.extend(
+            relation_kinds
+                .iter()
+                .copied()
+                .map(|kind| {
+                    LogicalRelation::new(
+                        &b,
+                        kind,
+                        RelationResolution::resolved(&b)?,
+                        ConfidenceClass::Exact,
+                        Completeness::Complete,
+                        generation,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
     let occurrences = (0..occurrence_count)
         .map(|index| {
             RelationOccurrence::new(
@@ -6379,10 +6654,125 @@ fn pruned_relation_entrypoint_store(
     publication.replace_repository_graph(
         project,
         &entities,
-        &[relation],
+        &relations,
         &occurrences,
         &coverage,
     )?;
+    publication.complete()?;
+    drop(store);
+    Ok((
+        temp,
+        AtlasStore::open_read_only_for_project(&database, &root)?,
+    ))
+}
+
+fn symbol_pruned_relation_overflow_store(
+    include_candidate_relation: bool,
+    entry_name: &str,
+    entry_parent: &str,
+    entry_signature: &str,
+) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("symbol-pruned-relation-entrypoint");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join("src/a.rs"), "fn entry() {}\n")?;
+    fs::write(root.join("src/b.rs"), "fn candidate() {}\n")?;
+    let database = root.join("projectatlas.db");
+    let mut store = AtlasStore::open_for_project(&database, &root)?;
+    let project = store
+        .project_instance_id()?
+        .ok_or("symbol pruned relation project identity missing")?;
+    let generation = IndexGeneration::new(1);
+    let symbol = |file: &str, name: &str, parent: &str, signature: &str| {
+        GraphEntity::new(
+            project,
+            EntitySelector::Symbol {
+                symbol: SymbolSelector {
+                    file: RepositoryFilePath::new(Path::new(file))?,
+                    name: GraphIdentityText::new(name)?,
+                    kind: SymbolKind::Function,
+                    parent: Some(GraphIdentityText::new(parent)?),
+                    signature: GraphIdentityText::new(signature)?,
+                },
+            },
+            generation,
+        )
+    };
+    let entry = symbol("src/a.rs", entry_name, entry_parent, entry_signature)?;
+    let candidate = symbol(
+        "src/b.rs",
+        "candidate",
+        &"q".repeat(3_500),
+        &"t".repeat(3_500),
+    )?;
+    let all = GraphRelationKind::ALL;
+    let anchor_kinds = if include_candidate_relation {
+        &[][..]
+    } else {
+        &all[..]
+    };
+    let candidate_kinds = if include_candidate_relation {
+        &all[..]
+    } else {
+        &[][..]
+    };
+    let relation = |source: &GraphEntity, kind| {
+        LogicalRelation::new(
+            source,
+            kind,
+            RelationResolution::resolved(source)?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )
+    };
+    let relations = anchor_kinds
+        .iter()
+        .copied()
+        .map(|kind| relation(&entry, kind))
+        .chain(
+            candidate_kinds
+                .iter()
+                .copied()
+                .map(|kind| relation(&candidate, kind)),
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    let entities = vec![entry, candidate];
+    let coverage = ["src/a.rs", "src/b.rs"]
+        .into_iter()
+        .map(|path| {
+            CoverageRecord::new(
+                CoverageScope::Path {
+                    path: RepositoryNodePath::new(Path::new(path))?,
+                },
+                None,
+                CoverageState::Complete,
+                1,
+                0,
+                generation,
+                None,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut publication = store.begin_index_publication("symbol-pruned-relation-entrypoint")?;
+    publication.begin_scan_replacement()?;
+    publication.upsert_scan_node_batch(&[
+        test_node("src/a.rs", "src/a.rs"),
+        test_node("src/b.rs", "src/b.rs"),
+    ])?;
+    publication.upsert_file_content_classification_batch(&[
+        projectatlas_db::FileContentClassification {
+            path: "src/a.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+        projectatlas_db::FileContentClassification {
+            path: "src/b.rs".to_string(),
+            classification: ContentClassification::Source,
+        },
+    ])?;
+    publication.finish_scan_replacement()?;
+    publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
     publication.complete()?;
     drop(store);
     Ok((
