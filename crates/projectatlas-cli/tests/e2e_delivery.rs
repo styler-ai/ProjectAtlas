@@ -4495,7 +4495,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         let platform_contracts: &[&str] = if job == "Unix" {
             &[
                 "set -euo pipefail",
-                "runtime=\"$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas\"",
+                "runtime=\"${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}\"",
                 "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
                 "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
             ]
@@ -4687,6 +4687,11 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "expected_runtime_digest",
         "[ \"$archive_digest\" != \"$expected_archive_digest\" ]",
         "[ \"$runtime_digest\" != \"$expected_runtime_digest\" ]",
+        "PROJECTATLAS_RELEASE_BASE_URL=\"http://127.0.0.1:8765\"",
+        "installed_runtime=\"$HOME/.local/bin/projectatlas\"",
+        "installed_runtime_digest",
+        "PROJECTATLAS_PACKAGED_RUNTIME=$installed_runtime",
+        "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$installed_runtime\"",
     ] {
         if !unix_prepublish.contains(required) {
             return Err(io::Error::other(format!(
@@ -4708,6 +4713,12 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     if digest_gate >= installer_invocation || digest_gate >= runtime_invocation {
         return Err(io::Error::other(
             "Unix prepublish must verify the packaged digest before installation or execution",
+        )
+        .into());
+    }
+    if unix_prepublish.contains("PROJECTATLAS_RUNTIME_PATH=\"$runtime\"") {
+        return Err(io::Error::other(
+            "Unix prepublish must exercise the installer's selected runtime path",
         )
         .into());
     }

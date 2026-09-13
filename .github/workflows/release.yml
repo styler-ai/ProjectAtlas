@@ -556,25 +556,57 @@ jobs:
             echo "Packaged candidate digest does not match its authoritative manifest." >&2
             exit 1
           fi
+          local_release_root="$RUNNER_TEMP/projectatlas-local-release"
+          local_release_dir="$local_release_root/$RELEASE_VERSION"
+          mkdir -p "$local_release_dir"
+          cp "$archive" "$local_release_dir/$archive_name"
+          printf '%s  %s\n' "$archive_digest" "$archive_name" > "$local_release_dir/SHA256SUMS"
+          release_server_log="$RUNNER_TEMP/projectatlas-release-server.log"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$local_release_root" > "$release_server_log" 2>&1 &
+          release_server_pid=$!
+          trap 'kill "$release_server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if curl --fail --silent "http://127.0.0.1:8765/$RELEASE_VERSION/SHA256SUMS" > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 50 ]; then
+              cat "$release_server_log" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
           project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
           if [ -e "$project_root" ]; then
             echo "Packaged lifecycle project root was not clean: $project_root" >&2
             exit 1
           fi
           mkdir -p "$project_root"
-          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RELEASE_BASE_URL="http://127.0.0.1:8765" \
             bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
-          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
+          installed_runtime="$HOME/.local/bin/projectatlas"
+          if [ ! -x "$installed_runtime" ]; then
+            echo "Packaged runtime was not installed at the selected user path: $installed_runtime" >&2
+            exit 1
+          fi
+          installed_runtime_digest="$("${digest_command[@]}" "$installed_runtime" | awk '{print $1}')"
+          if [ "$installed_runtime_digest" != "$expected_runtime_digest" ]; then
+            echo "Installed packaged runtime digest does not match its authoritative manifest." >&2
+            exit 1
+          fi
+          echo "PROJECTATLAS_PACKAGED_RUNTIME=$installed_runtime" >> "$GITHUB_ENV"
+          PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
           {
             echo
             echo "- packaged archive: $archive"
             echo "- packaged archive SHA-256: $archive_digest"
             echo "- extracted runtime: $runtime"
             echo "- extracted runtime SHA-256: $runtime_digest"
+            echo "- installed runtime: $installed_runtime"
+            echo "- installed runtime SHA-256: $installed_runtime_digest"
           } >> "$GITHUB_STEP_SUMMARY"
-          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" config --print)
-          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" ignore list)
-          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$runtime" python3 <<'PY'
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$installed_runtime" python3 <<'PY'
           import json
           import os
           from pathlib import Path
@@ -631,7 +663,7 @@ jobs:
               echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
               exit 1
             fi
-            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$installed_runtime" \
             PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
               "$contract" "$test" --exact --include-ignored --nocapture
           done
@@ -641,7 +673,7 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
           contract="contract-artifacts/projectatlas-packaged-contract"
           chmod +x "$contract"
           inventory="$("$contract" --list)"
@@ -678,7 +710,7 @@ jobs:
           PROJECTATLAS_NO_TELEMETRY: "1"
         run: |
           set -euo pipefail
-          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
           contract="contract-artifacts/projectatlas-packaged-contract"
           chmod +x "$contract"
           if ! inventory="$("$contract" --list)"; then
