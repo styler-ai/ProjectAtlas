@@ -120,7 +120,7 @@ use projectatlas_core::language::ContentClassification;
 use projectatlas_core::language::ContentSelection;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
 use projectatlas_core::{
-    CanonicalProjectRoot, IndexCancellation, IndexWorkControl, IndexWorkStage,
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkStage,
 };
 #[cfg(test)]
 use projectatlas_db::MAX_FILE_CONTENT_CLASSIFICATION_PATHS;
@@ -1627,7 +1627,19 @@ fn load_entrypoint_profile_draft(
                 analysis_test_observer::notify(
                     analysis_test_observer::AnalysisPhaseEvent::Traversal,
                 );
-                let report = load_detailed_relations(store, &relation_query, control)?;
+                let report = match load_detailed_relations(store, &relation_query, control) {
+                    Ok(report) => report,
+                    Err(ServiceError::Db(DbError::GraphContract(
+                        projectatlas_core::graph::GraphContractError::InvalidLimits {
+                            reason: "graph read decoded bytes exceed the batch budget",
+                        },
+                    ))) => {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                        break 'profile;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if report.generation != generation {
                     return Err(ServiceError::RelationCursorStale {
                         field: "entrypoint graph generation",
@@ -2075,6 +2087,7 @@ fn load_entrypoint_profile_draft(
                     candidate_unretained_keys.extend(candidate_report_unretained_local_keys(
                         &candidate_report,
                         &retained_candidate_keys,
+                        query.relations.content_selection,
                     ));
                     let remaining_candidate_capacity =
                         u32::try_from(retained_candidate_keys.len()).unwrap_or(u32::MAX);
@@ -2691,13 +2704,13 @@ fn protect_reachable_symbol_enclosures(
             let EntitySelector::Symbol { symbol } = entity.selector() else {
                 continue;
             };
-            let parent_name = parent
-                .rsplit_once("::")
-                .or_else(|| parent.rsplit_once('.'))
-                .map_or(parent.as_str(), |(_, name)| name);
-            if symbol.file.as_str() != file
-                || (symbol.name.as_str() != parent && symbol.name.as_str() != parent_name)
-            {
+            let qualified_name_matches = symbol.name.as_str() == parent
+                || symbol.parent.as_ref().is_some_and(|candidate_parent| {
+                    format!("{candidate_parent}::{name}", name = symbol.name.as_str()) == parent
+                        || format!("{candidate_parent}.{name}", name = symbol.name.as_str())
+                            == parent
+                });
+            if symbol.file.as_str() != file || !qualified_name_matches {
                 continue;
             }
             let key = entity.key().canonical_identity().to_string();
@@ -2816,16 +2829,7 @@ fn entrypoint_terminal_adjacency_is_empty(
     )?;
     #[cfg(test)]
     analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::TerminalProbe);
-    let current_generation = store.repository_graph_generation()?.ok_or_else(|| {
-        ServiceError::InvalidInput(
-            "repository graph has no complete generation for entrypoint analysis".to_string(),
-        )
-    })?;
-    if current_generation != generation {
-        return Err(ServiceError::RelationCursorStale {
-            field: "entrypoint graph generation",
-        });
-    }
+    validate_entrypoint_generation(generation, store.repository_graph_generation())?;
     Ok(empty)
 }
 
@@ -2900,16 +2904,7 @@ fn load_entrypoint_terminal_candidate_coverage(
     analysis_test_observer::notify(
         analysis_test_observer::AnalysisPhaseEvent::TerminalCandidateCoverageProbe,
     );
-    let current_generation = store.repository_graph_generation()?.ok_or_else(|| {
-        ServiceError::InvalidInput(
-            "repository graph has no complete generation for entrypoint analysis".to_string(),
-        )
-    })?;
-    if current_generation != generation {
-        return Err(ServiceError::RelationCursorStale {
-            field: "entrypoint graph generation",
-        });
-    }
+    validate_entrypoint_generation(generation, store.repository_graph_generation())?;
     check_control(control)?;
     let mut node = entrypoint_unavailable_node(entity, content_selection);
     node.coverage = batch.page.rows;
@@ -2975,10 +2970,15 @@ fn entrypoint_report_complete(
 fn candidate_report_unretained_local_keys(
     report: &DetailedRelationReport,
     retained_keys: &BTreeSet<String>,
+    content_selection: ContentSelection,
 ) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     let mut retain = |node: &DetailedRelationNode| {
         if !matches!(node.entity.selector(), EntitySelector::External { .. })
+            && (content_selection == ContentSelection::UnspecifiedLegacy
+                || node
+                    .classification
+                    .is_some_and(|classification| content_selection.includes(classification)))
             && !retained_keys.contains(node.entity.key().canonical_identity())
         {
             keys.insert(node.entity.key().canonical_identity().to_string());
@@ -2993,6 +2993,30 @@ fn candidate_report_unretained_local_keys(
         row.path.iter().for_each(&mut retain);
     }
     keys
+}
+
+/// Require one unchanged complete generation at a freshness boundary.
+fn validate_entrypoint_generation(
+    expected: IndexGeneration,
+    current: Result<Option<IndexGeneration>, DbError>,
+) -> ServiceResult<()> {
+    match current {
+        Ok(Some(current)) if current == expected => Ok(()),
+        Ok(Some(_) | None)
+        | Err(
+            DbError::GraphPublicationUnavailable
+            | DbError::GraphRowShape {
+                table: "project_identity",
+                reason: "typed graph generation does not match complete publication",
+            }
+            | DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::GenerationMismatch { .. },
+            ),
+        ) => Err(ServiceError::RelationCursorStale {
+            field: "entrypoint graph generation",
+        }),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Clamp the existing traversal budget to analysis product ceilings.

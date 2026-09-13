@@ -1066,7 +1066,7 @@ fn entrypoint_profile_protects_enclosing_symbols_of_reachable_nested_symbol()
 
 #[test]
 fn entrypoint_profile_protects_qualified_enclosing_symbols() -> Result<(), Box<dyn Error>> {
-    let (_temp, store) = nested_symbol_entrypoint_store_with_options(true, true, true)?;
+    let (_temp, store) = nested_symbol_entrypoint_store_with_options(true, true, true, false)?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
     query.relations.resolution = RelationResolutionFilter::Any;
     query.relations.budget = query.relations.budget.with_aggregate_limits(
@@ -1108,6 +1108,58 @@ fn entrypoint_profile_protects_qualified_enclosing_symbols() -> Result<(), Box<d
                 && profile.unreachable_candidates == 1
         }) && candidate_names == ["unrelated"],
         "qualified reachable nested symbols left an enclosing symbol eligible as an unreachable candidate",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_does_not_overprotect_same_named_qualified_enclosures()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = nested_symbol_entrypoint_store_with_options(true, false, true, true)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(10),
+        Some(10),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "same-named-qualified-enclosures".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+            name: "inner".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: Some("NamespaceOne::Service".to_string()),
+            signature: Some("fn inner()".to_string()),
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let candidate_parents = report
+        .findings
+        .iter()
+        .filter(|finding| finding.status == AnalysisStatus::Candidate)
+        .flat_map(|finding| &finding.nodes)
+        .filter_map(|node| match node.node.entity.selector() {
+            EntitySelector::Symbol { symbol } => Some((
+                symbol.name.as_str(),
+                symbol.parent.as_ref().map(GraphIdentityText::as_str),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 1
+        }) && candidate_parents == [("Service", Some("NamespaceTwo"))],
+        "qualified enclosure protection conflated same-named symbols",
     )?;
     Ok(())
 }
@@ -1906,10 +1958,14 @@ fn entrypoint_profile_rejects_generation_change_after_terminal_probe() -> Result
     );
     require(
         probes.get() == 2
-            && stale
-                .as_ref()
-                .err()
-                .is_some_and(|error| error.to_string().contains("typed graph generation")),
+            && stale.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error,
+                    ServiceError::RelationCursorStale {
+                        field: "entrypoint graph generation"
+                    }
+                )
+            }),
         "candidate terminal probing did not reject a generation transition",
     )?;
     Ok(())
@@ -1961,12 +2017,42 @@ fn entrypoint_profile_rejects_generation_change_after_terminal_candidate_coverag
     );
     require(
         probed.get()
-            && stale
-                .as_ref()
-                .err()
-                .is_some_and(|error| error.to_string().contains("typed graph generation")),
+            && stale.as_ref().err().is_some_and(|error| {
+                matches!(
+                    error,
+                    ServiceError::RelationCursorStale {
+                        field: "entrypoint graph generation"
+                    }
+                )
+            }),
         "terminal candidate coverage did not reject a generation transition",
     )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_generation_recheck_maps_incomplete_publication_to_stale() -> Result<(), Box<dyn Error>>
+{
+    let generation = IndexGeneration::new(1);
+    let cases = vec![
+        Ok(None),
+        Err(DbError::GraphPublicationUnavailable),
+        Err(DbError::GraphRowShape {
+            table: "project_identity",
+            reason: "typed graph generation does not match complete publication",
+        }),
+    ];
+    for current in cases {
+        require(
+            matches!(
+                validate_entrypoint_generation(generation, current),
+                Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation"
+                })
+            ),
+            "incomplete graph publication escaped the typed stale boundary",
+        )?;
+    }
     Ok(())
 }
 
@@ -2572,6 +2658,46 @@ fn entrypoint_profile_translates_candidate_decoded_byte_exhaustion() -> Result<(
 }
 
 #[test]
+fn entrypoint_profile_translates_reachable_decoded_byte_exhaustion() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_large_reachable_page()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(50),
+        Some(50),
+        Some(100),
+        Some(96 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "reachable-decoded-byte-boundary".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Partial
+                && profile.unreachable_candidates == 0
+        }) && report
+            .reached_limits
+            .contains(&GraphLimitKind::IntermediateBytes)
+            && report
+                .findings
+                .iter()
+                .all(|finding| finding.status == AnalysisStatus::Inconclusive)
+            && report.work.peak_intermediate_bytes <= query.relations.budget.intermediate_bytes(),
+        "reachable decoded-byte exhaustion escaped as an error or exceeded its budget",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_candidate_page_filters_content_before_truncation_sentinel()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store_with_external_candidate()?;
@@ -2891,6 +3017,53 @@ fn entrypoint_profile_keeps_cross_class_document_targets_out_of_frontier()
         }) && !report.reached_limits.contains(&GraphLimitKind::Depth)
             && !source_target_present,
         "documentation entrypoint traversal admitted a cross-class source target",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_excludes_cross_class_candidate_endpoints_from_capacity()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = analysis_store_with_document_relation()?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.content_selection = ContentSelection::Documentation;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(2),
+        Some(2),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "documentation-candidate-cross-class-capacity".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("docs/guide.md"))?,
+        }],
+        relations: vec![GraphRelationKind::Extended(ExtendedRelationKind::Documents)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let candidate_present = report.findings.iter().any(|finding| {
+        finding.status == AnalysisStatus::Candidate
+            && finding.nodes.iter().any(|node| {
+                matches!(
+                    node.node.entity.selector(),
+                    EntitySelector::File { path } if path.as_str() == "docs/candidate.md"
+                )
+            })
+    });
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 1
+        }) && candidate_present
+            && !report.reached_limits.contains(&GraphLimitKind::Nodes)
+            && !report.reached_limits.contains(&GraphLimitKind::Visited),
+        "a cross-class candidate endpoint consumed selected-content capacity",
     )?;
     Ok(())
 }
@@ -5505,18 +5678,20 @@ fn branching_entrypoint_store(
 }
 
 fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    nested_symbol_entrypoint_store_with_options(false, false, false)
+    nested_symbol_entrypoint_store_with_options(false, false, false, false)
 }
 
 fn nested_symbol_entrypoint_store_with_unrelated_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    nested_symbol_entrypoint_store_with_options(true, true, false)
+    nested_symbol_entrypoint_store_with_options(true, true, false, false)
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn nested_symbol_entrypoint_store_with_options(
     include_enclosing: bool,
     include_unrelated: bool,
     qualified_parents: bool,
+    include_same_named_qualified: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("nested-symbol-entrypoint");
@@ -5528,10 +5703,22 @@ fn nested_symbol_entrypoint_store_with_options(
         .project_instance_id()?
         .ok_or("nested symbol project identity missing")?;
     let generation = IndexGeneration::new(1);
-    let inner_parent = if qualified_parents {
+    let inner_parent = if include_same_named_qualified {
+        "NamespaceOne::Service"
+    } else if qualified_parents {
         "Ancestor::Outer"
     } else {
         "Outer"
+    };
+    let outer_name = if include_same_named_qualified {
+        "Service"
+    } else {
+        "Outer"
+    };
+    let outer_parent = if include_same_named_qualified {
+        "NamespaceOne"
+    } else {
+        "Ancestor"
     };
     let inner = GraphEntity::new(
         project,
@@ -5551,10 +5738,10 @@ fn nested_symbol_entrypoint_store_with_options(
         EntitySelector::Symbol {
             symbol: SymbolSelector {
                 file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
-                name: GraphIdentityText::new("Outer")?,
+                name: GraphIdentityText::new(outer_name)?,
                 kind: SymbolKind::Class,
-                parent: Some(GraphIdentityText::new("Ancestor")?),
-                signature: GraphIdentityText::new("class Outer")?,
+                parent: Some(GraphIdentityText::new(outer_parent)?),
+                signature: GraphIdentityText::new(format!("class {outer_name}"))?,
             },
         },
         generation,
@@ -5572,6 +5759,23 @@ fn nested_symbol_entrypoint_store_with_options(
         },
         generation,
     )?;
+    let other_outer = include_same_named_qualified
+        .then(|| {
+            GraphEntity::new(
+                project,
+                EntitySelector::Symbol {
+                    symbol: SymbolSelector {
+                        file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+                        name: GraphIdentityText::new("Service")?,
+                        kind: SymbolKind::Class,
+                        parent: Some(GraphIdentityText::new("NamespaceTwo")?),
+                        signature: GraphIdentityText::new("class Service")?,
+                    },
+                },
+                generation,
+            )
+        })
+        .transpose()?;
     let unrelated = include_unrelated
         .then(|| {
             GraphEntity::new(
@@ -5607,7 +5811,14 @@ fn nested_symbol_entrypoint_store_with_options(
     publication.finish_scan_replacement()?;
     let mut entities = vec![inner];
     if include_enclosing {
-        entities.extend([outer, ancestor]);
+        entities.push(outer);
+        if include_same_named_qualified {
+            if let Some(other_outer) = other_outer {
+                entities.push(other_outer);
+            }
+        } else {
+            entities.push(ancestor);
+        }
     }
     if let Some(unrelated) = unrelated {
         entities.push(unrelated);
@@ -5661,6 +5872,11 @@ fn analysis_store_with_large_candidates() -> Result<(tempfile::TempDir, AtlasSto
     analysis_store_with_options(true, None, false, 20, false, None, None, None)
 }
 
+fn analysis_store_with_large_reachable_page()
+-> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    analysis_store_with_options(true, None, false, 20, false, None, None, Some("reachable"))
+}
+
 fn analysis_store_with_document_relation() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>>
 {
     analysis_store_with_options(true, None, false, 0, true, None, None, None)
@@ -5697,6 +5913,9 @@ fn analysis_store_with_options(
     fs::write(root.join("src/b.rs"), "pub fn b() {}\n")?;
     fs::write(root.join("tools/c.rs"), "pub fn c() {}\n")?;
     fs::write(root.join("docs/guide.md"), "# Guide\n")?;
+    if document_relation {
+        fs::write(root.join("docs/candidate.md"), "# Candidate\n")?;
+    }
     let database = root.join("projectatlas.db");
     let mut store = AtlasStore::open_for_project(&database, &root)?;
     let project = store
@@ -5716,6 +5935,9 @@ fn analysis_store_with_options(
     let b = entity("src/b.rs")?;
     let c = entity("tools/c.rs")?;
     let guide = entity("docs/guide.md")?;
+    let candidate_guide = document_relation
+        .then(|| entity("docs/candidate.md"))
+        .transpose()?;
     let extra_target = target_selector
         .map(|selector| GraphEntity::new(project, selector, generation))
         .transpose()?;
@@ -5796,6 +6018,7 @@ fn analysis_store_with_options(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let secondary_large_candidates = secondary_large_candidate_path
+        .filter(|path| *path != "reachable")
         .map(|path| {
             (0..large_candidate_count)
                 .map(|index| {
@@ -5871,6 +6094,15 @@ fn analysis_store_with_options(
             generation,
         )?,
     ];
+    if secondary_large_candidate_path == Some("reachable") {
+        for candidate in &large_candidates {
+            relations.push(relation(
+                &a,
+                candidate,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+            )?);
+        }
+    }
     if document_relation {
         relations.push(LogicalRelation::new(
             &guide,
@@ -5880,6 +6112,16 @@ fn analysis_store_with_options(
             Completeness::Complete,
             generation,
         )?);
+        if let Some(candidate_guide) = candidate_guide.as_ref() {
+            relations.push(LogicalRelation::new(
+                candidate_guide,
+                GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                RelationResolution::resolved(&a)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
     }
     if let Some(target) = extra_target.as_ref() {
         let relation = if matches!(target.selector(), EntitySelector::External { .. }) {
@@ -5931,6 +6173,9 @@ fn analysis_store_with_options(
         }
     }
     let mut coverage_paths = vec!["src/a.rs", "src/b.rs", "tools/c.rs", "docs/guide.md"];
+    if candidate_guide.is_some() {
+        coverage_paths.push("docs/candidate.md");
+    }
     if extra_target
         .as_ref()
         .is_some_and(|target| matches!(target.selector(), EntitySelector::Folder { .. }))
@@ -6017,7 +6262,7 @@ fn analysis_store_with_options(
     }
     let mut publication = store.begin_index_publication("analysis-service")?;
     publication.begin_scan_replacement()?;
-    publication.upsert_scan_node_batch(&[
+    let mut scan_nodes = vec![
         test_folder_node("src"),
         test_folder_node("tools"),
         test_folder_node("docs"),
@@ -6025,8 +6270,17 @@ fn analysis_store_with_options(
         test_node("src/b.rs", "hash-b"),
         test_node_in("tools/c.rs", "tools", "hash-c"),
         classified_test_node("docs/guide.md", "hash-guide", ".md", "markdown"),
-    ])?;
-    publication.upsert_file_content_classification_batch(&[
+    ];
+    if candidate_guide.is_some() {
+        scan_nodes.push(classified_test_node(
+            "docs/candidate.md",
+            "hash-candidate",
+            ".md",
+            "markdown",
+        ));
+    }
+    publication.upsert_scan_node_batch(&scan_nodes)?;
+    let mut classifications = vec![
         projectatlas_db::FileContentClassification {
             path: "src/a.rs".to_string(),
             classification: ContentClassification::Source,
@@ -6043,7 +6297,14 @@ fn analysis_store_with_options(
             path: "docs/guide.md".to_string(),
             classification: ContentClassification::Documentation,
         },
-    ])?;
+    ];
+    if candidate_guide.is_some() {
+        classifications.push(projectatlas_db::FileContentClassification {
+            path: "docs/candidate.md".to_string(),
+            classification: ContentClassification::Documentation,
+        });
+    }
+    publication.upsert_file_content_classification_batch(&classifications)?;
     publication.finish_scan_replacement()?;
     publication.replace_symbol_graph(&SymbolGraph {
         path: "src/a.rs".to_string(),
@@ -6097,6 +6358,9 @@ fn analysis_store_with_options(
     }
     if let Some(target) = candidate_external_second {
         entities.push(target);
+    }
+    if let Some(candidate_guide) = candidate_guide {
+        entities.push(candidate_guide);
     }
     publication.replace_repository_graph(project, &entities, &relations, &[], &coverage)?;
     publication.complete()?;
