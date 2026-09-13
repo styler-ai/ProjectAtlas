@@ -932,6 +932,63 @@ fn entrypoint_profile_rechecks_terminal_frontier_at_exact_edge_limit() -> Result
 }
 
 #[test]
+fn entrypoint_profile_retains_explicit_terminal_anchor_at_exact_edge_limit()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = terminal_entrypoint_store(false)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "explicit-terminal-anchor-edge-bound".to_string(),
+        anchors: vec![
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+            },
+            RelationAnchor::File {
+                file: RepositoryFilePath::new(Path::new("src/d.rs"))?,
+            },
+        ],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 3
+        }) && !report.reached_limits.contains(&GraphLimitKind::Edges),
+        "an empty explicit terminal anchor was rejected at the exact edge limit",
+    )?;
+
+    let (_temp, store) = terminal_entrypoint_store_with_options(
+        true,
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        ContentClassification::Source,
+        true,
+        false,
+        false,
+    )?;
+    let report = fitted_report(&store, &query)?;
+    require(
+        report
+            .entrypoint_profile
+            .as_ref()
+            .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+            && report.reached_limits.contains(&GraphLimitKind::Edges),
+        "an admitted edge on an explicit terminal anchor was not retained as an edge-limit truncation",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_protects_files_owned_by_reachable_symbols() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;

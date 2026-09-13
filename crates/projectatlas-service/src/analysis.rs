@@ -1497,6 +1497,7 @@ fn load_entrypoint_profile_draft(
     let mut canonical_anchors = Vec::with_capacity(profile.anchors.len());
     let mut canonical_anchor_keys = BTreeSet::new();
     let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
+    let mut resolved_anchor_entities = BTreeMap::<String, GraphEntity>::new();
     let mut first_resolved_anchor = None;
     let mut complete = true;
     let mut reached_limits = Vec::new();
@@ -1544,7 +1545,8 @@ fn load_entrypoint_profile_draft(
         })?;
         let anchor_identity = serde_json::to_string(&canonical_anchor)
             .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-        resolved_anchor_keys.insert(anchor_identity, entity_key);
+        resolved_anchor_keys.insert(anchor_identity.clone(), entity_key);
+        resolved_anchor_entities.insert(anchor_identity, entity);
         canonical_anchors.push(canonical_anchor);
     }
     let mut first_anchor = None;
@@ -1598,17 +1600,60 @@ fn load_entrypoint_profile_draft(
                     Err(limit) => {
                         if limit == GraphLimitKind::Edges
                             && let Some(anchor_key) = resolved_anchor_keys.get(&anchor_identity)
-                            && let Some(anchor_node) = reachable.get(anchor_key)
+                            && let Some(entity) = resolved_anchor_entities
+                                .get(&anchor_identity)
+                                .or_else(|| reachable.get(anchor_key).map(|node| &node.entity))
                             && entrypoint_terminal_adjacency_is_empty(
                                 store,
                                 generation,
-                                anchor_node.entity.key(),
+                                entity.key(),
                                 *relation,
                                 query.relations.minimum_confidence,
                                 query.relations.content_selection,
                                 control,
                             )?
                         {
+                            if reachable.contains_key(anchor_key) {
+                                continue;
+                            }
+                            if purpose_revision_initialized
+                                && store.authored_purpose_revision()? != authored_purpose_revision
+                            {
+                                return Err(ServiceError::RelationCursorStale {
+                                    field: "entrypoint authored purpose revision",
+                                });
+                            }
+                            let anchor_node = match load_entrypoint_terminal_candidate_coverage(
+                                store,
+                                entity,
+                                generation,
+                                budget,
+                                &mut relation_work,
+                                query.relations.content_selection,
+                                control,
+                            )? {
+                                Ok(node) => node,
+                                Err(limit) => {
+                                    complete = false;
+                                    push_limit(&mut reached_limits, limit);
+                                    break 'profile;
+                                }
+                            };
+                            if purpose_revision_initialized
+                                && store.authored_purpose_revision()? != authored_purpose_revision
+                            {
+                                return Err(ServiceError::RelationCursorStale {
+                                    field: "entrypoint authored purpose revision",
+                                });
+                            }
+                            if !trusted_node_coverage(&anchor_node, &profile.relations) {
+                                complete = false;
+                                break 'profile;
+                            }
+                            let entity_key = entity.key().canonical_identity().to_string();
+                            visited.insert(entity_key);
+                            insert_node(&mut reachable, &anchor_node);
+                            first_anchor.get_or_insert(anchor_node);
                             continue;
                         }
                         complete = false;
@@ -2159,6 +2204,9 @@ fn load_entrypoint_profile_draft(
                 }
             }
         }
+    }
+    if complete {
+        validate_entrypoint_generation(generation, store.repository_graph_generation())?;
     }
     let coverage = if complete {
         EntrypointProfileCoverage::Complete
