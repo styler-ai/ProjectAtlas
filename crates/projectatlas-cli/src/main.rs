@@ -6599,6 +6599,7 @@ mod tests {
             "--file",
             "src/a.rs",
         ])?;
+        cli.database_path_is_explicit = true;
         let error = match super::run(&mut cli) {
             Ok(()) => {
                 return Err(io::Error::other("federated entrypoint analysis was accepted").into());
