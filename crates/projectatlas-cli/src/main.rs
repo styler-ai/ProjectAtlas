@@ -6584,6 +6584,8 @@ mod tests {
     {
         let mut cli = Cli::try_parse_from([
             "projectatlas",
+            "--db",
+            "unused.sqlite",
             "symbols",
             "relations",
             "--view",
