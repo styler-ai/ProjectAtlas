@@ -985,6 +985,31 @@ fn entrypoint_profile_retains_explicit_terminal_anchor_at_exact_edge_limit()
             && report.reached_limits.contains(&GraphLimitKind::Edges),
         "an admitted edge on an explicit terminal anchor was not retained as an edge-limit truncation",
     )?;
+
+    for (node_limit, visited_limit, limit) in [
+        (2, 8, GraphLimitKind::Nodes),
+        (8, 2, GraphLimitKind::Visited),
+    ] {
+        let (_temp, store) = terminal_entrypoint_store(false)?;
+        let mut limited_query = query.clone();
+        limited_query.relations.budget = limited_query.relations.budget.with_aggregate_limits(
+            Some(1),
+            Some(node_limit),
+            Some(visited_limit),
+            Some(100),
+            Some(256 * 1024),
+            None,
+        )?;
+        let report = fitted_report(&store, &limited_query)?;
+        require(
+            report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| profile.coverage == EntrypointProfileCoverage::Partial)
+                && report.reached_limits.contains(&limit),
+            "an explicit terminal anchor bypassed an aggregate identity limit",
+        )?;
+    }
     Ok(())
 }
 
@@ -1165,6 +1190,55 @@ fn entrypoint_profile_protects_qualified_enclosing_symbols() -> Result<(), Box<d
                 && profile.unreachable_candidates == 1
         }) && candidate_names == ["unrelated"],
         "qualified reachable nested symbols left an enclosing symbol eligible as an unreachable candidate",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_does_not_truncate_on_nested_enclosure_chain() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = nested_symbol_entrypoint_store_with_options(true, true, true, false)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(2),
+        Some(10),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "nested-enclosure-chain-page-bound".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+            name: "inner".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: Some("Ancestor::Outer".to_string()),
+            signature: Some("fn inner()".to_string()),
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let candidate_names = report
+        .findings
+        .iter()
+        .filter(|finding| finding.status == AnalysisStatus::Candidate)
+        .flat_map(|finding| &finding.nodes)
+        .filter_map(|node| match node.node.entity.selector() {
+            EntitySelector::Symbol { symbol } => Some(symbol.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 1
+        }) && candidate_names == ["unrelated"]
+            && !report.reached_limits.contains(&GraphLimitKind::Nodes),
+        "nested protected enclosures were counted as candidate-page truncation",
     )?;
     Ok(())
 }
@@ -5920,6 +5994,13 @@ fn nested_symbol_entrypoint_store_with_options(
     } else {
         "Ancestor"
     };
+    let file = GraphEntity::new(
+        project,
+        EntitySelector::File {
+            path: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+        },
+        generation,
+    )?;
     let inner = GraphEntity::new(
         project,
         EntitySelector::Symbol {
@@ -6009,7 +6090,7 @@ fn nested_symbol_entrypoint_store_with_options(
     publication.begin_scan_replacement()?;
     publication.upsert_scan_node_batch(&[test_node("src/nested.rs", "src/nested.rs")])?;
     publication.finish_scan_replacement()?;
-    let mut entities = vec![inner];
+    let mut entities = vec![file, inner];
     if include_enclosing {
         entities.push(outer);
         if include_same_named_qualified {

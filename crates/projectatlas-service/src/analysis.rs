@@ -1650,6 +1650,17 @@ fn load_entrypoint_profile_draft(
                                 complete = false;
                                 break 'profile;
                             }
+                            if reachable.len() >= budget.nodes() as usize {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                            }
+                            if visited.len() >= budget.visited() as usize {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Visited);
+                            }
+                            if !complete {
+                                break 'profile;
+                            }
                             let entity_key = entity.key().canonical_identity().to_string();
                             visited.insert(entity_key);
                             insert_node(&mut reachable, &anchor_node);
@@ -1863,6 +1874,69 @@ fn load_entrypoint_profile_draft(
             );
         }
     }
+    let mut protected_enclosure_entities = Vec::new();
+    if complete {
+        let owner_paths = reachable
+            .values()
+            .filter_map(|node| match node.entity.selector() {
+                EntitySelector::Symbol { symbol } => Some(symbol.file.as_str().to_string()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for path in owner_paths {
+            check_control(control)?;
+            let path = RepositoryNodePath::new(std::path::Path::new(&path))
+                .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+            let remaining_intermediate = budget
+                .intermediate_bytes()
+                .saturating_sub(relation_work.intermediate_bytes);
+            if remaining_intermediate == 0 {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                break;
+            }
+            let read_budget = RepositoryGraphReadBudget::new(
+                1,
+                RepositoryGraphReadBudget::MAX_RETURNED_ROWS,
+                remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+                RepositoryGraphReadBudget::MAX_HYDRATED_ENTITIES,
+                RepositoryGraphReadBudget::MAX_HYDRATED_PATHS,
+            )
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+            let owner_page = match store.repository_graph_entities_by_path_bounded(
+                generation_project(&anchor.entity),
+                generation,
+                &path,
+                RepositoryGraphReadBudget::MAX_RETURNED_ROWS,
+                read_budget,
+                control,
+            ) {
+                Ok(owner_page) => owner_page,
+                Err(DbError::GraphContract(
+                    projectatlas_core::graph::GraphContractError::InvalidLimits {
+                        reason: "graph read decoded bytes exceed the batch budget",
+                    },
+                )) => {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            add_repository_read_work(&mut relation_work, &owner_page.work)?;
+            if owner_page.page.truncated {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                break;
+            }
+            protected_enclosure_entities.extend(owner_page.page.rows);
+        }
+    }
+    protect_reachable_symbol_enclosures(
+        &reachable,
+        &protected_enclosure_entities,
+        &mut protected_reachable_keys,
+    );
     let mut retained_candidate_keys = reachable_keys;
     let mut unreachable = BTreeMap::new();
     let remaining_intermediate = budget
@@ -1873,56 +1947,62 @@ fn load_entrypoint_profile_draft(
         push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
     }
     if complete {
-        let protected_entity_overhead =
-            u32::try_from(protected_reachable_keys.len()).map_err(|_overflow| {
-                ServiceError::InvalidInput(
-                    "entrypoint protected entity count exceeds the candidate-page budget"
-                        .to_string(),
-                )
-            })?;
-        let candidate_page_limit = entity_limit
-            .checked_add(protected_entity_overhead)
-            .ok_or_else(|| {
-                ServiceError::InvalidInput(
-                    "entrypoint candidate-page limit exceeds the graph row budget".to_string(),
-                )
-            })?;
-        #[cfg(test)]
-        analysis_test_observer::notify(
-            analysis_test_observer::AnalysisPhaseEvent::CandidateEntityHydration {
-                remaining_intermediate_bytes: remaining_intermediate,
-            },
-        );
-        let read_budget = RepositoryGraphReadBudget::new(
-            1,
-            candidate_page_limit,
-            remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
-            candidate_page_limit.saturating_add(1).saturating_mul(2),
-            candidate_page_limit.saturating_add(1).saturating_mul(2),
-        )
-        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-        let all_entities = match store.repository_graph_entrypoint_candidates_page_bounded(
-            generation_project(&anchor.entity),
-            generation,
-            candidate_page_limit,
-            query.relations.content_selection,
-            read_budget,
-            control,
-        ) {
-            Ok(all_entities) => {
-                add_repository_read_work(&mut relation_work, &all_entities.work)?;
-                Some(all_entities.page)
-            }
-            Err(DbError::GraphContract(
-                projectatlas_core::graph::GraphContractError::InvalidLimits {
-                    reason: "graph read decoded bytes exceed the batch budget",
-                },
-            )) => {
+        let protected_entity_overhead = match u32::try_from(protected_reachable_keys.len()) {
+            Ok(overhead) => overhead,
+            Err(_overflow) => {
                 complete = false;
-                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
-                None
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                0
             }
-            Err(error) => return Err(error.into()),
+        };
+        let candidate_page_limit = match entity_limit.checked_add(protected_entity_overhead) {
+            Some(limit) if limit <= GraphLimits::MAX_ROWS => limit,
+            _ => {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                0
+            }
+        };
+        let all_entities = if candidate_page_limit == 0 {
+            None
+        } else {
+            #[cfg(test)]
+            analysis_test_observer::notify(
+                analysis_test_observer::AnalysisPhaseEvent::CandidateEntityHydration {
+                    remaining_intermediate_bytes: remaining_intermediate,
+                },
+            );
+            let read_budget = RepositoryGraphReadBudget::new(
+                1,
+                candidate_page_limit,
+                remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+                candidate_page_limit.saturating_add(1).saturating_mul(2),
+                candidate_page_limit.saturating_add(1).saturating_mul(2),
+            )
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+            match store.repository_graph_entrypoint_candidates_page_bounded(
+                generation_project(&anchor.entity),
+                generation,
+                candidate_page_limit,
+                query.relations.content_selection,
+                read_budget,
+                control,
+            ) {
+                Ok(all_entities) => {
+                    add_repository_read_work(&mut relation_work, &all_entities.work)?;
+                    Some(all_entities.page)
+                }
+                Err(DbError::GraphContract(
+                    projectatlas_core::graph::GraphContractError::InvalidLimits {
+                        reason: "graph read decoded bytes exceed the batch budget",
+                    },
+                )) => {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
         };
         if let Some(all_entities) = all_entities.as_ref() {
             protect_reachable_symbol_enclosures(
