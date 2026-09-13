@@ -240,19 +240,22 @@ jobs:
 
       - name: Build packaged contract runner
         run: |
-          cargo test --locked --release --all-features -p projectatlas-cli \
+          contract_target="$RUNNER_TEMP/projectatlas-contract-target"
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
             --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
             --test e2e_worktrees --test e2e_maintenance --no-run
+          CARGO_TARGET_DIR="$contract_target" cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
           for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
-            binary="$(find target/release/deps -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
+            binary="$(find "$contract_target/release/deps" -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
             if [[ -z "$binary" ]]; then
               echo "Compiled packaged contract binary was not found: $binary_name" >&2
               exit 1
             fi
             cp "$binary" "contract-artifacts/bin/$binary_name"
           done
+          cp "$contract_target/release/optional_parser_pack_release" contract-artifacts/bin/optional_parser_pack_release
           cat > contract-artifacts/projectatlas-packaged-contract <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -348,16 +351,22 @@ jobs:
       - name: Build packaged contract runner
         shell: pwsh
         run: |
+          $contractTarget = Join-Path $env:RUNNER_TEMP "projectatlas-contract-target"
+          $env:CARGO_TARGET_DIR = $contractTarget
           cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
           foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
-            $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "$binaryName-*.exe" -File)
+            $contracts = @(Get-ChildItem -LiteralPath (Join-Path $contractTarget "release\deps") -Filter "$binaryName-*.exe" -File)
             if ($contracts.Count -ne 1) {
               throw "Expected one packaged contract binary for $binaryName, found $($contracts.Count)."
             }
             Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\bin\$binaryName.exe"
           }
+          Copy-Item -LiteralPath (Join-Path $contractTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
           @'
           param(
             [Parameter(ValueFromRemainingArguments = $true)]
@@ -523,6 +532,13 @@ jobs:
             fi
             chmod +x "$binary"
           done
+          verifier="contract-artifacts/bin/optional_parser_pack_release"
+          if [ ! -f "$verifier" ]; then
+            echo "Downloaded packaged parser-pack release verifier was not found: $verifier" >&2
+            exit 1
+          fi
+          chmod +x "$verifier"
+          echo "PROJECTATLAS_PARSER_PACK_RELEASE_VERIFIER=$PWD/$verifier" >> "$GITHUB_ENV"
 
       - name: Install packaged runtime through plugin
         timeout-minutes: 5

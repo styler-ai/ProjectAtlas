@@ -74,12 +74,12 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    MCP_CONTRACT_EXECUTABLE_ENV, McpDatabaseSnapshot, complete_mcp_test_after_shutdown,
-    git_command_for_root, json_at, json_summary_command, mcp_contract_executable,
-    mcp_database_snapshot, mcp_tool_text, require_json_array_len, require_json_bool,
-    require_json_contains, require_json_string, require_json_usize, require_json_usize_at_least,
-    require_json_usize_greater_than, run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex,
-    sqlite_table_digests, workspace_root,
+    MCP_CONTRACT_EXECUTABLE_ENV, McpDatabaseSnapshot, PARSER_PACK_RELEASE_VERIFIER_ENV,
+    complete_mcp_test_after_shutdown, git_command_for_root, json_at, json_summary_command,
+    mcp_contract_executable, mcp_database_snapshot, mcp_tool_text, require_json_array_len,
+    require_json_bool, require_json_contains, require_json_string, require_json_usize,
+    require_json_usize_at_least, require_json_usize_greater_than, run_mcp_stdio,
+    run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -691,92 +691,94 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
 
     let release_root = temp.path().join("release-verifier");
     fs::create_dir(&release_root)?;
-    if std::env::var_os(MCP_CONTRACT_EXECUTABLE_ENV).is_none() {
-        for (label, archive, context, proof) in [
-            (
-                "missing archive and context",
-                release_root.join("missing/archive.tar.zst"),
-                release_root.join("missing/runner-context.json"),
-                release_root.join("missing/output/platform-proof.json"),
-            ),
-            (
-                "invalid archive and context",
-                release_root.join("invalid/archive.tar.zst"),
-                release_root.join("invalid/runner-context.json"),
-                release_root.join("invalid/output/platform-proof.json"),
-            ),
-            (
-                "unreadable archive and context",
-                release_root.join("unreadable/archive.tar.zst"),
-                release_root.join("unreadable/runner-context.json"),
-                release_root.join("unreadable/output/platform-proof.json"),
-            ),
-        ] {
-            let case_root = archive
-                .parent()
-                .ok_or_else(|| io::Error::other("release verifier case has no parent"))?;
-            fs::create_dir_all(case_root)?;
-            let temp_root = case_root.join("temp");
-            let home_root = case_root.join("home");
-            fs::create_dir(&temp_root)?;
-            fs::create_dir(&home_root)?;
-            match label {
-                "invalid archive and context" => {
-                    fs::write(&archive, b"not a parser-pack archive")?;
-                    fs::write(&context, b"not runner context")?;
-                    fs::create_dir(
-                        proof.parent().ok_or_else(|| {
-                            io::Error::other("invalid release proof has no parent")
-                        })?,
-                    )?;
-                }
-                "unreadable archive and context" => {
-                    fs::create_dir(&archive)?;
-                    fs::create_dir(&context)?;
-                }
-                _ => {}
+    for (label, archive, context, proof) in [
+        (
+            "missing archive and context",
+            release_root.join("missing/archive.tar.zst"),
+            release_root.join("missing/runner-context.json"),
+            release_root.join("missing/output/platform-proof.json"),
+        ),
+        (
+            "invalid archive and context",
+            release_root.join("invalid/archive.tar.zst"),
+            release_root.join("invalid/runner-context.json"),
+            release_root.join("invalid/output/platform-proof.json"),
+        ),
+        (
+            "unreadable archive and context",
+            release_root.join("unreadable/archive.tar.zst"),
+            release_root.join("unreadable/runner-context.json"),
+            release_root.join("unreadable/output/platform-proof.json"),
+        ),
+    ] {
+        let case_root = archive
+            .parent()
+            .ok_or_else(|| io::Error::other("release verifier case has no parent"))?;
+        fs::create_dir_all(case_root)?;
+        let temp_root = case_root.join("temp");
+        let home_root = case_root.join("home");
+        fs::create_dir(&temp_root)?;
+        fs::create_dir(&home_root)?;
+        match label {
+            "invalid archive and context" => {
+                fs::write(&archive, b"not a parser-pack archive")?;
+                fs::write(&context, b"not runner context")?;
+                fs::create_dir(
+                    proof
+                        .parent()
+                        .ok_or_else(|| io::Error::other("invalid release proof has no parent"))?,
+                )?;
             }
-            let output = Command::cargo_bin("optional_parser_pack_release")?
-                .current_dir(&release_root)
-                .env("HOME", &home_root)
-                .env("TMPDIR", &temp_root)
-                .args([
-                    OsStr::new("verify"),
-                    archive.as_os_str(),
-                    context.as_os_str(),
-                    proof.as_os_str(),
-                ])
-                .output()?;
-            if output.status.success()
-                || !String::from_utf8_lossy(&output.stderr).contains("unsupported_containment")
-            {
-                return Err(io::Error::other(format!(
+            "unreadable archive and context" => {
+                fs::create_dir(&archive)?;
+                fs::create_dir(&context)?;
+            }
+            _ => {}
+        }
+        let mut verifier = match std::env::var_os(PARSER_PACK_RELEASE_VERIFIER_ENV) {
+            Some(path) => Command::new(path),
+            None => Command::cargo_bin("optional_parser_pack_release")?,
+        };
+        let output = verifier
+            .current_dir(&release_root)
+            .env("HOME", &home_root)
+            .env("TMPDIR", &temp_root)
+            .args([
+                OsStr::new("verify"),
+                archive.as_os_str(),
+                context.as_os_str(),
+                proof.as_os_str(),
+            ])
+            .output()?;
+        if output.status.success()
+            || !String::from_utf8_lossy(&output.stderr).contains("unsupported_containment")
+        {
+            return Err(io::Error::other(format!(
                 "macOS release verifier {label} did not refuse typed unsupported containment: {}",
                 String::from_utf8_lossy(&output.stderr)
             ))
             .into());
-            }
-            if proof.exists()
-                || fs::read_dir(&temp_root)?.next().is_some()
-                || fs::read_dir(&home_root)?.next().is_some()
-            {
-                return Err(io::Error::other(format!(
-                    "macOS release verifier {label} touched proof, temporary, or payload state"
-                ))
-                .into());
-            }
-            if archive.is_file() && fs::read(&archive)?.as_slice() != b"not a parser-pack archive" {
-                return Err(io::Error::other(format!(
-                    "macOS release verifier {label} changed the invalid archive"
-                ))
-                .into());
-            }
-            if context.is_file() && fs::read(&context)?.as_slice() != b"not runner context" {
-                return Err(io::Error::other(format!(
-                    "macOS release verifier {label} changed runner context"
-                ))
-                .into());
-            }
+        }
+        if proof.exists()
+            || fs::read_dir(&temp_root)?.next().is_some()
+            || fs::read_dir(&home_root)?.next().is_some()
+        {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} touched proof, temporary, or payload state"
+            ))
+            .into());
+        }
+        if archive.is_file() && fs::read(&archive)?.as_slice() != b"not a parser-pack archive" {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} changed the invalid archive"
+            ))
+            .into());
+        }
+        if context.is_file() && fs::read(&context)?.as_slice() != b"not runner context" {
+            return Err(io::Error::other(format!(
+                "macOS release verifier {label} changed runner context"
+            ))
+            .into());
         }
     }
 

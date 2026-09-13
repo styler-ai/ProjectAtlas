@@ -16,6 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub(super) const MCP_CONTRACT_EXECUTABLE_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE";
+pub(super) const PARSER_PACK_RELEASE_VERIFIER_ENV: &str =
+    "PROJECTATLAS_PARSER_PACK_RELEASE_VERIFIER";
 pub(super) const MCP_CONTRACT_METADATA_CANARY: &str = "mcp_contract_metadata_canary";
 pub(super) const GIT_REPOSITORY_ENVIRONMENT_VARIABLES: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
