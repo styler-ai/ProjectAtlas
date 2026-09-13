@@ -275,7 +275,7 @@ jobs:
 
       - name: Install cargo-deny
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency') || contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -472,7 +472,7 @@ jobs:
 
       - name: Install cargo-deny for PDF source validation
         if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+        uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
         with:
           tool: cargo-deny@0.20.2
 
