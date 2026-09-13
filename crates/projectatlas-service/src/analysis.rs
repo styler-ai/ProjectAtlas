@@ -43,6 +43,8 @@ mod analysis_test_observer {
         OccurrenceProbe,
         /// The occurrence evidence query was about to validate its generation.
         OccurrenceProbeBeforeRead,
+        /// Terminal candidate coverage was loaded before its generation was rechecked.
+        TerminalCandidateCoverageProbe,
         /// The repository-wide candidate entity page is about to run.
         CandidateEntityHydration {
             /// Intermediate bytes left after relation traversal.
@@ -2893,6 +2895,20 @@ fn load_entrypoint_terminal_candidate_coverage(
     }
     if batch.page.truncated {
         return Ok(Err(GraphLimitKind::Rows));
+    }
+    #[cfg(test)]
+    analysis_test_observer::notify(
+        analysis_test_observer::AnalysisPhaseEvent::TerminalCandidateCoverageProbe,
+    );
+    let current_generation = store.repository_graph_generation()?.ok_or_else(|| {
+        ServiceError::InvalidInput(
+            "repository graph has no complete generation for entrypoint analysis".to_string(),
+        )
+    })?;
+    if current_generation != generation {
+        return Err(ServiceError::RelationCursorStale {
+            field: "entrypoint graph generation",
+        });
     }
     check_control(control)?;
     let mut node = entrypoint_unavailable_node(entity, content_selection);

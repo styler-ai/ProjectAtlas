@@ -1916,6 +1916,61 @@ fn entrypoint_profile_rejects_generation_change_after_terminal_probe() -> Result
 }
 
 #[test]
+fn entrypoint_profile_rejects_generation_change_after_terminal_candidate_coverage()
+-> Result<(), Box<dyn Error>> {
+    let (temp, stale_store) = terminal_entrypoint_store(false)?;
+    let root = temp.path().join("terminal-entrypoint");
+    let database = root.join("projectatlas.db");
+    stale_store.finish_index_read_snapshot()?;
+    let writer = Rc::new(RefCell::new(Some(AtlasStore::open_for_project(
+        &database, &root,
+    )?)));
+    let probed = Rc::new(Cell::new(false));
+    let writer_for_observer = Rc::clone(&writer);
+    let probed_for_observer = Rc::clone(&probed);
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "candidate-coverage-stale".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let stale = observe_analysis_phase(
+        move |event| {
+            if event == AnalysisPhaseEvent::TerminalCandidateCoverageProbe
+                && !probed_for_observer.replace(true)
+                && let Some(mut writer) = writer_for_observer.borrow_mut().take()
+                && let Ok(refresh) = writer.begin_index_projection_refresh("terminal-entrypoint")
+            {
+                drop(refresh.complete());
+            }
+        },
+        || load_relation_analysis(&stale_store, &query, None),
+    );
+    require(
+        probed.get()
+            && stale
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("typed graph generation")),
+        "terminal candidate coverage did not reject a generation transition",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_rejects_generation_change_after_occurrence_probe()
 -> Result<(), Box<dyn Error>> {
     let (temp, stale_store) = branching_entrypoint_store(true, 1)?;
