@@ -2633,7 +2633,8 @@ fn protect_reachable_symbol_enclosures(
                 continue;
             };
             let parent_name = parent
-                .rsplit_once('.')
+                .rsplit_once("::")
+                .or_else(|| parent.rsplit_once('.'))
                 .map_or(parent.as_str(), |(_, name)| name);
             if symbol.file.as_str() != file
                 || (symbol.name.as_str() != parent && symbol.name.as_str() != parent_name)

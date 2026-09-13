@@ -1065,6 +1065,54 @@ fn entrypoint_profile_protects_enclosing_symbols_of_reachable_nested_symbol()
 }
 
 #[test]
+fn entrypoint_profile_protects_qualified_enclosing_symbols() -> Result<(), Box<dyn Error>> {
+    let (_temp, store) = nested_symbol_entrypoint_store_with_options(true, true, true)?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(100),
+        Some(10),
+        Some(10),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "qualified-nested-symbol-enclosure-protection".to_string(),
+        anchors: vec![RelationAnchor::Symbol {
+            file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
+            name: "inner".to_string(),
+            symbol_kind: Some(SymbolKind::Function),
+            parent: Some("Ancestor::Outer".to_string()),
+            signature: Some("fn inner()".to_string()),
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    let candidate_names = report
+        .findings
+        .iter()
+        .filter(|finding| finding.status == AnalysisStatus::Candidate)
+        .flat_map(|finding| &finding.nodes)
+        .filter_map(|node| match node.node.entity.selector() {
+            EntitySelector::Symbol { symbol } => Some(symbol.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete
+                && profile.reachable == 1
+                && profile.unreachable_candidates == 1
+        }) && candidate_names == ["unrelated"],
+        "qualified reachable nested symbols left an enclosing symbol eligible as an unreachable candidate",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_rejects_initial_anchors_with_duplicate_resolved_identity()
 -> Result<(), Box<dyn Error>> {
     let (_temp, store) = nested_symbol_entrypoint_store()?;
@@ -2594,6 +2642,7 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
             base_classification,
             terminal_classification,
             true,
+            false,
         )?;
         let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
         query.relations.resolution = RelationResolutionFilter::Any;
@@ -2624,6 +2673,42 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
             "terminal probing admitted a filtered relation as pending",
         )?;
     }
+
+    let (_temp, store) = terminal_entrypoint_store_with_options(
+        false,
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        ContentClassification::Source,
+        false,
+        true,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(256 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "external-terminal-is-not-admitted".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+    });
+    let report = fitted_report(&store, &query)?;
+    require(
+        report.entrypoint_profile.as_ref().is_some_and(|profile| {
+            profile.coverage == EntrypointProfileCoverage::Complete && profile.reachable == 2
+        }) && !report.reached_limits.contains(&GraphLimitKind::Edges),
+        "selected terminal probing treated an external endpoint as a pending local edge",
+    )?;
     Ok(())
 }
 
@@ -4961,6 +5046,7 @@ fn terminal_entrypoint_store(
         ContentClassification::Source,
         ContentClassification::Source,
         false,
+        false,
     )
 }
 
@@ -4970,6 +5056,7 @@ fn terminal_entrypoint_store_with_options(
     base_classification: ContentClassification,
     terminal_edge_classification: ContentClassification,
     include_candidate_edge: bool,
+    include_external_terminal_edge: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("terminal-entrypoint");
@@ -5005,6 +5092,20 @@ fn terminal_entrypoint_store_with_options(
     let c = include_terminal_edge
         .then(|| entity("src/c.rs"))
         .transpose()?;
+    let external = include_external_terminal_edge
+        .then(|| {
+            GraphEntity::new(
+                project,
+                EntitySelector::External {
+                    external: ExternalSelector {
+                        system: GraphIdentityText::new("crates.io")?,
+                        identity: GraphIdentityText::new("terminal@1")?,
+                    },
+                },
+                generation,
+            )
+        })
+        .transpose()?;
     let calls = GraphRelationKind::Legacy(RelationKind::Calls);
     let relation = |source: &GraphEntity, target: &GraphEntity| {
         LogicalRelation::new(
@@ -5037,38 +5138,49 @@ fn terminal_entrypoint_store_with_options(
             )?);
         }
     }
+    if let Some(external) = external.as_ref() {
+        relations.push(LogicalRelation::new(
+            &b,
+            calls,
+            RelationResolution::external(external)?,
+            terminal_edge_confidence,
+            Completeness::Complete,
+            generation,
+        )?);
+    }
     let mut entities = vec![a, b, d];
     if let Some(c) = c.as_ref() {
         entities.push(c.clone());
     }
+    if let Some(external) = external {
+        entities.push(external);
+    }
     let coverage = entities
         .iter()
-        .map(|entity| {
-            let path = match entity.selector() {
-                EntitySelector::File { path } => path.as_str(),
-                _ => unreachable!("terminal fixture only contains files"),
-            };
-            CoverageRecord::new(
-                CoverageScope::Path {
-                    path: RepositoryNodePath::new(Path::new(path))?,
-                },
-                None,
-                CoverageState::Complete,
-                1,
-                0,
-                generation,
-                None,
-                None,
-            )
+        .filter_map(|entity| match entity.selector() {
+            EntitySelector::File { path } => {
+                let path = RepositoryNodePath::new(Path::new(path.as_str())).ok()?;
+                Some(CoverageRecord::new(
+                    CoverageScope::Path { path },
+                    None,
+                    CoverageState::Complete,
+                    1,
+                    0,
+                    generation,
+                    None,
+                    None,
+                ))
+            }
+            _ => None,
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut publication = store.begin_index_publication("terminal-entrypoint")?;
     publication.begin_scan_replacement()?;
     let scan_nodes = entities
         .iter()
-        .map(|entity| match entity.selector() {
-            EntitySelector::File { path } => test_node(path.as_str(), path.as_str()),
-            _ => unreachable!("terminal fixture only contains files"),
+        .filter_map(|entity| match entity.selector() {
+            EntitySelector::File { path } => Some(test_node(path.as_str(), path.as_str())),
+            _ => None,
         })
         .collect::<Vec<_>>();
     publication.upsert_scan_node_batch(&scan_nodes)?;
@@ -5236,17 +5348,18 @@ fn branching_entrypoint_store(
 }
 
 fn nested_symbol_entrypoint_store() -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    nested_symbol_entrypoint_store_with_options(false, false)
+    nested_symbol_entrypoint_store_with_options(false, false, false)
 }
 
 fn nested_symbol_entrypoint_store_with_unrelated_candidate()
 -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    nested_symbol_entrypoint_store_with_options(true, true)
+    nested_symbol_entrypoint_store_with_options(true, true, false)
 }
 
 fn nested_symbol_entrypoint_store_with_options(
     include_enclosing: bool,
     include_unrelated: bool,
+    qualified_parents: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("nested-symbol-entrypoint");
@@ -5258,6 +5371,11 @@ fn nested_symbol_entrypoint_store_with_options(
         .project_instance_id()?
         .ok_or("nested symbol project identity missing")?;
     let generation = IndexGeneration::new(1);
+    let inner_parent = if qualified_parents {
+        "Ancestor::Outer"
+    } else {
+        "Outer"
+    };
     let inner = GraphEntity::new(
         project,
         EntitySelector::Symbol {
@@ -5265,7 +5383,7 @@ fn nested_symbol_entrypoint_store_with_options(
                 file: RepositoryFilePath::new(Path::new("src/nested.rs"))?,
                 name: GraphIdentityText::new("inner")?,
                 kind: SymbolKind::Function,
-                parent: Some(GraphIdentityText::new("Outer")?),
+                parent: Some(GraphIdentityText::new(inner_parent)?),
                 signature: GraphIdentityText::new("fn inner()")?,
             },
         },

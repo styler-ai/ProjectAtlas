@@ -2450,22 +2450,25 @@ impl AtlasStore {
         let selection_filter = match selection {
             ContentSelection::UnspecifiedLegacy => "",
             ContentSelection::Source => {
-                "AND (relation.resolution_status <> 'resolved'
-                      OR (relation.relation_scope = 'extended'
-                          AND relation.relation_kind = 'documents')
-                      OR target_classification.classification = 'source')"
+                "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR (relation.resolution_status = 'resolved'
+                          AND (relation.relation_scope = 'extended'
+                               AND relation.relation_kind = 'documents'
+                               OR target_classification.classification = 'source')))"
             }
             ContentSelection::Documentation => {
-                "AND (relation.resolution_status <> 'resolved'
-                      OR (relation.relation_scope = 'extended'
-                          AND relation.relation_kind = 'documents')
-                      OR target_classification.classification = 'documentation')"
+                "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR (relation.resolution_status = 'resolved'
+                          AND (relation.relation_scope = 'extended'
+                               AND relation.relation_kind = 'documents'
+                               OR target_classification.classification = 'documentation')))"
             }
             ContentSelection::Both => {
-                "AND (relation.resolution_status <> 'resolved'
-                      OR (relation.relation_scope = 'extended'
-                          AND relation.relation_kind = 'documents')
-                      OR target_classification.classification IN ('source', 'documentation'))"
+                "AND (relation.resolution_status NOT IN ('resolved', 'external')
+                      OR (relation.resolution_status = 'resolved'
+                          AND (relation.relation_scope = 'extended'
+                               AND relation.relation_kind = 'documents'
+                               OR target_classification.classification IN ('source', 'documentation'))))"
             }
         };
         let sql = format!(
