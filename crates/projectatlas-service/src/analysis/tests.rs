@@ -2239,8 +2239,10 @@ fn entrypoint_profile_rejects_generation_change_after_terminal_candidate_coverag
     });
     let stale = observe_analysis_phase(
         move |event| {
-            if event == AnalysisPhaseEvent::TerminalCandidateCoverageProbe
-                && !probed_for_observer.replace(true)
+            if matches!(
+                event,
+                AnalysisPhaseEvent::TerminalCandidateCoverageProbe { .. }
+            ) && !probed_for_observer.replace(true)
                 && let Some(mut writer) = writer_for_observer.borrow_mut().take()
                 && let Ok(refresh) = writer.begin_index_projection_refresh("terminal-entrypoint")
             {
@@ -3401,6 +3403,111 @@ fn entrypoint_profile_terminal_probe_honors_admitted_filters() -> Result<(), Box
                 .iter()
                 .all(|finding| finding.status == AnalysisStatus::Inconclusive),
         "filtered terminal probing bypassed the aggregate visited limit",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn entrypoint_profile_reuses_terminal_candidate_coverage_across_families()
+-> Result<(), Box<dyn Error>> {
+    let (_temp, store) = terminal_entrypoint_store_with_options(
+        false,
+        ConfidenceClass::Exact,
+        ContentClassification::Source,
+        ContentClassification::Source,
+        false,
+        false,
+        false,
+    )?;
+    let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+    query.relations.resolution = RelationResolutionFilter::Any;
+    query.relations.content_selection = ContentSelection::Source;
+    query.relations.budget = query.relations.budget.with_aggregate_limits(
+        Some(1),
+        Some(8),
+        Some(8),
+        Some(100),
+        Some(1024 * 1024),
+        None,
+    )?;
+    query.include_communities = false;
+    query.include_cycles = false;
+    query.entrypoint_profile = Some(EntrypointProfile {
+        name: "terminal-candidate-coverage-reuse".to_string(),
+        anchors: vec![RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        }],
+        relations: vec![
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            GraphRelationKind::Extended(ExtendedRelationKind::References),
+        ],
+    });
+
+    let broad_probe_count = Rc::new(Cell::new(0_u32));
+    let broad_probe_writer = Rc::clone(&broad_probe_count);
+    let broad_probe_work = Rc::new(Cell::new(None));
+    let broad_probe_work_writer = Rc::clone(&broad_probe_work);
+    let broad = observe_analysis_phase(
+        move |event| {
+            if let AnalysisPhaseEvent::TerminalCandidateCoverageProbe { intermediate_bytes } = event
+            {
+                broad_probe_writer.set(broad_probe_writer.get().saturating_add(1));
+                broad_probe_work_writer
+                    .set(broad_probe_work_writer.get().or(Some(intermediate_bytes)));
+            }
+        },
+        || fitted_report(&store, &query),
+    )?;
+    require(
+        broad_probe_count.get() == 1
+            && broad_probe_work.get().is_some()
+            && broad.entrypoint_profile.as_ref().is_some_and(|profile| {
+                profile.coverage == EntrypointProfileCoverage::Complete
+                    && profile.reachable == 2
+                    && profile.unreachable_candidates == 1
+            }),
+        "terminal candidate coverage was not reused across admitted relation families",
+    )?;
+
+    let first_coverage_intermediate_bytes = broad_probe_work
+        .get()
+        .ok_or("first terminal candidate coverage work was not observed")?;
+    let mut bounded = query;
+    bounded.relations.budget = bounded.relations.budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(first_coverage_intermediate_bytes.saturating_add(64 * 1024)),
+        None,
+    )?;
+    let bounded_probe_count = Rc::new(Cell::new(0_u32));
+    let bounded_probe_writer = Rc::clone(&bounded_probe_count);
+    let bounded_report = observe_analysis_phase(
+        move |event| {
+            if matches!(
+                event,
+                AnalysisPhaseEvent::TerminalCandidateCoverageProbe { .. }
+            ) {
+                bounded_probe_writer.set(bounded_probe_writer.get().saturating_add(1));
+            }
+        },
+        || fitted_report(&store, &bounded),
+    )?;
+    require(
+        bounded_probe_count.get() == 1
+            && bounded_report
+                .entrypoint_profile
+                .as_ref()
+                .is_some_and(|profile| {
+                    profile.coverage == EntrypointProfileCoverage::Complete
+                        && profile.reachable == 2
+                        && profile.unreachable_candidates == 1
+                })
+            && !bounded_report
+                .reached_limits
+                .contains(&GraphLimitKind::IntermediateBytes),
+        "repeated terminal candidate coverage exceeded its aggregate byte boundary",
     )?;
     Ok(())
 }

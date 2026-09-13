@@ -44,7 +44,10 @@ mod analysis_test_observer {
         /// The occurrence evidence query was about to validate its generation.
         OccurrenceProbeBeforeRead,
         /// Terminal candidate coverage was loaded before its generation was rechecked.
-        TerminalCandidateCoverageProbe,
+        TerminalCandidateCoverageProbe {
+            /// Aggregate relation work retained after the coverage batch.
+            intermediate_bytes: u64,
+        },
         /// The repository-wide candidate entity page is about to run.
         CandidateEntityHydration {
             /// Intermediate bytes left after relation traversal.
@@ -3071,7 +3074,9 @@ fn load_entrypoint_terminal_candidate_coverage(
     }
     #[cfg(test)]
     analysis_test_observer::notify(
-        analysis_test_observer::AnalysisPhaseEvent::TerminalCandidateCoverageProbe,
+        analysis_test_observer::AnalysisPhaseEvent::TerminalCandidateCoverageProbe {
+            intermediate_bytes: relation_work.intermediate_bytes,
+        },
     );
     validate_entrypoint_generation(generation, store.repository_graph_generation())?;
     check_control(control)?;
