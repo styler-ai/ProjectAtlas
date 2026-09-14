@@ -1640,6 +1640,11 @@ fn load_entrypoint_profile_draft(
                                     break 'profile;
                                 }
                             };
+                            if !entity_selected(&anchor_node) {
+                                return Err(ServiceError::InvalidInput(
+                                    "entrypoint anchor is outside the selected content".to_string(),
+                                ));
+                            }
                             if purpose_revision_initialized
                                 && store.authored_purpose_revision()? != authored_purpose_revision
                             {
@@ -2342,10 +2347,11 @@ fn load_entrypoint_profile_draft(
                     if candidate_report.continuation.is_some() && !filtered_edge_limit_is_terminal {
                         push_limit(&mut reached_limits, GraphLimitKind::Rows);
                     }
-                    if !trusted_node_coverage(&candidate_report.anchor, &profile.relations)
-                        || (!filtered_edge_limit_is_terminal
-                            && !entrypoint_report_complete(&candidate_report, &profile.relations))
-                    {
+                    if !entrypoint_report_complete(
+                        &candidate_report,
+                        &profile.relations,
+                        filtered_edge_limit_is_terminal,
+                    ) {
                         complete = false;
                         break;
                     }
@@ -3049,7 +3055,7 @@ fn entrypoint_work_overflow() -> ServiceError {
     ServiceError::InvalidInput("entrypoint relation work overflowed".to_string())
 }
 
-/// Reconcile a raw edge limit when every row in the page was filtered out.
+/// Reconcile a raw edge limit when no admitted row remains after the page.
 fn entrypoint_filtered_edge_limit_is_terminal(
     store: &AtlasStore,
     generation: projectatlas_core::IndexGeneration,
@@ -3239,13 +3245,15 @@ fn trusted_relation_row(
 fn entrypoint_report_complete(
     report: &DetailedRelationReport,
     admitted_relations: &[GraphRelationKind],
+    filtered_edge_limit_is_terminal: bool,
 ) -> bool {
-    matches!(
-        report.total,
-        RelationTotalState::Exact(total) if total == u64::from(report.returned)
-    ) && !report.truncated
-        && report.continuation.is_none()
-        && report.reached_limits.is_empty()
+    (filtered_edge_limit_is_terminal
+        || (matches!(
+            report.total,
+            RelationTotalState::Exact(total) if total == u64::from(report.returned)
+        ) && !report.truncated
+            && report.continuation.is_none()
+            && report.reached_limits.is_empty()))
         && report.pruned_incomplete_paths == 0
         && !report.pruned_evidence_truncated
         && trusted_node_coverage(&report.anchor, admitted_relations)

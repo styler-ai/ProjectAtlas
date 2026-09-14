@@ -24580,15 +24580,40 @@ fn serve_release_assets_with_deadline(
                 Ok((mut stream, _)) => {
                     let mut request = [0_u8; 1024];
                     stream.set_nonblocking(true)?;
-                    let bytes_read = loop {
+                    let mut bytes_read = 0;
+                    loop {
                         if Instant::now() >= deadline {
                             return Err(io::Error::new(
                                 io::ErrorKind::TimedOut,
                                 "timed out waiting for release asset request",
                             ));
                         }
-                        match stream.read(&mut request) {
-                            Ok(bytes_read) => break bytes_read,
+                        match stream.read(&mut request[bytes_read..]) {
+                            Ok(0) => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::UnexpectedEof,
+                                    if bytes_read == 0 {
+                                        "release asset request was empty"
+                                    } else {
+                                        "release asset request headers were incomplete"
+                                    },
+                                ));
+                            }
+                            Ok(count) => {
+                                bytes_read += count;
+                                if request[..bytes_read]
+                                    .windows(4)
+                                    .any(|bytes| bytes == b"\r\n\r\n")
+                                {
+                                    break;
+                                }
+                                if bytes_read == request.len() {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "release asset request headers exceeded the byte limit",
+                                    ));
+                                }
+                            }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                                 let remaining = deadline.saturating_duration_since(Instant::now());
                                 match completion_receiver
@@ -24610,14 +24635,9 @@ fn serve_release_assets_with_deadline(
                                     }
                                 }
                             }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                             Err(error) => return Err(error),
                         }
-                    };
-                    if bytes_read == 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "release asset request was empty",
-                        ));
                     }
                     let request_text = String::from_utf8_lossy(&request[..bytes_read]);
                     let request_path = request_text
@@ -24746,10 +24766,20 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
             .strip_prefix("http://")
             .ok_or_else(|| io::Error::other("release fixture URL was not HTTP"))?;
         let mut stream = std::net::TcpStream::connect(address)?;
+        stream.write_all(b"GET ")?;
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let mut premature_response = [0_u8; 1];
+        if !matches!(stream.peek(&mut premature_response), Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
+        {
+            return Err(io::Error::other(
+                "release asset server completed a fragmented request before its headers arrived",
+            )
+            .into());
+        }
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            "{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )?;
         read_response(&mut stream)
     };
@@ -24811,6 +24841,32 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let new_server = || {
         serve_release_assets_with_deadline(&archive, None, Instant::now() + Duration::from_secs(2))
     };
+
+    for (bytes, diagnostic) in [
+        (b"GET /assets/".to_vec(), "headers were incomplete"),
+        (vec![b'x'; 1024], "headers exceeded the byte limit"),
+    ] {
+        let server = new_server()?;
+        let address = server
+            .base_url()
+            .strip_prefix("http://")
+            .ok_or_else(|| io::Error::other("release fixture URL was not HTTP"))?;
+        let mut stream = std::net::TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.write_all(&bytes)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        require(
+            read_response(&mut stream)?.is_empty(),
+            "malformed header returned a response",
+        )?;
+        let Err(error) = server.finish::<()>(Ok(())) else {
+            return Err(io::Error::other("malformed header unexpectedly passed").into());
+        };
+        require(
+            error.to_string().contains(diagnostic),
+            "malformed header lost its terminal diagnostic",
+        )?;
+    }
 
     let server = new_server()?;
     thread::sleep(Duration::from_millis(200));

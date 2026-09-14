@@ -1643,6 +1643,108 @@ fn entrypoint_profile_retains_explicit_terminal_anchor_at_exact_edge_limit()
 }
 
 #[test]
+fn entrypoint_terminal_explicit_anchor_preserves_content_selection() -> Result<(), Box<dyn Error>> {
+    for (selection, selected, excluded) in [
+        (
+            ContentSelection::Source,
+            ContentClassification::Source,
+            ContentClassification::Documentation,
+        ),
+        (
+            ContentSelection::Documentation,
+            ContentClassification::Documentation,
+            ContentClassification::Source,
+        ),
+    ] {
+        let (_temp, store) = terminal_entrypoint_store_with_options(
+            true,
+            ConfidenceClass::Exact,
+            selected,
+            excluded,
+            false,
+            false,
+            false,
+        )?;
+        for edges in [1, 10] {
+            let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+            query.relations.content_selection = selection;
+            query.relations.resolution = RelationResolutionFilter::Any;
+            query.relations.budget = query.relations.budget.with_aggregate_limits(
+                Some(edges),
+                Some(8),
+                Some(8),
+                Some(100),
+                Some(256 * 1024),
+                None,
+            )?;
+            query.include_communities = false;
+            query.include_cycles = false;
+            query.entrypoint_profile = Some(EntrypointProfile {
+                name: "terminal-anchor-selection".to_string(),
+                anchors: ["src/a.rs", "src/c.rs"]
+                    .into_iter()
+                    .map(|path| {
+                        Ok(RelationAnchor::File {
+                            file: RepositoryFilePath::new(Path::new(path))?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Box<dyn Error>>>()?,
+                relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+            });
+            require(
+                matches!(load_relation_analysis(&store, &query, None), Err(ServiceError::InvalidInput(message)) if message.contains("outside the selected content")),
+                "explicit anchor selection changed when the edge budget was exhausted",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn entrypoint_reconciled_candidate_keeps_retained_evidence_checks() -> Result<(), Box<dyn Error>> {
+    for partial_coverage in [false, true] {
+        let (_temp, store) = filtered_page_entrypoint_store(
+            ConfidenceClass::Exact,
+            ContentClassification::Source,
+            false,
+            partial_coverage,
+            true,
+        )?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.anchor = RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new("src/a.rs"))?,
+        };
+        query.relations.minimum_confidence = ConfidenceClass::Exact;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.content_selection = ContentSelection::Source;
+        query.relations.budget = DetailedRelationBudget::from_graph_limits(
+            projectatlas_core::graph::GraphLimits::new(50, 1, 2, 256 * 1024)?,
+        )
+        .with_aggregate_limits(Some(1), Some(8), Some(8), Some(100), None, None)?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "candidate-retained-evidence".to_string(),
+            anchors: vec![query.relations.anchor.clone()],
+            relations: vec![GraphRelationKind::Legacy(RelationKind::Calls)],
+        });
+        let report = fitted_report(&store, &query)?;
+        require(
+            report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                if partial_coverage {
+                    profile.coverage == EntrypointProfileCoverage::Partial
+                        && profile.unreachable_candidates == 0
+                } else {
+                    profile.coverage == EntrypointProfileCoverage::Complete
+                }
+            }),
+            "reconciled candidate page lost its retained endpoint coverage requirement",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn entrypoint_profile_protects_files_owned_by_reachable_symbols() -> Result<(), Box<dyn Error>> {
     let (_temp, store) = analysis_store()?;
     let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
@@ -7407,7 +7509,11 @@ fn filtered_page_entrypoint_store(
     if partial_candidate_coverage {
         coverage.push(CoverageRecord::new(
             CoverageScope::Path {
-                path: RepositoryNodePath::new(Path::new("src/d.rs"))?,
+                path: RepositoryNodePath::new(Path::new(if mixed_filtered_tail {
+                    mixed_admitted_path
+                } else {
+                    "src/d.rs"
+                }))?,
             },
             Some(calls),
             CoverageState::Partial,
