@@ -3075,10 +3075,7 @@ fn entrypoint_filtered_edge_limit_is_terminal(
     {
         return Ok(false);
     }
-    if !report.rows.is_empty() {
-        let Some(continuation) = report.adjacency_continuation.as_ref() else {
-            return Ok(false);
-        };
+    if let Some(continuation) = report.adjacency_continuation.as_ref() {
         let has_rows = store.repository_graph_adjacency_continuation_has_filtered_rows(
             continuation,
             minimum_confidence,
@@ -3089,6 +3086,9 @@ fn entrypoint_filtered_edge_limit_is_terminal(
         #[cfg(test)]
         analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::TerminalProbe);
         return Ok(!has_rows);
+    }
+    if !report.rows.is_empty() {
+        return Ok(false);
     }
     entrypoint_terminal_adjacency_is_empty(
         store,

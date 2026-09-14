@@ -1247,6 +1247,68 @@ fn entrypoint_local_edge_state_stays_within_the_intermediate_budget() -> Result<
 }
 
 #[test]
+fn entrypoint_pruned_page_reconciles_filtered_continuation() -> Result<(), Box<dyn Error>> {
+    let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    for confidence in [ConfidenceClass::Low, ConfidenceClass::Exact] {
+        let (_temp, store, anchor) = pruned_relation_entrypoint_store_with_kinds(
+            Completeness::Complete,
+            0,
+            false,
+            &[calls],
+            Some(confidence),
+        )?;
+        let mut query = analysis_query(RelationAnalysisMode::Entrypoint)?;
+        query.relations.anchor = anchor;
+        query.relations.relation = Some(calls);
+        query.relations.minimum_confidence = ConfidenceClass::Exact;
+        query.relations.resolution = RelationResolutionFilter::Any;
+        query.relations.budget = query.relations.budget.with_aggregate_limits(
+            Some(1),
+            None,
+            None,
+            None,
+            Some(256 * 1024),
+            None,
+        )?;
+        query.include_communities = false;
+        query.include_cycles = false;
+        query.entrypoint_profile = Some(EntrypointProfile {
+            name: "pruned-filtered-continuation".to_string(),
+            anchors: vec![query.relations.anchor.clone()],
+            relations: vec![calls],
+        });
+        let page = load_detailed_relations(&store, &query.relations, None)?;
+        require(
+            page.rows.is_empty()
+                && page.pruned_paths == 1
+                && page.pruned_incomplete_paths == 0
+                && page.adjacency_continuation.is_some()
+                && page.reached_limits.contains(&GraphLimitKind::Edges),
+            "fixture did not prune the complete self-loop before its continuation",
+        )?;
+        query.relations.relation = None;
+        let report = fitted_report(&store, &query)?;
+        let filtered = confidence == ConfidenceClass::Low;
+        require(
+            report.entrypoint_profile.as_ref().is_some_and(|profile| {
+                profile.coverage
+                    == if filtered {
+                        EntrypointProfileCoverage::Complete
+                    } else {
+                        EntrypointProfileCoverage::Partial
+                    }
+            }) && report.reached_limits.contains(&GraphLimitKind::Edges) != filtered
+                && report
+                    .findings
+                    .iter()
+                    .all(|finding| (finding.status == AnalysisStatus::Inconclusive) != filtered),
+            "pruned page did not distinguish filtered from admitted continuation",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn entrypoint_page_edge_limits_reconcile_filtered_rows() -> Result<(), Box<dyn Error>> {
     let scenarios = [
         (
@@ -7047,12 +7109,14 @@ fn pruned_relation_entrypoint_store_with_candidate(
     occurrence_count: u8,
     include_candidate_relation: bool,
 ) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
-    pruned_relation_entrypoint_store_with_kinds(
+    let (temp, store, _) = pruned_relation_entrypoint_store_with_kinds(
         completeness,
         occurrence_count,
         include_candidate_relation,
         &[GraphRelationKind::Legacy(RelationKind::Calls)],
-    )
+        None,
+    )?;
+    Ok((temp, store))
 }
 
 fn pruned_relation_entrypoint_store_with_kinds(
@@ -7060,7 +7124,8 @@ fn pruned_relation_entrypoint_store_with_kinds(
     occurrence_count: u8,
     include_candidate_relation: bool,
     relation_kinds: &[GraphRelationKind],
-) -> Result<(tempfile::TempDir, AtlasStore), Box<dyn Error>> {
+    tail_confidence: Option<ConfidenceClass>,
+) -> Result<(tempfile::TempDir, AtlasStore, RelationAnchor), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("pruned-relation-entrypoint");
     fs::create_dir_all(root.join("src"))?;
@@ -7081,9 +7146,39 @@ fn pruned_relation_entrypoint_store_with_kinds(
             generation,
         )
     };
-    let a = entity("src/a.rs")?;
-    let b = entity("src/b.rs")?;
     let calls = GraphRelationKind::Legacy(RelationKind::Calls);
+    let b = entity("src/b.rs")?;
+    let mut anchor_path = "src/a.rs".to_string();
+    if let Some(confidence) = tail_confidence {
+        let mut ordered_path = None;
+        for index in 0..128 {
+            let path = format!("src/a{index}.rs");
+            let source = entity(&path)?;
+            let self_loop = LogicalRelation::new(
+                &source,
+                calls,
+                RelationResolution::resolved(&source)?,
+                ConfidenceClass::Exact,
+                completeness,
+                generation,
+            )?;
+            let tail = LogicalRelation::new(
+                &source,
+                calls,
+                RelationResolution::resolved(&b)?,
+                confidence,
+                Completeness::Complete,
+                generation,
+            )?;
+            if self_loop.key().digest() < tail.key().digest() {
+                ordered_path = Some(path);
+                break;
+            }
+        }
+        anchor_path = ordered_path.ok_or("no ordered self-loop fixture identity")?;
+        fs::write(root.join(&anchor_path), "pub fn a() {}\n")?;
+    }
+    let a = entity(&anchor_path)?;
     let relation = LogicalRelation::new(
         &a,
         calls,
@@ -7108,6 +7203,21 @@ fn pruned_relation_entrypoint_store_with_kinds(
         })
         .collect::<Result<Vec<_>, _>>()?;
     relations.insert(0, relation.clone());
+    if let Some(confidence) = tail_confidence {
+        let tail = LogicalRelation::new(
+            &a,
+            calls,
+            RelationResolution::resolved(&b)?,
+            confidence,
+            Completeness::Complete,
+            generation,
+        )?;
+        require(
+            relation.key().digest() < tail.key().digest(),
+            "self-loop must precede tail",
+        )?;
+        relations.push(tail);
+    }
     if include_candidate_relation {
         relations.extend(
             relation_kinds
@@ -7193,6 +7303,9 @@ fn pruned_relation_entrypoint_store_with_kinds(
     Ok((
         temp,
         AtlasStore::open_read_only_for_project(&database, &root)?,
+        RelationAnchor::File {
+            file: RepositoryFilePath::new(Path::new(&anchor_path))?,
+        },
     ))
 }
 
