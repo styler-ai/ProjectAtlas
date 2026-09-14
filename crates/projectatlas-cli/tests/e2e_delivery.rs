@@ -4681,7 +4681,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "archive_name=\"${archive##*/}\"",
-        "manifest=\"$archive.sha256\"",
+        "manifest=\"contract-artifacts/$archive_name.sha256\"",
         "awk -v name=\"$archive_name\"",
         "expected_runtime_digest",
         "[ \"$archive_digest\" != \"$expected_archive_digest\" ]",
@@ -4698,6 +4698,15 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+
+    if !release.contains("> \"contract-artifacts/$archive.sha256\"")
+        || release.contains("> \"release-assets/$archive.sha256\"")
+    {
+        return Err(io::Error::other(
+            "internal packaged digests must travel with contract runners, not release assets",
+        )
+        .into());
     }
 
     let digest_gate = unix_prepublish

@@ -311,7 +311,7 @@ jobs:
           {
             printf '%s  %s\n' "$archive_digest" "$archive"
             printf '%s  %s\n' "$runtime_digest" "projectatlas/projectatlas"
-          } > "release-assets/$archive.sha256"
+          } > "contract-artifacts/$archive.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -556,7 +556,7 @@ jobs:
             digest_command=(sha256sum)
           fi
           archive_name="${archive##*/}"
-          manifest="$archive.sha256"
+          manifest="contract-artifacts/$archive_name.sha256"
           if [ ! -f "$manifest" ]; then
             echo "Authoritative packaged digest manifest was not found: $manifest" >&2
             exit 1
