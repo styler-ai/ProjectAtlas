@@ -945,7 +945,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
             io::Error::other("macOS settings overstated optional parser-pack support").into(),
         );
     }
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let executable = mcp_contract_executable();
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     let mut mcp = McpContractSession::spawn(&executable, &repo, &database)?;
     let mcp_result = (|| -> Result<(), Box<dyn Error>> {

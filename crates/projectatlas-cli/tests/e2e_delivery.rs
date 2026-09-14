@@ -4671,7 +4671,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .nth(1)
             .and_then(|tail| tail.split("\nfn ").next())
             .ok_or_else(|| io::Error::other(format!("missing packaged contract {function}")))?;
-        if body.contains("Command::cargo_bin(\"projectatlas\")")
+        if body.contains("cargo_bin(\"projectatlas\")")
             || !body.contains("mcp_contract_executable")
         {
             return Err(io::Error::other(format!(
