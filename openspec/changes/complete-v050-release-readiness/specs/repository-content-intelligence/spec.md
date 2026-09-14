@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: PHP 8 is a pinned built-in language
-#477 SHALL pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.9 contract and SHALL add PHP to the existing `LanguageCapability` and built-in parser dispatch without a provider/process framework.
+#477 SHALL pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.13 contract and SHALL add PHP to the existing `LanguageCapability` and built-in parser dispatch without a provider/process framework.
 
 #### Scenario: Supported PHP source
 - **WHEN** PHP 8 source contains namespaces, classes/interfaces/traits/enums, functions/methods/properties/constants, `use` aliases, or static include/require/call syntax

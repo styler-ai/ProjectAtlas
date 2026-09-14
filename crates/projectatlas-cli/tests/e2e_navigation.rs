@@ -98,6 +98,8 @@ const INSTALLER_RS_FILE_NAME: &str = "installer.rs";
 
 const LIB_RS_FILE_NAME: &str = "lib.rs";
 
+const COMPOSER_JSON_FILE_NAME: &str = "composer.json";
+
 const GIT_DIR_NAME: &str = ".git";
 
 const ATLAS_DIR_NAME: &str = ".projectatlas";
@@ -722,6 +724,155 @@ fn detailed_relation_cli_bounds_the_exact_json_envelope() -> Result<(), Box<dyn 
             "analysis trace requires an exact file or symbol target",
         ));
     Ok(())
+}
+
+#[test]
+fn entrypoint_analysis_cli_and_mcp_share_profile_result_and_rejections()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("entrypoint-parity");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
+        "pub fn root() { child(); }\nfn child() {}\nfn isolated() {}\n",
+    )?;
+    fs::write(
+        repo.join(COMPOSER_JSON_FILE_NAME),
+        r#"{"autoload":{"psr-4":{"Parity\\":"src/"}}}"#,
+    )?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("Parity.php"),
+        "<?php\nnamespace Parity;\nfunction helper(): void {}\n",
+    )?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &database)?;
+    let php_summary = json_summary_command(&repo, &database, "src/Parity.php")?;
+    require_json_string(&php_summary, &["language"], "php")?;
+
+    let anchor = serde_json::json!({
+        "kind": "file",
+        "file": "src/lib.rs"
+    })
+    .to_string();
+    let cli_args = vec![
+        "--db".to_string(),
+        database.display().to_string(),
+        "symbols".to_string(),
+        "relations".to_string(),
+        "--view".to_string(),
+        "analysis".to_string(),
+        "--analysis-mode".to_string(),
+        "entrypoint".to_string(),
+        "--entrypoint".to_string(),
+        anchor.clone(),
+        "--profile-name".to_string(),
+        "parity".to_string(),
+        "--profile-relation".to_string(),
+        "calls".to_string(),
+        "--profile-relation".to_string(),
+        "contains".to_string(),
+        "--limit".to_string(),
+        "50".to_string(),
+    ];
+    let cli = run_mcp_contract_json(&mcp_contract_executable(), &repo, &cli_args)?;
+    let cli_report = cli
+        .get("symbol_relations")
+        .ok_or("CLI omitted symbol_relations")?;
+    require_json_string(cli_report, &["mode"], "entrypoint")?;
+    if cli_report["entrypoint_profile"]["coverage"] != "partial"
+        || cli_report["findings"].as_array().is_none_or(|findings| {
+            findings
+                .iter()
+                .any(|finding| finding["status"] == "candidate")
+        })
+    {
+        return Err(io::Error::other(
+            "representative PHP graph uncertainty was exposed as a deletion candidate",
+        )
+        .into());
+    }
+
+    let executable = mcp_contract_executable();
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        let mcp: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_symbol_relations",
+            &serde_json::json!({
+                "project_path": repo,
+                "view": "analysis",
+                "analysis_mode": "entrypoint",
+                "entrypoints": [anchor],
+                "profile_name": "parity",
+                "profile_relations": ["calls", "contains"],
+                "limit": 50
+            }),
+        )?)?;
+        let mcp_report = mcp
+            .get("symbol_relations")
+            .ok_or("MCP omitted symbol_relations")?;
+        require_json_string(mcp_report, &["mode"], "entrypoint")?;
+        for field in [
+            "entrypoint_profile",
+            "truncated",
+            "returned",
+            "total",
+            "findings",
+        ] {
+            if cli_report.get(field) != mcp_report.get(field) {
+                return Err(
+                    io::Error::other(format!("CLI and MCP entrypoint {field} diverged")).into(),
+                );
+            }
+        }
+        let invalid_cli = StdCommand::new(&executable)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--format")
+            .arg("json")
+            .args([
+                "--db",
+                database.to_str().ok_or("database path is not UTF-8")?,
+                "symbols",
+                "relations",
+                "--view",
+                "analysis",
+                "--analysis-mode",
+                "architecture",
+                "--file",
+                "src/lib.rs",
+                "--profile-relation",
+                "calls",
+            ])
+            .output()?;
+        if invalid_cli.status.success()
+            || !String::from_utf8_lossy(&invalid_cli.stderr).contains("entrypoint profile controls")
+        {
+            return Err(io::Error::other(format!(
+                "CLI accepted entrypoint controls outside entrypoint mode: status={}, stderr={}",
+                invalid_cli.status,
+                String::from_utf8_lossy(&invalid_cli.stderr)
+            ))
+            .into());
+        }
+        let invalid_mcp = session.call_tool(
+            "atlas_symbol_relations",
+            &serde_json::json!({
+                "project_path": repo,
+                "view": "analysis",
+                "analysis_mode": "architecture",
+                "file": "src/lib.rs",
+                "profile_relations": ["calls"]
+            }),
+        )?;
+        if !invalid_mcp.contains("entrypoint profile controls") {
+            return Err(io::Error::other(
+                "MCP accepted entrypoint controls outside entrypoint mode",
+            )
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
 }
 
 #[test]
@@ -8692,9 +8843,20 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .get(name.as_str())
             .and_then(|tool| tool.get("inputSchema"))
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
+        let normalized_baseline = if name == "atlas_symbol_relations" {
+            let mut schema = baseline_schema.clone();
+            if let Some(description) = schema.pointer_mut("/properties/analysis_mode/description") {
+                *description = json!(
+                    "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`."
+                );
+            }
+            schema
+        } else {
+            baseline_schema.clone()
+        };
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
-            baseline_schema,
+            &normalized_baseline,
             current_schema,
         )?;
     }
@@ -9144,7 +9306,7 @@ fn composer_shaped_php_cli_mcp_and_incremental_refresh_agree() -> Result<(), Box
         fs::write(repo.join(path), source)?;
     }
     fs::write(
-        repo.join("composer.json"),
+        repo.join(COMPOSER_JSON_FILE_NAME),
         r#"{
   "name": "atlas/composer-fixture",
   "autoload": {"psr-4": {"Atlas\\": "src/"}}
