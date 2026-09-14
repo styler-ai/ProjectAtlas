@@ -5338,7 +5338,7 @@ impl Drop for McpContractSession {
 
 /// Generate one harness-specific MCP config document.
 fn mcp_config_for_harness(repo: &Path, db: &Path, harness: &str) -> Result<Value, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .arg("--format")
         .arg("json")

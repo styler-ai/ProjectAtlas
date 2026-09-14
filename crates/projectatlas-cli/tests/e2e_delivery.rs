@@ -4656,6 +4656,10 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             "holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp",
         ),
         (
+            "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+            "mcp_config_for_harness",
+        ),
+        (
             "crates/projectatlas-cli/tests/e2e_maintenance.rs",
             "token_cli_and_mcp_preserve_average_maximum_edge_accounting",
         ),
