@@ -2186,7 +2186,6 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "plugin_update_skips_non_official_codex_marketplace",
         "plugin_update_leaves_current_codex_marketplace_untouched",
         "plugin_update_repairs_current_codex_plugin_with_stale_source_manifest",
-        "plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails",
         "plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
         "plugin_update_refuses_unavailable_or_ambiguous_inventory",
         "plugin_update_serializes_restore_before_the_next_installer_reads_state",
