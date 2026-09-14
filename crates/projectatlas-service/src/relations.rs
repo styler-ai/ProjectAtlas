@@ -2,8 +2,8 @@
 
 use super::{ServiceError, ServiceResult, canonical_root_digest, selected_project_binding};
 use projectatlas_core::graph::{
-    ConfidenceClass, CoverageRecord, CoverageScope, DocumentTargetUnresolvedReason, EntitySelector,
-    ExtendedRelationKind, GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits,
+    Completeness, ConfidenceClass, CoverageRecord, CoverageScope, DocumentTargetUnresolvedReason,
+    EntitySelector, ExtendedRelationKind, GraphEntity, GraphEntityKey, GraphLimitKind, GraphLimits,
     GraphRelationKind, LogicalRelation, RelationOccurrence, RelationResolution, RepositoryFilePath,
     RepositoryNodePath, SymbolSelector,
 };
@@ -554,10 +554,22 @@ pub struct DetailedRelationReport {
     pub returned: u32,
     /// Number of cyclic or lower-ranked duplicate-node paths pruned.
     pub pruned_paths: u64,
+    /// Number of pruned relations whose producer coverage was partial.
+    #[serde(skip)]
+    pub(crate) pruned_incomplete_paths: u64,
+    /// Pruned relations retained only for bounded entrypoint trust probes.
+    #[serde(skip)]
+    pub(crate) pruned_relations: Vec<projectatlas_core::graph::LogicalRelation>,
+    /// Whether a relation-evidence sidecar was omitted at the byte boundary.
+    #[serde(skip)]
+    pub(crate) pruned_evidence_truncated: bool,
     /// Whether any declared result boundary stopped the traversal.
     pub truncated: bool,
     /// Generation-, purpose-, query-, order-, and budget-bound continuation.
     pub continuation: Option<String>,
+    /// Database keyset retained for bounded entrypoint suffix probes.
+    #[serde(skip)]
+    pub(crate) adjacency_continuation: Option<RepositoryGraphAdjacencyContinuation>,
     /// Exact, lower-bound, or unknown traversal cardinality.
     pub total: RelationTotalState,
     /// Stable unique hard limits reached while constructing the response.
@@ -871,7 +883,7 @@ struct SerializedByteCounter {
 }
 
 /// Return the exact admitted file path that owns an entity classification.
-fn classification_path(entity: &GraphEntity) -> Option<String> {
+pub(super) fn classification_path(entity: &GraphEntity) -> Option<String> {
     match entity.selector() {
         EntitySelector::File { path } => Some(path.as_str().to_string()),
         EntitySelector::Package { package } => Some(package.manifest.as_str().to_string()),
@@ -906,7 +918,7 @@ fn load_entity_classifications<'entity>(
 }
 
 /// Return whether one local file-bearing entity belongs to the selection.
-fn entity_matches_selection(
+pub(super) fn entity_matches_selection(
     entity: &GraphEntity,
     classifications: &BTreeMap<String, ContentClassification>,
     selection: ContentSelection,
@@ -1057,6 +1069,10 @@ pub fn load_detailed_relation_page(
     let mut reached_limits = Vec::new();
     let mut terminal_limit = false;
     let mut exhausted = false;
+    let mut pruned_incomplete_paths = 0_u64;
+    let mut pruned_relations = Vec::new();
+    let mut pruned_evidence_truncated = false;
+    let mut pruned_relation_bytes = 0_u64;
 
     while selected.len() < budget.page_rows() as usize {
         if relation_deadline_elapsed(deadline) {
@@ -1216,6 +1232,22 @@ pub fn load_detailed_relation_page(
                 let digest = next.key().digest_bytes().map_err(invalid_graph_input)?;
                 if visited.contains_key(&digest) {
                     state.pruned_paths = state.pruned_paths.saturating_add(1);
+                    if row.detail.relation.completeness() != Completeness::Complete {
+                        pruned_incomplete_paths = pruned_incomplete_paths.saturating_add(1);
+                    }
+                    if query.include_occurrences {
+                        let relation_bytes = serialized_equivalent_bytes(&row.detail.relation)?;
+                        let state_bytes =
+                            encoded_relation_state_bytes(&cursor_binding, &state, budget)?;
+                        let reserved = database_work.decoded_bytes.saturating_add(state_bytes);
+                        let prospective = pruned_relation_bytes.saturating_add(relation_bytes);
+                        if prospective > budget.intermediate_bytes().saturating_sub(reserved) {
+                            pruned_evidence_truncated = true;
+                        } else {
+                            pruned_relation_bytes = prospective;
+                            pruned_relations.push(row.detail.relation.clone());
+                        }
+                    }
                     continue;
                 }
                 if state.nodes.len() >= budget.nodes() as usize {
@@ -1378,7 +1410,8 @@ pub fn load_detailed_relation_page(
         control,
         &mut reached_limits,
     )?;
-    let working_composition_bytes = relation_working_composition_bytes(
+    let pruned_evidence_bytes = serialized_equivalent_bytes(&pruned_relations)?;
+    let mut working_composition_bytes = relation_working_composition_bytes(
         &entities,
         &retained,
         query.direction,
@@ -1386,13 +1419,25 @@ pub fn load_detailed_relation_page(
         &coverage,
         &classifications,
         &occurrence_pages,
+        &pruned_relations,
     )?;
-    let precomposition_bytes = relation_intermediate_bytes(
+    let mut precomposition_bytes = relation_intermediate_bytes(
         database_work.decoded_bytes,
         retained_cursor_bytes,
         working_composition_bytes,
         0,
     )?;
+    if precomposition_bytes > budget.intermediate_bytes() && !pruned_relations.is_empty() {
+        pruned_relations.clear();
+        working_composition_bytes = working_composition_bytes.saturating_sub(pruned_evidence_bytes);
+        pruned_evidence_truncated = true;
+        precomposition_bytes = relation_intermediate_bytes(
+            database_work.decoded_bytes,
+            retained_cursor_bytes,
+            working_composition_bytes,
+            0,
+        )?;
+    }
     if precomposition_bytes > budget.intermediate_bytes() {
         return Err(ServiceError::InvalidInput(
             "detailed relation aggregate intermediate-byte budget was exhausted before composition"
@@ -1425,12 +1470,23 @@ pub fn load_detailed_relation_page(
         .map_or(serialized_relation_state_bytes(&state)?, |cursor| {
             cursor.len() as u64
         });
-    let intermediate_bytes = relation_intermediate_bytes(
+    let mut intermediate_bytes = relation_intermediate_bytes(
         database_work.decoded_bytes,
         cursor_bytes,
         working_composition_bytes,
         retained_composition_bytes,
     )?;
+    if intermediate_bytes > budget.intermediate_bytes() && !pruned_relations.is_empty() {
+        pruned_relations.clear();
+        working_composition_bytes = working_composition_bytes.saturating_sub(pruned_evidence_bytes);
+        pruned_evidence_truncated = true;
+        intermediate_bytes = relation_intermediate_bytes(
+            database_work.decoded_bytes,
+            cursor_bytes,
+            working_composition_bytes,
+            retained_composition_bytes,
+        )?;
+    }
     if intermediate_bytes > budget.intermediate_bytes() {
         return Err(ServiceError::InvalidInput(
             "detailed relation aggregate intermediate-byte budget was exhausted before composition"
@@ -1465,8 +1521,12 @@ pub fn load_detailed_relation_page(
             .map(|_| query.content_selection),
         returned,
         pruned_paths: state.pruned_paths,
+        pruned_incomplete_paths,
+        pruned_relations,
+        pruned_evidence_truncated,
         truncated: continuation.is_some() || terminal_limit || !reached_limits.is_empty(),
         continuation,
+        adjacency_continuation: state.adjacency.clone(),
         total,
         reached_limits,
         work: DetailedRelationWork {
@@ -1861,6 +1921,39 @@ fn resolve_anchor(
     }
 }
 
+/// Resolve one entrypoint anchor before profile traversal and expose its read ledger.
+pub(super) fn resolve_relation_anchor_for_analysis(
+    store: &AtlasStore,
+    project: projectatlas_core::graph::ProjectInstanceId,
+    generation: IndexGeneration,
+    anchor: &RelationAnchor,
+    budget: DetailedRelationBudget,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(GraphEntity, DetailedRelationWork)> {
+    let mut database_work = RelationDatabaseWork::default();
+    let entity = resolve_anchor(
+        store,
+        project,
+        generation,
+        anchor,
+        budget,
+        &mut database_work,
+        control,
+    )?;
+    Ok((
+        entity,
+        DetailedRelationWork {
+            database_requested_rows: database_work.requested_rows,
+            database_returned_rows: database_work.returned_rows,
+            database_decoded_bytes: database_work.decoded_bytes,
+            hydrated_entities: database_work.hydrated_entities,
+            hydrated_purpose_paths: database_work.hydrated_paths,
+            intermediate_bytes: database_work.decoded_bytes,
+            ..DetailedRelationWork::default()
+        },
+    ))
+}
+
 /// Test one normalized relation against the service-owned trust filters.
 pub(super) fn relation_matches(relation: &LogicalRelation, query: &DetailedRelationQuery) -> bool {
     query.relation.is_none_or(|kind| relation.kind() == kind)
@@ -2113,6 +2206,89 @@ fn detailed_node(
     }
 }
 
+/// Hydrate one exact node with the same classification, purpose, and coverage
+/// authorities used by ordinary detailed relation responses.
+pub(super) fn hydrate_single_detailed_node(
+    store: &AtlasStore,
+    entity: &GraphEntity,
+    generation: IndexGeneration,
+    content_selection: ContentSelection,
+    budget: DetailedRelationBudget,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(DetailedRelationNode, DetailedRelationWork)> {
+    check_relation_control(control)?;
+    let classifications = load_entity_classifications(store, std::iter::once(entity))?;
+    let classification_bytes = serialized_equivalent_bytes(&classifications)?;
+    let remaining_metadata_bytes = budget
+        .intermediate_bytes()
+        .checked_sub(classification_bytes)
+        .ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "terminal node metadata exceeded the intermediate-byte budget".to_string(),
+            )
+        })?;
+    let metadata_budget = budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(remaining_metadata_bytes),
+        None,
+    )?;
+    let mut database_work = RelationDatabaseWork::default();
+    let purposes = load_purposes(
+        store,
+        entity.key().project(),
+        generation,
+        entity,
+        &[],
+        metadata_budget,
+        &mut database_work,
+        0,
+        control,
+    )?;
+    let coverage = load_coverage(
+        store,
+        entity.key().project(),
+        generation,
+        entity,
+        &[],
+        metadata_budget,
+        &mut database_work,
+        0,
+        control,
+    )?;
+    let intermediate_bytes = database_work
+        .decoded_bytes
+        .checked_add(classification_bytes)
+        .ok_or_else(relation_work_overflow)?;
+    if intermediate_bytes > budget.intermediate_bytes() {
+        return Err(ServiceError::InvalidInput(
+            "terminal node metadata exceeded the intermediate-byte budget".to_string(),
+        ));
+    }
+    check_relation_control(control)?;
+    Ok((
+        detailed_node(
+            entity.clone(),
+            content_selection,
+            &classifications,
+            &purposes,
+            &coverage,
+        ),
+        DetailedRelationWork {
+            database_requested_rows: database_work.requested_rows,
+            database_returned_rows: database_work.returned_rows,
+            database_decoded_bytes: database_work.decoded_bytes,
+            hydrated_entities: database_work.hydrated_entities,
+            hydrated_purpose_paths: database_work.hydrated_paths,
+            hydrated_classification_paths: u32::try_from(classifications.len()).unwrap_or(u32::MAX),
+            intermediate_bytes,
+            ..DetailedRelationWork::default()
+        },
+    ))
+}
+
 /// Compose one public traversal row from its internal retained state.
 fn detailed_row(
     row: TraversalRow,
@@ -2281,8 +2457,66 @@ fn load_occurrence_pages(
     while start < rows.len() {
         check_relation_control(control)?;
         if remaining == 0 {
-            push_limit(reached_limits, GraphLimitKind::Occurrences);
-            pages.extend((start..rows.len()).map(|_| (Vec::new(), true)));
+            let mut occurrence_evidence_omitted = false;
+            while start < rows.len() {
+                check_relation_control(control)?;
+                let batch_size = (rows.len() - start).min(MAX_REPOSITORY_GRAPH_FRONTIER);
+                let chunk = &rows[start..start + batch_size];
+                let relations = chunk
+                    .iter()
+                    .map(|row| row.detail.relation.clone())
+                    .collect::<Vec<_>>();
+                let batch_rows = u32::try_from(batch_size).map_err(|_overflow| {
+                    ServiceError::InvalidInput("occurrence batch size overflowed".to_string())
+                })?;
+                let hydrated_paths = batch_rows.saturating_mul(2).max(1);
+                let Ok(database_budget) = relation_database_budget(
+                    budget,
+                    *database_work,
+                    retained_state_bytes,
+                    relations.len(),
+                    batch_rows,
+                    1,
+                    hydrated_paths,
+                ) else {
+                    occurrence_evidence_omitted = true;
+                    pages.extend((start..rows.len()).map(|_| (Vec::new(), true)));
+                    break;
+                };
+                let batch = match store.repository_graph_occurrence_pages_bounded(
+                    &relations,
+                    1,
+                    database_budget,
+                    control,
+                ) {
+                    Ok(batch) => batch,
+                    Err(DbError::GraphContract(
+                        projectatlas_core::graph::GraphContractError::InvalidLimits {
+                            reason: "graph read decoded bytes exceed the batch budget",
+                        },
+                    )) => {
+                        occurrence_evidence_omitted = true;
+                        pages.extend((start..rows.len()).map(|_| (Vec::new(), true)));
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                database_work.record(batch.work)?;
+                occurrence_evidence_omitted |= batch
+                    .pages
+                    .iter()
+                    .any(|page| page.truncated || !page.rows.is_empty());
+                pages.extend(
+                    batch
+                        .pages
+                        .into_iter()
+                        .map(|page| (Vec::new(), page.truncated || !page.rows.is_empty())),
+                );
+                start += batch_size;
+            }
+            if occurrence_evidence_omitted {
+                push_limit(reached_limits, GraphLimitKind::Occurrences);
+            }
             break;
         }
         let limit = per_relation.min(remaining);
@@ -2512,6 +2746,7 @@ fn relation_working_composition_bytes(
     coverage: &BTreeMap<String, Vec<CoverageRecord>>,
     classifications: &BTreeMap<String, ContentClassification>,
     occurrence_pages: &[(Vec<RelationOccurrence>, bool)],
+    pruned_relations: &[LogicalRelation],
 ) -> ServiceResult<u64> {
     let parts = [
         serialized_equivalent_bytes(entities)?,
@@ -2519,6 +2754,7 @@ fn relation_working_composition_bytes(
         serialized_equivalent_bytes(coverage)?,
         serialized_equivalent_bytes(classifications)?,
         serialized_equivalent_bytes(occurrence_pages)?,
+        serialized_equivalent_bytes(pruned_relations)?,
     ];
     let mut bytes = 0_u64;
     for part in parts {

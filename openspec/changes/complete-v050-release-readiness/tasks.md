@@ -42,10 +42,10 @@
 
 ## 7. Entrypoint-aware dead-code profiles (#384)
 
-- [ ] 7.1 Define the non-persistent typed `EntrypointProfile` request contract, exact file/symbol anchors, supported resolved relation families, profile/input/output bounds, graph-coverage prerequisites, cursor binding, and typed uncertainty; reuse existing graph storage and reject empty, stale, wrong-root, ambiguous, unsupported, or over-budget profiles before traversal.
-- [ ] 7.2 Extend the existing bounded analysis service with node-simple reachability from every accepted entrypoint and classify reachable, evidence-backed unreachable candidate, and inconclusive; adapters only decode/serialize the shared typed contract and never claim deletion safety.
-- [ ] 7.3 Cover reachable, unreachable, cyclic, disconnected, multi-entrypoint, duplicate/invalid anchor, dynamic uncertainty, incomplete relation coverage, stale generation/cursor, truncation, cancellation, wrong root, deterministic replay, CLI/MCP parity, and representative Rust/PHP repository tasks with exact source evidence.
-- [ ] 7.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 7.1 Define the non-persistent typed `EntrypointProfile` request contract, exact file/symbol anchors, supported resolved relation families, profile/input/output bounds, graph-coverage prerequisites, cursor binding, and typed uncertainty; reuse existing graph storage and reject empty, stale, wrong-root, ambiguous, unsupported, or over-budget profiles before traversal.
+- [x] 7.2 Extend the existing bounded analysis service with node-simple reachability from every accepted entrypoint and classify reachable, evidence-backed unreachable candidate, and inconclusive; adapters only decode/serialize the shared typed contract and never claim deletion safety.
+- [x] 7.3 Cover reachable, unreachable, cyclic, disconnected, multi-entrypoint, duplicate/invalid anchor, dynamic uncertainty, incomplete relation coverage, stale generation/cursor, truncation, cancellation, wrong root, deterministic replay, CLI/MCP parity, and representative Rust/PHP repository tasks with exact source evidence.
+- [x] 7.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 8. npm native distribution (#388)
 
@@ -91,7 +91,7 @@
 
 ## 14. Built-in PHP support (#477)
 
-- [x] 14.1 Pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.9 contract and freeze PHP 8 registration, grammar dispatch, symbol kinds/parents/signatures, byte/line/column spans, namespace/import/include/call relation rules, parser provenance, mixed HTML/PHP handling, dynamic/unsupported fallback, cancellation, and file/node/output budgets without a provider framework.
+- [x] 14.1 Pin `tree-sitter-php` 0.24.2 against the workspace Tree-sitter 0.26.13 contract and freeze PHP 8 registration, grammar dispatch, symbol kinds/parents/signatures, byte/line/column spans, namespace/import/include/call relation rules, parser provenance, mixed HTML/PHP handling, dynamic/unsupported fallback, cancellation, and file/node/output budgets without a provider framework.
 - [x] 14.2 Add PHP to the existing `LanguageCapability` and built-in Tree-sitter dispatch and implement the smallest PHP-specific node mapping inside `projectatlas-symbols`; centralize identifiers at the owning registry/parser boundary and preserve existing runtime/graph publication.
 - [x] 14.3 Cover functions, namespaces, classes/interfaces/traits/enums, methods/properties/constants, `use` aliases, include/require, malformed/recovery trees, mixed HTML/PHP, dynamic constructs, duplicate/ambiguous names, exact spans, large/canceled parses, incremental refresh, CLI/MCP navigation, representative Composer repositories, and Windows/Linux/macOS behavior.
 - [x] 14.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

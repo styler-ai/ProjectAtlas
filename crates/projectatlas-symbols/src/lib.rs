@@ -632,7 +632,7 @@ fn extract_cargo_lock_packages_checked<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
-    let Ok(lockfile) = content.parse::<TomlValue>() else {
+    let Ok(lockfile) = toml::from_str::<TomlValue>(content) else {
         return Ok(());
     };
     check()?;
@@ -703,7 +703,7 @@ fn extract_cargo_toml_entries_checked<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(), E> {
-    let Ok(manifest) = content.parse::<TomlValue>() else {
+    let Ok(manifest) = toml::from_str::<TomlValue>(content) else {
         return Ok(());
     };
     check()?;
