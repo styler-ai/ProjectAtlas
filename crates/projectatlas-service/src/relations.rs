@@ -1243,7 +1243,6 @@ pub fn load_detailed_relation_page(
                         let prospective = pruned_relation_bytes.saturating_add(relation_bytes);
                         if prospective > budget.intermediate_bytes().saturating_sub(reserved) {
                             pruned_evidence_truncated = true;
-                            push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                         } else {
                             pruned_relation_bytes = prospective;
                             pruned_relations.push(row.detail.relation.clone());
@@ -1432,7 +1431,6 @@ pub fn load_detailed_relation_page(
         pruned_relations.clear();
         working_composition_bytes = working_composition_bytes.saturating_sub(pruned_evidence_bytes);
         pruned_evidence_truncated = true;
-        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
         precomposition_bytes = relation_intermediate_bytes(
             database_work.decoded_bytes,
             retained_cursor_bytes,
@@ -1482,7 +1480,6 @@ pub fn load_detailed_relation_page(
         pruned_relations.clear();
         working_composition_bytes = working_composition_bytes.saturating_sub(pruned_evidence_bytes);
         pruned_evidence_truncated = true;
-        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
         intermediate_bytes = relation_intermediate_bytes(
             database_work.decoded_bytes,
             cursor_bytes,

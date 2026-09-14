@@ -2658,13 +2658,12 @@ impl AtlasStore {
                         {document_filter}
                         {confidence_filter}
                         {selection_filter}
-                        {keyset}
-                      LIMIT 1"
+                        {keyset}"
                 )
             })
             .collect::<Vec<_>>()
             .join(" UNION ALL ");
-        let sql = format!("SELECT EXISTS(SELECT 1 FROM ({branches}) AS pending)");
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM ({branches}) AS pending LIMIT 1)");
         with_sqlite_read_progress(
             &self.connection,
             control,
@@ -13152,6 +13151,28 @@ mod tests {
         let inbound_continuation = inbound_first
             .continuation
             .ok_or_else(|| io::Error::other("inbound continuation missing"))?;
+        require(
+            store.repository_graph_adjacency_continuation_has_filtered_rows(
+                &inbound_continuation,
+                ConfidenceClass::Low,
+                ContentSelection::UnspecifiedLegacy,
+                None,
+            )?,
+            "multi-frontier continuation lost its remaining admitted relation",
+        )?;
+        let mut exhausted_continuation = inbound_continuation.clone();
+        exhausted_continuation.relation = Some(GraphRelationKind::Extended(
+            ExtendedRelationKind::Configures,
+        ));
+        require(
+            !store.repository_graph_adjacency_continuation_has_filtered_rows(
+                &exhausted_continuation,
+                ConfidenceClass::Low,
+                ContentSelection::UnspecifiedLegacy,
+                None,
+            )?,
+            "multi-frontier continuation retained an excluded relation",
+        )?;
         let reordered_frontier = vec![external.key().clone(), symbol.key().clone()];
         let reordered_error = require_db_error(
             store.repository_graph_adjacency_page(

@@ -1125,9 +1125,11 @@ fn entrypoint_pruned_sidecar_overflow_stays_inconclusive() -> Result<(), Box<dyn
         direct_detail.ok_or("no direct sidecar overflow")?;
     require(
         direct_detail.pruned_evidence_truncated
-            && direct_detail
+            && !direct_detail
                 .reached_limits
                 .contains(&GraphLimitKind::IntermediateBytes)
+            && !direct_detail.truncated
+            && direct_detail.continuation.is_none()
             && direct_detail.pruned_relations.is_empty()
             && direct_detail.work.intermediate_bytes <= direct_detail_budget,
         "direct detailed relation sidecar overflow was not typed and bounded",
