@@ -122,4 +122,4 @@ The accepted v0.6 surface SHALL pass real CLI, stdio MCP, generated-host, concur
 
 #### Scenario: Dependency transition
 - **WHEN** #310 is accepted and merged
-- **THEN** #314 refreshes or rebases onto that baseline and #493 remains blocked until both children and their required reviews are complete
+- **THEN** #314 refreshes or rebases onto that baseline and #493 remains blocked until every accepted release child, including #310, #314, and #388, and their required reviews are complete

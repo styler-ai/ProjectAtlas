@@ -1,8 +1,8 @@
 ## Context
 
-#310 and #314 are the initial accepted v0.6 implementation issues. #310 is the foundation; #314 is directly blocked by #310 because its public adapters must target the accepted installed surface. #493 is the release-acceptance root: it is the native parent of both children, is directly blocked by both, and gains any later accepted milestone issue as another direct child and blocker. Hierarchy expresses scope/progress; dependency edges express execution order.
+#310, #314, and #388 are the accepted v0.6 implementation issues. #314 is directly blocked by #310 because its public adapters must target the accepted installed surface. #388 owns verified npm distribution; its native forwarding prerequisite #491 is already complete on main, so it has no outstanding direct blocker. #493 is the release-acceptance root and the direct native parent of every accepted child, is directly blocked by every child, and closes last. Later accepted milestone issues join the same hierarchy and blocker graph. Hierarchy expresses scope/progress; dependency edges express execution order.
 
-The v0.6 release boundary is a packaged command-line product with CLI, MCP, generated host, plugin/skill, SQLite, installer, and hosted release contracts. Unit tests and schema/help inventories cannot prove their integration.
+The v0.6 release boundary is a packaged command-line product with CLI, MCP, generated host, plugin/skill, SQLite, installer, npm distribution, and hosted release contracts. Unit tests and schema/help inventories cannot prove their integration.
 
 ## Goals / Non-Goals
 
@@ -11,7 +11,7 @@ The v0.6 release boundary is a packaged command-line product with CLI, MCP, gene
 - Maintain one visible native release hierarchy and an acyclic direct-blocker graph.
 - Freeze and build one exact revision/artifact set only after all child issues and reviews are accepted.
 - Safely execute every supported CLI command/nested command and MCP tool, including unchanged routes.
-- Prove one installed workflow across #310 and #314 positive, negative, failure, recovery, compatibility, privacy, concurrency, pressure, and platform boundaries.
+- Prove one installed workflow across #310, #314, and #388 positive, negative, failure, recovery, compatibility, privacy, concurrency, pressure, and platform boundaries.
 - Independently read back prerelease and stable hosted truth and close #493 last.
 
 **Non-goals:**
@@ -24,7 +24,7 @@ The v0.6 release boundary is a packaged command-line product with CLI, MCP, gene
 
 ### Native hierarchy and dependency graph have different jobs
 
-#493 is the sole native parent for every other accepted `v0.6.0-00` issue. Each child has exactly one parent and #493 has none. Direct `blocked by` edges remain the execution authority: #310 has no blocker, #314 is blocked by #310, and #493 is blocked by both. No duplicated children list is stored in OpenSpec; `release_issue` plus the graph issue keys imply the hierarchy.
+#493 is the sole native parent for every other accepted `v0.6.0-00` issue. Each child has exactly one parent and #493 has none. Direct `blocked by` edges remain the execution authority: #310 has no blocker, #314 is blocked by #310, and #493 is blocked by #310, #314, and #388. No duplicated children list is stored in OpenSpec; `release_issue` plus the graph issue keys imply the hierarchy.
 
 ### The release owner is feature-free
 
@@ -36,11 +36,11 @@ The candidate manifest is derived from the installed runtime and accepted specs,
 
 ### Holistic proof uses the installed product
 
-The E2E begins from isolated homes/config/cache/repository state and exact candidate artifacts. It covers installation or upgrade, init, scan, purpose-led navigation, graph/source evidence, #310 routing, #314 typed storage, conditional atomic writes, bounded recovery after resume/compaction, documented host-hook or manual fallback, pressure/conflict/privacy, failure recovery, uninstall, and compatible rollback. It never substitutes checkout binaries or a developer database.
+On every supported release OS/architecture tuple, the E2E begins from isolated homes/config/cache/repository state and exact candidate artifacts. It covers installation or upgrade, init, scan, purpose-led navigation, graph/source evidence, #388 verified npm installation/materialization/forwarding, #310 routing, #314 typed storage, conditional atomic writes, bounded recovery after resume/compaction, documented host-hook or manual fallback, pressure/conflict/privacy, failure recovery, uninstall, and compatible rollback. It never substitutes checkout binaries or a developer database.
 
 ### Prerelease and stable truth are independently read back
 
-`v0.6.0-rc1` is a non-draft prerelease and stable v0.5.0 remains Latest. Readback independently verifies tag/revision, metadata, assets, checksums, installers, runtime/plugin/skill/MCP identity, and acceptance results. Any changed revision or artifact invalidates prior proof. Stable v0.6.0 repeats installed and hosted verification before Latest/downstream/milestone finalization.
+`v0.6.0-rc1` is a non-draft prerelease and stable v0.5.0 remains Latest. Readback independently verifies tag/revision, metadata, assets, checksums, installers, npm registry-package version/provenance/native-asset mapping, runtime/plugin/skill/MCP identity, and acceptance results. Any changed revision or artifact invalidates prior proof. Stable v0.6.0 repeats installed and hosted verification, including npm installation/materialization/forwarding and registry-package version/provenance/native-asset mapping, before Latest/downstream/milestone finalization.
 
 ## Risks / Trade-offs
 
@@ -53,7 +53,7 @@ The E2E begins from isolated homes/config/cache/repository state and exact candi
 
 1. Land and accept #310.
 2. Refresh/rebase #314 onto the accepted #310 baseline, then land and accept #314.
-3. Add any later accepted v0.6 issue as a direct #493 child/blocker and recompute the graph.
+3. Land and accept independent #388 npm distribution. Add any later accepted v0.6 issue as a direct #493 child/blocker and recompute the graph.
 4. Freeze one exact revision after every child/review is complete; run gates, full public-surface execution, and holistic installed E2E.
 5. Publish/read back RC1 only with explicit authorization. Return blockers to owners and restart on any changed input.
 6. Repeat proof for stable, verify Latest/downstream/milestone state, and close #493 last.
@@ -64,8 +64,9 @@ Rollback leaves stable v0.5.0 as Latest, retains failed candidates as prerelease
 
 - Foundation wave: #310 has no direct blocker.
 - Authored-context wave: #314 is blocked by #310 and lands its SQLite boundary before service/adapters.
-- Release-acceptance wave: #493 is blocked by #310, #314, and every future accepted v0.6 child; it has no parent and closes last.
-- #493 creates no SQLite schema. It consumes migration, query-plan, concurrency, backup/restore, privacy, and compatibility proof owned by #314 and installed-surface proof owned by #310.
+- Independent distribution work: #388 has no outstanding direct blocker and owns verified npm installation/materialization/forwarding.
+- Release-acceptance wave: #493 is blocked by #310, #314, #388, and every future accepted v0.6 child; it has no parent and closes last.
+- #493 creates no SQLite schema. It consumes migration, query-plan, concurrency, backup/restore, privacy, and compatibility proof owned by #314 and installed-surface proof owned by #310, and verified npm distribution proof owned by #388.
 
 ## Open Questions
 

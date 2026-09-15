@@ -37,4 +37,4 @@ None. The change classifies and may version public adapters while preserving the
 - `projectatlas-cli` command and MCP routers, tool schemas, runtime identity, task ownership, compatibility fixtures, generated host configuration, and installed-product E2E.
 - The version-matched ProjectAtlas Codex plugin skill and any public documentation that recommends CLI or MCP routes.
 - Windows, Linux, macOS x64, and macOS Apple Silicon installed workflows, including concurrent explicit-root routing.
-- Issue #310 as the direct native sub-issue of release owner #493 and sole owner of this surface decision; #314 is blocked by #310 and #493 is blocked by both for final holistic acceptance.
+- Issue #310 as the direct native sub-issue of release owner #493 and sole owner of this surface decision; #314 is blocked by #310 and #493 is blocked by every accepted child, including #310, #314, and #388, for final holistic acceptance of the agent surface, Memory Atlas, and verified npm distribution.
