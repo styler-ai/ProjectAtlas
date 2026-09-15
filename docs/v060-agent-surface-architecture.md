@@ -1,6 +1,6 @@
 # ProjectAtlas v0.6 Agent Surface Architecture
 
-These views own the intended post-v0.5 CLI/MCP decision and compatibility boundary for #310, the project-authored Memory Atlas boundary for #314, and the feature-free installed-product acceptance boundary for #493. The release graph in `openspec/issue-map.json` makes #310 and #314 direct children of #493, orders #314 after #310, and leaves #493 to close last.
+These views own the intended post-v0.5 CLI/MCP decision and compatibility boundary for #310, the project-authored Memory Atlas boundary for #314, verified native-runtime npm distribution for #388, and the feature-free installed-product acceptance boundary for #493. The release graph in `openspec/issue-map.json` makes #310, #314, and #388 direct children of #493, orders #314 after #310, and leaves #493 to close last.
 
 ## Evidence-led route decision
 
@@ -140,17 +140,20 @@ The integration does not read or write host-private registries, caches, credenti
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Hierarchy: #310 and #314 are closed, reviewed children of #493
-    Hierarchy --> Inventory: freeze installed CLI, nested command, and MCP inventory
+    [*] --> Hierarchy: all accepted children, including #310, #314, and #388, closed and reviewed
+    Hierarchy --> Candidate: freeze revision and build exact artifacts
+    Candidate --> Inventory: install and reconcile complete CLI, nested command, and MCP inventory
     Inventory --> Regression: execute every supported route, including unchanged routes
-    Regression --> HostProof: packaged host, process, root, freshness, format, error, cancellation, and source-evidence E2E
-    HostProof --> Candidate: build exact release candidate
-    Candidate --> Readback: independently verify tag, assets, checksums, runtime, plugin, MCP, and Latest policy
+    Regression --> NpmProof: verified npm install, scripts-disabled materialization, native forwarding
+    NpmProof --> HostProof: packaged host, process, root, freshness, format, error, cancellation, source-evidence E2E
+    HostProof --> Readback: publish RC and verify tag, assets, checksums, runtime, plugin, MCP, hosts, Latest
+    Readback --> NpmReadback: verify npm registry version, provenance, and native-asset mapping
+    NpmReadback --> Defect: confirmed blocker
     Readback --> Defect: confirmed blocker
-    Defect --> Owner: reopen or return defect to owning child issue
+    Defect --> Owner: return defect to owning child issue
     Owner --> Hierarchy: land accepted fix and restart complete proof
-    Readback --> Stable: accepted candidate with no blocker
-    Stable --> FinalReadback: repeat installed and hosted stable proof
-    FinalReadback --> Close: close #493 last with hierarchy and milestone complete
+    NpmReadback --> Stable: accepted candidate, no blocker, explicit promotion authorization
+    Stable --> FinalReadback: repeat installed, npm, and hosted stable proof
+    FinalReadback --> Close: verified identities, Latest, hierarchy and milestone complete, close #493 last
     Close --> [*]
 ```
