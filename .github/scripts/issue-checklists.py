@@ -16,9 +16,11 @@ from enum import Enum
 from functools import lru_cache
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlsplit
 
-from release_version import ReleaseVersion, parse_release_version
+if TYPE_CHECKING:
+    from release_version import ReleaseVersion
 
 
 UNORDERED_LIST_MARKER_RE = r"[-*+]"
@@ -2474,7 +2476,7 @@ def publication_graph(
     if dependencies[owner] != numbers - {owner}:
         raise ValueError("release owner must be blocked by every child")
     try:
-        tuple(TopologicalSorter(dependencies).static_order())
+        TopologicalSorter(dependencies).prepare()
     except CycleError as error:
         raise ValueError("release graph contains a dependency cycle") from error
     return ReleaseGraph(owner, frozenset(numbers))
@@ -2496,6 +2498,8 @@ def closed_owner_repair_matches(
 def check_publication_ready(
     repo: str, root: Path, issue_map_path: Path, mapped_issues: set[int], tag: str
 ) -> list[str]:
+    from release_version import parse_release_version
+
     try:
         version = parse_release_version(tag, source="release")
         graph = publication_graph(issue_map_path, version.milestone, mapped_issues)
@@ -2518,7 +2522,7 @@ def check_publication_ready(
             return failures + ["release owner has unknown native state"]
         release = gh_api_json([f"repos/{repo}/releases/tags/{version.tag}"])
         candidate = run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"]).strip()
-        commit = gh_api_json([f"repos/{repo}/commits/{version.tag}"])
+        commit = gh_api_json([f"repos/{repo}/commits/refs/tags/{version.tag}"])
         tag_commit = commit.get("sha", "") if isinstance(commit, dict) else ""
         if not isinstance(tag_commit, str):
             tag_commit = ""
@@ -2530,6 +2534,8 @@ def check_publication_ready(
 
 
 def self_test() -> None:
+    from release_version import parse_release_version
+
     with tempfile.TemporaryDirectory() as temporary:
         publication_root = Path(temporary)
         publication_map = publication_root / "issue-map.json"
@@ -2597,7 +2603,12 @@ def self_test() -> None:
             commit_sha = "a" * 40
             release = {"tag_name": "v1.2.3-rc1", "draft": False, "prerelease": True}
             globals()["run"] = lambda *_args, **_kwargs: commit_sha + "\n"
-            globals()["gh_api_json"] = lambda args: release if "/releases/" in args[0] else {"sha": commit_sha}
+            def exact_release_api(args: list[str]) -> object:
+                if "/releases/" in args[0]:
+                    return release
+                assert args == ["repos/owner/repo/commits/refs/tags/v1.2.3-rc1"]
+                return {"sha": commit_sha}
+            globals()["gh_api_json"] = exact_release_api
             assert check_publication() == []
             for field, value in (("draft", True), ("prerelease", False), ("tag_name", "v1.2.3")):
                 invalid_release = dict(release, **{field: value})
@@ -2627,10 +2638,6 @@ def self_test() -> None:
                 capture_output=True, text=True, timeout=30,
             )
             assert refused.returncode != 0 and "cannot be combined" in refused.stderr
-        workflow = Path(__file__).resolve().parents[1] / "workflows" / "release.yml"
-        release_workflow = workflow.read_text(encoding="utf-8")
-        assert '--publication-version "$RELEASE_VERSION"' in release_workflow
-        assert '--milestone "${{ steps.release_version.outputs.milestone }}"' not in release_workflow
     sample = """
 - [x] 1.1 Done task
   - [ ] Nested item

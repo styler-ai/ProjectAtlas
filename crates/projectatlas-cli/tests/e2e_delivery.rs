@@ -4073,13 +4073,14 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    if !release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
+    if !release.contains("--publication-version \"$RELEASE_VERSION\"")
+        || release.contains("--milestone \"${{ steps.release_version.outputs.milestone }}\"")
         || !release.contains("cargo fmt --all --check")
         || !release.contains(FILTERED_CUSTOM_HARNESS_COMMAND)
         || !release.contains("test-optional-parser-proof-inputs.py")
     {
         return Err(io::Error::other(
-            "release must retain milestone completion, ordinary gates, and a non-publishing package-proof mode",
+            "release must use publication admission, retain ordinary gates, and support non-publishing package proof",
         )
         .into());
     }
