@@ -206,7 +206,7 @@ jobs:
         run: |
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
-            --milestone "${{ steps.release_version.outputs.milestone }}"
+            --publication-version "$RELEASE_VERSION"
 
   package-unix:
     name: package ${{ matrix.label }}
@@ -1071,6 +1071,9 @@ jobs:
           pattern: projectatlas-*
           merge-multiple: true
 
+      - name: Install publication checklist parser
+        run: npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+
       - name: Prepare release assets
         run: |
           set -euo pipefail
@@ -1197,7 +1200,10 @@ jobs:
       - name: Create GitHub release
         run: |
           set -euo pipefail
-          require_stable_tag_absent_for_rc() {
+          require_release_mutation_ready() {
+            python3 .github/scripts/issue-checklists.py \
+              --repo "$GITHUB_REPOSITORY" \
+              --publication-version "$RELEASE_VERSION"
             if [[ "$EXPECTED_RELEASE_PRERELEASE" != "true" ]]; then
               return
             fi
@@ -1218,14 +1224,14 @@ jobs:
               --immutable-list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
               --upload-list-file "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
             mapfile -t upload_assets < "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
-            require_stable_tag_absent_for_rc
+            require_release_mutation_ready
             gh release upload "$RELEASE_VERSION" "${upload_assets[@]}" --clobber
           else
             classification=()
             if [[ "$EXPECTED_RELEASE_PRERELEASE" == "true" ]]; then
               classification+=(--prerelease --latest=false)
             fi
-            require_stable_tag_absent_for_rc
+            require_release_mutation_ready
             gh release create "$RELEASE_VERSION" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_VERSION" \
