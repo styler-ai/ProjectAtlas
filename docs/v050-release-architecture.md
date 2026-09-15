@@ -635,3 +635,44 @@ stateDiagram-v2
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
   FinalState --> [*]
 ```
+
+## Installed release acceptance
+
+The packaged contract runner owns complete route execution and real predecessor
+upgrade proof. Artifact checks precede installation; read-only snapshots distinguish
+authored authority from derived freshness. Every supported platform must pass.
+
+An exercised v0.4.5 Unix database has no native root identity. Ordinary opens and
+initialization refuse its ambiguous legacy path display. After verifying the
+candidate archive and retaining a compatible database backup, the operator uses
+the candidate executable to run `root set <project-root> --transition adopt-legacy`,
+then retries installation. MCP exposes the same explicit `adopt_legacy` transition
+on `atlas_root_set`. Adoption requires an intact schema-19 database at that root's
+conventional project-local path and revalidates its identity inside the migration
+transaction and after commit. It preserves authored state and publishes the native
+root atomically; a pre-commit failure rolls back. A committed-location error means
+the transaction committed on an opened database whose location could not be
+verified afterward: stop before configuration publication or installer retry and
+preserve both database locations with their WAL/SHM sidecars for inspection.
+Current databases use the existing bind/repair operations. Installers and ordinary
+operations never select adoption implicitly.
+
+```mermaid
+flowchart TD
+  Published[Published v0.4.5 archive and checksum] --> Old[Install and exercise released predecessor]
+  Old --> State[Capture authored state and valid predecessor backup]
+  Candidate[Exact candidate archive and checksum] --> Refusal[Inject invalid candidate admission]
+  State --> Refusal
+  Refusal --> Preserve[Verify prior runtime, configs, and state unchanged]
+  Preserve --> Legacy{Legacy Unix root identity?}
+  Legacy -->|no| Retry[Retry verified candidate update on same project]
+  Legacy -->|yes| Adopt[Operator explicitly adopts root with verified candidate]
+  Adopt -->|commit and location verified| Retry
+  Adopt -->|pre-commit failure| Rollback[Preserve predecessor schema and authored state; repair and retry]
+  Adopt -->|committed location changed| PreserveBoth[Stop; preserve both databases and WAL/SHM; inspect]
+  Rollback --> Adopt
+  Retry --> Continuity[Verify identity, authority, generation, and source continuity]
+  Continuity --> Routes[Execute complete CLI routes and live MCP tool cases]
+  Routes --> Recovery[Verify compatible recovery and incompatible rollback refusal]
+  Recovery --> Gate[All native tuples pass before publication]
+```

@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "4f43ccff4c0f177f340db1a51c4a4248d3dcb944466feaec2ead090c86bcef86",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "56172a988ca5deb4bb990f1f849faac59009d7e1d65764c6e761c0d259708d70",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "89f9cce2ac58141f242542c8deabadc1679f318f9894d87aed15565735d52c34",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "25000ee218d31f042e2c7bf5a67f0cc36682238cb23eeeec63f250cec1e19587",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "faed094df8e9b476a723553100fdfb4658ab4942d1b4bd21af2b7a3ec8b38fde",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 194,
+  "test_count": 195,
   "symbol_count": 431,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -1140,6 +1140,14 @@
       "owner": "e2e_navigation",
       "attributes": [
         "#[test]"
+      ]
+    },
+    {
+      "name": "packaged_cli_upgrades_published_predecessor_without_losing_state",
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]",
+        "#[ignore = \"requires checksum-verified published predecessor and explicit packaged candidate\"]"
       ]
     },
     {

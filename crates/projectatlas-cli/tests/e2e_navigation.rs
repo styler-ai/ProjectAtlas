@@ -8969,6 +8969,18 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
                 );
             }
             schema
+        } else if name == "atlas_root_set" {
+            let mut schema = baseline_schema.clone();
+            let transitions = schema
+                .pointer_mut("/properties/transition/anyOf/0/oneOf")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| io::Error::other("frozen root transitions are missing"))?;
+            transitions.push(json!({
+                "description": "Explicitly adopt the selected native root for an intact schema-19 database.",
+                "type": "string",
+                "const": "adopt_legacy"
+            }));
+            schema
         } else {
             baseline_schema.clone()
         };

@@ -102,6 +102,8 @@ const TEST_POSIX_USER_BIN_DIR: &str = ".local/bin";
 const TEST_ATLAS_FORWARDER_FILE_NAME: &str = "atlas";
 
 const SRC_DIR_NAME: &str = "src";
+const PROJECT_LOCAL_FIXTURE_DIR: &str = ".tmp";
+const POSIX_INSTALLER_SCRIPT: &str = "plugins/projectatlas/scripts/install-runtime.sh";
 
 const DUPLICATE_RS_FILE_NAME: &str = "duplicate.rs";
 
@@ -456,7 +458,7 @@ const LANGUAGE_SUPPORT_FILE_NAME: &str = "language-support.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "9a01e84163fd5a60cd850a6ccb2edb0c4cdb60bc3bd9c7cec9a61541c980b4c5";
+const MCP_TOOLS_SHA256: &str = "2044084ddf9cfdcabaee2f3c727fb8aca2f06e8abab0ffea134d56a40ba15bfb";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -3223,6 +3225,8 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
+    #[cfg(windows)]
+    assert_windows_packaged_digest_admission()?;
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
@@ -4451,10 +4455,24 @@ gate_status={gate_status}
             "mcp_tools_list_preserves_frozen_contracts_without_index_state",
             "packaged_cli_surface_preserves_frozen_routes_and_defaults",
             "packaged_cli_commands_own_their_real_sqlite_effects",
+            "packaged_cli_upgrades_published_predecessor_without_losing_state",
         ] {
             if !packaged_step.contains(contract) {
                 return Err(io::Error::other(format!(
                     "{job} prepublish omitted packaged contract {contract:?}"
+                ))
+                .into());
+            }
+        }
+        for required in [
+            "Prepare published predecessor upgrade inputs",
+            "prepare-published-predecessor.py",
+            "--suffix",
+            "--destination",
+        ] {
+            if !body.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{job} prepublish omitted predecessor input binding {required}"
                 ))
                 .into());
             }
@@ -9593,7 +9611,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
 
     let mut uninstall = StdCommand::new("bash");
     uninstall
-        .arg(workspace_root.join("plugins/projectatlas/scripts/install-runtime.sh"))
+        .arg(workspace_root.join(POSIX_INSTALLER_SCRIPT))
         .arg("--uninstall")
         .arg(&repo)
         .env("HOME", &home)
@@ -13408,7 +13426,7 @@ Write-Output "exact_json_registry_contract_verified"
 
 fn fake_codex_projectatlas_marketplace_root(codex_dir: &Path) -> PathBuf {
     codex_dir
-        .join(".tmp")
+        .join(PROJECT_LOCAL_FIXTURE_DIR)
         .join("marketplaces")
         .join("projectatlas")
 }
@@ -17733,6 +17751,600 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
     Ok(())
 }
 
+/// Exercise the published predecessor rather than synthesizing its schema.
+#[test]
+#[ignore = "requires checksum-verified published predecessor and explicit packaged candidate"]
+fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<(), Box<dyn Error>>
+{
+    let required_path = |name: &str| -> Result<PathBuf, Box<dyn Error>> {
+        let path = PathBuf::from(std::env::var_os(name).ok_or_else(|| {
+            io::Error::other(format!("required release contract input {name} is missing"))
+        })?);
+        if !path.exists() {
+            return Err(
+                io::Error::other(format!("release contract input {name} does not exist")).into(),
+            );
+        }
+        Ok(path)
+    };
+    let predecessor = required_path("PROJECTATLAS_PREDECESSOR_EXECUTABLE")?;
+    let predecessor_digest = std::env::var("PROJECTATLAS_PREDECESSOR_EXECUTABLE_SHA256")?;
+    if sha256_hex(&fs::read(&predecessor)?) != predecessor_digest {
+        return Err(io::Error::other(
+            "predecessor runtime does not match the verified archive extraction",
+        )
+        .into());
+    }
+    let predecessor_source = required_path("PROJECTATLAS_PREDECESSOR_SOURCE")?;
+    let predecessor_archive = required_path("PROJECTATLAS_PREDECESSOR_ARCHIVE")?;
+    let predecessor_checksums = required_path("PROJECTATLAS_PREDECESSOR_CHECKSUMS")?;
+    let executable = required_path(support::MCP_CONTRACT_EXECUTABLE_ENV)?;
+    assert_mcp_contract_runtime_and_skill(&executable)?;
+    let archive_name = predecessor_archive
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| io::Error::other("predecessor archive name is not UTF-8"))?;
+    let checksum_line = format!(
+        "{}  {archive_name}",
+        sha256_hex(&fs::read(&predecessor_archive)?)
+    );
+    if fs::read_to_string(&predecessor_checksums)?
+        .lines()
+        .filter(|line| *line == checksum_line)
+        .count()
+        != 1
+    {
+        return Err(
+            io::Error::other("published predecessor checksum does not match its archive").into(),
+        );
+    }
+    let manifest: Value = serde_json::from_slice(&fs::read(
+        predecessor_source.join("plugins/projectatlas/.codex-plugin/plugin.json"),
+    )?)?;
+    require_json_string(&manifest, &["version"], "0.4.5")?;
+    let info = run_mcp_contract_json(
+        &predecessor,
+        &predecessor_source,
+        &["runtime-info".to_string()],
+    )?;
+    require_json_string(&info, &["version"], "0.4.5")?;
+
+    let fixture_root = workspace_root()?.join(PROJECT_LOCAL_FIXTURE_DIR);
+    fs::create_dir_all(&fixture_root)?;
+    let temp = tempfile::Builder::new()
+        .prefix("released-upgrade-")
+        .tempdir_in(fixture_root)?;
+    let repo = temp.path().join("released-upgrade");
+    let home = temp.path().join(ISOLATED_HOME_DIR);
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(&home)?;
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn released_upgrade_marker() {}\n",
+    )?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    for arguments in [
+        vec!["init", "-b", "main"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Contract",
+            "-c",
+            "user.email=contract@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let output = git_command_for_root(&repo).args(arguments).output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!("upgrade fixture Git failed: {output:?}")).into());
+        }
+    }
+    let linked = temp.path().join("released-linked");
+    let output = git_command_for_root(&repo)
+        .args(["worktree", "add", "--detach"])
+        .arg(&linked)
+        .arg("HEAD")
+        .output()?;
+    if !output.status.success() {
+        return Err(
+            io::Error::other(format!("upgrade fixture worktree failed: {output:?}")).into(),
+        );
+    }
+    let canary = temp.path().join("unrelated.txt");
+    fs::write(&canary, "preserve unrelated state\n")?;
+
+    let isolated_path = std::env::join_paths(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|directory| {
+            !["projectatlas", "projectatlas.exe", "atlas", "atlas.cmd"]
+                .iter()
+                .any(|name| directory.join(name).is_file())
+        }),
+    )?;
+    let xdg_data = home.join(".local/share");
+    let xdg_config = home.join(".config");
+    let xdg_cache = home.join(".cache");
+    let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
+        &predecessor_source,
+        &repo,
+        &predecessor,
+        None,
+        Some(&home),
+    )?;
+    install
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("PATH", &isolated_path)
+        .env("PROJECTATLAS_VERSION", "0.4.5")
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_CACHE_HOME", &xdg_cache);
+    if cfg!(windows) {
+        install.args(["-ProjectAtlasVersion", "v0.4.5"]);
+    }
+    let deadline = Instant::now() + RELEASE_ASSET_INSTALLER_OPERATION_TIMEOUT;
+    let child = spawn_plugin_installer_process(&mut install)?;
+    require_successful_plugin_installer_output(wait_for_plugin_installer_output(
+        child,
+        "published predecessor installer",
+        deadline.saturating_duration_since(Instant::now()),
+    )?)?;
+    let database_relative = Path::new(".projectatlas/projectatlas.db");
+    let database = repo.join(database_relative);
+    for arguments in [
+        vec!["init".to_string()],
+        vec![
+            "purpose".to_string(),
+            "set".to_string(),
+            "src/lib.rs".to_string(),
+            "Preserve the released authored purpose.".to_string(),
+        ],
+    ] {
+        run_mcp_contract_json(&predecessor, &repo, &arguments)?;
+    }
+    for (name, arguments, telemetry) in [
+        (
+            "atlas_worktree_add",
+            serde_json::json!({"worktree":"released-linked", "alias":"released-linked"}),
+            false,
+        ),
+        (
+            "atlas_init",
+            serde_json::json!({"worktree":"released-linked"}),
+            false,
+        ),
+        ("atlas_overview", serde_json::json!({}), true),
+    ] {
+        let (response, _) =
+            run_mcp_contract_raw_call(&predecessor, &repo, &database, name, &arguments, telemetry)?;
+        if response.get("error").is_some()
+            || response.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+        {
+            return Err(io::Error::other(format!(
+                "released predecessor {name} failed: {response}"
+            ))
+            .into());
+        }
+    }
+    let authority = released_upgrade_authority(&database)?;
+    let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    for table in ["usage_events", "worktree_registrations"] {
+        let count: i64 =
+            connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?;
+        if count == 0 {
+            return Err(io::Error::other(format!("released fixture has no {table}")).into());
+        }
+    }
+    let backup = temp.path().join("released-compatible-backup.db");
+    connection.execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
+    drop(connection);
+    let before_database = sqlite_compatibility_snapshot(&database)?;
+    let before_host = repository_filesystem_snapshot(&home)?;
+    let before_repo = repository_filesystem_snapshot(&repo)?;
+    let before_runtime = sha256_hex(&fs::read(&predecessor)?);
+    #[cfg(windows)]
+    let archive = create_windows_release_archive(temp.path(), &executable)?;
+    #[cfg(unix)]
+    let archive = create_posix_release_archive(temp.path(), &executable)?;
+    let source = workspace_root()?;
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    for invalid in [true, false] {
+        #[cfg(unix)]
+        if !invalid {
+            // Released Unix root displays are ambiguous. Ordinary operations
+            // must refuse; only the operator's explicit transition may adopt.
+            for arguments in [vec!["init", "--no-scan"], vec!["mcp-config"]] {
+                let refused = StdCommand::new(&executable)
+                    .current_dir(&repo)
+                    .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                    .args(arguments)
+                    .output()?;
+                if refused.status.success()
+                    || !String::from_utf8_lossy(&refused.stderr)
+                        .contains("missing canonical project-root identity")
+                    || sqlite_compatibility_snapshot(&database)? != before_database
+                    || repository_filesystem_snapshot(&repo)? != before_repo
+                {
+                    return Err(io::Error::other(format!(
+                        "ordinary candidate access did not preserve ambiguous predecessor state: {refused:?}"
+                    )).into());
+                }
+            }
+            run_mcp_contract_json(
+                &executable,
+                &repo,
+                &[
+                    "root".to_string(),
+                    "set".to_string(),
+                    repo.display().to_string(),
+                    "--transition".to_string(),
+                    "adopt-legacy".to_string(),
+                ],
+            )?;
+        }
+        #[cfg(windows)]
+        if !invalid {
+            // Exercise the same explicit transition through the real MCP
+            // adapter from an isolated control root with no legacy binding.
+            let control = temp.path().join("adoption-control");
+            fs::create_dir_all(&control)?;
+            let initialized = git_command_for_root(&control)
+                .args(["init", "-b", "main"])
+                .output()?;
+            if !initialized.status.success() {
+                return Err(io::Error::other(format!(
+                    "adoption control Git failed: {initialized:?}"
+                ))
+                .into());
+            }
+            let (response, _) = run_mcp_contract_raw_call(
+                &executable,
+                &control,
+                &control.join(database_relative),
+                "atlas_root_set",
+                &json!({"root": repo, "transition": "adopt_legacy"}),
+                false,
+            )?;
+            if response.get("error").is_some()
+                || response.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+            {
+                return Err(
+                    io::Error::other(format!("explicit MCP adoption failed: {response}")).into(),
+                );
+            }
+        }
+        if !invalid {
+            if released_upgrade_authority(&database)? != authority {
+                return Err(io::Error::other(
+                    "explicit legacy adoption changed authored authority",
+                )
+                .into());
+            }
+            let connection =
+                Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let (root_identity, administrative_identity, administrative) = connection.query_row(
+                "SELECT last_root_identity, git_administrative_directory_identity,
+                        git_administrative_directory FROM worktree_registrations
+                 WHERE alias = 'released-linked' AND state = 'active'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?;
+            if projectatlas_core::CanonicalProjectRoot::decode(&root_identity)?
+                != projectatlas_core::CanonicalProjectRoot::from_path(&linked)?
+                || projectatlas_core::CanonicalProjectRoot::decode(&administrative_identity)?
+                    != projectatlas_core::CanonicalProjectRoot::from_path(Path::new(
+                        &administrative,
+                    ))?
+            {
+                return Err(io::Error::other(
+                    "adoption changed registered native worktree identity",
+                )
+                .into());
+            }
+            drop(connection);
+            let (response, _) = run_mcp_contract_raw_call(
+                &executable,
+                &repo,
+                &database,
+                "atlas_worktree_list",
+                &json!({}),
+                false,
+            )?;
+            if response.get("error").is_some()
+                || response.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+            {
+                return Err(
+                    io::Error::other(format!("adopted worktree list failed: {response}")).into(),
+                );
+            }
+        }
+        let wrong_hash = "0".repeat(64);
+        let server = serve_release_assets(&archive, invalid.then_some(wrong_hash.as_str()))?;
+        let mut command = if cfg!(windows) {
+            let mut command = StdCommand::new("powershell");
+            command
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(source.join("plugins/projectatlas/scripts/install-runtime.ps1"))
+                .arg("-ProjectRoot")
+                .arg(&repo)
+                .arg("-ProjectAtlasVersion")
+                .arg(&release_tag)
+                .arg("-ReleaseBaseUrl")
+                .arg(server.base_url())
+                .arg("-ReleaseBinaryOnly");
+            command
+        } else {
+            let mut command = StdCommand::new("bash");
+            command.arg(source.join(POSIX_INSTALLER_SCRIPT)).arg(&repo);
+            command
+        };
+        command
+            .env("PATH", &isolated_path)
+            .env("PROJECTATLAS_VERSION", &release_tag)
+            .env("PROJECTATLAS_RELEASE_BASE_URL", server.base_url())
+            .env("PROJECTATLAS_RELEASE_BINARY_ONLY", "1")
+            .env_remove("PROJECTATLAS_RUNTIME_PATH")
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", home.join("AppData/Roaming"))
+            .env("LOCALAPPDATA", home.join("AppData/Local"))
+            .env("CODEX_HOME", home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .env("XDG_CACHE_HOME", &xdg_cache)
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
+            .env("PROJECTATLAS_NO_TELEMETRY", "1");
+        let result =
+            run_release_asset_installer(&server, "published predecessor update", &mut command);
+        let output = server.finish_installer(result)?;
+        if invalid {
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if output.status.success() || !diagnostic.contains("Checksum mismatch") {
+                return Err(io::Error::other(format!(
+                    "invalid candidate was not refused by checksum: {output:?}"
+                ))
+                .into());
+            }
+            let mut actual_host = repository_filesystem_snapshot(&home)?;
+            let mut expected_host = before_host.clone();
+            // PowerShell owns this process-start cache, independently of installer admission.
+            let startup_cache =
+                "AppData/Local/Microsoft/Windows/PowerShell/StartupProfileData-NonInteractive";
+            actual_host.remove(startup_cache);
+            expected_host.remove(startup_cache);
+            for (path, value) in &actual_host {
+                if cfg!(windows)
+                    && value == "directory"
+                    && (path == "AppData/Local/ProjectAtlas/runtimes"
+                        || path.starts_with(&format!(
+                            "AppData/Local/ProjectAtlas/runtimes/{}/",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        || path
+                            == &format!(
+                                "AppData/Local/ProjectAtlas/runtimes/{}",
+                                env!("CARGO_PKG_VERSION")
+                            ))
+                {
+                    expected_host.insert(path.clone(), value.clone());
+                }
+            }
+            if sqlite_compatibility_snapshot(&database)? != before_database
+                || actual_host != expected_host
+                || repository_filesystem_snapshot(&repo)? != before_repo
+            {
+                return Err(io::Error::other(format!(
+                    "invalid candidate changed state: database_equal={} host_delta={:?} repo_delta={:?}",
+                    sqlite_compatibility_snapshot(&database)? == before_database,
+                    changed_snapshot_keys(&expected_host, &actual_host),
+                    changed_snapshot_keys(&before_repo, &repository_filesystem_snapshot(&repo)?))).into());
+            }
+            let summary = run_mcp_contract_json(
+                &predecessor,
+                &repo,
+                &["summary".to_string(), "src/lib.rs".to_string()],
+            )?;
+            require_json_string(
+                &summary,
+                &["file_purpose"],
+                "Preserve the released authored purpose.",
+            )?;
+        } else {
+            require_successful_plugin_installer_output(output)?;
+        }
+    }
+    let installed_config: Value =
+        serde_json::from_slice(&fs::read(repo.join(".projectatlas/projectatlas.mcp.json"))?)?;
+    let installed = PathBuf::from(
+        json_at(
+            &installed_config,
+            &["mcpServers", "projectatlas", "command"],
+        )?
+        .as_str()
+        .ok_or_else(|| io::Error::other("candidate installer omitted its MCP runtime"))?,
+    );
+    if sha256_hex(&fs::read(&installed)?) != sha256_hex(&fs::read(&executable)?) {
+        return Err(io::Error::other("installer did not publish exact candidate bytes").into());
+    }
+    // Installer convergence and database migration are separate public operations.
+    run_mcp_contract_json(
+        &installed,
+        &repo,
+        &["init".to_string(), "--no-scan".to_string()],
+    )?;
+    if released_upgrade_authority(&database)? != authority {
+        return Err(io::Error::other(
+            "candidate migration changed released authored authority or generation",
+        )
+        .into());
+    }
+    let migrated = sqlite_compatibility_snapshot(&database)?;
+    let refusal = StdCommand::new(&predecessor)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json", "overview"])
+        .output()?;
+    if refusal.status.success()
+        || !String::from_utf8_lossy(&refusal.stderr).contains("schema")
+        || sqlite_compatibility_snapshot(&database)? != migrated
+    {
+        return Err(io::Error::other(format!(
+            "predecessor did not refuse incompatible state atomically: {refusal:?}"
+        ))
+        .into());
+    }
+    // Read the retained compatible database explicitly; never replace later candidate state.
+    Connection::open(&backup)?.pragma_update(None, "journal_mode", "WAL")?;
+    let recovery = run_mcp_contract_json(
+        &predecessor,
+        &repo,
+        &[
+            "--db".to_string(),
+            backup.display().to_string(),
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+        ],
+    )?;
+    require_json_string(
+        &recovery,
+        &["file_purpose"],
+        "Preserve the released authored purpose.",
+    )?;
+    if sqlite_compatibility_snapshot(&database)? != migrated {
+        return Err(
+            io::Error::other("compatible predecessor recovery changed candidate state").into(),
+        );
+    }
+    run_mcp_contract_json(&installed, &repo, &["scan".to_string()])?;
+    let summary = run_mcp_contract_json(
+        &installed,
+        &repo,
+        &["summary".to_string(), "src/lib.rs".to_string()],
+    )?;
+    require_json_string(
+        &summary,
+        &["file_purpose"],
+        "Preserve the released authored purpose.",
+    )?;
+    require_json_contains(&summary, &["content_summary"], "released_upgrade_marker")?;
+    let messages = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"released-upgrade","version":"1"}}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}).to_string(),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs","compact":true}}}).to_string(),
+    ];
+    for file in [
+        "projectatlas.mcp.json",
+        "projectatlas.claude.mcp.json",
+        "projectatlas.opencode.json",
+    ] {
+        let config: Value =
+            serde_json::from_slice(&fs::read(repo.join(ATLAS_DIR_NAME).join(file))?)?;
+        let (host_runtime, arguments) = if file == "projectatlas.opencode.json" {
+            let command = cli_surface_strings(&config, &["mcp", "projectatlas", "command"])?;
+            require_json_bool(&config, &["mcp", "projectatlas", "enabled"], true)?;
+            require_json_string(&config, &["mcp", "projectatlas", "type"], "local")?;
+            (PathBuf::from(&command[0]), command[1..].to_vec())
+        } else {
+            mcp_command_and_args(&config)?
+        };
+        require_same_executable(&host_runtime.to_string_lossy(), &installed, file)?;
+        if arguments.len() != 7
+            || arguments[0] != "--require-version"
+            || arguments[1] != env!("CARGO_PKG_VERSION")
+            || arguments[2] != "--db"
+            || fs::canonicalize(&arguments[3])? != fs::canonicalize(&database)?
+            || arguments[4] != "--config"
+            || fs::canonicalize(&arguments[5])?
+                != fs::canonicalize(repo.join(".projectatlas/config.toml"))?
+            || arguments[6] != "mcp"
+        {
+            return Err(io::Error::other(format!(
+                "{file} lost its exact runtime/database/config binding: {arguments:?}"
+            ))
+            .into());
+        }
+        let stdout = run_mcp_stdio_with_env(
+            &host_runtime,
+            &repo,
+            &arguments,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+        )?;
+        let payload: Value = toon_format::decode_default(&mcp_tool_text(&stdout, 2)?)?;
+        require_json_string(
+            &payload,
+            &["file_summary", "file_purpose"],
+            "Preserve the released authored purpose.",
+        )?;
+    }
+    if sha256_hex(&fs::read(&predecessor)?) != before_runtime
+        || fs::read_to_string(&canary)? != "preserve unrelated state\n"
+    {
+        return Err(
+            io::Error::other("upgrade changed retained runtime or unrelated canary").into(),
+        );
+    }
+    Ok(())
+}
+
+/// Compare released authored rows through the stable schema projection, without opening an Atlas writer.
+fn released_upgrade_authority(database: &Path) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut authority = sqlite_table_digests(&connection)?;
+    authority.retain(|table, _| {
+        table.starts_with("usage_")
+            || matches!(
+                table.as_str(),
+                "purposes" | "project_identity" | "file_texts"
+            )
+    });
+    for (name, query) in [
+        (
+            "metadata",
+            "SELECT key,value FROM metadata WHERE key IN ('project_root','purpose.authored_revision','index_publication_generation') ORDER BY key",
+        ),
+        (
+            "worktrees",
+            "SELECT registration_id,alias,state,git_common_directory,git_administrative_directory,git_administrative_identity,last_root,project_instance_id,accepted_telemetry_revision,created_at_epoch,retired_at_epoch FROM worktree_registrations ORDER BY registration_id",
+        ),
+    ] {
+        let mut statement = connection.prepare(query)?;
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                    .collect::<Result<Vec<_>, _>>()
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        authority.insert(name.to_string(), serde_json::to_string(&rows)?);
+    }
+    Ok(authority)
+}
+
 #[test]
 fn packaged_cli_surface_preserves_frozen_routes_and_defaults() -> Result<(), Box<dyn Error>> {
     let executable = mcp_contract_executable();
@@ -18276,6 +18888,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         .into());
     }
 
+    let mut tested_routes = BTreeSet::new();
     for case in &cases {
         match case.name {
             "scan" => fs::write(
@@ -18296,6 +18909,21 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         let filesystem_before = repository_filesystem_snapshot(&repo)?;
         let outer_filesystem_before = repository_filesystem_snapshot(temp.path())?;
         let output = run_packaged_cli_contract_case(&executable, &repo, &database, case)?;
+        let surface = json_at(&fixture, &[&current_key])?;
+        for family in ["subcommands", "actions"] {
+            if let Some(routes) = surface[family][case.name].as_array() {
+                for route in routes.iter().filter_map(Value::as_str) {
+                    let route_index = if case.name == "parser-pack" { 3 } else { 1 };
+                    if case
+                        .arguments
+                        .get(route_index)
+                        .is_some_and(|argument| argument == route)
+                    {
+                        tested_routes.insert(format!("{} {route}", case.name));
+                    }
+                }
+            }
+        }
         assert_cli_contract_filesystem_effect(case.name, &repo)?;
         let filesystem_after = repository_filesystem_snapshot(&repo)?;
         assert_cli_contract_filesystem_delta(case.name, &filesystem_before, &filesystem_after)?;
@@ -18343,7 +18971,30 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
     }
     assert_cli_snapshot_archive(&snapshot_archive)?;
 
-    assert_packaged_cli_legacy_leaf_contracts(&executable, &repo, &database, temp.path())?;
+    assert_packaged_cli_legacy_leaf_contracts(
+        &executable,
+        &repo,
+        &database,
+        temp.path(),
+        &mut tested_routes,
+    )?;
+    let surface = json_at(&fixture, &[&current_key])?;
+    let mut expected_routes = BTreeSet::new();
+    for family in ["subcommands", "actions"] {
+        let commands = surface[family]
+            .as_object()
+            .ok_or_else(|| io::Error::other("frozen CLI route inventory is not an object"))?;
+        for (command, routes) in commands {
+            for route in cli_surface_strings(routes, &[])? {
+                expected_routes.insert(format!("{command} {route}"));
+            }
+        }
+    }
+    if tested_routes != expected_routes {
+        return Err(io::Error::other(format!(
+            "packaged CLI nested behavior coverage drifted: tested={tested_routes:?} expected={expected_routes:?}"
+        )).into());
+    }
     assert_packaged_cli_edge_contracts(&executable, &repo, &database)?;
     assert_cli_non_git_freshness(&executable)?;
 
@@ -20778,43 +21429,34 @@ fn assert_cli_contract_filesystem_delta(
     .into())
 }
 
-/// Run every frozen v0.3.26 nested leaf through the real packaged executable.
+/// Execute and record nested routes through the real packaged executable.
 fn assert_packaged_cli_legacy_leaf_contracts(
     executable: &Path,
     repo: &Path,
     database: &Path,
     temp: &Path,
+    tested_routes: &mut BTreeSet<String>,
 ) -> Result<(), Box<dyn Error>> {
+    let mut run = |arguments: &[&str]| -> Result<Value, Box<dyn Error>> {
+        let output = run_packaged_cli_json(executable, repo, database, arguments)?;
+        tested_routes.insert(format!("{} {}", arguments[0], arguments[1]));
+        Ok(output)
+    };
     let before = mcp_database_snapshot(database)?;
     let filesystem_before = repository_filesystem_snapshot(repo)?;
 
-    let symbols = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["symbols", "list", "--file", "src/lib.rs", "--limit", "2"],
-    )?;
+    let symbols = run(&["symbols", "list", "--file", "src/lib.rs", "--limit", "2"])?;
     require_json_string(&symbols, &["0", "path"], "src/lib.rs")?;
-    let relations = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &[
-            "symbols",
-            "relations",
-            "--file",
-            "src/lib.rs",
-            "--limit",
-            "2",
-        ],
-    )?;
+    let relations = run(&[
+        "symbols",
+        "relations",
+        "--file",
+        "src/lib.rs",
+        "--limit",
+        "2",
+    ])?;
     require_json_string(&relations, &["0", "path"], "src/lib.rs")?;
-    let symbol_slice = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["symbols", "slice", "src/lib.rs", "indexed"],
-    )?;
+    let symbol_slice = run(&["symbols", "slice", "src/lib.rs", "indexed"])?;
     require_json_string(&symbol_slice, &["path"], "src/lib.rs")?;
     require_json_contains(&symbol_slice, &["content"], "indexed")?;
 
@@ -20823,61 +21465,48 @@ fn assert_packaged_cli_legacy_leaf_contracts(
         .to_string_lossy()
         .trim_start_matches("\\\\?\\")
         .replace('\\', "/");
-    let root_set = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["root", "set", &root, "--transition", "bind"],
-    )?;
+    let root_set = run(&["root", "set", &root, "--transition", "bind"])?;
     require_json_string(&root_set, &["transition"], "bind")?;
     require_json_bool(&root_set, &["verified"], true)?;
     for arguments in [&["root", "show"][..], &["root", "verify"][..]] {
-        let report = run_packaged_cli_json(executable, repo, database, arguments)?;
+        let report = run(arguments)?;
         require_json_bool(&report, &["verified"], true)?;
     }
+    let status = run(&["root", "status", &root])?;
+    require_json_bool(&status, &["worktree_required"], false)?;
+    require_json_string(&status, &["selected_root"], &root)?;
     let filesystem_after_root = repository_filesystem_snapshot(repo)?;
     assert_root_bind_filesystem_delta(&filesystem_before, &filesystem_after_root)?;
 
     let gitignore = repo.join(".gitignore");
     let gitignore_before = fs::read(&gitignore)?;
-    let gitignore_report =
-        run_packaged_cli_json(executable, repo, database, &["ignore", "init-gitignore"])?;
+    let gitignore_report = run(&["ignore", "init-gitignore"])?;
     require_json_bool(&gitignore_report, &["existed"], true)?;
     require_json_bool(&gitignore_report, &["created"], false)?;
     if fs::read(&gitignore)? != gitignore_before {
         return Err(io::Error::other("ignore init-gitignore rewrote an existing file").into());
     }
 
-    let added = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["ignore", "add", "--kind", "dir-name", "cli-contract-temp"],
-    )?;
+    let added = run(&["ignore", "add", "--kind", "dir-name", "cli-contract-temp"])?;
     require_json_string(&added, &["action"], "add")?;
     require_json_bool(&added, &["changed"], true)?;
-    let listed = run_packaged_cli_json(executable, repo, database, &["ignore", "list"])?;
+    let listed = run(&["ignore", "list"])?;
     let names = json_at(&listed, &["exclude_dir_names"])?
         .as_array()
         .ok_or_else(|| io::Error::other("ignore list directory names was not an array"))?;
     if !names.iter().any(|name| name == "cli-contract-temp") {
         return Err(io::Error::other("ignore add was absent from the packaged list route").into());
     }
-    let removed = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &[
-            "ignore",
-            "remove",
-            "--kind",
-            "dir-name",
-            "cli-contract-temp",
-        ],
-    )?;
+    let removed = run(&[
+        "ignore",
+        "remove",
+        "--kind",
+        "dir-name",
+        "cli-contract-temp",
+    ])?;
     require_json_string(&removed, &["action"], "remove")?;
     require_json_bool(&removed, &["changed"], true)?;
-    let listed = run_packaged_cli_json(executable, repo, database, &["ignore", "list"])?;
+    let listed = run(&["ignore", "list"])?;
     let names = json_at(&listed, &["exclude_dir_names"])?
         .as_array()
         .ok_or_else(|| io::Error::other("ignore list directory names was not an array"))?;
@@ -20900,42 +21529,180 @@ fn assert_packaged_cli_legacy_leaf_contracts(
         }))?,
     )?;
     let review_path = review_file.to_string_lossy().into_owned();
-    let review = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["purpose", "review", "--from-file", &review_path],
-    )?;
+    let review = run(&["purpose", "review", "--from-file", &review_path])?;
     require_json_bool(&review, &["applied"], false)?;
     require_json_usize(&review, &["failed"], 0)?;
-    let queue = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["purpose", "queue", "--task", "cli-contract", "--limit", "2"],
-    )?;
+    let queue = run(&["purpose", "queue", "--task", "cli-contract", "--limit", "2"])?;
     require_json_string(&queue, &["task"], "cli-contract")?;
     require_json_usize(&queue, &["limit"], 2)?;
 
-    let parity = run_packaged_cli_json(
-        executable,
-        repo,
-        database,
-        &["parity", "report", "--profile", "repository-intelligence"],
-    )?;
+    let parity = run(&["parity", "report", "--profile", "repository-intelligence"])?;
     require_json_bool(&parity, &["ok"], true)?;
 
     let after = mcp_database_snapshot(database)?;
     if after != before {
-        return Err(
-            io::Error::other("a frozen v0.3.26 nested CLI leaf changed SQLite state").into(),
-        );
+        return Err(io::Error::other("a nested CLI leaf changed SQLite state").into());
     }
     if repository_filesystem_snapshot(repo)? != filesystem_after_root {
         return Err(io::Error::other(
-            "a frozen v0.3.26 nested CLI leaf changed the post-root repository filesystem state",
+            "a nested CLI leaf changed the post-root repository filesystem state",
         )
         .into());
+    }
+    let archive = temp.join("cli-nested-snapshot.tar.zst");
+    let archive_path = archive.to_string_lossy();
+    let exported = run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &["snapshot", "export", &archive_path],
+    )?;
+    let digest = json_at(&exported, &["snapshot_digest"])?
+        .as_str()
+        .ok_or_else(|| io::Error::other("nested snapshot omitted digest"))?;
+    let before_import = mcp_database_snapshot(database)?;
+    run_packaged_cli_json(
+        executable,
+        repo,
+        database,
+        &[
+            "snapshot",
+            "import",
+            &archive_path,
+            "--require-digest",
+            digest,
+        ],
+    )?;
+    tested_routes.insert("snapshot import".to_string());
+    let after_import = mcp_database_snapshot(database)?;
+    if changed_snapshot_keys(&before_import.authoritative, &after_import.authoritative)
+        != BTreeSet::from(["metadata".to_string(), "project_identity".to_string()])
+        || before_import.usage != after_import.usage
+        || before_import.authored_purposes != after_import.authored_purposes
+        || before_import.project_instance_id != after_import.project_instance_id
+        || before_import.purpose_revision != after_import.purpose_revision
+        || after_import.generation != before_import.generation.saturating_add(1)
+        || after_import.publication_state != "complete"
+    {
+        return Err(io::Error::other(
+            "same-graph snapshot import changed authority or lost its publication",
+        )
+        .into());
+    }
+    if repository_filesystem_snapshot(repo)? != filesystem_after_root {
+        return Err(io::Error::other("snapshot import changed repository files").into());
+    }
+
+    let storage = temp.join("nested-parser-storage");
+    let absent = temp.join("missing-parser-archive.tar.zst");
+    let before_parser = mcp_database_snapshot(database)?;
+    let mut expected_parser_filesystem = repository_filesystem_snapshot(temp)?;
+    for operation in ["verify", "install", "enable", "update", "disable", "remove"] {
+        let mut arguments = vec![
+            "parser-pack".to_string(),
+            "--storage-root".to_string(),
+            storage.display().to_string(),
+            operation.to_string(),
+        ];
+        if operation == "enable" {
+            arguments.extend(["--artifact".to_string(), "a".repeat(64)]);
+        } else if matches!(operation, "verify" | "install" | "update") {
+            arguments.extend(["--archive".to_string(), absent.display().to_string()]);
+        }
+        let output = StdCommand::new(executable)
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args([
+                "--require-version",
+                env!("CARGO_PKG_VERSION"),
+                "--format",
+                "json",
+                "--db",
+            ])
+            .arg(database)
+            .args(&arguments)
+            .output()?;
+        if matches!(operation, "disable" | "remove") {
+            if !output.status.success() || !output.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "parser-pack {operation} failed: {output:?}"
+                ))
+                .into());
+            }
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            require_json_string(&report, &["operation"], operation)?;
+            require_json_bool(
+                &report,
+                &["changed"],
+                operation == "remove" && !cfg!(target_os = "macos"),
+            )?;
+        } else {
+            if output.status.code() != Some(1) {
+                return Err(io::Error::other(format!(
+                    "parser-pack {operation} accepted absent input: {output:?}"
+                ))
+                .into());
+            }
+            if cfg!(target_os = "macos") {
+                let report: Value = serde_json::from_slice(&output.stderr)?;
+                require_json_string(&report, &["error", "kind"], "unsupported_containment")?;
+            } else if !output.stdout.is_empty()
+                || !String::from_utf8_lossy(&output.stderr).contains(if operation == "update" {
+                    "update requires an enabled current-project parser-pack selection"
+                } else {
+                    "inspect bounded lifecycle file failed"
+                })
+            {
+                return Err(io::Error::other(format!(
+                    "parser-pack {operation} lost missing-file refusal: {output:?}"
+                ))
+                .into());
+            }
+        }
+        tested_routes.insert(format!("parser-pack {operation}"));
+        assert_contract_sqlite_effect(
+            operation,
+            McpSqliteEffect::None,
+            &before_parser,
+            &mcp_database_snapshot(database)?,
+        )?;
+        if !cfg!(target_os = "macos") {
+            let empty_file = format!("file:0:{}", sha256_hex(&[]));
+            if operation != "verify" || cfg!(windows) {
+                expected_parser_filesystem
+                    .insert("nested-parser-storage".to_string(), "directory".to_string());
+                expected_parser_filesystem.insert(
+                    "nested-parser-storage/.projectatlas-broad-parser.lifecycle.lock".to_string(),
+                    empty_file.clone(),
+                );
+            }
+            if operation == "install" {
+                for path in [
+                    "nested-parser-storage/broad-parser",
+                    "nested-parser-storage/broad-parser/versions",
+                ] {
+                    expected_parser_filesystem.insert(path.to_string(), "directory".to_string());
+                }
+            }
+            if matches!(operation, "enable" | "update") {
+                expected_parser_filesystem.insert(
+                    "cli-contract/.projectatlas/optional-parser-pack.selection.lock".to_string(),
+                    empty_file,
+                );
+            }
+            if operation == "remove" {
+                expected_parser_filesystem
+                    .retain(|path, _| !path.starts_with("nested-parser-storage/broad-parser"));
+            }
+        }
+        let actual = repository_filesystem_snapshot(temp)?;
+        if actual != expected_parser_filesystem {
+            return Err(io::Error::other(format!(
+                "parser-pack {operation} changed undeclared paths: {:?}",
+                changed_snapshot_keys(&expected_parser_filesystem, &actual)
+            ))
+            .into());
+        }
     }
     Ok(())
 }
@@ -23397,6 +24164,18 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
                 );
             }
             schema
+        } else if name == "atlas_root_set" {
+            let mut schema = baseline_schema.clone();
+            let transitions = schema
+                .pointer_mut("/properties/transition/anyOf/0/oneOf")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| io::Error::other("frozen root transitions are missing"))?;
+            transitions.push(json!({
+                "description": "Explicitly adopt the selected native root for an intact schema-19 database.",
+                "type": "string",
+                "const": "adopt_legacy"
+            }));
+            schema
         } else {
             baseline_schema.clone()
         };
@@ -24480,6 +25259,139 @@ fn assert_json_contract_subset(
         ))
         .into()),
     }
+}
+
+/// Exercise the real package producer and pre-install digest consumer with substituted inputs.
+#[cfg(windows)]
+fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
+    let workspace = workspace_root()?;
+    let release = fs::read_to_string(workspace.join(".github/workflows/release.yml"))?;
+    let package = workflow_job_step(&release, "package-windows", "Package")?;
+    let admission = workflow_job_step(
+        &release,
+        "prepublish-installer-smoke-windows",
+        "Install packaged runtime through plugin",
+    )?;
+    let producer = package["run"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Windows package script missing"))?;
+    let consumer = admission["run"]
+        .as_str()
+        .and_then(|script| {
+            script
+                .split_once("$projectRoot =")
+                .map(|(prefix, _)| prefix)
+        })
+        .ok_or_else(|| io::Error::other("Windows pre-install admission script missing"))?;
+    let fixture_root = workspace.join(PROJECT_LOCAL_FIXTURE_DIR);
+    fs::create_dir_all(&fixture_root)?;
+    let temp = tempfile::Builder::new()
+        .prefix("packaged-digest-")
+        .tempdir_in(fixture_root)?;
+    for directory in [
+        "target/release",
+        "packaging/pdf-parser/vendor/pdf-extract",
+        "contract-artifacts",
+    ] {
+        fs::create_dir_all(temp.path().join(directory))?;
+    }
+    let runtime_bytes = b"packaged runtime authority\n";
+    fs::write(
+        temp.path().join("target/release/projectatlas.exe"),
+        runtime_bytes,
+    )?;
+    for file in [
+        "README.md",
+        "LICENSE",
+        "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md",
+    ] {
+        fs::write(temp.path().join(file), "package fixture\n")?;
+    }
+    let script = temp.path().join("digest-admission.ps1");
+    fs::write(
+        &script,
+        format!("$ErrorActionPreference = 'Stop'\n{producer}"),
+    )?;
+    let run = |runner: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        Ok(StdCommand::new("pwsh")
+            .current_dir(temp.path())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .env("RELEASE_VERSION", format!("v{}", env!("CARGO_PKG_VERSION")))
+            .env("RUNNER_TEMP", runner)
+            .output()?)
+    };
+    let output = run(temp.path())?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("Windows digest producer failed: {output:?}")).into());
+    }
+    let archive_name = format!(
+        "projectatlas-v{}-x86_64-pc-windows-msvc.zip",
+        env!("CARGO_PKG_VERSION")
+    );
+    let archive = temp.path().join("release-assets").join(&archive_name);
+    let manifest = temp
+        .path()
+        .join("contract-artifacts")
+        .join(format!("{archive_name}.sha256"));
+    let archive_bytes = fs::read(&archive)?;
+    let manifest_bytes = fs::read(&manifest)?;
+    let manifest_text = String::from_utf8(manifest_bytes.clone())?;
+    for expected in [
+        format!("{}  {archive_name}", sha256_hex(&archive_bytes)),
+        format!("{}  projectatlas.exe", sha256_hex(runtime_bytes)),
+    ] {
+        if !manifest_text.contains(&expected) {
+            return Err(
+                io::Error::other("Windows producer omitted exact archive/runtime digest").into(),
+            );
+        }
+    }
+    fs::write(
+        &script,
+        format!("$ErrorActionPreference = 'Stop'\n{consumer}"),
+    )?;
+    for fault in ["valid", "archive", "runtime", "missing-manifest"] {
+        fs::write(&archive, &archive_bytes)?;
+        fs::write(&manifest, &manifest_bytes)?;
+        match fault {
+            "archive" => {
+                let mut changed = archive_bytes.clone();
+                changed.push(0);
+                fs::write(&archive, changed)?;
+            }
+            "runtime" => fs::write(
+                &manifest,
+                manifest_text.replace(&sha256_hex(runtime_bytes), &"0".repeat(64)),
+            )?,
+            "missing-manifest" => fs::remove_file(&manifest)?,
+            _ => {}
+        }
+        let runner = temp.path().join(fault);
+        fs::create_dir(&runner)?;
+        let output = run(&runner)?;
+        if output.status.success() != (fault == "valid") {
+            return Err(io::Error::other(format!(
+                "Windows {fault} digest admission behaved incorrectly: {output:?}"
+            ))
+            .into());
+        }
+        if matches!(fault, "archive" | "missing-manifest")
+            && runner.join("projectatlas-prepublish").exists()
+        {
+            return Err(io::Error::other(format!(
+                "Windows {fault} input reached archive extraction"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Return one top-level GitHub Actions job block from a workflow document.

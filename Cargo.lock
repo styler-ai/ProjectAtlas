@@ -1931,6 +1931,7 @@ dependencies = [
  "blake3",
  "getrandom 0.4.3",
  "projectatlas-core",
+ "projectatlas-fs",
  "rusqlite",
  "serde",
  "serde_json",

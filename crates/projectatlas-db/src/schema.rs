@@ -1632,6 +1632,162 @@ pub(crate) fn legacy_root_requires_native_authority(legacy: Option<&str>) -> boo
     }
 }
 
+/// Adopt an explicitly selected native root without trusting the legacy display.
+///
+/// Only the released schema-19 shape is admitted. The caller's deliberate root
+/// transition supplies authority; the old projection can only reject a mismatch.
+/// Ordinary initialization and root admission never call this recovery path.
+pub(crate) fn adopt_legacy_project_root(
+    path: &Path,
+    selected: &CanonicalProjectRoot,
+) -> DbResult<SchemaPreflight> {
+    validate_legacy_adoption_location(path, selected)?;
+    let (previous, location) = preflight(path, None)?;
+    {
+        let connection = open_read_only_connection(path, &location)?;
+        validate_legacy_adoption(&connection, &previous, selected)?;
+    }
+    let connection = crate::sqlite_profile::open_writable_connection(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        &location,
+        crate::SQLITE_BUSY_TIMEOUT,
+        crate::sqlite_profile::JournalModePolicy::RequireWal,
+    )?;
+    adopt_legacy_project_root_on_connection(&connection, path, selected, &previous)?;
+    Ok(previous)
+}
+
+/// Require the physical database to remain in the explicitly selected root.
+fn validate_legacy_adoption_location(path: &Path, selected: &CanonicalProjectRoot) -> DbResult<()> {
+    let physical = path
+        .canonicalize()
+        .map_err(|source| CoreError::CanonicalProjectRootIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let current = CanonicalProjectRoot::from_path(selected.as_path())?;
+    let parent = CanonicalProjectRoot::from_path(
+        physical
+            .parent()
+            .ok_or(DbError::LegacyRootAdoptionUnavailable)?,
+    )?;
+    if &current != selected
+        || physical.file_name() != Some(std::ffi::OsStr::new("projectatlas.db"))
+        || parent.as_path() != selected.as_path().join(".projectatlas")
+    {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    Ok(())
+}
+
+/// Revalidate predecessor identity and its mismatch-only legacy projection.
+fn validate_legacy_adoption(
+    connection: &Connection,
+    previous: &SchemaPreflight,
+    selected: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    let current = inspect_connection(connection, None, true)?;
+    if &current != previous
+        || current.schema_version != Some(CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)
+        || current.state != SchemaState::UpgradeRequired
+        || object_kind(connection, "project_root_identity")?.is_some()
+    {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    if current.project_instance_id.is_none() {
+        return Err(DbError::ProjectInstanceIdentityMissing);
+    }
+    // This reproduces the predecessor's projection only to reject a
+    // contradiction. It never substitutes for explicit operator adoption.
+    let projection =
+        projectatlas_core::normalize_native_path_display(selected.as_path()).replace('\\', "/");
+    if current.project_root.as_deref() != Some(projection.as_str()) {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    Ok(())
+}
+
+/// Publish migration and explicitly adopted identity in one rollback boundary.
+fn adopt_legacy_project_root_on_connection(
+    connection: &Connection,
+    path: &Path,
+    selected: &CanonicalProjectRoot,
+    previous: &SchemaPreflight,
+) -> DbResult<()> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        validate_legacy_adoption_location(path, selected)?;
+        #[cfg(unix)]
+        validate_legacy_adoption_handle(connection)?;
+        validate_legacy_adoption(connection, previous, selected)?;
+        apply_migrations(
+            connection,
+            CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION,
+            Some(selected),
+        )?;
+        crate::project_identity::set_project_root_identity(connection, selected)?;
+        crate::project_identity::set_project_root_metadata(connection, selected)?;
+        let current = inspect_connection_native(connection, Some(selected), true)?;
+        if current.state != SchemaState::Current
+            || current.project_instance_id != previous.project_instance_id
+        {
+            return Err(DbError::SchemaPostcondition {
+                expected: SCHEMA_VERSION,
+            });
+        }
+        validate_legacy_adoption_location(path, selected)?;
+        #[cfg(unix)]
+        validate_legacy_adoption_handle(connection)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            connection.execute_batch("COMMIT")?;
+            // POSIX directory entries can change despite SQLite's write lock.
+            // A committed migration cannot be rolled back or safely restored here.
+            let published = (|| {
+                validate_legacy_adoption_location(path, selected)?;
+                #[cfg(unix)]
+                validate_legacy_adoption_handle(connection)?;
+                Ok(())
+            })();
+            published.map_err(
+                |source| DbError::LegacyRootAdoptionCommittedLocationChanged {
+                    source: Box::new(source),
+                },
+            )
+        }
+        Err(error) => Err(rollback_after_error(connection, error)),
+    }
+}
+
+/// Bind recovery to the opened Unix database rather than a replacement pathname.
+/// Windows SQLite opens without delete sharing, preventing replacement while open.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "SQLite exposes opened-file identity only through its VFS control"
+)]
+fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
+    let mut moved: std::ffi::c_int = 1;
+    // SAFETY: the borrowed connection remains live and exclusively used by this
+    // synchronous operation. SQLite borrows the main schema name and writable
+    // c_int only for this call; neither pointer is retained or freed by the VFS.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            std::ptr::from_mut(&mut moved).cast(),
+        )
+    };
+    if result != rusqlite::ffi::SQLITE_OK || moved != 0 {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    Ok(())
+}
+
 /// Revalidate a predecessor's legacy root against the caller's native root.
 ///
 /// This check is intentionally repeated from the writer connection after its
@@ -1822,7 +1978,7 @@ pub(crate) fn initialize_with_project_root_in_transaction(
         SchemaState::Current => {}
         SchemaState::UpgradeRequired => {
             validate_integrity(connection)?;
-            apply_migrations(connection, stored_schema_version(connection)?)?;
+            apply_migrations(connection, stored_schema_version(connection)?, None)?;
         }
     }
     if let Some(expected) = expected_identity {
@@ -2290,7 +2446,11 @@ fn create_fresh(
 }
 
 /// Apply the fixed migration path without skipping or synthesizing versions.
-fn apply_migrations(connection: &Connection, mut version: i64) -> DbResult<()> {
+fn apply_migrations(
+    connection: &Connection,
+    mut version: i64,
+    adopted_root: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
     while version != SCHEMA_VERSION {
         let migration = MIGRATIONS
             .iter()
@@ -2304,7 +2464,11 @@ fn apply_migrations(connection: &Connection, mut version: i64) -> DbResult<()> {
                 expected: SCHEMA_VERSION,
             });
         }
-        (migration.apply)(connection)?;
+        if migration.from == 22 && adopted_root.is_some() {
+            migrate_worktree_native_identities(connection, adopted_root)?;
+        } else {
+            (migration.apply)(connection)?;
+        }
         version = migration.to;
     }
     set_metadata(connection, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())
@@ -2439,8 +2603,16 @@ fn migrate_21_to_22(connection: &Connection) -> DbResult<()> {
 
 /// Add and backfill lossless native identities for every registered worktree.
 fn migrate_22_to_23(connection: &Connection) -> DbResult<()> {
+    migrate_worktree_native_identities(connection, None)
+}
+
+/// Share native-key publication while requiring Git proof for explicit adoption.
+fn migrate_worktree_native_identities(
+    connection: &Connection,
+    adopted_root: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
     add_worktree_native_identity_columns(connection)?;
-    backfill_worktree_native_identities(connection)?;
+    backfill_worktree_native_identities(connection, adopted_root)?;
     reject_worktree_native_identity_collisions(connection)?;
     connection.execute_batch(WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL)?;
     Ok(())
@@ -2488,11 +2660,15 @@ fn reject_worktree_native_identity_collisions(connection: &Connection) -> DbResu
 }
 
 /// Encode the historical UTF-8 path projection before publishing native keys.
-fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> {
+fn backfill_worktree_native_identities(
+    connection: &Connection,
+    adopted_root: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
     let rows = {
         let mut statement = connection.prepare(
             "SELECT registration_id, git_common_directory,
-                    git_administrative_directory, last_root, state = 'retired'
+                    git_administrative_directory, last_root, state = 'retired',
+                    git_administrative_identity
              FROM worktree_registrations
              ORDER BY registration_id",
         )?;
@@ -2503,29 +2679,65 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    for (registration_id, common, administrative, root, retired) in rows {
-        let common = legacy_worktree_native_identity(
-            registration_id,
-            "git_common_directory",
-            PathBuf::from(common),
-            retired,
-        )?;
-        let administrative = legacy_worktree_native_identity(
-            registration_id,
-            "git_administrative_directory",
-            PathBuf::from(administrative),
-            retired,
-        )?;
-        let root = legacy_worktree_native_identity(
-            registration_id,
-            "last_root",
-            PathBuf::from(root),
-            retired,
-        )?;
+    let repository = adopted_root.and_then(|root| {
+        rows.iter()
+            .any(|row| !row.4)
+            .then(|| projectatlas_fs::worktree::discover_repository_structure(root.as_path()))
+    });
+    let mut native_worktrees = std::collections::BTreeMap::new();
+    if let Some(Ok(projectatlas_fs::worktree::RepositoryStructure::Git(repository))) = &repository {
+        for entry in &repository.worktrees {
+            let projectatlas_fs::worktree::GitWorktreeState::Active { root, .. } = &entry.state
+            else {
+                continue;
+            };
+            if let Ok(fingerprint) = projectatlas_fs::worktree::git_administrative_identity(
+                &entry.administrative_directory,
+            ) {
+                native_worktrees
+                    .entry(fingerprint)
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(Some((
+                        repository.common_directory.as_path(),
+                        entry.administrative_directory.as_path(),
+                        root.as_path(),
+                    )));
+            }
+        }
+    }
+    for (registration_id, common, administrative, root, retired, fingerprint) in rows {
+        let (common, administrative, root) = if adopted_root.is_some() && !retired {
+            adopted_worktree_native_identities(
+                native_worktrees.get(&fingerprint).copied().flatten(),
+                registration_id,
+                &fingerprint,
+            )?
+        } else {
+            let common = legacy_worktree_native_identity(
+                registration_id,
+                "git_common_directory",
+                PathBuf::from(common),
+                retired,
+            )?;
+            let administrative = legacy_worktree_native_identity(
+                registration_id,
+                "git_administrative_directory",
+                PathBuf::from(administrative),
+                retired,
+            )?;
+            let root = legacy_worktree_native_identity(
+                registration_id,
+                "last_root",
+                PathBuf::from(root),
+                retired,
+            )?;
+            (common, administrative, root)
+        };
         connection.execute(
             "UPDATE worktree_registrations
              SET git_common_directory_identity = ?1,
@@ -2541,6 +2753,35 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
         )?;
     }
     Ok(())
+}
+
+/// Recover an active registration only from reciprocal Git state and its native lifecycle.
+fn adopted_worktree_native_identities(
+    paths: Option<(&Path, &Path, &Path)>,
+    registration_id: i64,
+    fingerprint: &str,
+) -> DbResult<(
+    CanonicalProjectRoot,
+    CanonicalProjectRoot,
+    CanonicalProjectRoot,
+)> {
+    let unavailable = || DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+        field: "git_administrative_identity",
+        registration_id,
+    };
+    let (common, administrative, root) = paths.ok_or_else(unavailable)?;
+    let common = CanonicalProjectRoot::from_path(common)?;
+    let administrative = CanonicalProjectRoot::from_path(administrative)?;
+    let root = CanonicalProjectRoot::from_path(root)?;
+    let Ok(true) = projectatlas_fs::worktree::git_worktree_lifecycle_matches(
+        root.as_path(),
+        common.as_path(),
+        administrative.as_path(),
+        fingerprint,
+    ) else {
+        return Err(unavailable());
+    };
+    Ok((common, administrative, root))
 }
 
 /// Recover active native authority or retain a retired row's lexical history.
@@ -6416,6 +6657,544 @@ mod tests {
                 "schema-21 identity repair did not survive SQLite reopen",
             )
             .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_legacy_root_adoption_preserves_authority_and_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        #[cfg(unix)]
+        let name = std::ffi::OsStr::new("legacy\\adoption");
+        #[cfg(windows)]
+        let name = std::ffi::OsStr::new("legacy-adoption");
+        assert_legacy_root_adoption(name)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_legacy_root_adoption_preserves_non_utf8_identity() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStrExt;
+
+        assert_legacy_root_adoption(std::ffi::OsStr::from_bytes(b"legacy-\xff-adoption"))
+    }
+
+    #[cfg(unix)]
+    struct AdoptionCommitReplacement {
+        database: std::path::PathBuf,
+        moved: std::path::PathBuf,
+        replacement: std::path::PathBuf,
+        result: Option<io::Result<()>>,
+    }
+
+    #[cfg(unix)]
+    thread_local! {
+        static ADOPTION_COMMIT_REPLACEMENT: std::cell::RefCell<Option<AdoptionCommitReplacement>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::needless_pass_by_value)]
+    fn replace_legacy_database_at_commit(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, "COMMIT") = event {
+            ADOPTION_COMMIT_REPLACEMENT.with_borrow_mut(|slot| {
+                if let Some(replacement) = slot.as_mut()
+                    && replacement.result.is_none()
+                {
+                    replacement.result = Some(
+                        fs::rename(&replacement.database, &replacement.moved).and_then(|()| {
+                            fs::rename(&replacement.replacement, &replacement.database)
+                        }),
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn explicit_legacy_adoption_recovers_worktrees_from_native_git_identity()
+    -> Result<(), Box<dyn Error>> {
+        use projectatlas_fs::worktree::{GitWorktreeState, RepositoryStructure};
+        let snapshot = |database: &Path| -> Result<_, Box<dyn Error>> {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("missing database parent"))?;
+            Ok((
+                fs::read(database)?,
+                ["-wal", "-shm", "-journal"]
+                    .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok()),
+                directory_entry_names(parent)?,
+            ))
+        };
+        let mut names = vec![std::ffi::OsString::from("native-worktrees")];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            names.push(std::ffi::OsString::from("native\\worktrees"));
+            names.push(std::ffi::OsString::from_vec(
+                b"native-\xff-worktrees".to_vec(),
+            ));
+        }
+        for name in names.drain(..) {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join(&name);
+            fs::create_dir_all(root.join(".projectatlas"))?;
+            let root = CanonicalProjectRoot::from_path(&root)?;
+            let linked = temp.path().join("linked").join(&name);
+            for args in [
+                vec!["init"],
+                vec![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "fixture",
+                ],
+            ] {
+                let output = std::process::Command::new("git")
+                    .current_dir(root.as_path())
+                    .args(args)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(io::Error::other(String::from_utf8_lossy(&output.stderr)).into());
+                }
+            }
+            let output = std::process::Command::new("git")
+                .current_dir(root.as_path())
+                .args(["worktree", "add", "-b", "linked"])
+                .arg(&linked)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(String::from_utf8_lossy(&output.stderr)).into());
+            }
+            let RepositoryStructure::Git(repository) =
+                projectatlas_fs::worktree::discover_repository_structure(root.as_path())?
+            else {
+                return Err(io::Error::other("native Git fixture was not discovered").into());
+            };
+            let database = root.as_path().join(".projectatlas/projectatlas.db");
+            let store = AtlasStore::open_for_project(&database, root.as_path())?;
+            let project = store.project_instance_id()?;
+            drop_worktree_native_identity_schema(&store.connection)?;
+            store.connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 DROP TABLE graph_identity_rejections;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+            set_metadata(
+                &store.connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(root.as_path()).replace('\\', "/"),
+            )?;
+            let mut expected = Vec::new();
+            for (index, entry) in repository.worktrees.iter().enumerate() {
+                let GitWorktreeState::Active { root, .. } = &entry.state else {
+                    return Err(io::Error::other("fixture contains an inactive worktree").into());
+                };
+                let common = &repository.common_directory;
+                let administrative = &entry.administrative_directory;
+                let fingerprint =
+                    projectatlas_fs::worktree::git_administrative_identity(administrative)?;
+                let projection =
+                    |path: &Path| normalize_native_path_display(path).replace('\\', "/");
+                store.connection.execute(
+                    "INSERT INTO worktree_registrations(alias, git_common_directory,
+                        git_administrative_directory, git_administrative_identity,
+                        last_root, created_at_epoch)
+                     VALUES(?1, ?2, ?3, ?4, ?5, 1)",
+                    params![
+                        format!("fixture-{index}"),
+                        projection(common),
+                        projection(administrative),
+                        fingerprint,
+                        projection(root)
+                    ],
+                )?;
+                expected.push((
+                    CanonicalProjectRoot::from_path(common)?.encode()?,
+                    CanonicalProjectRoot::from_path(administrative)?.encode()?,
+                    CanonicalProjectRoot::from_path(root)?.encode()?,
+                ));
+                // Lookalike display directories cannot substitute for native Git identity.
+                #[cfg(unix)]
+                if projection(root) != root.to_string_lossy() {
+                    fs::create_dir_all(Path::new(&projection(root)).join(".git"))?;
+                }
+            }
+            drop(store);
+            let connection = Connection::open(&database)?;
+            configure_writable(&connection)?;
+            drop(connection);
+            let before = snapshot(&database)?;
+            let pointer = linked.join(".git");
+            let saved_pointer = linked.join("saved-git-pointer");
+            fs::rename(&pointer, &saved_pointer)?;
+            let refused = adopt_legacy_project_root(&database, &root);
+            if !matches!(
+                refused,
+                Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable { .. })
+            ) || snapshot(&database)? != before
+                || stored_schema_version(&Connection::open(&database)?)? != 19
+            {
+                return Err(io::Error::other(format!(
+                    "unproven registration was not atomically refused: {refused:?}"
+                ))
+                .into());
+            }
+            fs::rename(&saved_pointer, &pointer)?;
+            let connection = Connection::open(&database)?;
+            let fingerprint: String = connection.query_row(
+                "SELECT git_administrative_identity FROM worktree_registrations WHERE registration_id = 1",
+                [], |row| row.get(0),
+            )?;
+            connection.execute(
+                "UPDATE worktree_registrations SET git_administrative_identity = ?1 WHERE registration_id = 1",
+                ["0".repeat(64)],
+            )?;
+            drop(connection);
+            let connection = Connection::open(&database)?;
+            configure_writable(&connection)?;
+            drop(connection);
+            let before = snapshot(&database)?;
+            let refused = adopt_legacy_project_root(&database, &root);
+            if !matches!(
+                refused,
+                Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable { .. })
+            ) || snapshot(&database)? != before
+            {
+                return Err(
+                    io::Error::other("adoption ignored the stored native lifecycle").into(),
+                );
+            }
+            let connection = Connection::open(&database)?;
+            connection.execute(
+                "UPDATE worktree_registrations SET git_administrative_identity = ?1 WHERE registration_id = 1",
+                [fingerprint],
+            )?;
+            drop(connection);
+            adopt_legacy_project_root(&database, &root)?;
+            let migrated = AtlasStore::open_for_project(&database, root.as_path())?;
+            if migrated.project_instance_id()? != project {
+                return Err(io::Error::other("adoption changed project identity").into());
+            }
+            let mut statement = migrated.connection.prepare(
+                "SELECT git_common_directory_identity, git_administrative_directory_identity,
+                        last_root_identity FROM worktree_registrations ORDER BY registration_id",
+            )?;
+            let actual = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            if actual != expected {
+                return Err(
+                    io::Error::other("adoption changed native worktree identity bytes").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_legacy_root_adoption(name: &std::ffi::OsStr) -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(name);
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let root = CanonicalProjectRoot::from_path(&root)?;
+        let database = root.as_path().join(".projectatlas/projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, root.as_path())?;
+        let project = store
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'Retain adopted purpose', 'agent', 'approved', 'schema-test'
+             FROM nodes WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "legacy-adoption",
+            "migration",
+            Some("src/lib.rs".to_string()),
+            None,
+            10,
+            4,
+        ))?;
+        store.connection.execute(
+            "UPDATE project_identity SET active_generation = 7 WHERE singleton = 1",
+            [],
+        )?;
+        if !matches!(
+            adopt_legacy_project_root(&database, &root),
+            Err(DbError::LegacyRootAdoptionUnavailable)
+        ) {
+            return Err(io::Error::other("legacy adoption admitted current state").into());
+        }
+        drop_worktree_native_identity_schema(&store.connection)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        set_metadata(
+            &store.connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(root.as_path()).replace('\\', "/"),
+        )?;
+        drop(store);
+        let previous = preflight(&database, None)?.0;
+        let before = fs::read(&database)?;
+        let foreign = temp.path().join("foreign-adoption");
+        fs::create_dir_all(foreign.join(".projectatlas"))?;
+        let foreign = CanonicalProjectRoot::from_path(&foreign)?;
+        let copied_database = foreign.as_path().join(".projectatlas/projectatlas.db");
+        fs::copy(&database, &copied_database)?;
+        for (candidate, selected) in [(&database, &foreign), (&copied_database, &foreign)] {
+            if !matches!(
+                adopt_legacy_project_root(candidate, selected),
+                Err(DbError::LegacyRootAdoptionUnavailable)
+            ) || fs::read(candidate)? != before
+            {
+                return Err(io::Error::other("legacy adoption changed foreign-root state").into());
+            }
+        }
+        #[cfg(unix)]
+        {
+            if !matches!(
+                AtlasStore::open_for_project(&database, root.as_path()),
+                Err(DbError::ProjectRootIdentityMissing)
+            ) || fs::read(&database)? != before
+            {
+                return Err(
+                    io::Error::other("ordinary open implicitly adopted a legacy root").into(),
+                );
+            }
+            for transition in [
+                crate::ProjectRootTransition::Bind,
+                crate::ProjectRootTransition::Move,
+                crate::ProjectRootTransition::Detach,
+            ] {
+                if !matches!(
+                    AtlasStore::transition_project_root(&database, root.as_path(), transition),
+                    Err(DbError::ProjectRootIdentityMissing)
+                ) || fs::read(&database)? != before
+                {
+                    return Err(io::Error::other(
+                        "ordinary transition implicitly adopted a legacy root",
+                    )
+                    .into());
+                }
+            }
+        }
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        let before_failure = fs::read(&database)?;
+        let wal_path = sqlite_sidecar_path(&database, "-wal");
+        let wal_before = fs::read(&wal_path).ok();
+        connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_legacy_adoption
+             BEFORE UPDATE OF value ON metadata WHEN OLD.key = 'project_root'
+             BEGIN SELECT RAISE(ABORT, 'injected legacy adoption failure'); END;
+             CREATE TEMP TRIGGER fail_legacy_adoption_delete
+             BEFORE DELETE ON metadata WHEN OLD.key = 'project_root'
+             BEGIN SELECT RAISE(ABORT, 'injected legacy adoption failure'); END;",
+        )?;
+        let failed =
+            adopt_legacy_project_root_on_connection(&connection, &database, &root, &previous);
+        if !matches!(failed, Err(DbError::Sqlite(_)))
+            || fs::read(&database)? != before_failure
+            || fs::read(&wal_path).ok() != wal_before
+            || read_schema_contract(&connection)? != *canonical_root_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "failed adoption result={failed:?}, database_equal={}, wal_equal={}, schema_equal={}",
+                fs::read(&database)? == before_failure, fs::read(&wal_path).ok() == wal_before,
+                read_schema_contract(&connection)? == *canonical_root_predecessor_schema_contract()?
+            )).into());
+        }
+        connection.execute_batch(
+            "DROP TRIGGER fail_legacy_adoption; DROP TRIGGER fail_legacy_adoption_delete;",
+        )?;
+        // A predecessor replaced between admission and the write lock must not
+        // inherit the original operator's captured project identity.
+        let mut stale = previous;
+        stale.project_root = Some("different-root".to_string());
+        if !matches!(
+            adopt_legacy_project_root_on_connection(&connection, &database, &root, &stale),
+            Err(DbError::LegacyRootAdoptionUnavailable)
+        ) || fs::read(&database)? != before_failure
+        {
+            return Err(io::Error::other("adoption accepted stale predecessor authority").into());
+        }
+        drop(connection);
+        #[cfg(unix)]
+        {
+            let replacement = temp.path().join("replacement.db");
+            fs::copy(&database, &replacement)?;
+            let replacement_connection = Connection::open(&replacement)?;
+            replacement_connection.execute(
+                "UPDATE purposes SET purpose = 'Replacement retained purpose'",
+                [],
+            )?;
+            drop(replacement_connection);
+            let replacement_before = fs::read(&replacement)?;
+            let opened = Connection::open(&database)?;
+            configure_writable(&opened)?;
+            let captured = inspect_connection(&opened, None, true)?;
+            let original_before = fs::read(&database)?;
+            let moved = temp.path().join("moved.db");
+            fs::rename(&database, &moved)?;
+            fs::rename(&replacement, &database)?;
+            let result =
+                adopt_legacy_project_root_on_connection(&opened, &database, &root, &captured);
+            if !matches!(result, Err(DbError::LegacyRootAdoptionUnavailable))
+                || fs::read(&database)? != replacement_before
+                || fs::read(&moved)? != original_before
+                || read_schema_contract(&opened)? != *canonical_root_predecessor_schema_contract()?
+            {
+                return Err(
+                    io::Error::other("adoption migrated a replaced database handle").into(),
+                );
+            }
+            drop(opened);
+            fs::rename(&database, &replacement)?;
+            fs::rename(&moved, &database)?;
+        }
+        #[cfg(windows)]
+        {
+            let opened = Connection::open(&database)?;
+            if fs::rename(&database, temp.path().join("moved.db")).is_ok() {
+                return Err(io::Error::other("open Windows database permitted replacement").into());
+            }
+            drop(opened);
+        }
+        let result = AtlasStore::transition_project_root(
+            &database,
+            root.as_path(),
+            crate::ProjectRootTransition::AdoptLegacy,
+        )?;
+        let migrated = AtlasStore::open_read_only_for_project(&database, root.as_path())?;
+        if root.display_string().is_err()
+            && read_metadata(&migrated.connection, PROJECT_ROOT_KEY)?.is_some()
+        {
+            return Err(io::Error::other("adoption retained lossy root metadata").into());
+        }
+        let authority = migrated.connection.query_row(
+            "SELECT
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT purpose FROM purposes),
+                (SELECT COUNT(*) FROM usage_events),
+                (SELECT COUNT(*) FROM usage_instances)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if result.project_instance_id != project
+            || result.previous_root.is_some()
+            || result.identity_changed
+            || result.publication_invalidated
+            || migrated.project_instance_id()? != Some(project)
+            || migrated.project_root_identity()? != Some(root)
+            || authority != (7, "Retain adopted purpose".to_string(), 1, 1)
+        {
+            return Err(io::Error::other(
+                "adoption retry changed authored authority or generation",
+            )
+            .into());
+        }
+        drop(migrated);
+        #[cfg(unix)]
+        {
+            // Use a fresh, terminal fixture: a displaced WAL database cannot be
+            // reconstructed by restoring only its main-file bytes.
+            let race_root = temp.path().join("commit-race");
+            fs::create_dir_all(race_root.join(".projectatlas"))?;
+            let race_root = CanonicalProjectRoot::from_path(&race_root)?;
+            let database = race_root.as_path().join(".projectatlas/projectatlas.db");
+            fs::write(&database, &before)?;
+            let predecessor = Connection::open(&database)?;
+            set_metadata(
+                &predecessor,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(race_root.as_path()).replace('\\', "/"),
+            )?;
+            drop(predecessor);
+            let replacement = temp.path().join("commit-replacement.db");
+            fs::copy(&database, &replacement)?;
+            let replacement_connection = Connection::open(&replacement)?;
+            replacement_connection.execute(
+                "UPDATE purposes SET purpose = 'Replacement retained purpose'",
+                [],
+            )?;
+            drop(replacement_connection);
+            let replacement_before = fs::read(&replacement)?;
+            let opened = Connection::open(&database)?;
+            configure_writable(&opened)?;
+            let captured = inspect_connection(&opened, None, true)?;
+            ADOPTION_COMMIT_REPLACEMENT.set(Some(AdoptionCommitReplacement {
+                database: database.clone(),
+                moved: temp.path().join("commit-moved.db"),
+                replacement,
+                result: None,
+            }));
+            // Swap only when SQLite starts COMMIT, after every pre-commit guard.
+            opened.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(replace_legacy_database_at_commit),
+            );
+            let result =
+                adopt_legacy_project_root_on_connection(&opened, &database, &race_root, &captured);
+            opened.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            let replacement_result = ADOPTION_COMMIT_REPLACEMENT
+                .take()
+                .and_then(|replacement| replacement.result)
+                .ok_or_else(|| io::Error::other("adoption COMMIT replacement did not execute"))?;
+            replacement_result?;
+            let retained_purpose = opened.query_row("SELECT purpose FROM purposes", [], |row| {
+                row.get::<_, String>(0)
+            })?;
+            if !matches!(
+                result,
+                Err(DbError::LegacyRootAdoptionCommittedLocationChanged { .. })
+            ) || !opened.is_autocommit()
+                || inspect_connection_native(&opened, Some(&race_root), true)?.state
+                    != SchemaState::Current
+                || retained_purpose != "Retain adopted purpose"
+                || fs::read(&database)? != replacement_before
+            {
+                return Err(io::Error::other(format!(
+                    "commit-time replacement did not preserve authority and report committed-location failure: {result:?}"
+                )).into());
+            }
+            let wal_path = sqlite_sidecar_path(&database, "-wal");
+            let committed_wal = fs::read(&wal_path)?;
+            drop(opened);
+            if fs::read(&database)? != replacement_before
+                || committed_wal.is_empty()
+                || fs::read(&wal_path)? != committed_wal
+                || !sqlite_sidecar_path(&database, "-shm").exists()
+            {
+                return Err(io::Error::other(
+                    "adoption recovery changed replacement or retained WAL state",
+                )
+                .into());
+            }
+            // Keep both main files and the WAL/SHM unit until the fixture closes.
         }
         Ok(())
     }

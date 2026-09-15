@@ -23,6 +23,8 @@ pub enum ProjectRootTransition {
     Move,
     /// Rotate identity for an independent copy, clone, or worktree.
     Detach,
+    /// Explicitly adopt the selected native root for an intact schema-19 database.
+    AdoptLegacy,
 }
 
 /// Result of one completed root transition.
@@ -138,6 +140,9 @@ impl AtlasStore {
     /// canonicalized before database preflight. `Bind` preserves the old compatible behavior. `Move` preserves identity
     /// only after the recorded root is proven absent. `Detach` rotates identity
     /// and discards project-qualified graph rows while preserving authored data.
+    /// `AdoptLegacy` explicitly supplies native authority for an intact schema-19
+    /// database at the selected root's conventional project-local location;
+    /// migration and root publication preserve its existing project identity.
     ///
     /// # Errors
     ///
@@ -151,6 +156,19 @@ impl AtlasStore {
     ) -> DbResult<ProjectRootTransitionResult> {
         let destination_identity = validate_project_root_destination(destination)?;
         let destination = destination_identity.display_string().ok();
+        if transition == ProjectRootTransition::AdoptLegacy {
+            let previous = schema::adopt_legacy_project_root(database_path, &destination_identity)?;
+            return Ok(ProjectRootTransitionResult {
+                transition,
+                previous_root: None,
+                project_root: destination,
+                project_instance_id: previous
+                    .project_instance_id
+                    .ok_or(DbError::ProjectInstanceIdentityMissing)?,
+                identity_changed: false,
+                publication_invalidated: false,
+            });
+        }
         let (preflight, _) = schema::preflight(database_path, None)?;
         let previous_root = preflight.project_root.clone();
         let previous_identity = preflight.project_instance_id;
@@ -174,6 +192,7 @@ impl AtlasStore {
             None
         };
         match transition {
+            ProjectRootTransition::AdoptLegacy => Err(DbError::LegacyRootAdoptionUnavailable),
             ProjectRootTransition::Bind => {
                 if let Some(found) = previous_root_identity.as_ref() {
                     prove_existing_root_equivalence(
@@ -375,6 +394,7 @@ fn apply_root_transition_in_transaction(
     schema::invalidate_derived_publication(&store.connection)?;
     let (project_instance_id, identity_changed) = match transition {
         ProjectRootTransition::Bind => unreachable!("bind does not use transition mutation"),
+        ProjectRootTransition::AdoptLegacy => return Err(DbError::LegacyRootAdoptionUnavailable),
         ProjectRootTransition::Move => {
             let (identity, identity_changed) = ensure_project_identity(&store.connection)?;
             set_graph_generation(&store.connection, IndexGeneration::ZERO)?;

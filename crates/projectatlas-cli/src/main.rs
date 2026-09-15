@@ -902,6 +902,8 @@ enum RootTransition {
     Move,
     /// Rotate identity for an independent copy, clone, or worktree.
     Detach,
+    /// Explicitly adopt the selected native root for an intact schema-19 database.
+    AdoptLegacy,
 }
 
 impl From<RootTransition> for ProjectRootTransition {
@@ -910,6 +912,7 @@ impl From<RootTransition> for ProjectRootTransition {
             RootTransition::Bind => Self::Bind,
             RootTransition::Move => Self::Move,
             RootTransition::Detach => Self::Detach,
+            RootTransition::AdoptLegacy => Self::AdoptLegacy,
         }
     }
 }
@@ -920,6 +923,7 @@ impl From<ProjectRootTransition> for RootTransition {
             ProjectRootTransition::Bind => Self::Bind,
             ProjectRootTransition::Move => Self::Move,
             ProjectRootTransition::Detach => Self::Detach,
+            ProjectRootTransition::AdoptLegacy => Self::AdoptLegacy,
         }
     }
 }
