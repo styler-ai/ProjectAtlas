@@ -139,4 +139,4 @@ tree-sitter-typescript = "=0.23.2"
 zstd = "=0.14.0"
 tree-sitter-zig = "=1.1.2"
 whichdisk = { version = "0.6.0", default-features = false, features = ["list"] }
-yaml-rust2 = "0.12"
+yaml-rust2 = "0.13"
