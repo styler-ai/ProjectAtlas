@@ -74,12 +74,12 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    MCP_CONTRACT_EXECUTABLE_ENV, McpDatabaseSnapshot, complete_mcp_test_after_shutdown,
-    git_command_for_root, json_at, json_summary_command, mcp_contract_executable,
-    mcp_database_snapshot, mcp_tool_text, require_json_array_len, require_json_bool,
-    require_json_contains, require_json_string, require_json_usize, require_json_usize_at_least,
-    require_json_usize_greater_than, run_mcp_stdio, run_mcp_stdio_with_env, sha256_hex,
-    sqlite_table_digests, workspace_root,
+    MCP_CONTRACT_EXECUTABLE_ENV, McpDatabaseSnapshot, PARSER_PACK_RELEASE_VERIFIER_ENV,
+    complete_mcp_test_after_shutdown, git_command_for_root, json_at, json_summary_command,
+    mcp_contract_executable, mcp_database_snapshot, mcp_tool_text, require_json_array_len,
+    require_json_bool, require_json_contains, require_json_string, require_json_usize,
+    require_json_usize_at_least, require_json_usize_greater_than, run_mcp_stdio,
+    run_mcp_stdio_with_env, sha256_hex, sqlite_table_digests, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -735,7 +735,11 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
             }
             _ => {}
         }
-        let output = Command::cargo_bin("optional_parser_pack_release")?
+        let mut verifier = match std::env::var_os(PARSER_PACK_RELEASE_VERIFIER_ENV) {
+            Some(path) => Command::new(path),
+            None => Command::cargo_bin("optional_parser_pack_release")?,
+        };
+        let output = verifier
             .current_dir(&release_root)
             .env("HOME", &home_root)
             .env("TMPDIR", &temp_root)
@@ -817,7 +821,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
         ),
     ];
     for (operation, arguments) in commands {
-        let output = Command::cargo_bin("projectatlas")?
+        let output = Command::new(mcp_contract_executable())
             .current_dir(&repo)
             .env("HOME", &home)
             .env_remove("LOCALAPPDATA")
@@ -856,7 +860,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
     )?;
     fs::write(&selection, selection_bytes)?;
     fs::write(&source, source_bytes)?;
-    let scan = Command::cargo_bin("projectatlas")?
+    let scan = Command::new(mcp_contract_executable())
         .current_dir(&repo)
         .env("HOME", &home)
         .env_remove("LOCALAPPDATA")
@@ -882,7 +886,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
     }
 
     for expected_changed in [true, false] {
-        let remove = Command::cargo_bin("projectatlas")?
+        let remove = Command::new(mcp_contract_executable())
             .current_dir(&repo)
             .env("HOME", &home)
             .env_remove("LOCALAPPDATA")
@@ -941,7 +945,7 @@ fn parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_acc
             io::Error::other("macOS settings overstated optional parser-pack support").into(),
         );
     }
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let executable = mcp_contract_executable();
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     let mut mcp = McpContractSession::spawn(&executable, &repo, &database)?;
     let mcp_result = (|| -> Result<(), Box<dyn Error>> {
@@ -2679,9 +2683,6 @@ fn assert_cli_migrates_released_schema_layout(
 #[test]
 fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Box<dyn Error>> {
     const RESTART_COUNT: usize = 2;
-    if std::env::var_os("PROJECTATLAS_NO_TELEMETRY").is_some() {
-        return Ok(());
-    }
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
@@ -2689,8 +2690,9 @@ fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Bo
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn owner() {}\n",
     )?;
-    Command::cargo_bin("projectatlas")?
+    Command::new(mcp_contract_executable())
         .current_dir(&repo)
+        .env_remove("PROJECTATLAS_NO_TELEMETRY")
         .arg("init")
         .assert()
         .success();
@@ -2707,7 +2709,13 @@ fn mcp_clean_shutdown_seals_runtime_instances_across_restarts() -> Result<(), Bo
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_overview","arguments":{}}}"#,
     ];
     for _ in 0..RESTART_COUNT {
-        let stdout = run_mcp_stdio(&command, &repo, &args, &messages)?;
+        let stdout = run_mcp_stdio_with_env(
+            &command,
+            &repo,
+            &args,
+            &messages,
+            &[("PROJECTATLAS_NO_TELEMETRY", None)],
+        )?;
         if !mcp_tool_text(&stdout, 2)?.contains("overview:") {
             return Err(io::Error::other("restarted MCP overview did not succeed").into());
         }
@@ -2755,7 +2763,7 @@ fn init_bootstrap_creates_db_scan_report_and_host_configs() -> Result<(), Box<dy
         "pub fn indexed() {}\n",
     )?;
 
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(&repo)
         .args(["--format", "json", "init"])
         .output()?;
@@ -4256,7 +4264,7 @@ fn mcp_server_stays_bound_to_one_project_database() -> Result<(), Box<dyn Error>
     }
 
     for (repo, db) in [(&repo_a, &db_a), (&repo_b, &db_b)] {
-        Command::cargo_bin("projectatlas")?
+        Command::new(mcp_contract_executable())
             .current_dir(repo)
             .arg("--db")
             .arg(db)
@@ -5905,7 +5913,7 @@ fn token_call_count(repo: &std::path::Path, db: &std::path::Path) -> Result<u64,
 
 /// Generate one harness-specific MCP config document.
 fn mcp_config_for_harness(repo: &Path, db: &Path, harness: &str) -> Result<Value, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .arg("--format")
         .arg("json")
@@ -5951,7 +5959,7 @@ fn projectatlas_json(
     host_state: &Path,
     arguments: &[&OsStr],
 ) -> Result<Value, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .env("HOME", host_state.join(PARSER_PACK_TEST_HOME_DIR))
         .env(

@@ -1443,7 +1443,10 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                     $faultReceipt.PipeCompleted -and
                     $faultReceipt.Disposed -and
                     $faultReceipt.ExitCode -eq $faultRow.ExitCode) `
-                "Named-object $($faultRow.Name) fault lost its stable process boundary."
+                ("Named-object $($faultRow.Name) fault lost its stable process boundary: " +
+                    "timed_out=$($faultReceipt.TimedOut), exit_code=$($faultReceipt.ExitCode), " +
+                    "reaped=$($faultReceipt.ReapedBeforePipeCollection), " +
+                    "pipes_completed=$($faultReceipt.PipeCompleted), disposed=$($faultReceipt.Disposed).")
             $faultRecord = Read-NamedObjectProbeRecord -Path $faultResult
             if ($faultRow.Name -eq 'combined') {
                 $combinedMessage = Format-NamedObjectProbeFailure `

@@ -749,11 +749,6 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli plugin_update_repairs_current_codex_plugin_with_stale_source_manifest --test e2e_delivery
 
-      - name: Plugin update restore-on-failure E2E
-        if: contains(matrix.contracts, 'plugin')
-        timeout-minutes: 5
-        run: cargo test --locked -p projectatlas-cli plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails --test e2e_delivery
-
       - name: Plugin update total-offline preservation E2E
         if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 5

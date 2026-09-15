@@ -240,19 +240,22 @@ jobs:
 
       - name: Build packaged contract runner
         run: |
-          cargo test --locked --release -p projectatlas-cli \
+          contract_target="$RUNNER_TEMP/projectatlas-contract-target"
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
             --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
             --test e2e_worktrees --test e2e_maintenance --no-run
+          CARGO_TARGET_DIR="$contract_target" cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           mkdir -p contract-artifacts
           mkdir -p contract-artifacts/bin
           for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
-            binary="$(find target/release/deps -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
+            binary="$(find "$contract_target/release/deps" -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
             if [[ -z "$binary" ]]; then
               echo "Compiled packaged contract binary was not found: $binary_name" >&2
               exit 1
             fi
             cp "$binary" "contract-artifacts/bin/$binary_name"
           done
+          cp "$contract_target/release/optional_parser_pack_release" contract-artifacts/bin/optional_parser_pack_release
           cat > contract-artifacts/projectatlas-packaged-contract <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -264,15 +267,15 @@ jobs:
             exit 0
           fi
           case "${1:-}" in
-            mcp_advertised_tools_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
+            mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
               binary=e2e_delivery ;;
-            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|installed_candidate_without_git_*|compiler_config_*)
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
               binary=e2e_navigation ;;
-            lint_formats_*|token_tui_*|conditional_purpose_*|persistent_mcp_purpose_*)
+            lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
               binary=e2e_maintenance ;;
             holistic_agent_worktree_*|*watch*|*federation*)
               binary=e2e_worktrees ;;
-            installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|parser_pack_*|linux_btrfs_*)
+            init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*)
               binary=e2e_lifecycle ;;
             *)
               echo "unknown packaged contract test: ${1:-<missing>}" >&2
@@ -282,7 +285,8 @@ jobs:
           SH
           chmod +x contract-artifacts/projectatlas-packaged-contract
           contract="contract-artifacts/projectatlas-packaged-contract"
-          "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
+          CARGO_BIN_EXE_projectatlas="$GITHUB_WORKSPACE/target/release/projectatlas" \
+            "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
 
       - name: Package
         run: |
@@ -294,6 +298,21 @@ jobs:
           tar -czf "$archive" -C dist projectatlas
           mkdir -p release-assets
           mv "$archive" release-assets/
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          archive_digest="$("${digest_command[@]}" "release-assets/$archive" | awk '{print $1}')"
+          runtime_digest="$("${digest_command[@]}" "dist/projectatlas/projectatlas" | awk '{print $1}')"
+          if [ -z "$archive_digest" ] || [ -z "$runtime_digest" ]; then
+            echo "Authoritative packaged digest capture failed." >&2
+            exit 1
+          fi
+          {
+            printf '%s  %s\n' "$archive_digest" "$archive"
+            printf '%s  %s\n' "$runtime_digest" "projectatlas/projectatlas"
+          } > "contract-artifacts/$archive.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -333,16 +352,22 @@ jobs:
       - name: Build packaged contract runner
         shell: pwsh
         run: |
-          cargo test --locked --release -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
+          $contractTarget = Join-Path $env:RUNNER_TEMP "projectatlas-contract-target"
+          $env:CARGO_TARGET_DIR = $contractTarget
+          cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
           New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
           foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
-            $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "$binaryName-*.exe" -File)
+            $contracts = @(Get-ChildItem -LiteralPath (Join-Path $contractTarget "release\deps") -Filter "$binaryName-*.exe" -File)
             if ($contracts.Count -ne 1) {
               throw "Expected one packaged contract binary for $binaryName, found $($contracts.Count)."
             }
             Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\bin\$binaryName.exe"
           }
+          Copy-Item -LiteralPath (Join-Path $contractTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
           @'
           param(
             [Parameter(ValueFromRemainingArguments = $true)]
@@ -396,6 +421,7 @@ jobs:
       - name: Run Windows release-mode lifecycle contracts
         shell: pwsh
         run: |
+          $env:CARGO_BIN_EXE_projectatlas = Join-Path $env:GITHUB_WORKSPACE "target/release/projectatlas.exe"
           $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
           & pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture
           if ($LASTEXITCODE -ne 0) {
@@ -466,6 +492,37 @@ jobs:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts
 
+      - name: Prepare isolated macOS arm64 host state
+        if: matrix.label == 'macos-arm64-posix'
+        run: |
+          set -euo pipefail
+          isolation_root="$RUNNER_TEMP/projectatlas-macos-arm64-clean"
+          for path in "$isolation_root" "$isolation_root/home" "$isolation_root/config" "$isolation_root/cache" "$isolation_root/state" "$isolation_root/codex" "$isolation_root/tmp"; do
+            if [ -e "$path" ]; then
+              echo "Clean macOS lifecycle path already exists: $path" >&2
+              exit 1
+            fi
+          done
+          mkdir -p "$isolation_root" "$isolation_root/home" "$isolation_root/config" "$isolation_root/cache" "$isolation_root/state" "$isolation_root/codex" "$isolation_root/tmp"
+          {
+            echo "HOME=$isolation_root/home"
+            echo "XDG_CONFIG_HOME=$isolation_root/config"
+            echo "XDG_CACHE_HOME=$isolation_root/cache"
+            echo "XDG_STATE_HOME=$isolation_root/state"
+            echo "CODEX_HOME=$isolation_root/codex"
+            echo "TMPDIR=$isolation_root/tmp"
+            echo "PATH=$isolation_root/home/.local/bin:$isolation_root/home/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+            echo "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1"
+            echo "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1"
+            echo "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### Clean macOS arm64 installed lifecycle"
+            echo
+            echo "HOME, XDG config/cache/state, CODEX_HOME, TMPDIR, PATH, project root, and database are isolated under RUNNER_TEMP."
+            echo "The following steps must use the downloaded packaged runtime via PROJECTATLAS_MCP_CONTRACT_EXECUTABLE."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Restore packaged contract execute permissions
         run: |
           set -euo pipefail
@@ -477,6 +534,13 @@ jobs:
             fi
             chmod +x "$binary"
           done
+          verifier="contract-artifacts/bin/optional_parser_pack_release"
+          if [ ! -f "$verifier" ]; then
+            echo "Downloaded packaged parser-pack release verifier was not found: $verifier" >&2
+            exit 1
+          fi
+          chmod +x "$verifier"
+          echo "PROJECTATLAS_PARSER_PACK_RELEASE_VERIFIER=$PWD/$verifier" >> "$GITHUB_ENV"
 
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
@@ -488,14 +552,79 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/projectatlas-prepublish"
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           chmod +x "$runtime"
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          archive_name="${archive##*/}"
+          manifest="contract-artifacts/$archive_name.sha256"
+          if [ ! -f "$manifest" ]; then
+            echo "Authoritative packaged digest manifest was not found: $manifest" >&2
+            exit 1
+          fi
+          expected_archive_digest="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$manifest")"
+          expected_runtime_digest="$(awk '$2 == "projectatlas/projectatlas" { print $1 }' "$manifest")"
+          archive_digest="$("${digest_command[@]}" "$archive" | awk '{print $1}')"
+          runtime_digest="$("${digest_command[@]}" "$runtime" | awk '{print $1}')"
+          if ! [[ "$expected_archive_digest" =~ ^[[:xdigit:]]{64}$ ]] \
+            || ! [[ "$expected_runtime_digest" =~ ^[[:xdigit:]]{64}$ ]] \
+            || [ "$archive_digest" != "$expected_archive_digest" ] \
+            || [ "$runtime_digest" != "$expected_runtime_digest" ]; then
+            echo "Packaged candidate digest does not match its authoritative manifest." >&2
+            exit 1
+          fi
+          local_release_root="$RUNNER_TEMP/projectatlas-local-release"
+          local_release_dir="$local_release_root/$RELEASE_VERSION"
+          mkdir -p "$local_release_dir"
+          cp "$archive" "$local_release_dir/$archive_name"
+          printf '%s  %s\n' "$archive_digest" "$archive_name" > "$local_release_dir/SHA256SUMS"
+          release_server_log="$RUNNER_TEMP/projectatlas-release-server.log"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$local_release_root" > "$release_server_log" 2>&1 &
+          release_server_pid=$!
+          trap 'kill "$release_server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if curl --fail --silent "http://127.0.0.1:8765/$RELEASE_VERSION/SHA256SUMS" > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 50 ]; then
+              cat "$release_server_log" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
           project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
+          if [ -e "$project_root" ]; then
+            echo "Packaged lifecycle project root was not clean: $project_root" >&2
+            exit 1
+          fi
           mkdir -p "$project_root"
-          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RELEASE_BASE_URL="http://127.0.0.1:8765" \
             bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
-          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
-          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" config --print)
-          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" ignore list)
-          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$runtime" python3 <<'PY'
+          installed_runtime="$HOME/.local/bin/projectatlas"
+          if [ ! -x "$installed_runtime" ]; then
+            echo "Packaged runtime was not installed at the selected user path: $installed_runtime" >&2
+            exit 1
+          fi
+          installed_runtime_digest="$("${digest_command[@]}" "$installed_runtime" | awk '{print $1}')"
+          if [ "$installed_runtime_digest" != "$expected_runtime_digest" ]; then
+            echo "Installed packaged runtime digest does not match its authoritative manifest." >&2
+            exit 1
+          fi
+          echo "PROJECTATLAS_PACKAGED_RUNTIME=$installed_runtime" >> "$GITHUB_ENV"
+          PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
+          {
+            echo
+            echo "- packaged archive: $archive"
+            echo "- packaged archive SHA-256: $archive_digest"
+            echo "- extracted runtime: $runtime"
+            echo "- extracted runtime SHA-256: $runtime_digest"
+            echo "- installed runtime: $installed_runtime"
+            echo "- installed runtime SHA-256: $installed_runtime_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$installed_runtime" python3 <<'PY'
           import json
           import os
           from pathlib import Path
@@ -552,6 +681,42 @@ jobs:
               echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
               exit 1
             fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$installed_runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
+
+      - name: Clean macOS arm64 holistic packaged lifecycle
+        if: matrix.label == 'macos-arm64-posix'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          inventory="$("$contract" --list)"
+          test=scan_and_watch_preserve_atomic_publication_across_roots
+          for test in "$test" \
+            init_bootstrap_creates_db_scan_report_and_host_configs \
+            installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            mcp_server_stays_bound_to_one_project_database \
+            mcp_clean_shutdown_seals_runtime_instances_across_restarts \
+            parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access \
+            packaged_cli_surface_preserves_frozen_routes_and_defaults \
+            packaged_cli_commands_own_their_real_sqlite_effects \
+            mcp_advertised_tools_own_their_real_sqlite_effects \
+            mcp_stdio_serves_toon_tool_payloads \
+            full_repository_intelligence_flow_indexes_database_and_commands \
+            classified_document_navigation_agrees_across_cli_and_mcp \
+            holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp \
+            token_cli_and_mcp_preserve_average_maximum_edge_accounting \
+            posix_installer_accepts_symlinked_runtime_path
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
             PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
             PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
               "$contract" "$test" --exact --include-ignored --nocapture
@@ -563,7 +728,7 @@ jobs:
           PROJECTATLAS_NO_TELEMETRY: "1"
         run: |
           set -euo pipefail
-          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
           contract="contract-artifacts/projectatlas-packaged-contract"
           chmod +x "$contract"
           if ! inventory="$("$contract" --list)"; then

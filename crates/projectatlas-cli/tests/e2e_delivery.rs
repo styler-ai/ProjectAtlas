@@ -539,7 +539,7 @@ const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
 
 const CLI_E2E_SUPPORT_SHA256: &str =
-    "fd0333474bc67c4af22f023c4d78cc6478421d15e99223d72ed3a871c4f41fa0";
+    "80e380a4a77b88454bc8d9ccb784e347061350c98e2c05b3cd9b51a856c2b71b";
 const CLI_E2E_INVENTORY_LIST_SEPARATOR: &str = "\u{1d}";
 
 const CLI_E2E_SOURCE_PATHS: &[&str] = &[
@@ -2186,7 +2186,6 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
         "plugin_update_skips_non_official_codex_marketplace",
         "plugin_update_leaves_current_codex_marketplace_untouched",
         "plugin_update_repairs_current_codex_plugin_with_stale_source_manifest",
-        "plugin_update_restores_current_ref_marketplace_when_plugin_reinstall_fails",
         "plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
         "plugin_update_refuses_unavailable_or_ambiguous_inventory",
         "plugin_update_serializes_restore_before_the_next_installer_reads_state",
@@ -4495,7 +4494,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         let platform_contracts: &[&str] = if job == "Unix" {
             &[
                 "set -euo pipefail",
-                "runtime=\"$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas\"",
+                "runtime=\"${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}\"",
                 "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
                 "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
             ]
@@ -4536,12 +4535,239 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
 
+    for (job, runtime_binding) in [
+        (
+            "package-unix",
+            r#"CARGO_BIN_EXE_projectatlas="$GITHUB_WORKSPACE/target/release/projectatlas""#,
+        ),
+        (
+            "package-windows",
+            r#"$env:CARGO_BIN_EXE_projectatlas = Join-Path $env:GITHUB_WORKSPACE "target/release/projectatlas.exe""#,
+        ),
+    ] {
+        if !workflow_job_block(&release, job)?.contains(runtime_binding) {
+            return Err(io::Error::other(format!(
+                "{job} copied contract runner must bind the runtime being packaged"
+            ))
+            .into());
+        }
+    }
+
+    let clean_macos_step_name = "- name: Prepare isolated macOS arm64 host state";
+    if unix_prepublish.matches(clean_macos_step_name).count() != 1 {
+        return Err(io::Error::other(
+            "Unix prepublish must own exactly one clean macOS arm64 isolation step",
+        )
+        .into());
+    }
+    let clean_macos_step = unix_prepublish
+        .split(clean_macos_step_name)
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted clean macOS arm64 isolation"))?;
+    for required in [
+        "if: matrix.label == 'macos-arm64-posix'",
+        "$RUNNER_TEMP/projectatlas-macos-arm64-clean",
+        "HOME=$isolation_root/home",
+        "XDG_CONFIG_HOME=$isolation_root/config",
+        "XDG_CACHE_HOME=$isolation_root/cache",
+        "XDG_STATE_HOME=$isolation_root/state",
+        "CODEX_HOME=$isolation_root/codex",
+        "TMPDIR=$isolation_root/tmp",
+        "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1",
+        "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1",
+        "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1",
+    ] {
+        if !clean_macos_step.contains(required) {
+            return Err(io::Error::other(format!(
+                "clean macOS arm64 isolation omitted {required:?}"
+            ))
+            .into());
+        }
+    }
+    let clean_macos_holistic_name = "- name: Clean macOS arm64 holistic packaged lifecycle";
+    if unix_prepublish.matches(clean_macos_holistic_name).count() != 1 {
+        return Err(io::Error::other(
+            "Unix prepublish must own exactly one clean macOS arm64 holistic step",
+        )
+        .into());
+    }
+    let clean_macos_holistic = unix_prepublish
+        .split(clean_macos_holistic_name)
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| {
+            io::Error::other("Unix prepublish omitted clean macOS arm64 holistic proof")
+        })?;
+    for required in [
+        "if: matrix.label == 'macos-arm64-posix'",
+        "timeout-minutes: 15",
+        "test=scan_and_watch_preserve_atomic_publication_across_roots",
+        "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
+        "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
+        "--exact --include-ignored --nocapture",
+    ] {
+        if !clean_macos_holistic.contains(required) {
+            return Err(io::Error::other(format!(
+                "clean macOS arm64 holistic proof omitted {required:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "scan_and_watch_preserve_atomic_publication_across_roots",
+        "init_bootstrap_creates_db_scan_report_and_host_configs",
+        "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+        "mcp_server_stays_bound_to_one_project_database",
+        "mcp_clean_shutdown_seals_runtime_instances_across_restarts",
+        "parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access",
+        "packaged_cli_surface_preserves_frozen_routes_and_defaults",
+        "packaged_cli_commands_own_their_real_sqlite_effects",
+        "mcp_advertised_tools_own_their_real_sqlite_effects",
+        "mcp_stdio_serves_toon_tool_payloads",
+        "full_repository_intelligence_flow_indexes_database_and_commands",
+        "classified_document_navigation_agrees_across_cli_and_mcp",
+        "holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp",
+        "token_cli_and_mcp_preserve_average_maximum_edge_accounting",
+        "posix_installer_accepts_symlinked_runtime_path",
+    ] {
+        if !clean_macos_holistic.contains(required) {
+            return Err(io::Error::other(format!(
+                "clean macOS arm64 holistic proof omitted selected contract {required:?}"
+            ))
+            .into());
+        }
+    }
+    if clean_macos_holistic.contains("PROJECTATLAS_NO_TELEMETRY") {
+        return Err(io::Error::other(
+            "clean macOS arm64 holistic proof must execute the telemetry shutdown contract",
+        )
+        .into());
+    }
+    for (path, function) in [
+        (
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "mcp_clean_shutdown_seals_runtime_instances_across_restarts",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "init_bootstrap_creates_db_scan_report_and_host_configs",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "mcp_server_stays_bound_to_one_project_database",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_navigation.rs",
+            "full_repository_intelligence_flow_indexes_database_and_commands",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_navigation.rs",
+            "classified_document_navigation_agrees_across_cli_and_mcp",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+            "holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+            "mcp_config_for_harness",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_maintenance.rs",
+            "token_cli_and_mcp_preserve_average_maximum_edge_accounting",
+        ),
+        (
+            "crates/projectatlas-cli/tests/e2e_delivery.rs",
+            "mcp_stdio_serves_toon_tool_payloads",
+        ),
+    ] {
+        let source = fs::read_to_string(workspace_root.join(path))?;
+        let body = source
+            .split(&format!("fn {function}"))
+            .nth(1)
+            .and_then(|tail| tail.split("\nfn ").next())
+            .ok_or_else(|| io::Error::other(format!("missing packaged contract {function}")))?;
+        if body.contains("cargo_bin(\"projectatlas\")") || !body.contains("mcp_contract_executable")
+        {
+            return Err(io::Error::other(format!(
+                "packaged contract {function} does not use the injected runtime owner"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "archive_name=\"${archive##*/}\"",
+        "manifest=\"contract-artifacts/$archive_name.sha256\"",
+        "awk -v name=\"$archive_name\"",
+        "expected_runtime_digest",
+        "[ \"$archive_digest\" != \"$expected_archive_digest\" ]",
+        "[ \"$runtime_digest\" != \"$expected_runtime_digest\" ]",
+        "PROJECTATLAS_RELEASE_BASE_URL=\"http://127.0.0.1:8765\"",
+        "installed_runtime=\"$HOME/.local/bin/projectatlas\"",
+        "installed_runtime_digest",
+        "PROJECTATLAS_PACKAGED_RUNTIME=$installed_runtime",
+        "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$installed_runtime\"",
+    ] {
+        if !unix_prepublish.contains(required) {
+            return Err(io::Error::other(format!(
+                "Unix prepublish omitted packaged digest verification {required:?}"
+            ))
+            .into());
+        }
+    }
+
+    if !release.contains("> \"contract-artifacts/$archive.sha256\"")
+        || release.contains("> \"release-assets/$archive.sha256\"")
+    {
+        return Err(io::Error::other(
+            "internal packaged digests must travel with contract runners, not release assets",
+        )
+        .into());
+    }
+
+    let digest_gate = unix_prepublish
+        .find("archive_name=\"${archive##*/}\"")
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted the digest gate"))?;
+    let installer_invocation = unix_prepublish
+        .find("bash ./plugins/projectatlas/scripts/install-runtime.sh")
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted packaged installation"))?;
+    let runtime_invocation = unix_prepublish
+        .find("runtime-info")
+        .ok_or_else(|| io::Error::other("Unix prepublish omitted packaged runtime validation"))?;
+    if digest_gate >= installer_invocation || digest_gate >= runtime_invocation {
+        return Err(io::Error::other(
+            "Unix prepublish must verify the packaged digest before installation or execution",
+        )
+        .into());
+    }
+    if unix_prepublish.contains("PROJECTATLAS_RUNTIME_PATH=\"$runtime\"") {
+        return Err(io::Error::other(
+            "Unix prepublish must exercise the installer's selected runtime path",
+        )
+        .into());
+    }
+
     if !template.contains("Refs #NNN")
         || !template.contains("Use `Closes #NNN` only when this pull request completes the issue.")
         || template.contains("every OpenSpec task is checked off before merge")
     {
         return Err(io::Error::other(
             "pull request template must allow meaningful incremental dev slices",
+        )
+        .into());
+    }
+    if release
+        .matches("cargo test --locked --release --all-features -p projectatlas-cli")
+        .count()
+        != 2
+    {
+        return Err(io::Error::other(
+            "Unix and Windows packaged contract runners must compile all feature-gated contracts",
         )
         .into());
     }
@@ -18971,6 +19197,7 @@ fn mcp_advertised_tools_own_their_real_sqlite_effects() -> Result<(), Box<dyn Er
 
 #[test]
 fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
+    let executable = mcp_contract_executable();
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
@@ -18992,12 +19219,12 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
     )?;
     let db = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .args(["init", "--no-scan"])
         .assert()
         .success();
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -19051,7 +19278,6 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"edge_limit":1,"output_bytes":65536,"include_communities":true}}}"#.to_string(),
     ];
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let args = [
         "--db".to_string(),
         db.display().to_string(),

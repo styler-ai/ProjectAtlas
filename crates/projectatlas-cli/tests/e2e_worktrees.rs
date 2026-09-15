@@ -137,6 +137,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     const LINKED_WORKTREE_DIR_NAME: &str = "feature checkout 工作树";
     const REVIEW_WORKTREE_DIR_NAME: &str = "review checkout";
     const UNICODE_RS_FILE_NAME: &str = "unicode_ß.rs";
+    let executable = mcp_contract_executable();
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(MAIN_CHECKOUT_DIR_NAME);
     fs::create_dir(&repo)?;
@@ -279,7 +280,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     git_success(&review, &["commit", "-m", "review fixture"])?;
 
     let manager = repo.join(GIT_DIR_NAME);
-    let status = Command::cargo_bin("projectatlas")?
+    let status = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "root", "status"])
         .arg(&manager)
@@ -305,7 +306,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         .into());
     }
 
-    let missing_read = Command::cargo_bin("projectatlas")?
+    let missing_read = Command::new(&executable)
         .current_dir(&linked)
         .args(["--format", "json", "overview"])
         .output()?;
@@ -326,7 +327,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         return Err(io::Error::other("read-only init_required probe created project state").into());
     }
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "scan", "."])
         .assert()
@@ -591,7 +592,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
     }
     drop(linked_after_first_write);
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&linked)
         .args(["--format", "json", "init"])
         .assert()
@@ -647,7 +648,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         (&repo, "2 nodes • 1 links", "3 nodes • 2 links", "main"),
         (&linked, "3 nodes • 2 links", "2 nodes • 1 links", "linked"),
     ] {
-        let output = Command::cargo_bin("projectatlas")?
+        let output = Command::new(&executable)
             .current_dir(selected)
             .env("COLUMNS", "200")
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -1024,7 +1025,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         .into());
     }
     drop(control_after_aggregate);
-    let aggregate_tui = Command::cargo_bin("projectatlas")?
+    let aggregate_tui = Command::new(&executable)
         .current_dir(&repo)
         .env("COLUMNS", "200")
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -1206,7 +1207,7 @@ fn holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_an
         ))
         .into());
     }
-    let status_after_lifecycle = Command::cargo_bin("projectatlas")?
+    let status_after_lifecycle = Command::new(&executable)
         .current_dir(&repo)
         .args(["--format", "json", "root", "status"])
         .arg(&manager)
@@ -5337,7 +5338,7 @@ impl Drop for McpContractSession {
 
 /// Generate one harness-specific MCP config document.
 fn mcp_config_for_harness(repo: &Path, db: &Path, harness: &str) -> Result<Value, Box<dyn Error>> {
-    let output = Command::cargo_bin("projectatlas")?
+    let output = Command::new(mcp_contract_executable())
         .current_dir(repo)
         .arg("--format")
         .arg("json")

@@ -3743,6 +3743,9 @@ fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<dyn Error>> {
+    #[cfg(target_os = "macos")]
+    let temp = tempfile::tempdir_in("/var/tmp")?;
+    #[cfg(not(target_os = "macos"))]
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("classified-document-navigation");
     fs::create_dir_all(repo.join("docs"))?;
@@ -3763,8 +3766,88 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
         repo.join(SRC_DIR_NAME).join(LIB_RS_FILE_NAME),
         "pub fn api() {}\n",
     )?;
+    let outside = temp.path().join("outside-documents");
+    fs::create_dir_all(&outside)?;
+    let sentinel = outside.join("sentinel.md");
+    let sentinel_contents = "# External sentinel\n\nMust not be indexed or changed.\n";
+    fs::write(&sentinel, sentinel_contents)?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&sentinel, repo.join("docs/linked.md"))?;
+
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
     run_scan(&repo, &database)?;
+    let canonical_repo = repo.canonicalize()?;
+    let canonical_database = database.canonicalize()?;
+    #[cfg(target_os = "macos")]
+    if !repo.starts_with("/var/tmp") || !canonical_repo.starts_with("/private/var/tmp") {
+        return Err(io::Error::other("macOS fixture did not exercise the real /var alias").into());
+    }
+    let canonical_root = projectatlas_core::normalize_native_path_display(&canonical_repo);
+    let mut project_instance_id: Option<String> = None;
+    for root in [&repo, &canonical_repo] {
+        let routed_database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+        if routed_database.canonicalize()? != canonical_database {
+            return Err(io::Error::other("root alias selected a second database").into());
+        }
+        let root_output = Command::new(mcp_contract_executable())
+            .current_dir(root)
+            .args(["--format", "json", "--db"])
+            .arg(&routed_database)
+            .args(["root", "show"])
+            .output()?;
+        if !root_output.status.success() {
+            return Err(io::Error::other(format!(
+                "root alias failed: {}",
+                String::from_utf8_lossy(&root_output.stderr)
+            ))
+            .into());
+        }
+        let root_json: Value = serde_json::from_slice(&root_output.stdout)?;
+        require_json_bool(&root_json, &["verified"], true)?;
+        require_json_string(&root_json, &["root"], &canonical_root)?;
+        let identity = root_json["project_instance_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| io::Error::other("root alias omitted project identity"))?;
+        if let Some(expected) = &project_instance_id {
+            require_json_string(&root_json, &["project_instance_id"], expected)?;
+        } else {
+            project_instance_id = Some(identity.to_owned());
+        }
+        let files_output = Command::new(mcp_contract_executable())
+            .current_dir(root)
+            .args(["--format", "json", "--db"])
+            .arg(&routed_database)
+            .args([
+                "files",
+                "--file-pattern",
+                "docs/*",
+                "--content-selection",
+                "documentation",
+                "--limit",
+                "10",
+            ])
+            .output()?;
+        if !files_output.status.success() {
+            return Err(io::Error::other(format!(
+                "document alias navigation failed: {}",
+                String::from_utf8_lossy(&files_output.stderr)
+            ))
+            .into());
+        }
+        let files: Value = serde_json::from_slice(&files_output.stdout)?;
+        let rows = files
+            .as_array()
+            .ok_or_else(|| io::Error::other("CLI files omitted rows"))?;
+        let mut paths: Vec<_> = rows.iter().filter_map(|row| row["path"].as_str()).collect();
+        paths.sort_unstable();
+        if paths != ["docs/empty.md", "docs/guide.md", "docs/missing.md"] {
+            return Err(io::Error::other(format!(
+                "CLI document selection followed a symlink or lost documents: {files}"
+            ))
+            .into());
+        }
+    }
 
     let symbols_output = Command::new(mcp_contract_executable())
         .current_dir(&repo)
@@ -4226,6 +4309,40 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
     let executable = mcp_contract_executable();
     let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
     let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        for root in [&canonical_repo, &repo] {
+            let root_json: Value = toon_format::decode_default(
+                &session.call_tool("atlas_root", &json!({"project_path": root}))?,
+            )?;
+            require_json_bool(&root_json, &["root", "verified"], true)?;
+            require_json_string(&root_json, &["root", "root"], &canonical_root)?;
+            require_json_string(&root_json, &["root", "db_project_root"], &canonical_root)?;
+            require_json_string(
+                &root_json,
+                &["root", "project_instance_id"],
+                project_instance_id
+                    .as_deref()
+                    .ok_or_else(|| io::Error::other("CLI project identity missing"))?,
+            )?;
+            let files: Value = toon_format::decode_default(&session.call_tool(
+                "atlas_files", &json!({"project_path": root, "file_pattern": "docs/*", "content_selection": "documentation", "limit": 10}),
+            )?)?;
+            let rows = files["files"]
+                .as_array()
+                .ok_or_else(|| io::Error::other(format!("MCP files omitted rows: {files}")))?;
+            let mut paths: Vec<_> = rows.iter().filter_map(|row| row["path"].as_str()).collect();
+            paths.sort_unstable();
+            if paths != ["docs/empty.md", "docs/guide.md", "docs/missing.md"] {
+                return Err(io::Error::other(format!(
+                    "MCP document selection followed a symlink or lost documents: {files}"
+                ))
+                .into());
+            }
+        }
+        if fs::read_to_string(&sentinel)? != sentinel_contents
+            || outside.join(ATLAS_DIR_NAME).exists()
+        {
+            return Err(io::Error::other("document navigation changed external state").into());
+        }
         let mcp_symbols: Value = toon_format::decode_default(&session.call_tool(
             "atlas_symbols",
             &serde_json::json!({
@@ -7270,8 +7387,9 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         "pub fn library_entry() -> &'static str {\n    \"atlas\"\n}\n",
     )?;
     let db = temp.path().join("projectatlas.db");
+    let executable = mcp_contract_executable();
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7286,7 +7404,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         return Err(io::Error::other("ProjectAtlas database was not created").into());
     }
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7295,7 +7413,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("crates/atlas_core"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7304,7 +7422,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("src/service.rs"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7323,7 +7441,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("src/main.rs"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7332,7 +7450,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("dependency"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7349,7 +7467,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .stdout(predicate::str::contains("Runner"))
         .stdout(predicate::str::contains("execute"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7358,7 +7476,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("helper"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7374,7 +7492,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("src/service.rs"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7383,7 +7501,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("helper();"));
 
-    let raw_summary = Command::cargo_bin("projectatlas")?
+    let raw_summary = Command::new(&executable)
         .current_dir(&repo)
         .arg("--format")
         .arg("json")
@@ -7405,7 +7523,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
     require_json_array_len(&summary_json, &["methods"], 1)?;
     require_json_array_len(&summary_json, &["types"], 1)?;
 
-    let cross_file_summary = Command::cargo_bin("projectatlas")?
+    let cross_file_summary = Command::new(&executable)
         .current_dir(&repo)
         .arg("--format")
         .arg("json")
@@ -7423,7 +7541,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         "src/main.rs::main",
     )?;
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7432,7 +7550,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("health_findings"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7441,7 +7559,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .success()
         .stdout(predicate::str::contains("estimated_saved"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
@@ -7454,7 +7572,7 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         ))
         .stdout(predicate::str::contains("5 suggested"));
 
-    Command::cargo_bin("projectatlas")?
+    Command::new(&executable)
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)

@@ -126,10 +126,10 @@
 
 ## 19. Clean macOS Apple Silicon installed lifecycle (#485)
 
-- [ ] 19.1 After #481, #482, #483, #484, and #486, build one clean macOS Apple Silicon harness with isolated HOME/config/cache/project state, no pre-existing database, exact Rust 1.98.0 source validation, and installation of the exact packaged candidate path/version/digest rather than checkout or ambient binaries.
-- [ ] 19.2 Exercise install, init/schema creation, scan, overview, exact files/summary/slice navigation, CLI/MCP session identity and host config, `/var`/`private-var` routing, worktree add/route/remove, watcher refresh, telemetry, symlinked documents, built-in parsing, and typed optional-parser unavailability.
-- [ ] 19.3 Cover missing and unrelated roots without mutation, legacy alias recovery, non-UTF-8 worktree identity where the runner permits, stale/wrong parser pack, injected command/database failure, cancellation, retry, cleanup, and absence of residual process/config/database state; classify any failure at its owning subsystem without weakening assertions.
-- [ ] 19.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+- [x] 19.1 After #481, #482, #483, #484, and #486, build one clean macOS Apple Silicon harness with isolated HOME/config/cache/project state, no pre-existing database, exact Rust 1.98.0 source validation, and installation of the exact packaged candidate path/version/digest rather than checkout or ambient binaries.
+- [x] 19.2 Exercise install, init/schema creation, scan, overview, exact files/summary/slice navigation, CLI/MCP session identity and host config, `/var`/`private-var` routing, worktree add/route/remove, watcher refresh, telemetry, symlinked documents, built-in parsing, and typed optional-parser unavailability.
+- [x] 19.3 Cover missing and unrelated roots without mutation, legacy alias recovery, non-UTF-8 worktree identity where the runner permits, stale/wrong parser pack, injected command/database failure, cancellation, retry, cleanup, and absence of residual process/config/database state; classify any failure at its owning subsystem without weakening assertions.
+- [x] 19.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 20. macOS all-features warning cleanliness (#486)
 
