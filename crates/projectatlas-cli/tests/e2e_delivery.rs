@@ -458,7 +458,7 @@ const LANGUAGE_SUPPORT_FILE_NAME: &str = "language-support.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "9a01e84163fd5a60cd850a6ccb2edb0c4cdb60bc3bd9c7cec9a61541c980b4c5";
+const MCP_TOOLS_SHA256: &str = "2044084ddf9cfdcabaee2f3c727fb8aca2f06e8abab0ffea134d56a40ba15bfb";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -17892,7 +17892,8 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         "published predecessor installer",
         deadline.saturating_duration_since(Instant::now()),
     )?)?;
-    let database = repo.join(".projectatlas/projectatlas.db");
+    let database_relative = Path::new(".projectatlas/projectatlas.db");
+    let database = repo.join(database_relative);
     for arguments in [
         vec!["init".to_string()],
         vec![
@@ -17953,6 +17954,121 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     let source = workspace_root()?;
     let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     for invalid in [true, false] {
+        #[cfg(unix)]
+        if !invalid {
+            // Released Unix root displays are ambiguous. Ordinary operations
+            // must refuse; only the operator's explicit transition may adopt.
+            for arguments in [vec!["init", "--no-scan"], vec!["mcp-config"]] {
+                let refused = StdCommand::new(&executable)
+                    .current_dir(&repo)
+                    .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                    .args(arguments)
+                    .output()?;
+                if refused.status.success()
+                    || !String::from_utf8_lossy(&refused.stderr)
+                        .contains("missing canonical project-root identity")
+                    || sqlite_compatibility_snapshot(&database)? != before_database
+                    || repository_filesystem_snapshot(&repo)? != before_repo
+                {
+                    return Err(io::Error::other(format!(
+                        "ordinary candidate access did not preserve ambiguous predecessor state: {refused:?}"
+                    )).into());
+                }
+            }
+            run_mcp_contract_json(
+                &executable,
+                &repo,
+                &[
+                    "root".to_string(),
+                    "set".to_string(),
+                    repo.display().to_string(),
+                    "--transition".to_string(),
+                    "adopt-legacy".to_string(),
+                ],
+            )?;
+        }
+        #[cfg(windows)]
+        if !invalid {
+            // Exercise the same explicit transition through the real MCP
+            // adapter from an isolated control root with no legacy binding.
+            let control = temp.path().join("adoption-control");
+            fs::create_dir_all(&control)?;
+            let initialized = git_command_for_root(&control)
+                .args(["init", "-b", "main"])
+                .output()?;
+            if !initialized.status.success() {
+                return Err(io::Error::other(format!(
+                    "adoption control Git failed: {initialized:?}"
+                ))
+                .into());
+            }
+            let (response, _) = run_mcp_contract_raw_call(
+                &executable,
+                &control,
+                &control.join(database_relative),
+                "atlas_root_set",
+                &json!({"root": repo, "transition": "adopt_legacy"}),
+                false,
+            )?;
+            if response.get("error").is_some()
+                || response.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+            {
+                return Err(
+                    io::Error::other(format!("explicit MCP adoption failed: {response}")).into(),
+                );
+            }
+        }
+        if !invalid {
+            if released_upgrade_authority(&database)? != authority {
+                return Err(io::Error::other(
+                    "explicit legacy adoption changed authored authority",
+                )
+                .into());
+            }
+            let connection =
+                Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let (root_identity, administrative_identity, administrative) = connection.query_row(
+                "SELECT last_root_identity, git_administrative_directory_identity,
+                        git_administrative_directory FROM worktree_registrations
+                 WHERE alias = 'released-linked' AND state = 'active'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?;
+            if projectatlas_core::CanonicalProjectRoot::decode(&root_identity)?
+                != projectatlas_core::CanonicalProjectRoot::from_path(&linked)?
+                || projectatlas_core::CanonicalProjectRoot::decode(&administrative_identity)?
+                    != projectatlas_core::CanonicalProjectRoot::from_path(Path::new(
+                        &administrative,
+                    ))?
+            {
+                return Err(io::Error::other(
+                    "adoption changed registered native worktree identity",
+                )
+                .into());
+            }
+            drop(connection);
+            let (response, _) = run_mcp_contract_raw_call(
+                &executable,
+                &repo,
+                &database,
+                "atlas_worktree_list",
+                &json!({}),
+                false,
+            )?;
+            if response.get("error").is_some()
+                || response.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+            {
+                return Err(
+                    io::Error::other(format!("adopted worktree list failed: {response}")).into(),
+                );
+            }
+        }
         let wrong_hash = "0".repeat(64);
         let server = serve_release_assets(&archive, invalid.then_some(wrong_hash.as_str()))?;
         let mut command = if cfg!(windows) {
@@ -24047,6 +24163,18 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
                     "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`."
                 );
             }
+            schema
+        } else if name == "atlas_root_set" {
+            let mut schema = baseline_schema.clone();
+            let transitions = schema
+                .pointer_mut("/properties/transition/anyOf/0/oneOf")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| io::Error::other("frozen root transitions are missing"))?;
+            transitions.push(json!({
+                "description": "Explicitly adopt the selected native root for an intact schema-19 database.",
+                "type": "string",
+                "const": "adopt_legacy"
+            }));
             schema
         } else {
             baseline_schema.clone()

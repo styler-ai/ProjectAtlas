@@ -642,6 +642,17 @@ The packaged contract runner owns complete route execution and real predecessor
 upgrade proof. Artifact checks precede installation; read-only snapshots distinguish
 authored authority from derived freshness. Every supported platform must pass.
 
+An exercised v0.4.5 Unix database has no native root identity. Ordinary opens and
+initialization refuse its ambiguous legacy path display. After verifying the
+candidate archive and retaining a compatible database backup, the operator uses
+the candidate executable to run `root set <project-root> --transition adopt-legacy`,
+then retries installation. MCP exposes the same explicit `adopt_legacy` transition
+on `atlas_root_set`. Adoption requires an intact schema-19 database at that root's
+conventional project-local path and revalidates its identity inside the migration
+transaction. It preserves authored state and publishes the native root atomically;
+an injected failure rolls back. Current databases use the existing bind/repair
+operations. Installers and ordinary operations never select adoption implicitly.
+
 ```mermaid
 flowchart TD
   Published[Published v0.4.5 archive and checksum] --> Old[Install and exercise released predecessor]
@@ -649,7 +660,12 @@ flowchart TD
   Candidate[Exact candidate archive and checksum] --> Refusal[Inject invalid candidate admission]
   State --> Refusal
   Refusal --> Preserve[Verify prior runtime, configs, and state unchanged]
-  Preserve --> Retry[Retry verified candidate update on same project]
+  Preserve --> Legacy{Legacy Unix root identity?}
+  Legacy -->|no| Retry[Retry verified candidate update on same project]
+  Legacy -->|yes| Adopt[Operator explicitly adopts root with verified candidate]
+  Adopt -->|atomic migration succeeds| Retry
+  Adopt -->|failure| Rollback[Preserve predecessor schema and authored state; repair and retry]
+  Rollback --> Adopt
   Retry --> Continuity[Verify identity, authority, generation, and source continuity]
   Continuity --> Routes[Execute complete CLI routes and live MCP tool cases]
   Routes --> Recovery[Verify compatible recovery and incompatible rollback refusal]

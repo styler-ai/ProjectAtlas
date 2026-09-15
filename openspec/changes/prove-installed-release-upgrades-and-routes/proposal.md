@@ -7,6 +7,7 @@ Release acceptance currently executes every top-level CLI command and advertised
 - Extend the existing packaged CLI behavior contract to reconcile and execute every supported nested route with isolated state and typed positive or refusal outcomes.
 - Require the actual checksum-verified v0.4.5 platform executable to create and exercise a predecessor project before the exact candidate installer updates that same state.
 - Exercise injected installer failure, atomic preservation, repair/retry, authored and derived state continuity, generated host binding, and compatibility-safe rollback/refusal on every supported platform.
+- Repair the demonstrated Unix upgrade gap with an explicit `root set <path> --transition adopt-legacy` operation for schema-19 databases, preserving ordinary fail-closed identity admission and reusing the existing atomic migration sequence.
 - Keep the existing synthetic schema tests as focused compatibility checks and the existing dynamic MCP inventory as the tool behavior authority.
 
 ## Capabilities
@@ -17,11 +18,11 @@ Release acceptance currently executes every top-level CLI command and advertised
 
 ### Modified Capabilities
 
-None.
+- `project-path-and-graph-integrity`: Explicit operator-owned legacy root recovery without weakening ordinary native identity admission.
 
 ## Impact
 
-The existing CLI integration tests, shared fixture helpers, frozen source contract, release workflow, and release architecture own this change. No new runtime framework, database schema, dependency, or supported public route is proposed. Any actual product defect exposed by the proof must receive an explicit owning disposition before release.
+The existing CLI integration tests, root transitions, database migration owner, frozen source contract, release workflow, and release architecture own this change. The demonstrated Unix predecessor refusal is repaired in this same issue and PR through one explicit transition. No new runtime framework, database schema, or dependency is proposed.
 
 ## Non-Goals
 

@@ -475,6 +475,11 @@ pub enum DbError {
     /// A current bound database has no lossless native project-root identity.
     #[error("bound project database is missing canonical project-root identity")]
     ProjectRootIdentityMissing,
+    /// Explicit legacy adoption requires the intact released schema-19 state.
+    #[error(
+        "legacy root adoption requires an intact schema-19 database at the selected root's .projectatlas/projectatlas.db, without native root identity"
+    )]
+    LegacyRootAdoptionUnavailable,
     /// A root transition destination is not an absolute existing directory.
     #[error("invalid project root transition destination {root:?}: {source}")]
     ProjectRootDestinationInvalid {

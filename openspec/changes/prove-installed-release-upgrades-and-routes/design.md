@@ -4,7 +4,7 @@ The existing release matrix binds every packaged test to an exact installed cand
 
 ## Goals / Non-Goals
 
-Prove complete installed CLI route execution and real v0.4.5-to-candidate continuity on all four supported native tuples. Reuse the current runner, installers, artifact servers, snapshots, and assertions. Do not add runtime behavior, dependencies, an alternative test framework, npm delivery, or automatic stable promotion.
+Prove complete installed CLI route execution and real v0.4.5-to-candidate continuity on all four supported native tuples. Reuse the current runner, installers, artifact servers, snapshots, and assertions. Repair the demonstrated Unix legacy-root upgrade refusal through the existing explicit root-transition boundary. Do not add unrelated runtime behavior, a new schema, dependencies, an alternative test framework, npm delivery, or automatic stable promotion.
 
 ## Decisions
 
@@ -15,6 +15,8 @@ Prove complete installed CLI route execution and real v0.4.5-to-candidate contin
 - Reuse the local release-asset server to inject an invalid candidate checksum, prove atomic refusal, then retry the verified exact candidate. Compare identity, root/database selection, authored purposes, telemetry, worktrees, generation, and source evidence across the supported migration. Verify generated MCP/host bindings select the candidate. Where parser provenance changes invalidate derived evidence, require explicit typed refresh and successful rebuild while preserving authored authority; never present stale derived evidence as current.
 - Preserve the predecessor runtime and valid predecessor state for recovery. An incompatible old runtime must refuse the upgraded database without changing bytes or sidecars; rollback is only accepted with a compatible retained state and must not discard later authored changes. This does not claim that a schema downgrade is supported.
 - Run the added contract in the existing Unix and Windows prepublish jobs, so it is a publication prerequisite on every tuple. Network downloads happen before the bounded test, while candidate update faults use the existing loopback fixture. Missing predecessor identity fails the required workflow instead of becoming a skip.
+- A published schema-19 Unix database has only a lossy root display, so ordinary init, opens, MCP configuration, and bind/move/detach must continue refusing to infer native authority. Add the explicit CLI/MCP root transition `adopt-legacy`: the operator supplies the existing canonical root, the database must occupy that root's conventional project-local location and retain valid schema-19 structure and project identity, and its legacy projection must not contradict the selection. That projection is only a mismatch check; explicit adoption supplies the new authority. Under one SQLite write transaction, revalidate the captured predecessor, run the existing migrations, seed the native root, and verify current integrity and unchanged project identity. Reject current, missing, malformed, foreign-root, and already-native state without changing it. No automatic adoption or hidden installer switch is permitted.
+- Document repair with the checksum-verified candidate's `root set <path> --transition adopt-legacy`, followed by an installer retry. The packaged test first proves invalid-candidate refusal preserves the predecessor, then uses this explicit repair where required and completes candidate installation. A causal SQLite failure test proves adoption rollback and successful retry; existing migration policy owns worktree native-column backfill and collision refusal.
 
 ## Risks / Trade-offs
 
@@ -25,7 +27,7 @@ Prove complete installed CLI route execution and real v0.4.5-to-candidate contin
 
 ## Migration Plan
 
-This is acceptance hardening. No user database migration is introduced. Any product defect exposed by the real predecessor must be fixed in its owning boundary and revalidated before this issue can close. Final release acceptance restarts from the resulting exact main revision.
+This is acceptance hardening plus the demonstrated legacy-root compatibility repair. No new database schema is introduced. Explicit adoption reuses the existing schema-19 migration sequence and preserves authored state, project identity, and compatible retained-state recovery. Final release acceptance restarts from the resulting exact main revision.
 
 ## Architecture
 

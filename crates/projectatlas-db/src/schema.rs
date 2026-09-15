@@ -1632,6 +1632,113 @@ pub(crate) fn legacy_root_requires_native_authority(legacy: Option<&str>) -> boo
     }
 }
 
+/// Adopt an explicitly selected native root without trusting the legacy display.
+///
+/// Only the released schema-19 shape is admitted. The caller's deliberate root
+/// transition supplies authority; the old projection can only reject a mismatch.
+/// Ordinary initialization and root admission never call this recovery path.
+pub(crate) fn adopt_legacy_project_root(
+    path: &Path,
+    selected: &CanonicalProjectRoot,
+) -> DbResult<SchemaPreflight> {
+    validate_legacy_adoption_location(path, selected)?;
+    let (previous, location) = preflight(path, None)?;
+    {
+        let connection = open_read_only_connection(path, &location)?;
+        validate_legacy_adoption(&connection, &previous, selected)?;
+    }
+    let connection = crate::sqlite_profile::open_writable_connection(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        &location,
+        crate::SQLITE_BUSY_TIMEOUT,
+        crate::sqlite_profile::JournalModePolicy::RequireWal,
+    )?;
+    adopt_legacy_project_root_on_connection(&connection, path, selected, &previous)?;
+    Ok(previous)
+}
+
+/// Require the physical database to remain in the explicitly selected root.
+fn validate_legacy_adoption_location(path: &Path, selected: &CanonicalProjectRoot) -> DbResult<()> {
+    let physical = path
+        .canonicalize()
+        .map_err(|source| CoreError::CanonicalProjectRootIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let current = CanonicalProjectRoot::from_path(selected.as_path())?;
+    let parent = CanonicalProjectRoot::from_path(
+        physical
+            .parent()
+            .ok_or(DbError::LegacyRootAdoptionUnavailable)?,
+    )?;
+    if &current != selected
+        || physical.file_name() != Some(std::ffi::OsStr::new("projectatlas.db"))
+        || parent.as_path() != selected.as_path().join(".projectatlas")
+    {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    Ok(())
+}
+
+/// Revalidate predecessor identity and its mismatch-only legacy projection.
+fn validate_legacy_adoption(
+    connection: &Connection,
+    previous: &SchemaPreflight,
+    selected: &CanonicalProjectRoot,
+) -> DbResult<()> {
+    let current = inspect_connection(connection, None, true)?;
+    if &current != previous
+        || current.schema_version != Some(CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)
+        || current.state != SchemaState::UpgradeRequired
+        || object_kind(connection, "project_root_identity")?.is_some()
+    {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    if current.project_instance_id.is_none() {
+        return Err(DbError::ProjectInstanceIdentityMissing);
+    }
+    // This reproduces the predecessor's projection only to reject a
+    // contradiction. It never substitutes for explicit operator adoption.
+    let projection =
+        projectatlas_core::normalize_native_path_display_str(&selected.display_string()?)
+            .replace('\\', "/");
+    if current.project_root.as_deref() != Some(projection.as_str()) {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    Ok(())
+}
+
+/// Publish migration and explicitly adopted identity in one rollback boundary.
+fn adopt_legacy_project_root_on_connection(
+    connection: &Connection,
+    path: &Path,
+    selected: &CanonicalProjectRoot,
+    previous: &SchemaPreflight,
+) -> DbResult<()> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        validate_legacy_adoption_location(path, selected)?;
+        validate_legacy_adoption(connection, previous, selected)?;
+        apply_migrations(connection, CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)?;
+        crate::project_identity::set_project_root_identity(connection, selected)?;
+        crate::project_identity::set_project_root_metadata(connection, selected)?;
+        let current = inspect_connection_native(connection, Some(selected), true)?;
+        if current.state != SchemaState::Current
+            || current.project_instance_id != previous.project_instance_id
+        {
+            return Err(DbError::SchemaPostcondition {
+                expected: SCHEMA_VERSION,
+            });
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
+        Err(error) => Err(rollback_after_error(connection, error)),
+    }
+}
+
 /// Revalidate a predecessor's legacy root against the caller's native root.
 ///
 /// This check is intentionally repeated from the writer connection after its
@@ -6414,6 +6521,179 @@ mod tests {
         {
             return Err(io::Error::other(
                 "schema-21 identity repair did not survive SQLite reopen",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_legacy_root_adoption_preserves_authority_and_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        #[cfg(unix)]
+        let root = temp.path().join("legacy\\adoption");
+        #[cfg(windows)]
+        let root = temp.path().join("legacy-adoption");
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let root = CanonicalProjectRoot::from_path(&root)?;
+        let database = root.as_path().join(".projectatlas/projectatlas.db");
+        let store = AtlasStore::open_for_project(&database, root.as_path())?;
+        let project = store
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        store.connection.execute(
+            "INSERT INTO nodes(path, kind) VALUES('src/lib.rs', 'file')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO purposes(node_id, purpose, source, status, updated_by)
+             SELECT id, 'Retain adopted purpose', 'agent', 'approved', 'schema-test'
+             FROM nodes WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        store.record_usage(&usage_from_estimates(
+            "legacy-adoption",
+            "migration",
+            Some("src/lib.rs".to_string()),
+            None,
+            10,
+            4,
+        ))?;
+        store.connection.execute(
+            "UPDATE project_identity SET active_generation = 7 WHERE singleton = 1",
+            [],
+        )?;
+        if !matches!(
+            adopt_legacy_project_root(&database, &root),
+            Err(DbError::LegacyRootAdoptionUnavailable)
+        ) {
+            return Err(io::Error::other("legacy adoption admitted current state").into());
+        }
+        drop_worktree_native_identity_schema(&store.connection)?;
+        store.connection.execute_batch(
+            "DROP TABLE project_root_identity;
+             DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+        )?;
+        set_metadata(
+            &store.connection,
+            PROJECT_ROOT_KEY,
+            &normalize_native_path_display(root.as_path()).replace('\\', "/"),
+        )?;
+        drop(store);
+        let previous = preflight(&database, None)?.0;
+        let before = fs::read(&database)?;
+        let foreign = temp.path().join("foreign-adoption");
+        fs::create_dir_all(foreign.join(".projectatlas"))?;
+        let foreign = CanonicalProjectRoot::from_path(&foreign)?;
+        let copied_database = foreign.as_path().join(".projectatlas/projectatlas.db");
+        fs::copy(&database, &copied_database)?;
+        for (candidate, selected) in [(&database, &foreign), (&copied_database, &foreign)] {
+            if !matches!(
+                adopt_legacy_project_root(candidate, selected),
+                Err(DbError::LegacyRootAdoptionUnavailable)
+            ) || fs::read(candidate)? != before
+            {
+                return Err(io::Error::other("legacy adoption changed foreign-root state").into());
+            }
+        }
+        #[cfg(unix)]
+        {
+            if !matches!(
+                AtlasStore::open_for_project(&database, root.as_path()),
+                Err(DbError::ProjectRootIdentityMissing)
+            ) || fs::read(&database)? != before
+            {
+                return Err(
+                    io::Error::other("ordinary open implicitly adopted a legacy root").into(),
+                );
+            }
+            for transition in [
+                crate::ProjectRootTransition::Bind,
+                crate::ProjectRootTransition::Move,
+                crate::ProjectRootTransition::Detach,
+            ] {
+                if !matches!(
+                    AtlasStore::transition_project_root(&database, root.as_path(), transition),
+                    Err(DbError::ProjectRootIdentityMissing)
+                ) || fs::read(&database)? != before
+                {
+                    return Err(io::Error::other(
+                        "ordinary transition implicitly adopted a legacy root",
+                    )
+                    .into());
+                }
+            }
+        }
+        let connection = Connection::open(&database)?;
+        configure_writable(&connection)?;
+        let before_failure = fs::read(&database)?;
+        let wal_path = sqlite_sidecar_path(&database, "-wal");
+        let wal_before = fs::read(&wal_path).ok();
+        connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_legacy_adoption
+             BEFORE UPDATE OF value ON metadata WHEN OLD.key = 'project_root'
+             BEGIN SELECT RAISE(ABORT, 'injected legacy adoption failure'); END;",
+        )?;
+        let failed =
+            adopt_legacy_project_root_on_connection(&connection, &database, &root, &previous);
+        if !matches!(failed, Err(DbError::Sqlite(_)))
+            || fs::read(&database)? != before_failure
+            || fs::read(&wal_path).ok() != wal_before
+            || read_schema_contract(&connection)? != *canonical_root_predecessor_schema_contract()?
+        {
+            return Err(io::Error::other(format!(
+                "failed adoption result={failed:?}, database_equal={}, wal_equal={}, schema_equal={}",
+                fs::read(&database)? == before_failure, fs::read(&wal_path).ok() == wal_before,
+                read_schema_contract(&connection)? == *canonical_root_predecessor_schema_contract()?
+            )).into());
+        }
+        connection.execute_batch("DROP TRIGGER fail_legacy_adoption")?;
+        // A predecessor replaced between admission and the write lock must not
+        // inherit the original operator's captured project identity.
+        let mut stale = previous;
+        stale.project_root = Some("different-root".to_string());
+        if !matches!(
+            adopt_legacy_project_root_on_connection(&connection, &database, &root, &stale),
+            Err(DbError::LegacyRootAdoptionUnavailable)
+        ) || fs::read(&database)? != before_failure
+        {
+            return Err(io::Error::other("adoption accepted stale predecessor authority").into());
+        }
+        drop(connection);
+        let result = AtlasStore::transition_project_root(
+            &database,
+            root.as_path(),
+            crate::ProjectRootTransition::AdoptLegacy,
+        )?;
+        let migrated = AtlasStore::open_read_only_for_project(&database, root.as_path())?;
+        let authority = migrated.connection.query_row(
+            "SELECT
+                (SELECT active_generation FROM project_identity WHERE singleton = 1),
+                (SELECT purpose FROM purposes),
+                (SELECT COUNT(*) FROM usage_events),
+                (SELECT COUNT(*) FROM usage_instances)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if result.project_instance_id != project
+            || result.previous_root.is_some()
+            || result.identity_changed
+            || result.publication_invalidated
+            || migrated.project_instance_id()? != Some(project)
+            || migrated.project_root_identity()? != Some(root)
+            || authority != (7, "Retain adopted purpose".to_string(), 1, 1)
+        {
+            return Err(io::Error::other(
+                "adoption retry changed authored authority or generation",
             )
             .into());
         }
