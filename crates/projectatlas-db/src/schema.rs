@@ -1738,7 +1738,22 @@ fn adopt_legacy_project_root_on_connection(
         Ok(())
     })();
     match result {
-        Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
+        Ok(()) => {
+            connection.execute_batch("COMMIT")?;
+            // POSIX directory entries can change despite SQLite's write lock.
+            // A committed migration cannot be rolled back or safely restored here.
+            let published = (|| {
+                validate_legacy_adoption_location(path, selected)?;
+                #[cfg(unix)]
+                validate_legacy_adoption_handle(connection)?;
+                Ok(())
+            })();
+            published.map_err(
+                |source| DbError::LegacyRootAdoptionCommittedLocationChanged {
+                    source: Box::new(source),
+                },
+            )
+        }
         Err(error) => Err(rollback_after_error(connection, error)),
     }
 }
@@ -6575,6 +6590,37 @@ mod tests {
         assert_legacy_root_adoption(std::ffi::OsStr::from_bytes(b"legacy-\xff-adoption"))
     }
 
+    #[cfg(unix)]
+    struct AdoptionCommitReplacement {
+        database: std::path::PathBuf,
+        moved: std::path::PathBuf,
+        replacement: std::path::PathBuf,
+        result: Option<io::Result<()>>,
+    }
+
+    #[cfg(unix)]
+    thread_local! {
+        static ADOPTION_COMMIT_REPLACEMENT: std::cell::RefCell<Option<AdoptionCommitReplacement>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::needless_pass_by_value)]
+    fn replace_legacy_database_at_commit(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, "COMMIT") = event {
+            ADOPTION_COMMIT_REPLACEMENT.with_borrow_mut(|slot| {
+                if let Some(replacement) = slot.as_mut()
+                    && replacement.result.is_none()
+                {
+                    replacement.result = Some(
+                        fs::rename(&replacement.database, &replacement.moved).and_then(|()| {
+                            fs::rename(&replacement.replacement, &replacement.database)
+                        }),
+                    );
+                }
+            });
+        }
+    }
+
     fn assert_legacy_root_adoption(name: &std::ffi::OsStr) -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join(name);
@@ -6790,6 +6836,85 @@ mod tests {
                 "adoption retry changed authored authority or generation",
             )
             .into());
+        }
+        drop(migrated);
+        #[cfg(unix)]
+        {
+            // Use a fresh, terminal fixture: a displaced WAL database cannot be
+            // reconstructed by restoring only its main-file bytes.
+            let race_root = temp.path().join("commit-race");
+            fs::create_dir_all(race_root.join(".projectatlas"))?;
+            let race_root = CanonicalProjectRoot::from_path(&race_root)?;
+            let database = race_root.as_path().join(".projectatlas/projectatlas.db");
+            fs::write(&database, &before)?;
+            let predecessor = Connection::open(&database)?;
+            set_metadata(
+                &predecessor,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(race_root.as_path()).replace('\\', "/"),
+            )?;
+            drop(predecessor);
+            let replacement = temp.path().join("commit-replacement.db");
+            fs::copy(&database, &replacement)?;
+            let replacement_connection = Connection::open(&replacement)?;
+            replacement_connection.execute(
+                "UPDATE purposes SET purpose = 'Replacement retained purpose'",
+                [],
+            )?;
+            drop(replacement_connection);
+            let replacement_before = fs::read(&replacement)?;
+            let opened = Connection::open(&database)?;
+            configure_writable(&opened)?;
+            let captured = inspect_connection(&opened, None, true)?;
+            ADOPTION_COMMIT_REPLACEMENT.set(Some(AdoptionCommitReplacement {
+                database: database.clone(),
+                moved: temp.path().join("commit-moved.db"),
+                replacement,
+                result: None,
+            }));
+            // Swap only when SQLite starts COMMIT, after every pre-commit guard.
+            opened.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(replace_legacy_database_at_commit),
+            );
+            let result =
+                adopt_legacy_project_root_on_connection(&opened, &database, &race_root, &captured);
+            opened.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            let replacement_result = ADOPTION_COMMIT_REPLACEMENT
+                .take()
+                .and_then(|replacement| replacement.result)
+                .ok_or_else(|| io::Error::other("adoption COMMIT replacement did not execute"))?;
+            replacement_result?;
+            let retained_purpose = opened.query_row("SELECT purpose FROM purposes", [], |row| {
+                row.get::<_, String>(0)
+            })?;
+            if !matches!(
+                result,
+                Err(DbError::LegacyRootAdoptionCommittedLocationChanged { .. })
+            ) || !opened.is_autocommit()
+                || inspect_connection_native(&opened, Some(&race_root), true)?.state
+                    != SchemaState::Current
+                || retained_purpose != "Retain adopted purpose"
+                || fs::read(&database)? != replacement_before
+            {
+                return Err(io::Error::other(format!(
+                    "commit-time replacement did not preserve authority and report committed-location failure: {result:?}"
+                )).into());
+            }
+            let wal_path = sqlite_sidecar_path(&database, "-wal");
+            let committed_wal = fs::read(&wal_path)?;
+            drop(opened);
+            if fs::read(&database)? != replacement_before
+                || committed_wal.is_empty()
+                || fs::read(&wal_path)? != committed_wal
+                || !sqlite_sidecar_path(&database, "-shm").exists()
+            {
+                return Err(io::Error::other(
+                    "adoption recovery changed replacement or retained WAL state",
+                )
+                .into());
+            }
+            // Keep both main files and the WAL/SHM unit until the fixture closes.
         }
         Ok(())
     }

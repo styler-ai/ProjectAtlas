@@ -12,7 +12,7 @@ The CLI and MCP root-transition API SHALL provide explicit `adopt-legacy` recove
 - **THEN** migration publishes the native root atomically, preserves project identity and authored state, and candidate CLI/MCP/host bindings converge
 
 #### Scenario: Invalid or failed adoption
-- **WHEN** adoption addresses a missing, current, malformed, already-native, foreign-root, or raced predecessor, or migration fails
+- **WHEN** adoption addresses a missing, current, malformed, already-native, foreign-root, or raced predecessor detected before commit, or migration fails
 - **THEN** it refuses or rolls back without partial schema, root identity, or generated configuration publication, and an intact predecessor remains usable for a corrected retry
 
 #### Scenario: Explicit recovery preserves non-UTF-8 root bytes
@@ -20,5 +20,10 @@ The CLI and MCP root-transition API SHALL provide explicit `adopt-legacy` recove
 - **THEN** explicit adoption preserves those bytes in native root identity, uses the predecessor's lossy text only to reject contradictions, and removes unrepresentable compatibility metadata
 
 #### Scenario: Database pathname is replaced after opening
-- **WHEN** the conventional database pathname stops identifying the database opened for adoption
+- **WHEN** the conventional database pathname stops identifying the database opened for adoption and the change is detected before commit
 - **THEN** adoption refuses before migration or rolls back before commit instead of reporting success for the displaced database
+
+#### Scenario: Database pathname changes during commit
+- **WHEN** an external Unix rename or replacement races the successful SQLite commit
+- **THEN** post-commit location and opened-file verification returns a distinct committed-location error instead of adoption success, no generated configuration is published, and recovery does not restore or overwrite either database
+- **AND** the error does not claim rollback of the committed migration; callers must preserve the displaced database, replacement, and WAL/SHM sidecars for inspection
