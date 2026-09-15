@@ -635,3 +635,23 @@ stateDiagram-v2
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
   FinalState --> [*]
 ```
+
+## Installed release acceptance
+
+The packaged contract runner owns complete route execution and real predecessor
+upgrade proof. Artifact checks precede installation; read-only snapshots distinguish
+authored authority from derived freshness. Every supported platform must pass.
+
+```mermaid
+flowchart TD
+  Published[Published v0.4.5 archive and checksum] --> Old[Install and exercise released predecessor]
+  Old --> State[Capture authored state and valid predecessor backup]
+  Candidate[Exact candidate archive and checksum] --> Refusal[Inject invalid candidate admission]
+  State --> Refusal
+  Refusal --> Preserve[Verify prior runtime, configs, and state unchanged]
+  Preserve --> Retry[Retry verified candidate update on same project]
+  Retry --> Continuity[Verify identity, authority, generation, and source continuity]
+  Continuity --> Routes[Execute complete CLI routes and live MCP tool cases]
+  Routes --> Recovery[Verify compatible recovery and incompatible rollback refusal]
+  Recovery --> Gate[All native tuples pass before publication]
+```

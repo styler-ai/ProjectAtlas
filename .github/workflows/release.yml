@@ -492,6 +492,14 @@ jobs:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts
 
+      - name: Prepare published predecessor upgrade inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 .github/scripts/prepare-published-predecessor.py
+          --suffix "${{ matrix.suffix }}"
+          --destination "$RUNNER_TEMP/projectatlas-published-predecessor"
+
       - name: Prepare isolated macOS arm64 host state
         if: matrix.label == 'macos-arm64-posix'
         run: |
@@ -674,7 +682,8 @@ jobs:
             mcp_advertised_tools_own_their_real_sqlite_effects \
             mcp_tools_list_preserves_frozen_contracts_without_index_state \
             packaged_cli_surface_preserves_frozen_routes_and_defaults \
-            packaged_cli_commands_own_their_real_sqlite_effects
+            packaged_cli_commands_own_their_real_sqlite_effects \
+            packaged_cli_upgrades_published_predecessor_without_losing_state
           do
             matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
             if [ "$matches" -ne 1 ]; then
@@ -827,6 +836,15 @@ jobs:
           name: packaged-contract-runner-x86_64-pc-windows-msvc
           path: contract-artifacts
 
+      - name: Prepare published predecessor upgrade inputs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python .github/scripts/prepare-published-predecessor.py
+          --suffix x86_64-pc-windows-msvc
+          --destination "$env:RUNNER_TEMP/projectatlas-published-predecessor"
+
       - name: Install packaged runtime through plugin
         timeout-minutes: 5
         shell: pwsh
@@ -903,7 +921,8 @@ jobs:
             "mcp_advertised_tools_own_their_real_sqlite_effects",
             "mcp_tools_list_preserves_frozen_contracts_without_index_state",
             "packaged_cli_surface_preserves_frozen_routes_and_defaults",
-            "packaged_cli_commands_own_their_real_sqlite_effects"
+            "packaged_cli_commands_own_their_real_sqlite_effects",
+            "packaged_cli_upgrades_published_predecessor_without_losing_state"
           )) {
             $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
             if ($matches -ne 1) {
