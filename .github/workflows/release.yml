@@ -206,7 +206,7 @@ jobs:
         run: |
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
-            --milestone "${{ steps.release_version.outputs.milestone }}"
+            --publication-version "$RELEASE_VERSION"
 
   package-unix:
     name: package ${{ matrix.label }}

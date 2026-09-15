@@ -14,8 +14,11 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from release_version import ReleaseVersion, parse_release_version
 
 
 UNORDERED_LIST_MARKER_RE = r"[-*+]"
@@ -2416,7 +2419,218 @@ def check_milestone_complete(
     return failures
 
 
+@dataclass(frozen=True)
+class ReleaseGraph:
+    release_issue: int
+    issues: frozenset[int]
+
+
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def publication_graph(
+    path: Path, milestone: str, mapped_issues: set[int]
+) -> ReleaseGraph | None:
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+        raise ValueError("publication issue map must use schema_version 2")
+    graphs = payload.get("release_graphs", {})
+    if not isinstance(graphs, dict):
+        raise ValueError("release_graphs must be an object")
+    if milestone not in graphs:
+        return None
+    graph = graphs[milestone]
+    if not isinstance(graph, dict) or set(graph) != {"release_issue", "issues"}:
+        raise ValueError("release graph must declare release_issue and issues")
+    owner = positive_issue(graph["release_issue"], "release_issue")
+    members = graph["issues"]
+    if not isinstance(members, dict) or not members:
+        raise ValueError("release graph issues must be a non-empty object")
+    dependencies: dict[int, set[int]] = {}
+    for key, item in members.items():
+        if not isinstance(key, str) or re.fullmatch(r"[1-9][0-9]*", key) is None:
+            raise ValueError("release graph issue keys must be canonical positive numbers")
+        number = int(key)
+        if not isinstance(item, dict) or set(item) != {"blocked_by"}:
+            raise ValueError(f"#{number} must declare blocked_by")
+        blockers = item["blocked_by"]
+        if not isinstance(blockers, list):
+            raise ValueError(f"#{number} blocked_by must be a list")
+        parsed = [positive_issue(value, f"#{number} blocker") for value in blockers]
+        if len(parsed) != len(set(parsed)) or number in parsed:
+            raise ValueError(f"#{number} has duplicate or self dependencies")
+        dependencies[number] = set(parsed)
+    numbers = set(dependencies)
+    if owner not in numbers or not numbers <= mapped_issues:
+        raise ValueError("release graph root must be a member and every member must be mapped")
+    if any(not blockers <= numbers for blockers in dependencies.values()):
+        raise ValueError("release graph contains unknown dependencies")
+    if dependencies[owner] != numbers - {owner}:
+        raise ValueError("release owner must be blocked by every child")
+    try:
+        tuple(TopologicalSorter(dependencies).static_order())
+    except CycleError as error:
+        raise ValueError("release graph contains a dependency cycle") from error
+    return ReleaseGraph(owner, frozenset(numbers))
+
+
+def closed_owner_repair_matches(
+    release: object, version: ReleaseVersion, tag_commit: str, candidate_commit: str
+) -> bool:
+    return (
+        isinstance(release, dict)
+        and release.get("tag_name") == version.tag
+        and release.get("draft") is False
+        and release.get("prerelease") is version.is_prerelease
+        and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tag_commit) is not None
+        and tag_commit == candidate_commit
+    )
+
+
+def check_publication_ready(
+    repo: str, root: Path, issue_map_path: Path, mapped_issues: set[int], tag: str
+) -> list[str]:
+    try:
+        version = parse_release_version(tag, source="release")
+        graph = publication_graph(issue_map_path, version.milestone, mapped_issues)
+        if graph is None:
+            return check_milestone_complete(repo, version.milestone, mapped_issues)
+        issues = milestone_issues(repo, version.milestone)
+        numbers = [positive_issue(item.get("number"), "issue number") for item in issues]
+        if len(numbers) != len(set(numbers)) or set(numbers) != graph.issues:
+            return [f"{version.milestone} native membership differs from its release graph"]
+        failures = milestone_issue_failures(
+            version.milestone,
+            [item for item in issues if item["number"] != graph.release_issue],
+            mapped_issues,
+        )
+        owner = next(item for item in issues if item["number"] == graph.release_issue)
+        state = str(owner.get("state", "")).upper()
+        if state == "OPEN":
+            return failures
+        if state != "CLOSED":
+            return failures + ["release owner has unknown native state"]
+        release = gh_api_json([f"repos/{repo}/releases/tags/{version.tag}"])
+        candidate = run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"]).strip()
+        commit = gh_api_json([f"repos/{repo}/commits/{version.tag}"])
+        tag_commit = commit.get("sha", "") if isinstance(commit, dict) else ""
+        if not isinstance(tag_commit, str):
+            tag_commit = ""
+        if not closed_owner_repair_matches(release, version, tag_commit, candidate):
+            failures.append("closed release owner requires an exact existing non-draft release repair")
+        return failures
+    except (OSError, ValueError, SystemExit, subprocess.SubprocessError) as error:
+        return [f"publication readiness: {error}"]
+
+
 def self_test() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        publication_root = Path(temporary)
+        publication_map = publication_root / "issue-map.json"
+        declaration = {
+            "schema_version": 2,
+            "release_graphs": {"v1.2.3-00": {
+                "release_issue": 2,
+                "issues": {"1": {"blocked_by": []}, "2": {"blocked_by": [1]}},
+            }},
+        }
+        def write_publication_map(payload: object) -> None:
+            publication_map.write_text(json.dumps(payload), encoding="utf-8")
+
+        write_publication_map(declaration)
+        assert publication_graph(publication_map, "v1.2.3-00", {1, 2}) == ReleaseGraph(2, frozenset({1, 2}))
+        assert publication_graph(publication_map, "v1.2.4-00", {1, 2}) is None
+        malformed_graphs = [
+            None,
+            {"release_issue": True, "issues": {"1": {"blocked_by": []}}},
+            {"release_issue": 3, "issues": {"1": {"blocked_by": []}}},
+            {"release_issue": 2, "issues": {"01": {"blocked_by": []}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": []}, "2": {"blocked_by": []}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": [2]}, "2": {"blocked_by": [1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": [3]}, "2": {"blocked_by": [1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": [1]}, "2": {"blocked_by": [1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": []}, "2": {"blocked_by": [1, 1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": None}, "2": {"blocked_by": [1]}}},
+        ]
+        for malformed in malformed_graphs:
+            write_publication_map({"schema_version": 2, "release_graphs": {"v1.2.3-00": malformed}})
+            try:
+                publication_graph(publication_map, "v1.2.3-00", {1, 2})
+            except (ValueError, SystemExit):
+                pass
+            else:
+                raise AssertionError(f"malformed graph admitted: {malformed}")
+        publication_map.write_text('{"schema_version":2,"release_graphs":{},"release_graphs":{}}', encoding="utf-8")
+        try:
+            publication_graph(publication_map, "v1.2.3-00", {1, 2})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("duplicate graph key admitted")
+        write_publication_map(declaration)
+        saved_publication_functions = {name: globals()[name] for name in ("milestone_issues", "gh_api_json", "run")}
+        try:
+            members = [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "OPEN"}]
+            globals()["milestone_issues"] = lambda *_args: members
+            def check_publication() -> list[str]:
+                return check_publication_ready("owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3-rc1")
+
+            assert check_publication() == []
+            assert check_milestone_complete("owner/repo", "v1.2.3-00", {1, 2})
+            assert check_publication_ready("owner/repo", publication_root, publication_map, {2}, "v1.2.3-rc1")
+            for invalid_members in (
+                [members[0]], [members[1]], members + [{"number": 3, "state": "CLOSED"}],
+                members + [members[0]],
+                [{"number": 1, "state": "OPEN"}, members[1]],
+                [members[0], {"number": 2, "state": "UNKNOWN"}],
+            ):
+                globals()["milestone_issues"] = lambda *_args: invalid_members
+                assert check_publication()
+            globals()["milestone_issues"] = lambda *_args: members
+            members[1]["state"] = "CLOSED"
+            commit_sha = "a" * 40
+            release = {"tag_name": "v1.2.3-rc1", "draft": False, "prerelease": True}
+            globals()["run"] = lambda *_args, **_kwargs: commit_sha + "\n"
+            globals()["gh_api_json"] = lambda args: release if "/releases/" in args[0] else {"sha": commit_sha}
+            assert check_publication() == []
+            for field, value in (("draft", True), ("prerelease", False), ("tag_name", "v1.2.3")):
+                invalid_release = dict(release, **{field: value})
+                globals()["gh_api_json"] = lambda args: invalid_release if "/releases/" in args[0] else {"sha": commit_sha}
+                assert check_publication()
+            globals()["gh_api_json"] = lambda args: release if "/releases/" in args[0] else {"sha": "b" * 40}
+            assert check_publication()
+            def missing_release(_args: list[str]) -> object:
+                raise SystemExit("release not found")
+            globals()["gh_api_json"] = missing_release
+            assert check_publication()
+            write_publication_map({"schema_version": 2})
+            assert check_publication() == []
+            members[1]["state"] = "OPEN"
+            assert check_publication()
+        finally:
+            globals().update(saved_publication_functions)
+        for tag in ("v1.2.3", "v1.2.3-rc1"):
+            version = parse_release_version(tag, source="release")
+            assert closed_owner_repair_matches(
+                {"tag_name": tag, "draft": False, "prerelease": version.is_prerelease},
+                version, "a" * 40, "a" * 40,
+            )
+        for conflicting in ("--milestone=v1.2.3-00", "--skip-openspec", "--planned-issue=2", "--self-test"):
+            refused = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--publication-version=v1.2.3-rc1", conflicting],
+                capture_output=True, text=True, timeout=30,
+            )
+            assert refused.returncode != 0 and "cannot be combined" in refused.stderr
+        workflow = Path(__file__).resolve().parents[1] / "workflows" / "release.yml"
+        release_workflow = workflow.read_text(encoding="utf-8")
+        assert '--publication-version "$RELEASE_VERSION"' in release_workflow
+        assert '--milestone "${{ steps.release_version.outputs.milestone }}"' not in release_workflow
     sample = """
 - [x] 1.1 Done task
   - [ ] Nested item
@@ -4702,6 +4916,7 @@ def main() -> None:
     parser.add_argument("--root", default=".")
     parser.add_argument("--issue-map", default="openspec/issue-map.json")
     parser.add_argument("--milestone", action="append", default=[])
+    parser.add_argument("--publication-version")
     parser.add_argument("--planned-issue", type=int)
     parser.add_argument("--pull-request", type=int)
     parser.add_argument("--candidate-issue", type=int)
@@ -4712,6 +4927,14 @@ def main() -> None:
     parser.add_argument("--owner-from-commits", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+
+    if args.publication_version is not None and (
+        args.milestone or args.skip_openspec or args.self_test or args.owner_from_commits
+        or args.refresh_pr_state_for_issue is not None or args.planned_issue is not None
+        or args.pull_request is not None or args.candidate_issue is not None
+        or args.candidate_local_oid or args.base
+    ):
+        raise SystemExit("--publication-version cannot be combined with another validation mode")
 
     if args.refresh_pr_state_for_issue is not None:
         if (
@@ -4865,6 +5088,10 @@ def main() -> None:
             )
         )
     mapped_issues = mapped_issue_numbers(issue_map)
+    if args.publication_version is not None:
+        failures.extend(check_publication_ready(
+            args.repo, root, Path(args.issue_map), mapped_issues, args.publication_version
+        ))
     for milestone in args.milestone:
         failures.extend(
             check_milestone_complete(
