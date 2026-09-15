@@ -620,17 +620,17 @@ stateDiagram-v2
   [*] --> PublishedIssueReadback: read exact main OpenSpec and architecture targets
   PublishedIssueReadback --> PublicationRepair: mapped task, document, heading, or Mermaid is missing or stale
   PublicationRepair --> PublishedIssueReadback: planning PR publishes corrected evidence
-  PublishedIssueReadback --> ExactRevision: published milestone gate and every required review pass
+  PublishedIssueReadback --> ExactRevision: publication admission and every required review pass
   ExactRevision --> SurfaceInventory: freeze complete CLI and MCP inventory
-  SurfaceInventory --> InstalledProof: safely execute every supported route
-  InstalledProof --> CandidateBuild: package exact main revision
-  CandidateBuild --> UpdateProof: update exercised v0.4.5 installation and database
+  SurfaceInventory --> CandidateBuild: package exact main revision
+  CandidateBuild --> InstalledProof: safely execute every supported installed route
+  InstalledProof --> UpdateProof: update exercised v0.4.5 installation and database
   UpdateProof --> RC1: state, migration, failure, retry, and rollback hard gate passes
   UpdateProof --> Remediation: update or migration blocker
   RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
-  HostedReadback --> StableBuild: accepted candidate and no blocker
+  HostedReadback --> StableBuild: accepted candidate and explicit promotion authorization
   StableBuild --> StableReadback: repeat installs and hosted identity
   StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
   FinalState --> [*]

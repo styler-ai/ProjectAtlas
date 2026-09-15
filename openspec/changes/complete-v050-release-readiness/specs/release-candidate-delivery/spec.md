@@ -1,5 +1,7 @@
 ## ADDED Requirements
 
+These requirements apply to the [accepted release scope](../../proposal.md#accepted-release-scope). Deferred npm delivery is not an RC artifact or acceptance requirement.
+
 ### Requirement: #492 is the feature-free v0.5 release hierarchy root
 #492 SHALL have no native parent and SHALL be the sole direct parent of every other accepted `v0.5.0-00` issue. It SHALL be directly blocked by every child and SHALL implement no feature or bug.
 
@@ -66,7 +68,7 @@ IssueOps SHALL derive a bounded transition plan from the declared release graph 
 - **THEN** IssueOps selects the graph from the issue map, reports targeted milestone drift, and does not skip validation because the event payload milestone is null
 
 ### Requirement: Release input is exact and complete
-#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps milestone gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
+#492 SHALL freeze one exact `main` revision only after every accepted child, task, owning proof, document/diagram, dependency, release note, and actionable human/automated review finding is complete and the published-default-branch IssueOps publication-admission gate has read back every accepted issue's OpenSpec task source and architecture target. Technical disposition MAY satisfy only reproducible no-change work or a genuinely non-actionable observation; it SHALL NOT convert partial accepted work into readiness.
 
 #### Scenario: Evidence-led no-change issue
 - **WHEN** a measurement or reproduction task proves existing behavior already satisfies its contract
@@ -92,7 +94,7 @@ The release gate SHALL derive and reconcile the complete installed CLI command/n
 - **THEN** it uses isolated disposable fixtures, proves confirmation/refusal/cleanup, and leaves unrelated state unchanged
 
 ### Requirement: Holistic proof uses packaged installed products
-One clean E2E SHALL compose binary/npm/plugin/host installation, init/database, scan, purpose-led navigation, graph/source evidence, PHP, PDF/DOCX, analysis, worktree/watcher/telemetry, parser capability, update/repair/uninstall, concurrency, cancellation, failure recovery, and compatible rollback using exact candidate artifacts.
+One clean E2E SHALL compose accepted binary/plugin/host installation, init/database, scan, purpose-led navigation, graph/source evidence, PHP, PDF/DOCX, analysis, worktree/watcher/telemetry, parser capability, update/repair/uninstall, concurrency, cancellation, failure recovery, and compatible rollback using exact candidate artifacts.
 
 #### Scenario: Supported installed workflow
 - **WHEN** the candidate is installed into isolated homes/config/cache/repositories/databases/host roots
@@ -125,7 +127,7 @@ Before RC or stable publication, the release gate SHALL install `v0.4.5`, create
 - **THEN** it is recorded without weakening an accepted task
 
 ### Requirement: v0.5.0 begins with an independently read-back prerelease
-With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prerelease from the exact accepted revision. Independent readback SHALL verify tag/revision, metadata, assets, checksums/integrity records, installers, npm, runtime/plugin/skill/MCP/CLI/host identity, and acceptance results. v0.4.5 SHALL remain Latest.
+With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prerelease from the exact accepted revision. Independent readback SHALL verify tag/revision, metadata, assets, checksums/integrity records, installers, runtime/plugin/skill/MCP/CLI/host identity, and acceptance results. v0.4.5 SHALL remain Latest.
 
 #### Scenario: Missing or mismatched release artifact
 - **WHEN** any required tuple/asset/digest/version/readback is absent or inconsistent

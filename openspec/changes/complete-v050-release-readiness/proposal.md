@@ -2,6 +2,10 @@
 
 ProjectAtlas v0.5.0 needs one coherent non-visual release campaign that repairs confirmed graph/path/platform failures, completes bounded repository intelligence, makes distribution truthful, and proves every installed CLI/MCP/host route before Memory Atlas begins. The milestone has independent implementation lanes but one feature-free release-acceptance owner: #492 is the native parent of every other v0.5 issue, is directly blocked by all of them, and closes last after RC and stable readback.
 
+## Accepted release scope
+
+The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #388 and #456 (unversioned backlog), and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion still requires separate explicit authorization after RC acceptance.
+
 ## What Changes
 
 - Establish one native canonical project identity and lossless/versioned SQLite codec in #481; #484 reuses it for worktree root, Git common-directory, and Git administrative-directory identity.

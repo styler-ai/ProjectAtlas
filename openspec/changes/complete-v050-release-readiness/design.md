@@ -4,6 +4,8 @@ v0.4.5 is the stable baseline. v0.5.0 combines confirmed correctness repairs, bo
 
 The accepted Rust shape remains seven crates with concrete modules, typed values/enums, bounded iterators/frontiers, and caller-owned cancellation/transactions. SQLite remains the project-local storage and publication authority. No task may invent an initiative-named crate, generic framework, second database, or stringly action surface.
 
+Delivery follows the [accepted release scope](proposal.md#accepted-release-scope); retained planning for excluded issues does not add RC acceptance requirements.
+
 ## Goals / Non-Goals
 
 **Goals:**
