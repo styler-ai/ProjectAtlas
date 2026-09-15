@@ -1,6 +1,6 @@
 ## Context
 
-#310 and #314 are the initial accepted v0.6 implementation issues. #310 is the foundation; #314 is directly blocked by #310 because its public adapters must target the accepted installed surface. #493 is the release-acceptance root: it is the native parent of both children, is directly blocked by both, and gains any later accepted milestone issue as another direct child and blocker. Hierarchy expresses scope/progress; dependency edges express execution order.
+#310 and #314 are the initial accepted v0.6 implementation issues. #310 is the foundation; #314 is directly blocked by #310 because its public adapters must target the accepted installed surface. #493 is the release-acceptance root: it is the native parent of both children, is directly blocked by both, and gains any later accepted milestone issue as another direct child and blocker. Hierarchy expresses scope/progress; dependency edges express execution order. #388 is now also an accepted direct child and blocker of #493, owning npm distribution. Its native forwarding prerequisite #491 is already complete on main, so it has no outstanding direct blocker.
 
 The v0.6 release boundary is a packaged command-line product with CLI, MCP, generated host, plugin/skill, SQLite, installer, and hosted release contracts. Unit tests and schema/help inventories cannot prove their integration.
 
@@ -24,7 +24,7 @@ The v0.6 release boundary is a packaged command-line product with CLI, MCP, gene
 
 ### Native hierarchy and dependency graph have different jobs
 
-#493 is the sole native parent for every other accepted `v0.6.0-00` issue. Each child has exactly one parent and #493 has none. Direct `blocked by` edges remain the execution authority: #310 has no blocker, #314 is blocked by #310, and #493 is blocked by both. No duplicated children list is stored in OpenSpec; `release_issue` plus the graph issue keys imply the hierarchy.
+#493 is the sole native parent for every other accepted `v0.6.0-00` issue. Each child has exactly one parent and #493 has none. Direct `blocked by` edges remain the execution authority: #310 has no blocker, #314 is blocked by #310, and #493 is blocked by #310, #314, and #388. No duplicated children list is stored in OpenSpec; `release_issue` plus the graph issue keys imply the hierarchy.
 
 ### The release owner is feature-free
 
@@ -64,7 +64,7 @@ Rollback leaves stable v0.5.0 as Latest, retains failed candidates as prerelease
 
 - Foundation wave: #310 has no direct blocker.
 - Authored-context wave: #314 is blocked by #310 and lands its SQLite boundary before service/adapters.
-- Release-acceptance wave: #493 is blocked by #310, #314, and every future accepted v0.6 child; it has no parent and closes last.
+- Release-acceptance wave: #493 is blocked by #310, #314, #388, and every future accepted v0.6 child; it has no parent and closes last.
 - #493 creates no SQLite schema. It consumes migration, query-plan, concurrency, backup/restore, privacy, and compatibility proof owned by #314 and installed-surface proof owned by #310.
 
 ## Open Questions

@@ -4,7 +4,7 @@ ProjectAtlas v0.5.0 needs one coherent non-visual release campaign that repairs 
 
 ## Accepted release scope
 
-The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #388 and #456 (unversioned backlog), and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion still requires separate explicit authorization after RC acceptance.
+The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #456 (unversioned backlog), and #388 and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion still requires separate explicit authorization after RC acceptance.
 
 ## What Changes
 
