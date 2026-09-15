@@ -53,7 +53,7 @@ The Rust router, CLI help, frozen inventory, plugin skill, generated host config
 
 ### The release hierarchy separates implementation from final acceptance
 
-#310 is a direct native sub-issue of #493 and has no direct blocker. #314 is another direct #493 child but is blocked by #310. #493 is blocked by both, owns the final complete installed public-surface regression and holistic #310/#314 E2E, implements no feature/bug, and closes last. The hierarchy exposes version progress; direct blockers determine execution order.
+#310 is a direct native sub-issue of #493 and has no direct blocker. #314 is another direct #493 child but is blocked by #310. #388 is an independent accepted child for verified npm distribution. #493 is blocked by every accepted child, including #310, #314, and #388. It owns the complete installed public-surface regression and holistic proof of the agent surface, Memory Atlas, npm installation/materialization/forwarding, and npm package readback. It implements no feature or bug and closes last. The hierarchy exposes version progress; direct blockers determine execution order.
 
 ## Risks / Trade-offs
 
@@ -77,7 +77,7 @@ The Rust router, CLI help, frozen inventory, plugin skill, generated host config
 - #491 and #492 establish and release the complete v0.5 installed CLI/MCP baseline consumed here.
 - #310 solely owns this agent-surface decision and its compatibility migration.
 - #314 depends on this issue and implements Memory Atlas only after the public surface is stable.
-- #493 is the native parent/release-acceptance issue, is directly blocked by #310 and #314, implements neither contract, and closes last.
+- #493 is the native parent/release-acceptance issue, is directly blocked by every accepted child, including #310, #314, and #388, implements none of their feature contracts, and closes last.
 - #357, #369, and #466 remain unversioned visual backlog and do not influence the transport decision.
 
 ## Open Questions

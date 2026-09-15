@@ -1,6 +1,6 @@
 ## Context
 
-#310 and #314 are the initial accepted v0.6 implementation issues. #310 is the foundation; #314 is directly blocked by #310 because its public adapters must target the accepted installed surface. #493 is the release-acceptance root: it is the native parent of both children, is directly blocked by both, and gains any later accepted milestone issue as another direct child and blocker. Hierarchy expresses scope/progress; dependency edges express execution order. #388 is now also an accepted direct child and blocker of #493, owning npm distribution. Its native forwarding prerequisite #491 is already complete on main, so it has no outstanding direct blocker.
+#310, #314, and #388 are the accepted v0.6 implementation issues. #314 is directly blocked by #310 because its public adapters must target the accepted installed surface. #388 owns verified npm distribution; its native forwarding prerequisite #491 is already complete on main, so it has no outstanding direct blocker. #493 is the release-acceptance root and the direct native parent of every accepted child, is directly blocked by every child, and closes last. Later accepted milestone issues join the same hierarchy and blocker graph. Hierarchy expresses scope/progress; dependency edges express execution order.
 
 The v0.6 release boundary is a packaged command-line product with CLI, MCP, generated host, plugin/skill, SQLite, installer, and hosted release contracts. Unit tests and schema/help inventories cannot prove their integration.
 

@@ -3,9 +3,9 @@
 ### Requirement: The release hierarchy exposes complete accepted scope
 Issue #493 SHALL be the sole native parent of every other accepted `v0.6.0-00` issue and SHALL have no parent. Every child SHALL appear once in the declared release graph; direct blockers SHALL independently express genuine execution prerequisites.
 
-#### Scenario: Initial hierarchy
-- **WHEN** v0.6.0 contains #310 and #314
-- **THEN** both are direct sub-issues of #493, #314 is blocked by #310, and #493 is blocked by both
+#### Scenario: Accepted hierarchy
+- **WHEN** v0.6.0 contains #310, #314, and #388
+- **THEN** all three are direct sub-issues of #493, #314 is blocked by #310, #388 has no outstanding blocker, and #493 is blocked by every accepted child
 
 #### Scenario: Later issue is accepted
 - **WHEN** another issue enters the milestone
