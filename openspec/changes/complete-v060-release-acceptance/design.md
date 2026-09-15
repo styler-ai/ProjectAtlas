@@ -11,7 +11,7 @@ The v0.6 release boundary is a packaged command-line product with CLI, MCP, gene
 - Maintain one visible native release hierarchy and an acyclic direct-blocker graph.
 - Freeze and build one exact revision/artifact set only after all child issues and reviews are accepted.
 - Safely execute every supported CLI command/nested command and MCP tool, including unchanged routes.
-- Prove one installed workflow across #310 and #314 positive, negative, failure, recovery, compatibility, privacy, concurrency, pressure, and platform boundaries.
+- Prove one installed workflow across #310, #314, and #388 positive, negative, failure, recovery, compatibility, privacy, concurrency, pressure, and platform boundaries.
 - Independently read back prerelease and stable hosted truth and close #493 last.
 
 **Non-goals:**
@@ -36,7 +36,7 @@ The candidate manifest is derived from the installed runtime and accepted specs,
 
 ### Holistic proof uses the installed product
 
-The E2E begins from isolated homes/config/cache/repository state and exact candidate artifacts. It covers installation or upgrade, init, scan, purpose-led navigation, graph/source evidence, #310 routing, #314 typed storage, conditional atomic writes, bounded recovery after resume/compaction, documented host-hook or manual fallback, pressure/conflict/privacy, failure recovery, uninstall, and compatible rollback. It never substitutes checkout binaries or a developer database.
+The E2E begins from isolated homes/config/cache/repository state and exact candidate artifacts. It covers installation or upgrade, init, scan, purpose-led navigation, graph/source evidence, #388 verified npm installation/materialization/forwarding, #310 routing, #314 typed storage, conditional atomic writes, bounded recovery after resume/compaction, documented host-hook or manual fallback, pressure/conflict/privacy, failure recovery, uninstall, and compatible rollback. It never substitutes checkout binaries or a developer database.
 
 ### Prerelease and stable truth are independently read back
 
@@ -65,7 +65,7 @@ Rollback leaves stable v0.5.0 as Latest, retains failed candidates as prerelease
 - Foundation wave: #310 has no direct blocker.
 - Authored-context wave: #314 is blocked by #310 and lands its SQLite boundary before service/adapters.
 - Release-acceptance wave: #493 is blocked by #310, #314, #388, and every future accepted v0.6 child; it has no parent and closes last.
-- #493 creates no SQLite schema. It consumes migration, query-plan, concurrency, backup/restore, privacy, and compatibility proof owned by #314 and installed-surface proof owned by #310.
+- #493 creates no SQLite schema. It consumes migration, query-plan, concurrency, backup/restore, privacy, and compatibility proof owned by #314 and installed-surface proof owned by #310, and verified npm distribution proof owned by #388.
 
 ## Open Questions
 
