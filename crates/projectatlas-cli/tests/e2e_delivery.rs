@@ -17951,6 +17951,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     #[cfg(unix)]
     let archive = create_posix_release_archive(temp.path(), &executable)?;
     let source = workspace_root()?;
+    let release_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     for invalid in [true, false] {
         let wrong_hash = "0".repeat(64);
         let server = serve_release_assets(&archive, invalid.then_some(wrong_hash.as_str()))?;
@@ -17968,7 +17969,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
                 .arg("-ProjectRoot")
                 .arg(&repo)
                 .arg("-ProjectAtlasVersion")
-                .arg(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .arg(&release_tag)
                 .arg("-ReleaseBaseUrl")
                 .arg(server.base_url())
                 .arg("-ReleaseBinaryOnly");
@@ -17980,7 +17981,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         };
         command
             .env("PATH", &isolated_path)
-            .env("PROJECTATLAS_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("PROJECTATLAS_VERSION", &release_tag)
             .env("PROJECTATLAS_RELEASE_BASE_URL", server.base_url())
             .env("PROJECTATLAS_RELEASE_BINARY_ONLY", "1")
             .env_remove("PROJECTATLAS_RUNTIME_PATH")
