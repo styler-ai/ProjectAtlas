@@ -3485,6 +3485,14 @@ try {
         throw [System.InvalidOperationException]::new('construction-token-owner-sid-mismatch')
     }
 
+    # Synthetic error composition does not depend on native probe compilation.
+    $probeStage = 'semaphore-acl'
+    if ($DiagnosticFault -ceq 'operation-and-cleanup') {
+        throw [System.InvalidOperationException]::new(
+            'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
+        )
+    }
+
     $probeStage = 'native-semaphore-create'
     Add-Type -TypeDefinition $nativeProbeSource -Language CSharp -ErrorAction Stop
     $currentPrivateNamespaceEnabled =
@@ -3578,12 +3586,6 @@ try {
         )
     }
 
-    $probeStage = 'semaphore-acl'
-    if ($DiagnosticFault -ceq 'operation-and-cleanup') {
-        throw [System.InvalidOperationException]::new(
-            'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
-        )
-    }
     $probeStage = 'semaphore-create'
     $name = $SeededSemaphoreName
     $semaphore = [ProjectAtlasNamedObjectAccessProbe]::OpenOwnedSemaphore($name)
