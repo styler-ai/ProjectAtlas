@@ -144,16 +144,16 @@ stateDiagram-v2
     Hierarchy --> Candidate: freeze revision and build exact artifacts
     Candidate --> Inventory: install and reconcile complete CLI, nested command, and MCP inventory
     Inventory --> Regression: execute every supported route, including unchanged routes
-    Regression --> NpmProof: verified npm install, scripts-disabled materialization, native forwarding
+    Regression --> NpmProof: every supported tuple: verified npm install, scripts-disabled materialization, native forwarding
     NpmProof --> HostProof: packaged host, process, root, freshness, format, error, cancellation, source-evidence E2E
-    HostProof --> Readback: publish RC and verify tag, assets, checksums, runtime, plugin, MCP, hosts, Latest
+    HostProof --> Readback: publish RC and verify tag, assets, checksums, runtime, plugin, MCP, hosts, Latest protection
     Readback --> NpmReadback: verify npm registry version, provenance, and native-asset mapping
     NpmReadback --> Defect: confirmed blocker
     Readback --> Defect: confirmed blocker
     Defect --> Owner: return defect to owning child issue
     Owner --> Hierarchy: land accepted fix and restart complete proof
     NpmReadback --> Stable: accepted candidate, no blocker, explicit promotion authorization
-    Stable --> FinalReadback: repeat installed, npm, and hosted stable proof
+    Stable --> FinalReadback: repeat installed and hosted stable proof, including npm registry version, provenance, and native-asset mapping
     FinalReadback --> Close: verified identities, Latest, hierarchy and milestone complete, close #493 last
     Close --> [*]
 ```

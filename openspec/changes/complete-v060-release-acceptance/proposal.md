@@ -7,7 +7,7 @@ v0.6.0 is not accepted merely because its feature issues merge. It changes the i
 - Make #493 the native GitHub parent of every other accepted `v0.6.0-00` issue and directly blocked by each child; the hierarchy communicates milestone scope/progress while direct `blocked by` relationships control execution order.
 - Freeze one exact candidate only after every child issue, required review, accepted compatibility disposition, and local specification is complete.
 - Reconcile and safely execute the complete installed CLI command/nested-command and MCP tool inventory, including unchanged routes, against isolated fixtures.
-- Run one holistic installed-product workflow spanning installation, initialization, indexing, navigation, #310 surface behavior, #314 storage/recovery/reflection/host behavior, #388 verified npm installation and forwarding, upgrade, rollback, privacy, concurrency, pressure, and failure recovery.
+- Run one holistic installed-product workflow spanning installation, initialization, indexing, navigation, #310 surface behavior, #314 storage/recovery/reflection/host behavior, #388 verified npm installation, scripts-disabled materialization, and forwarding, upgrade, rollback, privacy, concurrency, pressure, and failure recovery.
 - Publish and independently read back `v0.6.0-rc1`, return confirmed defects to their owning issues, repeat the proof after any changed revision/artifact, then promote and read back stable v0.6.0.
 - Close #493 last; it implements no feature or bug and never substitutes for owning tests or reviews.
 

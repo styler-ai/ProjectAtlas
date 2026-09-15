@@ -37,7 +37,7 @@ The release gate SHALL reconcile the complete installed CLI command/nested-comma
 The exact installed candidate SHALL pass one end-to-end workflow composing the accepted agent surface with Memory Atlas storage, reflection, recovery, host boundaries, and verified npm installation, explicit materialization, and native-runtime forwarding.
 
 #### Scenario: Clean installed workflow
-- **WHEN** the candidate is installed into isolated home/config/cache/project state
+- **WHEN** the candidate is installed into isolated home/config/cache/project state on every supported release OS/architecture tuple
 - **THEN** install or upgrade, verified npm installation/materialization/forwarding, init, scan, navigation, graph/source evidence, CLI/MCP routing, authored-context write/read/recovery, host fallback, concurrency/pressure, privacy, failure recovery, uninstall, and compatible rollback all pass
 
 ### Requirement: Confirmed defects return to their owners
