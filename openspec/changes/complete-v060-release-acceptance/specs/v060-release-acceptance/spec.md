@@ -52,11 +52,11 @@ The exact installed candidate SHALL pass one end-to-end workflow composing the a
 
 #### Scenario: RC1 publication
 - **WHEN** explicit authorization exists and all candidate proof passes
-- **THEN** independent readback verifies tag/revision, metadata, assets, checksums, installers, runtime/plugin/skill/MCP identity, E2E results, and Latest protection
+- **THEN** independent readback verifies tag/revision, metadata, assets, checksums, installers, npm registry-package version/provenance/native-asset mapping, runtime/plugin/skill/MCP identity, E2E results, and Latest protection
 
 #### Scenario: Stable promotion
 - **WHEN** the accepted candidate has no unresolved blocker and stable proof passes
-- **THEN** v0.6.0 becomes Latest only after exact installed/hosted/downstream/issue/review/milestone state is verified
+- **THEN** v0.6.0 becomes Latest only after exact installed/hosted/downstream/issue/review/milestone state, including npm registry-package version/provenance/native-asset mapping, is verified
 
 ### Requirement: The release-acceptance issue closes last
 #493 SHALL remain open until every child and required review is closed successfully and stable v0.6.0 readback is complete.
