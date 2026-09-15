@@ -137,7 +137,7 @@ Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository 
 
 ## Release Quality
 
-ProjectAtlas [v0.5.0-rc1](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0-rc1) is prepared to be published as a prerelease and does not replace the preceding stable GitHub Latest release. See the [RC1 release notes](docs/v0.5.0-rc1-release-notes.md) for its scope and compatibility boundaries.
+When published as a prerelease, [v0.5.0-rc1](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0-rc1) does not replace the preceding stable GitHub Latest release. [Notes](docs/v0.5.0-rc1-release-notes.md).
 
 `v0.4.5` ships through the full release matrix:
 
