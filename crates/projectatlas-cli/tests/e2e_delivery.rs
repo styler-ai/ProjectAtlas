@@ -1481,6 +1481,8 @@ fn tampered_cli_e2e_inventory_fixture(
     mutate: impl FnOnce(&mut Value),
 ) -> Result<tempfile::TempDir, Box<dyn Error>> {
     let fixture = tempfile::tempdir()?;
+    let calls_path = fixture.path().join("calls");
+    let mutations_path = fixture.path().join("mutations");
     copy_cli_e2e_contract_fixture(workspace_root, fixture.path())?;
     let inventory_path = fixture.path().join(CLI_E2E_INVENTORY_FILE);
     let mut inventory: Value = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
@@ -4136,8 +4138,8 @@ gate_status={gate_status}
 "#,
                 gate_status = if ready { 0 } else { 41 },
             );
-            fs::write(fixture.path().join("calls"), "")?;
-            fs::write(fixture.path().join("mutations"), "")?;
+            fs::write(&calls_path, "")?;
+            fs::write(&mutations_path, "")?;
             let output = StdCommand::new(&shell)
                 .args(["--noprofile", "--norc", "-c", &script])
                 .current_dir(fixture.path())
@@ -4149,8 +4151,8 @@ gate_status={gate_status}
                 .env("PROJECTATLAS_RELEASE_EXISTS", repair.to_string())
                 .env("RUNNER_TEMP", ".")
                 .output()?;
-            let calls = fs::read_to_string(fixture.path().join("calls"))?;
-            let mutations = fs::read_to_string(fixture.path().join("mutations"))?;
+            let calls = fs::read_to_string(&calls_path)?;
+            let mutations = fs::read_to_string(&mutations_path)?;
             let mutation = if repair {
                 "release upload "
             } else {
