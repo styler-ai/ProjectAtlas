@@ -4535,6 +4535,24 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
 
+    for (job, runtime_binding) in [
+        (
+            "package-unix",
+            r#"CARGO_BIN_EXE_projectatlas="$GITHUB_WORKSPACE/target/release/projectatlas""#,
+        ),
+        (
+            "package-windows",
+            r#"$env:CARGO_BIN_EXE_projectatlas = Join-Path $env:GITHUB_WORKSPACE "target/release/projectatlas.exe""#,
+        ),
+    ] {
+        if !workflow_job_block(&release, job)?.contains(runtime_binding) {
+            return Err(io::Error::other(format!(
+                "{job} copied contract runner must bind the runtime being packaged"
+            ))
+            .into());
+        }
+    }
+
     let clean_macos_step_name = "- name: Prepare isolated macOS arm64 host state";
     if unix_prepublish.matches(clean_macos_step_name).count() != 1 {
         return Err(io::Error::other(

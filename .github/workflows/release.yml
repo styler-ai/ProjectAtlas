@@ -285,7 +285,8 @@ jobs:
           SH
           chmod +x contract-artifacts/projectatlas-packaged-contract
           contract="contract-artifacts/projectatlas-packaged-contract"
-          "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
+          CARGO_BIN_EXE_projectatlas="$GITHUB_WORKSPACE/target/release/projectatlas" \
+            "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
 
       - name: Package
         run: |
@@ -420,6 +421,7 @@ jobs:
       - name: Run Windows release-mode lifecycle contracts
         shell: pwsh
         run: |
+          $env:CARGO_BIN_EXE_projectatlas = Join-Path $env:GITHUB_WORKSPACE "target/release/projectatlas.exe"
           $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
           & pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture
           if ($LASTEXITCODE -ne 0) {
