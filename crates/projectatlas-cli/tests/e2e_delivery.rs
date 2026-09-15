@@ -1481,8 +1481,6 @@ fn tampered_cli_e2e_inventory_fixture(
     mutate: impl FnOnce(&mut Value),
 ) -> Result<tempfile::TempDir, Box<dyn Error>> {
     let fixture = tempfile::tempdir()?;
-    let calls_path = fixture.path().join("calls");
-    let mutations_path = fixture.path().join("mutations");
     copy_cli_e2e_contract_fixture(workspace_root, fixture.path())?;
     let inventory_path = fixture.path().join(CLI_E2E_INVENTORY_FILE);
     let mut inventory: Value = serde_json::from_str(&fs::read_to_string(&inventory_path)?)?;
@@ -4104,6 +4102,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .as_str()
         .ok_or_else(|| io::Error::other("release publication has no script"))?;
     let fixture = tempfile::tempdir()?;
+    let calls_path = fixture.path().join("calls");
+    let mutations_path = fixture.path().join("mutations");
     fs::write(
         fixture
             .path()
