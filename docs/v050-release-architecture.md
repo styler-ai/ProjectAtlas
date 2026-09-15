@@ -649,9 +649,13 @@ the candidate executable to run `root set <project-root> --transition adopt-lega
 then retries installation. MCP exposes the same explicit `adopt_legacy` transition
 on `atlas_root_set`. Adoption requires an intact schema-19 database at that root's
 conventional project-local path and revalidates its identity inside the migration
-transaction. It preserves authored state and publishes the native root atomically;
-an injected failure rolls back. Current databases use the existing bind/repair
-operations. Installers and ordinary operations never select adoption implicitly.
+transaction and after commit. It preserves authored state and publishes the native
+root atomically; a pre-commit failure rolls back. A committed-location error means
+the transaction committed on an opened database whose location could not be
+verified afterward: stop before configuration publication or installer retry and
+preserve both database locations with their WAL/SHM sidecars for inspection.
+Current databases use the existing bind/repair operations. Installers and ordinary
+operations never select adoption implicitly.
 
 ```mermaid
 flowchart TD
@@ -663,8 +667,9 @@ flowchart TD
   Preserve --> Legacy{Legacy Unix root identity?}
   Legacy -->|no| Retry[Retry verified candidate update on same project]
   Legacy -->|yes| Adopt[Operator explicitly adopts root with verified candidate]
-  Adopt -->|atomic migration succeeds| Retry
-  Adopt -->|failure| Rollback[Preserve predecessor schema and authored state; repair and retry]
+  Adopt -->|commit and location verified| Retry
+  Adopt -->|pre-commit failure| Rollback[Preserve predecessor schema and authored state; repair and retry]
+  Adopt -->|committed location changed| PreserveBoth[Stop; preserve both databases and WAL/SHM; inspect]
   Rollback --> Adopt
   Retry --> Continuity[Verify identity, authority, generation, and source continuity]
   Continuity --> Routes[Execute complete CLI routes and live MCP tool cases]
