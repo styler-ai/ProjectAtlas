@@ -102,6 +102,8 @@ const TEST_POSIX_USER_BIN_DIR: &str = ".local/bin";
 const TEST_ATLAS_FORWARDER_FILE_NAME: &str = "atlas";
 
 const SRC_DIR_NAME: &str = "src";
+const PROJECT_LOCAL_FIXTURE_DIR: &str = ".tmp";
+const POSIX_INSTALLER_SCRIPT: &str = "plugins/projectatlas/scripts/install-runtime.sh";
 
 const DUPLICATE_RS_FILE_NAME: &str = "duplicate.rs";
 
@@ -3223,6 +3225,8 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
+    #[cfg(windows)]
+    assert_windows_packaged_digest_admission()?;
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
@@ -9607,7 +9611,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
 
     let mut uninstall = StdCommand::new("bash");
     uninstall
-        .arg(workspace_root.join("plugins/projectatlas/scripts/install-runtime.sh"))
+        .arg(workspace_root.join(POSIX_INSTALLER_SCRIPT))
         .arg("--uninstall")
         .arg(&repo)
         .env("HOME", &home)
@@ -13422,7 +13426,7 @@ Write-Output "exact_json_registry_contract_verified"
 
 fn fake_codex_projectatlas_marketplace_root(codex_dir: &Path) -> PathBuf {
     codex_dir
-        .join(".tmp")
+        .join(PROJECT_LOCAL_FIXTURE_DIR)
         .join("marketplaces")
         .join("projectatlas")
 }
@@ -17805,14 +17809,14 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     )?;
     require_json_string(&info, &["version"], "0.4.5")?;
 
-    let fixture_root = workspace_root()?.join(".tmp");
+    let fixture_root = workspace_root()?.join(PROJECT_LOCAL_FIXTURE_DIR);
     fs::create_dir_all(&fixture_root)?;
     let temp = tempfile::Builder::new()
         .prefix("released-upgrade-")
         .tempdir_in(fixture_root)?;
     let repo = temp.path().join("released-upgrade");
     let home = temp.path().join(ISOLATED_HOME_DIR);
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(&home)?;
     fs::write(
         repo.join("src/lib.rs"),
@@ -17858,6 +17862,9 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
                 .any(|name| directory.join(name).is_file())
         }),
     )?;
+    let xdg_data = home.join(".local/share");
+    let xdg_config = home.join(".config");
+    let xdg_cache = home.join(".cache");
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &predecessor_source,
         &repo,
@@ -17872,9 +17879,9 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         .env("PROJECTATLAS_VERSION", "0.4.5")
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
-        .env("XDG_DATA_HOME", home.join(".local/share"))
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_CACHE_HOME", home.join(".cache"));
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_CACHE_HOME", &xdg_cache);
     if cfg!(windows) {
         install.args(["-ProjectAtlasVersion", "v0.4.5"]);
     }
@@ -17968,9 +17975,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             command
         } else {
             let mut command = StdCommand::new("bash");
-            command
-                .arg(source.join("plugins/projectatlas/scripts/install-runtime.sh"))
-                .arg(&repo);
+            command.arg(source.join(POSIX_INSTALLER_SCRIPT)).arg(&repo);
             command
         };
         command
@@ -17983,10 +17988,10 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             .env("USERPROFILE", &home)
             .env("APPDATA", home.join("AppData/Roaming"))
             .env("LOCALAPPDATA", home.join("AppData/Local"))
-            .env("CODEX_HOME", home.join(".codex"))
-            .env("XDG_DATA_HOME", home.join(".local/share"))
-            .env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("XDG_CACHE_HOME", home.join(".cache"))
+            .env("CODEX_HOME", home.join(CODEX_CONFIG_DIR))
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .env("XDG_CACHE_HOME", &xdg_cache)
             .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
             .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
@@ -18139,7 +18144,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         "projectatlas.opencode.json",
     ] {
         let config: Value =
-            serde_json::from_slice(&fs::read(repo.join(".projectatlas").join(file))?)?;
+            serde_json::from_slice(&fs::read(repo.join(ATLAS_DIR_NAME).join(file))?)?;
         let (host_runtime, arguments) = if file == "projectatlas.opencode.json" {
             let command = cli_surface_strings(&config, &["mcp", "projectatlas", "command"])?;
             require_json_bool(&config, &["mcp", "projectatlas", "enabled"], true)?;
@@ -25125,6 +25130,139 @@ fn assert_json_contract_subset(
         ))
         .into()),
     }
+}
+
+/// Exercise the real package producer and pre-install digest consumer with substituted inputs.
+#[cfg(windows)]
+fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
+    let workspace = workspace_root()?;
+    let release = fs::read_to_string(workspace.join(".github/workflows/release.yml"))?;
+    let package = workflow_job_step(&release, "package-windows", "Package")?;
+    let admission = workflow_job_step(
+        &release,
+        "prepublish-installer-smoke-windows",
+        "Install packaged runtime through plugin",
+    )?;
+    let producer = package["run"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Windows package script missing"))?;
+    let consumer = admission["run"]
+        .as_str()
+        .and_then(|script| {
+            script
+                .split_once("$projectRoot =")
+                .map(|(prefix, _)| prefix)
+        })
+        .ok_or_else(|| io::Error::other("Windows pre-install admission script missing"))?;
+    let fixture_root = workspace.join(PROJECT_LOCAL_FIXTURE_DIR);
+    fs::create_dir_all(&fixture_root)?;
+    let temp = tempfile::Builder::new()
+        .prefix("packaged-digest-")
+        .tempdir_in(fixture_root)?;
+    for directory in [
+        "target/release",
+        "packaging/pdf-parser/vendor/pdf-extract",
+        "contract-artifacts",
+    ] {
+        fs::create_dir_all(temp.path().join(directory))?;
+    }
+    let runtime_bytes = b"packaged runtime authority\n";
+    fs::write(
+        temp.path().join("target/release/projectatlas.exe"),
+        runtime_bytes,
+    )?;
+    for file in [
+        "README.md",
+        "LICENSE",
+        "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md",
+    ] {
+        fs::write(temp.path().join(file), "package fixture\n")?;
+    }
+    let script = temp.path().join("digest-admission.ps1");
+    fs::write(
+        &script,
+        format!("$ErrorActionPreference = 'Stop'\n{producer}"),
+    )?;
+    let run = |runner: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+        Ok(StdCommand::new("pwsh")
+            .current_dir(temp.path())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .env("RELEASE_VERSION", format!("v{}", env!("CARGO_PKG_VERSION")))
+            .env("RUNNER_TEMP", runner)
+            .output()?)
+    };
+    let output = run(temp.path())?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("Windows digest producer failed: {output:?}")).into());
+    }
+    let archive_name = format!(
+        "projectatlas-v{}-x86_64-pc-windows-msvc.zip",
+        env!("CARGO_PKG_VERSION")
+    );
+    let archive = temp.path().join("release-assets").join(&archive_name);
+    let manifest = temp
+        .path()
+        .join("contract-artifacts")
+        .join(format!("{archive_name}.sha256"));
+    let archive_bytes = fs::read(&archive)?;
+    let manifest_bytes = fs::read(&manifest)?;
+    let manifest_text = String::from_utf8(manifest_bytes.clone())?;
+    for expected in [
+        format!("{}  {archive_name}", sha256_hex(&archive_bytes)),
+        format!("{}  projectatlas.exe", sha256_hex(runtime_bytes)),
+    ] {
+        if !manifest_text.contains(&expected) {
+            return Err(
+                io::Error::other("Windows producer omitted exact archive/runtime digest").into(),
+            );
+        }
+    }
+    fs::write(
+        &script,
+        format!("$ErrorActionPreference = 'Stop'\n{consumer}"),
+    )?;
+    for fault in ["valid", "archive", "runtime", "missing-manifest"] {
+        fs::write(&archive, &archive_bytes)?;
+        fs::write(&manifest, &manifest_bytes)?;
+        match fault {
+            "archive" => {
+                let mut changed = archive_bytes.clone();
+                changed.push(0);
+                fs::write(&archive, changed)?;
+            }
+            "runtime" => fs::write(
+                &manifest,
+                manifest_text.replace(&sha256_hex(runtime_bytes), &"0".repeat(64)),
+            )?,
+            "missing-manifest" => fs::remove_file(&manifest)?,
+            _ => {}
+        }
+        let runner = temp.path().join(fault);
+        fs::create_dir(&runner)?;
+        let output = run(&runner)?;
+        if output.status.success() != (fault == "valid") {
+            return Err(io::Error::other(format!(
+                "Windows {fault} digest admission behaved incorrectly: {output:?}"
+            ))
+            .into());
+        }
+        if matches!(fault, "archive" | "missing-manifest")
+            && runner.join("projectatlas-prepublish").exists()
+        {
+            return Err(io::Error::other(format!(
+                "Windows {fault} input reached archive extraction"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Return one top-level GitHub Actions job block from a workflow document.

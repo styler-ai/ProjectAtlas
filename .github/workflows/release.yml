@@ -444,6 +444,10 @@ jobs:
           Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
           Move-Item -LiteralPath $archive -Destination "release-assets/"
+          $archiveDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path "release-assets" $archive)).Hash.ToLowerInvariant()
+          $runtimeDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath "dist/projectatlas/projectatlas.exe").Hash.ToLowerInvariant()
+          @("$archiveDigest  $archive", "$runtimeDigest  projectatlas.exe") |
+            Set-Content -LiteralPath (Join-Path "contract-artifacts" "$archive.sha256") -Encoding utf8
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -850,9 +854,32 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path "release-assets" "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
+          $archiveName = [System.IO.Path]::GetFileName($archive)
+          $manifest = Join-Path "contract-artifacts" "$archiveName.sha256"
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "Authoritative packaged digest manifest was not found: $manifest"
+          }
+          $digests = @{}
+          foreach ($line in Get-Content -LiteralPath $manifest) {
+            if ($line -cnotmatch '^([a-f0-9]{64})  (.+)$' -or $digests.ContainsKey($Matches[2])) {
+              throw "Authoritative packaged digest manifest is malformed or ambiguous."
+            }
+            $digests[$Matches[2]] = $Matches[1]
+          }
+          if ($digests.Count -ne 2 -or -not $digests.ContainsKey($archiveName) -or -not $digests.ContainsKey("projectatlas.exe")) {
+            throw "Authoritative packaged digest manifest has unexpected members."
+          }
+          $archiveDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($archiveDigest -cne $digests[$archiveName]) {
+            throw "Packaged candidate archive digest does not match its authoritative manifest."
+          }
           $extractRoot = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish"
           Expand-Archive -Path $archive -DestinationPath $extractRoot -Force
           $runtime = Join-Path $extractRoot "projectatlas.exe"
+          $runtimeDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtime).Hash.ToLowerInvariant()
+          if ($runtimeDigest -cne $digests["projectatlas.exe"]) {
+            throw "Packaged candidate runtime digest does not match its authoritative manifest."
+          }
           $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-prepublish"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -RuntimePath $runtime
