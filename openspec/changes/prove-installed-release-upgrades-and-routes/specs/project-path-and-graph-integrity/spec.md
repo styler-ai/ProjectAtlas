@@ -14,3 +14,11 @@ The CLI and MCP root-transition API SHALL provide explicit `adopt-legacy` recove
 #### Scenario: Invalid or failed adoption
 - **WHEN** adoption addresses a missing, current, malformed, already-native, foreign-root, or raced predecessor, or migration fails
 - **THEN** it refuses or rolls back without partial schema, root identity, or generated configuration publication, and an intact predecessor remains usable for a corrected retry
+
+#### Scenario: Explicit recovery preserves non-UTF-8 root bytes
+- **WHEN** a Unix predecessor root contains bytes that cannot be represented as UTF-8
+- **THEN** explicit adoption preserves those bytes in native root identity, uses the predecessor's lossy text only to reject contradictions, and removes unrepresentable compatibility metadata
+
+#### Scenario: Database pathname is replaced after opening
+- **WHEN** the conventional database pathname stops identifying the database opened for adoption
+- **THEN** adoption refuses before migration or rolls back before commit instead of reporting success for the displaced database

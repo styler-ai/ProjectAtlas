@@ -1701,8 +1701,7 @@ fn validate_legacy_adoption(
     // This reproduces the predecessor's projection only to reject a
     // contradiction. It never substitutes for explicit operator adoption.
     let projection =
-        projectatlas_core::normalize_native_path_display_str(&selected.display_string()?)
-            .replace('\\', "/");
+        projectatlas_core::normalize_native_path_display(selected.as_path()).replace('\\', "/");
     if current.project_root.as_deref() != Some(projection.as_str()) {
         return Err(DbError::LegacyRootAdoptionUnavailable);
     }
@@ -1719,6 +1718,8 @@ fn adopt_legacy_project_root_on_connection(
     connection.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         validate_legacy_adoption_location(path, selected)?;
+        #[cfg(unix)]
+        validate_legacy_adoption_handle(connection)?;
         validate_legacy_adoption(connection, previous, selected)?;
         apply_migrations(connection, CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)?;
         crate::project_identity::set_project_root_identity(connection, selected)?;
@@ -1731,12 +1732,41 @@ fn adopt_legacy_project_root_on_connection(
                 expected: SCHEMA_VERSION,
             });
         }
+        validate_legacy_adoption_location(path, selected)?;
+        #[cfg(unix)]
+        validate_legacy_adoption_handle(connection)?;
         Ok(())
     })();
     match result {
         Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
         Err(error) => Err(rollback_after_error(connection, error)),
     }
+}
+
+/// Bind recovery to the opened Unix database rather than a replacement pathname.
+/// Windows SQLite opens without delete sharing, preventing replacement while open.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "SQLite exposes opened-file identity only through its VFS control"
+)]
+fn validate_legacy_adoption_handle(connection: &Connection) -> DbResult<()> {
+    let mut moved: std::ffi::c_int = 1;
+    // SAFETY: the borrowed connection remains live and exclusively used by this
+    // synchronous operation. SQLite borrows the main schema name and writable
+    // c_int only for this call; neither pointer is retained or freed by the VFS.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            std::ptr::from_mut(&mut moved).cast(),
+        )
+    };
+    if result != rusqlite::ffi::SQLITE_OK || moved != 0 {
+        return Err(DbError::LegacyRootAdoptionUnavailable);
+    }
+    Ok(())
 }
 
 /// Revalidate a predecessor's legacy root against the caller's native root.
@@ -6530,11 +6560,24 @@ mod tests {
     #[test]
     fn explicit_legacy_root_adoption_preserves_authority_and_rolls_back()
     -> Result<(), Box<dyn Error>> {
-        let temp = tempfile::tempdir()?;
         #[cfg(unix)]
-        let root = temp.path().join("legacy\\adoption");
+        let name = std::ffi::OsStr::new("legacy\\adoption");
         #[cfg(windows)]
-        let root = temp.path().join("legacy-adoption");
+        let name = std::ffi::OsStr::new("legacy-adoption");
+        assert_legacy_root_adoption(name)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_legacy_root_adoption_preserves_non_utf8_identity() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStrExt;
+
+        assert_legacy_root_adoption(std::ffi::OsStr::from_bytes(b"legacy-\xff-adoption"))
+    }
+
+    fn assert_legacy_root_adoption(name: &std::ffi::OsStr) -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(name);
         fs::create_dir_all(root.join(".projectatlas"))?;
         let root = CanonicalProjectRoot::from_path(&root)?;
         let database = root.as_path().join(".projectatlas/projectatlas.db");
@@ -6634,6 +6677,9 @@ mod tests {
         connection.execute_batch(
             "CREATE TEMP TRIGGER fail_legacy_adoption
              BEFORE UPDATE OF value ON metadata WHEN OLD.key = 'project_root'
+             BEGIN SELECT RAISE(ABORT, 'injected legacy adoption failure'); END;
+             CREATE TEMP TRIGGER fail_legacy_adoption_delete
+             BEFORE DELETE ON metadata WHEN OLD.key = 'project_root'
              BEGIN SELECT RAISE(ABORT, 'injected legacy adoption failure'); END;",
         )?;
         let failed =
@@ -6649,7 +6695,9 @@ mod tests {
                 read_schema_contract(&connection)? == *canonical_root_predecessor_schema_contract()?
             )).into());
         }
-        connection.execute_batch("DROP TRIGGER fail_legacy_adoption")?;
+        connection.execute_batch(
+            "DROP TRIGGER fail_legacy_adoption; DROP TRIGGER fail_legacy_adoption_delete;",
+        )?;
         // A predecessor replaced between admission and the write lock must not
         // inherit the original operator's captured project identity.
         let mut stale = previous;
@@ -6662,12 +6710,58 @@ mod tests {
             return Err(io::Error::other("adoption accepted stale predecessor authority").into());
         }
         drop(connection);
+        #[cfg(unix)]
+        {
+            let replacement = temp.path().join("replacement.db");
+            fs::copy(&database, &replacement)?;
+            let replacement_connection = Connection::open(&replacement)?;
+            replacement_connection.execute(
+                "UPDATE purposes SET purpose = 'Replacement retained purpose'",
+                [],
+            )?;
+            drop(replacement_connection);
+            let replacement_before = fs::read(&replacement)?;
+            let opened = Connection::open(&database)?;
+            configure_writable(&opened)?;
+            let captured = inspect_connection(&opened, None, true)?;
+            let original_before = fs::read(&database)?;
+            let moved = temp.path().join("moved.db");
+            fs::rename(&database, &moved)?;
+            fs::rename(&replacement, &database)?;
+            let result =
+                adopt_legacy_project_root_on_connection(&opened, &database, &root, &captured);
+            if !matches!(result, Err(DbError::LegacyRootAdoptionUnavailable))
+                || fs::read(&database)? != replacement_before
+                || fs::read(&moved)? != original_before
+                || read_schema_contract(&opened)? != *canonical_root_predecessor_schema_contract()?
+            {
+                return Err(
+                    io::Error::other("adoption migrated a replaced database handle").into(),
+                );
+            }
+            drop(opened);
+            fs::rename(&database, &replacement)?;
+            fs::rename(&moved, &database)?;
+        }
+        #[cfg(windows)]
+        {
+            let opened = Connection::open(&database)?;
+            if fs::rename(&database, temp.path().join("moved.db")).is_ok() {
+                return Err(io::Error::other("open Windows database permitted replacement").into());
+            }
+            drop(opened);
+        }
         let result = AtlasStore::transition_project_root(
             &database,
             root.as_path(),
             crate::ProjectRootTransition::AdoptLegacy,
         )?;
         let migrated = AtlasStore::open_read_only_for_project(&database, root.as_path())?;
+        if root.display_string().is_err()
+            && read_metadata(&migrated.connection, PROJECT_ROOT_KEY)?.is_some()
+        {
+            return Err(io::Error::other("adoption retained lossy root metadata").into());
+        }
         let authority = migrated.connection.query_row(
             "SELECT
                 (SELECT active_generation FROM project_identity WHERE singleton = 1),
