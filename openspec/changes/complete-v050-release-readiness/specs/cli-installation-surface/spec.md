@@ -1,5 +1,7 @@
 ## ADDED Requirements
 
+The npm adapter below remains #388 backlog under the [accepted release scope](../../proposal.md#accepted-release-scope); RC acceptance covers the delivered native binary, plugin, and host routes without claiming npm delivery.
+
 ### Requirement: npm is a verified adapter for the existing native runtime
 The v0.5 npm package SHALL declare one package identity, supported npm/Node floor, supported OS/architecture tuples, exact package-to-release-asset/version/SHA-256 mapping, and installer/cache ownership. It SHALL stage, verify, and atomically activate the existing native runtime and SHALL preserve arguments, stdout, stderr, exit status, signals, formats, selected root/config/database, and MCP behavior.
 

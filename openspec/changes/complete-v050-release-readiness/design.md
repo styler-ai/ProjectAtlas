@@ -4,6 +4,8 @@ v0.4.5 is the stable baseline. v0.5.0 combines confirmed correctness repairs, bo
 
 The accepted Rust shape remains seven crates with concrete modules, typed values/enums, bounded iterators/frontiers, and caller-owned cancellation/transactions. SQLite remains the project-local storage and publication authority. No task may invent an initiative-named crate, generic framework, second database, or stringly action surface.
 
+Delivery follows the [accepted release scope](proposal.md#accepted-release-scope); retained planning for excluded issues does not add RC acceptance requirements.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -77,7 +79,7 @@ PDF parsing uses one fixed, embedded WASI guest interpreted by pinned `wasmi` 2.
 
 ### Release acceptance composes rather than repairs
 
-#492 freezes one exact revision only after every child and required review is complete and the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL, heading, and Mermaid. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/npm/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the candidate; #492 does not repair them. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
+#492 freezes one exact revision only after every child and required review is complete and the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL, heading, and Mermaid. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the candidate; #492 does not repair them. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
 
 ## Risks / Trade-offs
 
