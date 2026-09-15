@@ -1267,12 +1267,12 @@ fn repository_delivery_and_dependency_policy_is_enforced() -> Result<(), Box<dyn
         }
     }
     for guarded_mutation in [
-        "require_stable_tag_absent_for_rc\n            gh release upload",
-        "require_stable_tag_absent_for_rc\n            gh release create",
+        "require_release_mutation_ready\n            gh release upload",
+        "require_release_mutation_ready\n            gh release create",
     ] {
         if !publish.contains(guarded_mutation) {
             return Err(io::Error::other(
-                "each release mutation must immediately recheck the remote stable tag",
+                "each release mutation must immediately recheck publication readiness and the remote stable tag",
             )
             .into());
         }
