@@ -22,7 +22,7 @@ Release acceptance currently executes every top-level CLI command and advertised
 
 ## Impact
 
-The existing CLI integration tests, root transitions, database migration owner, frozen source contract, release workflow, and release architecture own this change. The demonstrated Unix predecessor refusal is repaired in this same issue and PR through one explicit transition. No new runtime framework, database schema, or dependency is proposed.
+The existing CLI integration tests, root transitions, database migration owner, frozen source contract, release workflow, and release architecture own this change. The demonstrated Unix predecessor refusal is repaired in this same issue and PR through one explicit transition. No new runtime framework, database schema, or external dependency is proposed. The database migration reuses the existing filesystem crate for native Git lifecycle proof.
 
 ## Non-Goals
 

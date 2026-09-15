@@ -1721,7 +1721,11 @@ fn adopt_legacy_project_root_on_connection(
         #[cfg(unix)]
         validate_legacy_adoption_handle(connection)?;
         validate_legacy_adoption(connection, previous, selected)?;
-        apply_migrations(connection, CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION)?;
+        apply_migrations(
+            connection,
+            CANONICAL_ROOT_PREDECESSOR_SCHEMA_VERSION,
+            Some(selected),
+        )?;
         crate::project_identity::set_project_root_identity(connection, selected)?;
         crate::project_identity::set_project_root_metadata(connection, selected)?;
         let current = inspect_connection_native(connection, Some(selected), true)?;
@@ -1974,7 +1978,7 @@ pub(crate) fn initialize_with_project_root_in_transaction(
         SchemaState::Current => {}
         SchemaState::UpgradeRequired => {
             validate_integrity(connection)?;
-            apply_migrations(connection, stored_schema_version(connection)?)?;
+            apply_migrations(connection, stored_schema_version(connection)?, None)?;
         }
     }
     if let Some(expected) = expected_identity {
@@ -2442,7 +2446,11 @@ fn create_fresh(
 }
 
 /// Apply the fixed migration path without skipping or synthesizing versions.
-fn apply_migrations(connection: &Connection, mut version: i64) -> DbResult<()> {
+fn apply_migrations(
+    connection: &Connection,
+    mut version: i64,
+    adopted_root: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
     while version != SCHEMA_VERSION {
         let migration = MIGRATIONS
             .iter()
@@ -2456,7 +2464,11 @@ fn apply_migrations(connection: &Connection, mut version: i64) -> DbResult<()> {
                 expected: SCHEMA_VERSION,
             });
         }
-        (migration.apply)(connection)?;
+        if migration.from == 22 && adopted_root.is_some() {
+            migrate_worktree_native_identities(connection, adopted_root)?;
+        } else {
+            (migration.apply)(connection)?;
+        }
         version = migration.to;
     }
     set_metadata(connection, SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())
@@ -2591,8 +2603,16 @@ fn migrate_21_to_22(connection: &Connection) -> DbResult<()> {
 
 /// Add and backfill lossless native identities for every registered worktree.
 fn migrate_22_to_23(connection: &Connection) -> DbResult<()> {
+    migrate_worktree_native_identities(connection, None)
+}
+
+/// Share native-key publication while requiring Git proof for explicit adoption.
+fn migrate_worktree_native_identities(
+    connection: &Connection,
+    adopted_root: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
     add_worktree_native_identity_columns(connection)?;
-    backfill_worktree_native_identities(connection)?;
+    backfill_worktree_native_identities(connection, adopted_root)?;
     reject_worktree_native_identity_collisions(connection)?;
     connection.execute_batch(WORKTREE_NATIVE_IDENTITY_INDEX_SCHEMA_SQL)?;
     Ok(())
@@ -2640,11 +2660,15 @@ fn reject_worktree_native_identity_collisions(connection: &Connection) -> DbResu
 }
 
 /// Encode the historical UTF-8 path projection before publishing native keys.
-fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> {
+fn backfill_worktree_native_identities(
+    connection: &Connection,
+    adopted_root: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
     let rows = {
         let mut statement = connection.prepare(
             "SELECT registration_id, git_common_directory,
-                    git_administrative_directory, last_root, state = 'retired'
+                    git_administrative_directory, last_root, state = 'retired',
+                    git_administrative_identity
              FROM worktree_registrations
              ORDER BY registration_id",
         )?;
@@ -2655,29 +2679,65 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    for (registration_id, common, administrative, root, retired) in rows {
-        let common = legacy_worktree_native_identity(
-            registration_id,
-            "git_common_directory",
-            PathBuf::from(common),
-            retired,
-        )?;
-        let administrative = legacy_worktree_native_identity(
-            registration_id,
-            "git_administrative_directory",
-            PathBuf::from(administrative),
-            retired,
-        )?;
-        let root = legacy_worktree_native_identity(
-            registration_id,
-            "last_root",
-            PathBuf::from(root),
-            retired,
-        )?;
+    let repository = adopted_root.and_then(|root| {
+        rows.iter()
+            .any(|row| !row.4)
+            .then(|| projectatlas_fs::worktree::discover_repository_structure(root.as_path()))
+    });
+    let mut native_worktrees = std::collections::BTreeMap::new();
+    if let Some(Ok(projectatlas_fs::worktree::RepositoryStructure::Git(repository))) = &repository {
+        for entry in &repository.worktrees {
+            let projectatlas_fs::worktree::GitWorktreeState::Active { root, .. } = &entry.state
+            else {
+                continue;
+            };
+            if let Ok(fingerprint) = projectatlas_fs::worktree::git_administrative_identity(
+                &entry.administrative_directory,
+            ) {
+                native_worktrees
+                    .entry(fingerprint)
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(Some((
+                        repository.common_directory.as_path(),
+                        entry.administrative_directory.as_path(),
+                        root.as_path(),
+                    )));
+            }
+        }
+    }
+    for (registration_id, common, administrative, root, retired, fingerprint) in rows {
+        let (common, administrative, root) = if adopted_root.is_some() && !retired {
+            adopted_worktree_native_identities(
+                native_worktrees.get(&fingerprint).copied().flatten(),
+                registration_id,
+                &fingerprint,
+            )?
+        } else {
+            let common = legacy_worktree_native_identity(
+                registration_id,
+                "git_common_directory",
+                PathBuf::from(common),
+                retired,
+            )?;
+            let administrative = legacy_worktree_native_identity(
+                registration_id,
+                "git_administrative_directory",
+                PathBuf::from(administrative),
+                retired,
+            )?;
+            let root = legacy_worktree_native_identity(
+                registration_id,
+                "last_root",
+                PathBuf::from(root),
+                retired,
+            )?;
+            (common, administrative, root)
+        };
         connection.execute(
             "UPDATE worktree_registrations
              SET git_common_directory_identity = ?1,
@@ -2693,6 +2753,35 @@ fn backfill_worktree_native_identities(connection: &Connection) -> DbResult<()> 
         )?;
     }
     Ok(())
+}
+
+/// Recover an active registration only from reciprocal Git state and its native lifecycle.
+fn adopted_worktree_native_identities(
+    paths: Option<(&Path, &Path, &Path)>,
+    registration_id: i64,
+    fingerprint: &str,
+) -> DbResult<(
+    CanonicalProjectRoot,
+    CanonicalProjectRoot,
+    CanonicalProjectRoot,
+)> {
+    let unavailable = || DbError::WorktreeRegistrationMigrationIdentityUnavailable {
+        field: "git_administrative_identity",
+        registration_id,
+    };
+    let (common, administrative, root) = paths.ok_or_else(unavailable)?;
+    let common = CanonicalProjectRoot::from_path(common)?;
+    let administrative = CanonicalProjectRoot::from_path(administrative)?;
+    let root = CanonicalProjectRoot::from_path(root)?;
+    let Ok(true) = projectatlas_fs::worktree::git_worktree_lifecycle_matches(
+        root.as_path(),
+        common.as_path(),
+        administrative.as_path(),
+        fingerprint,
+    ) else {
+        return Err(unavailable());
+    };
+    Ok((common, administrative, root))
 }
 
 /// Recover active native authority or retain a retired row's lexical history.
@@ -6619,6 +6708,197 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn explicit_legacy_adoption_recovers_worktrees_from_native_git_identity()
+    -> Result<(), Box<dyn Error>> {
+        use projectatlas_fs::worktree::{GitWorktreeState, RepositoryStructure};
+        let snapshot = |database: &Path| -> Result<_, Box<dyn Error>> {
+            let parent = database
+                .parent()
+                .ok_or_else(|| io::Error::other("missing database parent"))?;
+            Ok((
+                fs::read(database)?,
+                ["-wal", "-shm", "-journal"]
+                    .map(|suffix| fs::read(sqlite_sidecar_path(database, suffix)).ok()),
+                directory_entry_names(parent)?,
+            ))
+        };
+        let mut names = vec![std::ffi::OsString::from("native-worktrees")];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            names.push(std::ffi::OsString::from("native\\worktrees"));
+            names.push(std::ffi::OsString::from_vec(
+                b"native-\xff-worktrees".to_vec(),
+            ));
+        }
+        for name in names.drain(..) {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join(&name);
+            fs::create_dir_all(root.join(".projectatlas"))?;
+            let root = CanonicalProjectRoot::from_path(&root)?;
+            let linked = temp.path().join("linked").join(&name);
+            for args in [
+                vec!["init"],
+                vec![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "fixture",
+                ],
+            ] {
+                let output = std::process::Command::new("git")
+                    .current_dir(root.as_path())
+                    .args(args)
+                    .output()?;
+                if !output.status.success() {
+                    return Err(io::Error::other(String::from_utf8_lossy(&output.stderr)).into());
+                }
+            }
+            let output = std::process::Command::new("git")
+                .current_dir(root.as_path())
+                .args(["worktree", "add", "-b", "linked"])
+                .arg(&linked)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(String::from_utf8_lossy(&output.stderr)).into());
+            }
+            let RepositoryStructure::Git(repository) =
+                projectatlas_fs::worktree::discover_repository_structure(root.as_path())?
+            else {
+                return Err(io::Error::other("native Git fixture was not discovered").into());
+            };
+            let database = root.as_path().join(".projectatlas/projectatlas.db");
+            let store = AtlasStore::open_for_project(&database, root.as_path())?;
+            let project = store.project_instance_id()?;
+            drop_worktree_native_identity_schema(&store.connection)?;
+            store.connection.execute_batch(
+                "DROP TABLE project_root_identity;
+                 DROP TABLE graph_identity_rejections;
+                 UPDATE metadata SET value = '19' WHERE key = 'schema_version';",
+            )?;
+            set_metadata(
+                &store.connection,
+                PROJECT_ROOT_KEY,
+                &normalize_native_path_display(root.as_path()).replace('\\', "/"),
+            )?;
+            let mut expected = Vec::new();
+            for (index, entry) in repository.worktrees.iter().enumerate() {
+                let GitWorktreeState::Active { root, .. } = &entry.state else {
+                    return Err(io::Error::other("fixture contains an inactive worktree").into());
+                };
+                let common = &repository.common_directory;
+                let administrative = &entry.administrative_directory;
+                let fingerprint =
+                    projectatlas_fs::worktree::git_administrative_identity(administrative)?;
+                let projection =
+                    |path: &Path| normalize_native_path_display(path).replace('\\', "/");
+                store.connection.execute(
+                    "INSERT INTO worktree_registrations(alias, git_common_directory,
+                        git_administrative_directory, git_administrative_identity,
+                        last_root, created_at_epoch)
+                     VALUES(?1, ?2, ?3, ?4, ?5, 1)",
+                    params![
+                        format!("fixture-{index}"),
+                        projection(common),
+                        projection(administrative),
+                        fingerprint,
+                        projection(root)
+                    ],
+                )?;
+                expected.push((
+                    CanonicalProjectRoot::from_path(common)?.encode()?,
+                    CanonicalProjectRoot::from_path(administrative)?.encode()?,
+                    CanonicalProjectRoot::from_path(root)?.encode()?,
+                ));
+                // Lookalike display directories cannot substitute for native Git identity.
+                #[cfg(unix)]
+                if projection(root) != root.to_string_lossy() {
+                    fs::create_dir_all(Path::new(&projection(root)).join(".git"))?;
+                }
+            }
+            drop(store);
+            let connection = Connection::open(&database)?;
+            configure_writable(&connection)?;
+            drop(connection);
+            let before = snapshot(&database)?;
+            let pointer = linked.join(".git");
+            let saved_pointer = linked.join("saved-git-pointer");
+            fs::rename(&pointer, &saved_pointer)?;
+            let refused = adopt_legacy_project_root(&database, &root);
+            if !matches!(
+                refused,
+                Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable { .. })
+            ) || snapshot(&database)? != before
+                || stored_schema_version(&Connection::open(&database)?)? != 19
+            {
+                return Err(io::Error::other(format!(
+                    "unproven registration was not atomically refused: {refused:?}"
+                ))
+                .into());
+            }
+            fs::rename(&saved_pointer, &pointer)?;
+            let connection = Connection::open(&database)?;
+            let fingerprint: String = connection.query_row(
+                "SELECT git_administrative_identity FROM worktree_registrations WHERE registration_id = 1",
+                [], |row| row.get(0),
+            )?;
+            connection.execute(
+                "UPDATE worktree_registrations SET git_administrative_identity = ?1 WHERE registration_id = 1",
+                ["0".repeat(64)],
+            )?;
+            drop(connection);
+            let connection = Connection::open(&database)?;
+            configure_writable(&connection)?;
+            drop(connection);
+            let before = snapshot(&database)?;
+            let refused = adopt_legacy_project_root(&database, &root);
+            if !matches!(
+                refused,
+                Err(DbError::WorktreeRegistrationMigrationIdentityUnavailable { .. })
+            ) || snapshot(&database)? != before
+            {
+                return Err(
+                    io::Error::other("adoption ignored the stored native lifecycle").into(),
+                );
+            }
+            let connection = Connection::open(&database)?;
+            connection.execute(
+                "UPDATE worktree_registrations SET git_administrative_identity = ?1 WHERE registration_id = 1",
+                [fingerprint],
+            )?;
+            drop(connection);
+            adopt_legacy_project_root(&database, &root)?;
+            let migrated = AtlasStore::open_for_project(&database, root.as_path())?;
+            if migrated.project_instance_id()? != project {
+                return Err(io::Error::other("adoption changed project identity").into());
+            }
+            let mut statement = migrated.connection.prepare(
+                "SELECT git_common_directory_identity, git_administrative_directory_identity,
+                        last_root_identity FROM worktree_registrations ORDER BY registration_id",
+            )?;
+            let actual = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            if actual != expected {
+                return Err(
+                    io::Error::other("adoption changed native worktree identity bytes").into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn assert_legacy_root_adoption(name: &std::ffi::OsStr) -> Result<(), Box<dyn Error>> {

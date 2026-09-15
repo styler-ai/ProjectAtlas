@@ -27,3 +27,8 @@ The CLI and MCP root-transition API SHALL provide explicit `adopt-legacy` recove
 - **WHEN** an external Unix rename or replacement races the successful SQLite commit
 - **THEN** post-commit location and opened-file verification returns a distinct committed-location error instead of adoption success, no generated configuration is published, and recovery does not restore or overwrite either database
 - **AND** the error does not claim rollback of the committed migration; callers must preserve the displaced database, replacement, and WAL/SHM sidecars for inspection
+
+#### Scenario: Legacy worktree paths are lossy
+- **WHEN** explicit adoption migrates active schema-19 worktree registrations whose display paths may have lost native bytes or separator distinctions
+- **THEN** each registration's native directory identities are recovered from reciprocal Git state matched by its stored administrative lifecycle fingerprint, and lossy text does not supply active authority
+- **AND** missing, ambiguous, or changed native evidence refuses and rolls back the adoption; repairing that evidence permits retry while retired history retains its existing migration semantics
