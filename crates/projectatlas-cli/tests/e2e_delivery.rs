@@ -4085,6 +4085,91 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .into());
     }
     assert_filtered_custom_harness_step(&release)?;
+    let verification = workflow_job_step(&release, "verify", "Release issue checklist gate")?;
+    let publication = workflow_job_step(&release, "publish", "Create GitHub release")?;
+    let parser = workflow_job_step(&release, "publish", "Install publication checklist parser")?;
+    if parser["run"].as_str()
+        != Some("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
+    {
+        return Err(
+            io::Error::other("publication must install the locked checklist parser").into(),
+        );
+    }
+    let verification = verification["run"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("release verification has no script"))?;
+    let publication = publication["run"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("release publication has no script"))?;
+    let fixture = tempfile::tempdir()?;
+    fs::write(
+        fixture
+            .path()
+            .join("projectatlas-release-repair-assets.txt"),
+        "fixture.zip\n",
+    )?;
+    let shell = if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")
+    } else {
+        PathBuf::from("bash")
+    };
+    for repair in [false, true] {
+        for ready in [false, true] {
+            let script = format!(
+                r#"set -euo pipefail
+gate_status=0
+python3() {{
+  case "$1" in
+    .github/scripts/issue-checklists.py)
+      [[ "$*" == *'--publication-version v0.5.0-rc1'* ]] || return 42
+      echo gate >> calls
+      return "$gate_status" ;;
+    .github/scripts/verify-main-atlas-seed-release-assets.py) return 0 ;;
+    *) return 43 ;;
+  esac
+}}
+git() {{ return 2; }}
+gh() {{ echo "$*" >> mutations; }}
+{verification}
+gate_status={gate_status}
+{publication}
+"#,
+                gate_status = if ready { 0 } else { 41 },
+            );
+            fs::write(fixture.path().join("calls"), "")?;
+            fs::write(fixture.path().join("mutations"), "")?;
+            let output = StdCommand::new(&shell)
+                .args(["--noprofile", "--norc", "-c", &script])
+                .current_dir(fixture.path())
+                .env("GITHUB_REPOSITORY", "fixture/repository")
+                .env("GITHUB_SHA", "1111111111111111111111111111111111111111")
+                .env("RELEASE_VERSION", "v0.5.0-rc1")
+                .env("EXPECTED_RELEASE_PRERELEASE", "true")
+                .env("EXPECTED_STABLE_TAG", "v0.5.0")
+                .env("PROJECTATLAS_RELEASE_EXISTS", repair.to_string())
+                .env("RUNNER_TEMP", ".")
+                .output()?;
+            let calls = fs::read_to_string(fixture.path().join("calls"))?;
+            let mutations = fs::read_to_string(fixture.path().join("mutations"))?;
+            let mutation = if repair {
+                "release upload "
+            } else {
+                "release create "
+            };
+            if calls.lines().count() != 2
+                || output.status.code() != Some(if ready { 0 } else { 41 })
+                || (ready && (mutations.lines().count() != 1 || !mutations.starts_with(mutation)))
+                || (!ready && !mutations.is_empty())
+            {
+                return Err(io::Error::other(format!(
+                    "publication readiness failed for repair={repair}, ready={ready}: calls={calls:?}, mutations={mutations:?}, status={}, stderr={}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr),
+                ))
+                .into());
+            }
+        }
+    }
     for required in [
         "def tool_text(name, response):",
         "if not isinstance(response, dict):",

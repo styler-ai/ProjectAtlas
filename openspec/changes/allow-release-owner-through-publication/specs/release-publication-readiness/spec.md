@@ -2,7 +2,7 @@
 
 ### Requirement: Publication admission preserves release-owner lifecycle
 
-The checker SHALL distinguish canonical release publication from strict milestone closeout. Publication SHALL derive the milestone using the shared release classifier and permit only its declared release owner to remain open. Every other milestone member SHALL be mapped and closed. Normal task/acceptance validation and exact-main publication checks SHALL remain in force. Publication admission SHALL NOT close issues or mark release tasks complete.
+The checker SHALL distinguish canonical release publication from strict milestone closeout. Publication SHALL derive the milestone using the shared release classifier and permit only its declared release owner to remain open. Every other milestone member SHALL be mapped and closed. Normal task/acceptance validation and exact-main publication checks SHALL remain in force. The complete publication check SHALL run both during verification and immediately before release creation or asset upload. Publication admission SHALL NOT close issues or mark release tasks complete.
 
 #### Scenario: Publication with completed children
 - **WHEN** the declared release owner is open, all declared children are closed, and native milestone membership matches the validated declaration
@@ -11,6 +11,10 @@ The checker SHALL distinguish canonical release publication from strict mileston
 #### Scenario: An implementation child remains open
 - **WHEN** any member other than the declared release owner is open
 - **THEN** publication admission fails
+
+#### Scenario: Readiness changes during packaging
+- **WHEN** initial verification succeeds but the release owner closes prematurely or a child reopens before publication
+- **THEN** the fresh pre-mutation check fails and neither release creation nor asset upload runs
 
 #### Scenario: Strict closeout or historical milestone
 - **WHEN** strict milestone closeout is requested, or publication targets a historical milestone without a release graph
