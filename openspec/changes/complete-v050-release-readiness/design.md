@@ -14,7 +14,7 @@ Delivery follows the [accepted release scope](proposal.md#accepted-release-scope
 - Require exact published-default-branch OpenSpec and architecture evidence before an issue becomes ready, enters a release, or reaches implementation.
 - Preserve strict identity, freshness, typed errors, exact source evidence, bounded output, one-generation publication, authored state, and platform security.
 - Keep independent graph lanes parallel while requiring accepted predecessors on `main` before dependent implementation/merge.
-- Finish with complete installed CLI/MCP/host/public-surface execution, a hard-gated in-place v0.4.5 database update, holistic packaged E2E, RC remediation, stable readback, and #492 closes-last truth.
+- Finish with complete installed CLI/MCP/host/public-surface execution, a hard-gated in-place v0.4.5 database update, holistic packaged E2E, RC remediation, separate stable-promotion handoff to #602, and #492 closes-last RC acceptance.
 
 **Non-goals:**
 
@@ -79,7 +79,7 @@ PDF parsing uses one fixed, embedded WASI guest interpreted by pinned `wasmi` 2.
 
 ### Release acceptance composes rather than repairs
 
-#492 freezes one exact revision only after every child and required review is complete and the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL, heading, and Mermaid. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the candidate; #492 does not repair them. RC1 and stable are independently read back; v0.4.5 stays Latest until stable proof; #492 closes last.
+#492 freezes one exact revision only after every child and required review is complete and the exact live default branch resolves every accepted issue's mapped OpenSpec task source and architecture URL, heading, and Mermaid. It derives/reconciles the complete installed CLI command/nested-command and MCP tool inventory, then safely executes every route—including unchanged and administrative/mutating routes—against isolated fixtures. A holistic installed E2E spans binary/plugin/host installation, database lifecycle, navigation, PHP/documents/analysis, worktrees/watchers, parser capability, update/repair/uninstall, concurrency/cancellation/failure/rollback. A separate publication hard gate starts from an exercised v0.4.5 installation and database, updates that same state to the exact candidate on every supported platform, preserves project identity, authored purposes, telemetry, worktree registrations, roots, generation, and source evidence, and proves injected-failure refusal, repair/retry, and compatible rollback without destructive reinitialization. Confirmed defects, including missing or stale published issue evidence, return to their specification or implementation owner and invalidate the candidate; #492 does not repair them. RC1 is independently read back and #492 closes last after RC acceptance and synchronization. Stable promotion, repeated installed and hosted proof, Latest movement, and downstream pins remain unperformed in #602 and require separate explicit authorization; v0.4.5 stays Latest.
 
 ## Risks / Trade-offs
 
@@ -102,7 +102,7 @@ Before wave 1, the planning PR publishes the shared OpenSpec and architecture so
 4. #358 and #465 follow #476/#480/#488; #484 follows #476/#481.
 5. #339 and #384 follow #477; #456 follows #358/#465/#477/#484; #485 follows #484/#486.
 6. #490 follows #339/#342/#358/#384/#464/#465/#489.
-7. #492 follows every child issue, runs RC remediation and stable proof, and closes last.
+7. #492 follows every child issue, runs RC remediation and independent readback, hands unperformed stable promotion to #602, and closes last.
 
 Each dependent worktree refreshes/rebases onto accepted predecessors on `main` and reruns affected proof. Independent, disjoint lanes remain parallel.
 

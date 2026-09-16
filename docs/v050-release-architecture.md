@@ -632,11 +632,11 @@ stateDiagram-v2
   RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
-  HostedReadback --> StableBuild: accepted candidate and explicit promotion authorization
-  StableBuild --> StableReadback: repeat installs and hosted identity
-  StableReadback --> FinalState: v0.5.0 is Latest with hierarchy, issues, milestone, and workflows verified
-  FinalState --> [*]
+  HostedReadback --> RCCloseout: all children closed and RC state synchronized
+  RCCloseout --> [*]: close 492 last with v0.4.5 Latest
 ```
+
+RC acceptance closes #492 after every accepted child. Stable promotion remains unstarted in [#602](https://github.com/styler-ai/ProjectAtlas/issues/602); it requires separate authorization and repeated proof before Latest or downstream pins change.
 
 ## Installed release acceptance
 

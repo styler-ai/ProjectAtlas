@@ -1,10 +1,10 @@
 ## Why
 
-ProjectAtlas v0.5.0 needs one coherent non-visual release campaign that repairs confirmed graph/path/platform failures, completes bounded repository intelligence, makes distribution truthful, and proves every installed CLI/MCP/host route before Memory Atlas begins. The milestone has independent implementation lanes but one feature-free release-acceptance owner: #492 is the native parent of every other v0.5 issue, is directly blocked by all of them, and closes last after RC and stable readback.
+ProjectAtlas v0.5.0 needs one coherent non-visual release campaign that repairs confirmed graph/path/platform failures, completes bounded repository intelligence, makes distribution truthful, and proves every installed CLI/MCP/host route before Memory Atlas begins. The milestone has independent implementation lanes but one feature-free release-acceptance owner: #492 is the native parent of every other v0.5 issue, is directly blocked by all of them, and closes last after RC readback and handoff of separately authorized stable promotion to #602.
 
 ## Accepted release scope
 
-The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #456 (unversioned backlog), and #388 and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion still requires separate explicit authorization after RC acceptance.
+The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #456 (unversioned backlog), and #388 and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion is retained as unstarted follow-up #602 outside this RC hierarchy and still requires separate explicit authorization after RC acceptance.
 
 ## What Changes
 
@@ -18,7 +18,7 @@ The native milestone and `openspec/issue-map.json` release graph define accepted
 - Narrow release timeout work to the reported GitHub Actions step; split tests/modules only through accepted responsibility maps; remove the named oversized raw benchmark artifact and reuse the existing two-arm evaluation harness.
 - Separate candidate-local specification validation from published readiness: a planning PR may publish OpenSpec and architecture artifacts without closing an implementation issue, but `status:ready`, release planning, native relationships, implementation handoff, merge, and release require exact clean live-default-branch readback.
 - Prevalidate every native relationship request, including an apparent no-op, against one exact graph-owned missing-or-extra transition before mutation; repair closed reverse dependents when blockers reopen; revoke affected merge authorization before other PR feedback using exact reread heads and repository-qualified closing references; treat demilestoning as targeted graph drift; and dynamically fail published-snapshot proof on wrong roots, malformed identities, Git failures, or default-branch movement while ignoring only untracked notes excluded from tracked state.
-- Make #492 read back every accepted issue's published OpenSpec task source and architecture URL/heading/Mermaid before freezing a candidate, reconcile and safely execute every installed CLI command/nested command and MCP tool—including unchanged routes—run the holistic packaged product E2E, publish/read back RC1, return defects to owners, repeat proof for stable, and close last.
+- Make #492 read back every accepted issue's published OpenSpec task source and architecture URL/heading/Mermaid before freezing a candidate, reconcile and safely execute every installed CLI command/nested command and MCP tool—including unchanged routes—run the holistic packaged product E2E, publish/read back RC1, return defects to owners, hand off the unperformed stable proof and promotion to #602, and close last after RC acceptance.
 
 Non-goals:
 
@@ -36,7 +36,7 @@ Non-goals:
 - `repository-analysis-and-scale`: measured reverse callers/resources/baselines, typed entrypoint reachability, and deterministic bounded communities.
 - `cli-installation-surface`: deferred v0.6.0 npm adapter planning, real host-reader consumption, and one complete collision-safe `atlas` surface.
 - `repository-quality-evaluation`: narrow workflow timeout, responsibility-led test/module ownership, benchmark retention, and repeatable bounded evaluation.
-- `release-candidate-delivery`: native release hierarchy, complete installed public-surface execution, holistic E2E, RC remediation, stable promotion, and closes-last acceptance.
+- `release-candidate-delivery`: native release hierarchy, complete installed public-surface execution, holistic E2E, RC remediation, separate stable-promotion handoff, and closes-last RC acceptance.
 
 ### Modified Capabilities
 

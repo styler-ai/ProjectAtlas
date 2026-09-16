@@ -133,9 +133,13 @@ With explicit authorization, `v0.5.0-rc1` SHALL publish as a non-draft prereleas
 - **WHEN** any required tuple/asset/digest/version/readback is absent or inconsistent
 - **THEN** RC acceptance fails and stable promotion is blocked
 
-### Requirement: Stable promotion repeats complete proof and closes last
-After an accepted candidate and explicit authorization, stable v0.5.0 SHALL repeat installed and hosted proof before becoming Latest. #492 SHALL remain open until downstream pins and final IssueOps/OpenSpec/review/milestone/workflow state agree and SHALL close last.
+### Requirement: RC acceptance closes last and preserves separate stable promotion
+After complete RC readback, #492 SHALL synchronize its IssueOps/OpenSpec/review/milestone/workflow state and close after every accepted child. Unperformed stable promotion SHALL remain tracked in #602 outside the RC hierarchy; RC acceptance SHALL NOT claim stable proof, authorize stable publication, move Latest, or update downstream pins.
+
+#### Scenario: RC closeout
+- **WHEN** the exact non-draft prerelease and complete installed and hosted proof pass independent readback and every accepted child is closed
+- **THEN** #492 closes last, v0.4.5 remains Latest, and #602 retains the unstarted stable work
 
 #### Scenario: Stable promotion
-- **WHEN** no blocker remains and stable artifacts pass the complete proof
-- **THEN** v0.5.0 becomes Latest only after exact readback and #492/milestone finalization
+- **WHEN** separate explicit authorization is given and the stable owner establishes its live OpenSpec task mapping
+- **THEN** stable v0.5.0 repeats the complete installed and hosted proof, independently verifies exact assets and identities, and becomes Latest only after stable readback and downstream-pin reconciliation
