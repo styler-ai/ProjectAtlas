@@ -1,9 +1,9 @@
 ## ADDED Requirements
 
-The npm adapter below remains #388 backlog under the [accepted release scope](../../proposal.md#accepted-release-scope); RC acceptance covers the delivered native binary, plugin, and host routes without claiming npm delivery.
+The npm adapter below is scheduled as #388 for v0.6.0 under the [accepted release scope](../../proposal.md#accepted-release-scope); RC acceptance covers the delivered native binary, plugin, and host routes without claiming npm delivery.
 
 ### Requirement: npm is a verified adapter for the existing native runtime
-The v0.5 npm package SHALL declare one package identity, supported npm/Node floor, supported OS/architecture tuples, exact package-to-release-asset/version/SHA-256 mapping, and installer/cache ownership. It SHALL stage, verify, and atomically activate the existing native runtime and SHALL preserve arguments, stdout, stderr, exit status, signals, formats, selected root/config/database, and MCP behavior.
+The npm package SHALL declare one package identity, supported npm/Node floor, supported OS/architecture tuples, exact package-to-release-asset/version/SHA-256 mapping, and installer/cache ownership. It SHALL stage, verify, and atomically activate the existing native runtime and SHALL preserve arguments, stdout, stderr, exit status, signals, formats, selected root/config/database, and MCP behavior. For deferred #388 delivery in v0.6.0, package install, update, repair, and uninstall SHALL manage only owned npm cache and registration state under the shared installer lifecycle contract.
 
 #### Scenario: Supported tuple
 - **WHEN** a supported tuple installs or explicitly materializes the package
@@ -99,10 +99,10 @@ The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS t
 - **THEN** the read-only report remains byte/schema/error compatible through the v0.5 contract
 
 ### Requirement: Installer lifecycle removes only owned state
-Install, update, repair, and uninstall SHALL manage the verified runtime, npm cache/registration, `atlas` shim, completions, and generated host configuration without deleting unrelated executables, credentials, databases, caches, or configuration.
+Install, update, repair, and uninstall SHALL manage the verified runtime, `atlas` shim, completions, and generated host configuration without deleting unrelated executables, credentials, databases, caches, or configuration.
 
 #### Scenario: Update or repair
-- **WHEN** an owned shim/config/cache is stale or missing
+- **WHEN** an owned runtime, shim, or generated host configuration is stale or missing
 - **THEN** it is repaired atomically to the exact verified runtime and revalidated through its real boundary
 
 #### Scenario: Uninstall

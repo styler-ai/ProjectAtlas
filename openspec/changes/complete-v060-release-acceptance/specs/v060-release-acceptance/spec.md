@@ -3,9 +3,9 @@
 ### Requirement: The release hierarchy exposes complete accepted scope
 Issue #493 SHALL be the sole native parent of every other accepted `v0.6.0-00` issue and SHALL have no parent. Every child SHALL appear once in the declared release graph; direct blockers SHALL independently express genuine execution prerequisites.
 
-#### Scenario: Initial hierarchy
-- **WHEN** v0.6.0 contains #310 and #314
-- **THEN** both are direct sub-issues of #493, #314 is blocked by #310, and #493 is blocked by both
+#### Scenario: Accepted hierarchy
+- **WHEN** v0.6.0 contains #310, #314, and #388
+- **THEN** all three are direct sub-issues of #493, #314 is blocked by #310, #388 has no outstanding blocker, and #493 is blocked by every accepted child
 
 #### Scenario: Later issue is accepted
 - **WHEN** another issue enters the milestone
@@ -33,12 +33,12 @@ The release gate SHALL reconcile the complete installed CLI command/nested-comma
 - **WHEN** a route can change purpose, task, worktree, Memory Atlas, database, or host state
 - **THEN** it executes only against disposable isolated state and proves refusal, cleanup, and no ambient mutation
 
-### Requirement: Holistic proof spans #310 and #314
-The exact installed candidate SHALL pass one end-to-end workflow composing the accepted agent surface with Memory Atlas storage, reflection, recovery, and host boundaries.
+### Requirement: Holistic proof spans #310, #314, and #388
+The exact installed candidate SHALL pass one end-to-end workflow composing the accepted agent surface with Memory Atlas storage, reflection, recovery, host boundaries, and verified npm installation, explicit materialization, and native-runtime forwarding.
 
 #### Scenario: Clean installed workflow
-- **WHEN** the candidate is installed into isolated home/config/cache/project state
-- **THEN** install or upgrade, init, scan, navigation, graph/source evidence, CLI/MCP routing, authored-context write/read/recovery, host fallback, concurrency/pressure, privacy, failure recovery, uninstall, and compatible rollback all pass
+- **WHEN** the candidate is installed into isolated home/config/cache/project state on every supported release OS/architecture tuple
+- **THEN** install or upgrade, verified npm installation/materialization/forwarding, init, scan, navigation, graph/source evidence, CLI/MCP routing, authored-context write/read/recovery, host fallback, concurrency/pressure, privacy, failure recovery, uninstall, and compatible rollback all pass
 
 ### Requirement: Confirmed defects return to their owners
 #493 SHALL implement no feature or bug. A confirmed candidate defect SHALL return to an existing or new sanitized issue with its own specification, implementation, tests, and review.
@@ -52,11 +52,11 @@ The exact installed candidate SHALL pass one end-to-end workflow composing the a
 
 #### Scenario: RC1 publication
 - **WHEN** explicit authorization exists and all candidate proof passes
-- **THEN** independent readback verifies tag/revision, metadata, assets, checksums, installers, runtime/plugin/skill/MCP identity, E2E results, and Latest protection
+- **THEN** independent readback verifies tag/revision, metadata, assets, checksums, installers, npm registry-package version/provenance/native-asset mapping, runtime/plugin/skill/MCP identity, E2E results, and Latest protection
 
 #### Scenario: Stable promotion
 - **WHEN** the accepted candidate has no unresolved blocker and stable proof passes
-- **THEN** v0.6.0 becomes Latest only after exact installed/hosted/downstream/issue/review/milestone state is verified
+- **THEN** v0.6.0 becomes Latest only after exact installed/hosted/downstream/issue/review/milestone state, including npm registry-package version/provenance/native-asset mapping, is verified
 
 ### Requirement: The release-acceptance issue closes last
 #493 SHALL remain open until every child and required review is closed successfully and stable v0.6.0 readback is complete.

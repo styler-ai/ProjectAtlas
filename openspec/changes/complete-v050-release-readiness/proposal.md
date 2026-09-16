@@ -4,7 +4,7 @@ ProjectAtlas v0.5.0 needs one coherent non-visual release campaign that repairs 
 
 ## Accepted release scope
 
-The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #388 and #456 (unversioned backlog), and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion still requires separate explicit authorization after RC acceptance.
+The native milestone and `openspec/issue-map.json` release graph define accepted delivery. The original planning sections retain #342 (declined), #456 (unversioned backlog), and #388 and #490 (v0.6.0 work); those issues are outside v0.5.0-rc1 and their unfinished tasks are not completion claims. RC distribution covers the native binaries, plugin, and host integrations. The deferred npm adapter is neither a required RC artifact nor a shipped capability. Stable promotion still requires separate explicit authorization after RC acceptance.
 
 ## What Changes
 
@@ -14,7 +14,7 @@ The native milestone and `openspec/issue-map.json` release graph define accepted
 - Add built-in PHP 8 parsing with pinned `tree-sitter-php` 0.24.2, then derive the first version-matched PHP guidance profile from accepted evidence.
 - Add PDF and DOCX extraction only, using pinned the fixed `pdf-extract` 0.12.0+projectatlas guest with `lopdf` 0.44.0, the `wasmi`/`wasmi_core` 2.0.0 host, `quick-xml` 0.42.0, and `zip` 0.6.6 (ZIP default features disabled, only `deflate` enabled); admit only stored/DEFLATE DOCX entries and reject encrypted or unsupported compression under strict admission/resource/provenance limits and sparse exact evidence.
 - Make entrypoint reachability request-owned and non-persistent; replace weak-component communities with deterministic bounded weighted label-propagation v1; measure reverse-caller, graph-resource, and released-main-baseline proposals before accepting either a measured change or reproducible no-change result.
-- Verify npm as a thin exact-native-runtime adapter, consume generated Claude Code/OpenCode configuration through real isolated host readers, and add one collision-safe `atlas` shim while preserving `projectatlas`, `health-check`, and administrative `health resolve`.
+- Retain #388 npm adapter planning for v0.6.0. For v0.5.0, consume generated Claude Code/OpenCode configuration through real isolated host readers, and add one collision-safe `atlas` shim while preserving `projectatlas`, `health-check`, and administrative `health resolve`.
 - Narrow release timeout work to the reported GitHub Actions step; split tests/modules only through accepted responsibility maps; remove the named oversized raw benchmark artifact and reuse the existing two-arm evaluation harness.
 - Separate candidate-local specification validation from published readiness: a planning PR may publish OpenSpec and architecture artifacts without closing an implementation issue, but `status:ready`, release planning, native relationships, implementation handoff, merge, and release require exact clean live-default-branch readback.
 - Prevalidate every native relationship request, including an apparent no-op, against one exact graph-owned missing-or-extra transition before mutation; repair closed reverse dependents when blockers reopen; revoke affected merge authorization before other PR feedback using exact reread heads and repository-qualified closing references; treat demilestoning as targeted graph drift; and dynamically fail published-snapshot proof on wrong roots, malformed identities, Git failures, or default-branch movement while ignoring only untracked notes excluded from tracked state.
@@ -34,7 +34,7 @@ Non-goals:
 - `platform-parser-readiness`: exact Rust 1.98.0 authority, truthful optional-parser capability, warning-clean target selection, and clean macOS arm64 installed proof.
 - `repository-content-intelligence`: built-in PHP, evidence-derived PHP guidance, and bounded exact-locator PDF/DOCX extraction.
 - `repository-analysis-and-scale`: measured reverse callers/resources/baselines, typed entrypoint reachability, and deterministic bounded communities.
-- `cli-installation-surface`: exact-native npm delivery, real host-reader consumption, and one complete collision-safe `atlas` surface.
+- `cli-installation-surface`: deferred v0.6.0 npm adapter planning, real host-reader consumption, and one complete collision-safe `atlas` surface.
 - `repository-quality-evaluation`: narrow workflow timeout, responsibility-led test/module ownership, benchmark retention, and repeatable bounded evaluation.
 - `release-candidate-delivery`: native release hierarchy, complete installed public-surface execution, holistic E2E, RC remediation, stable promotion, and closes-last acceptance.
 
@@ -46,5 +46,6 @@ None. Existing token-impact reporting, graph authority, database ownership, CLI/
 
 - Existing seven Rust crates, with concrete typed ownership rather than new architecture layers.
 - Project-local SQLite keys, constraints, migrations, plans, transactions, WAL/concurrency, rollback/recovery, and authored/derived-state preservation where explicitly owned.
-- Windows, Linux, macOS x64/arm64 runtime, installer, npm, plugin, generated host, CLI/MCP, parser, database, workflow, evaluation, and release boundaries.
+- Windows, Linux, macOS x64/arm64 runtime, installer, plugin, generated host, CLI/MCP, parser, database, workflow, evaluation, and release boundaries.
+- Retained npm adapter planning belongs to #388 in v0.6.0, not delivered v0.5.0 scope.
 - OpenSpec/IssueOps mapping, candidate-versus-published readiness, native GitHub hierarchy and dependency graph, version-matched guidance, issue-specific Mermaid documentation, and final hosted release state.

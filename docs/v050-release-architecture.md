@@ -145,6 +145,8 @@ flowchart LR
 
 ## npm runtime selection and integrity
 
+This view is retained for #388, scheduled for v0.6.0. npm delivery and its package/cache lifecycle are outside v0.5.0 and RC1 acceptance.
+
 ```mermaid
 flowchart TB
   npm[npm package] --> tuple[Resolve supported OS/arch tuple]
