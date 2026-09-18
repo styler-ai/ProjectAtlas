@@ -173,6 +173,16 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
     if atlas_dir.exists() {
         return Err(io::Error::other("runtime-info created .projectatlas").into());
     }
+    let guidance = Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("agent-instructions")
+        .output()?;
+    if !guidance.status.success()
+        || !String::from_utf8_lossy(&guidance.stdout).contains("ProjectAtlas skill")
+        || atlas_dir.exists()
+    {
+        return Err(io::Error::other("agent-instructions was not bounded and state-free").into());
+    }
     let required_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

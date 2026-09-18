@@ -509,6 +509,7 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 ## Codex skills
 
 ProjectAtlas ships public agent guidance through repository docs and the packaged plugin skill.
+The packaged Codex plugin also includes `hooks/hooks.json`, which emits a short ProjectAtlas-first routing reminder at trusted startup, resume, and compaction. Codex presents bundled hooks for review; users must trust the current hook definition before it runs. The reminder is read-only and does not replace repository instructions or the full version-matched skill.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
 ## Claude Code Plugin And OpenCode MCP Config
@@ -516,6 +517,7 @@ Personal workspace memory is local state and should stay ignored/untracked throu
 The ProjectAtlas plugin package includes:
 
 - `.codex-plugin/plugin.json` for Codex plugin metadata.
+- `hooks/hooks.json` for trusted Codex SessionStart guidance.
 - `.claude-plugin/plugin.json` plus the root `skills/` folder for Claude Code plugin packaging.
 - `opencode/opencode.json` as a disabled OpenCode MCP config template with absolute-path placeholders.
 - Installer scripts that generate project-local Codex-compatible, Claude Code, and OpenCode config files after runtime verification.

@@ -604,6 +604,7 @@
       "mcp",
       "mcp-config",
       "runtime-info",
+      "agent-instructions",
       "purpose"
     ],
     "subcommands": {

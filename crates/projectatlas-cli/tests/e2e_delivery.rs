@@ -591,6 +591,7 @@ struct McpToolContractCase {
 enum CliContractOutput {
     JsonObject,
     JsonArray,
+    Text(&'static str),
     Empty,
     Mcp,
 }
@@ -18861,6 +18862,13 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
             expected_exit_code: 0,
         },
         CliContractCase {
+            name: "agent-instructions",
+            arguments: vec!["agent-instructions".to_string()],
+            output: CliContractOutput::Text("ProjectAtlas skill"),
+            effect: McpSqliteEffect::None,
+            expected_exit_code: 0,
+        },
+        CliContractCase {
             name: "purpose",
             arguments: vec![
                 "purpose".to_string(),
@@ -20880,6 +20888,38 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         plugin_root.join(".codex-plugin").join("plugin.json"),
     )?)?;
     require_json_string(&manifest, &["version"], env!("CARGO_PKG_VERSION"))?;
+    let hooks: Value = serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "hooks", "0", "command"],
+        "projectatlas agent-instructions",
+    )?;
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "matcher"],
+        "startup|resume|compact",
+    )?;
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "hooks", "0", "statusMessage"],
+        "Loading ProjectAtlas guidance",
+    )?;
+    if json_at(
+        &hooks,
+        &[
+            "hooks",
+            "SessionStart",
+            "0",
+            "hooks",
+            "0",
+            "additionalContextLimit",
+        ],
+    )?
+    .as_u64()
+        != Some(200)
+    {
+        return Err(io::Error::other("packaged ProjectAtlas hook context limit drifted").into());
+    }
     let skill_bytes = fs::read(
         plugin_root
             .join(PROJECTATLAS_SKILL_DIR)
@@ -21017,7 +21057,9 @@ fn run_packaged_cli_contract_case(
             let expected_shape = match case.output {
                 CliContractOutput::JsonObject => decoded.is_object(),
                 CliContractOutput::JsonArray => decoded.is_array(),
-                CliContractOutput::Empty | CliContractOutput::Mcp => false,
+                CliContractOutput::Text(_) | CliContractOutput::Empty | CliContractOutput::Mcp => {
+                    false
+                }
             };
             if !expected_shape {
                 return Err(io::Error::other(format!(
@@ -21028,6 +21070,18 @@ fn run_packaged_cli_contract_case(
             }
             assert_cli_contract_payload(case.name, &decoded)?;
             Ok(Some(decoded))
+        }
+        CliContractOutput::Text(expected) => {
+            let stdout = String::from_utf8(output.stdout)?;
+            if !stdout.contains(expected) || !output.stderr.is_empty() {
+                return Err(io::Error::other(format!(
+                    "{} emitted unexpected text: stdout={stdout} stderr={}",
+                    case.name,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(None)
         }
         CliContractOutput::Empty => {
             if !output.stdout.is_empty() || !output.stderr.is_empty() {

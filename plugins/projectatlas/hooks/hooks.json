@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "projectatlas agent-instructions",
+            "statusMessage": "Loading ProjectAtlas guidance",
+            "additionalContextLimit": 200
+          }
+        ]
+      }
+    ]
+  }
+}

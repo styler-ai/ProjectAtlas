@@ -178,6 +178,7 @@ const REQUIRED_CLI_COMMANDS: &[RequiredCliCommand] = &[
     RequiredCliCommand::Mcp,
     RequiredCliCommand::McpConfig,
     RequiredCliCommand::RuntimeInfo,
+    RequiredCliCommand::AgentInstructions,
     RequiredCliCommand::Purpose,
 ];
 
@@ -1361,6 +1362,8 @@ enum Command {
     },
     /// Print structured runtime identity and capability information.
     RuntimeInfo,
+    /// Print bounded ProjectAtlas-first guidance for trusted agent lifecycle hooks.
+    AgentInstructions,
     /// Acquire the POSIX installer's update-lock descriptor inherited through stdin.
     #[cfg(unix)]
     #[command(hide = true)]
@@ -3078,6 +3081,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             let report = build_runtime_info();
             print_output(cli.format, &render_runtime_info(&report), &report)?;
         }
+        Command::AgentInstructions => {
+            write_stdout(AGENT_INSTRUCTIONS)?;
+        }
         #[cfg(unix)]
         Command::AcquireInstallerLock {
             expected_device,
@@ -3714,6 +3720,9 @@ fn build_runtime_info() -> RuntimeInfoReport {
 fn render_runtime_info(report: &RuntimeInfoReport) -> String {
     encode_agent_payload(&json!({ "runtime": report }))
 }
+
+/// Bounded, read-only routing context emitted by the trusted bundled hook.
+const AGENT_INSTRUCTIONS: &str = "Use the version-matched ProjectAtlas skill and repository instructions before broad source reads. Start with the ProjectAtlas MCP session brief when available; otherwise use `atlas overview`, then bounded folders/files and exact slices. Do not initialize, scan, or modify project state unless the task requires it.\n";
 
 /// Bind, move, or detach a project root without machine-global root state.
 fn bind_project_root(
@@ -4578,6 +4587,8 @@ enum RequiredCliCommand {
     McpConfig,
     /// `projectatlas runtime-info`.
     RuntimeInfo,
+    /// `projectatlas agent-instructions`.
+    AgentInstructions,
     /// `projectatlas purpose`.
     Purpose,
 }
@@ -4618,6 +4629,7 @@ impl RequiredCliCommand {
             Self::Mcp => "mcp",
             Self::McpConfig => "mcp-config",
             Self::RuntimeInfo => "runtime-info",
+            Self::AgentInstructions => "agent-instructions",
             Self::Purpose => "purpose",
         }
     }
@@ -4807,6 +4819,7 @@ impl RequiredCliCommand {
                 nearest_project: false,
             },
             Self::RuntimeInfo => Command::RuntimeInfo,
+            Self::AgentInstructions => Command::AgentInstructions,
             Self::Purpose => Command::Purpose {
                 command: PurposeCommand::Queue {
                     task: None,
@@ -5475,6 +5488,7 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Mcp { .. } => "mcp",
         Command::McpConfig { .. } => "mcp-config",
         Command::RuntimeInfo => "runtime-info",
+        Command::AgentInstructions => "agent-instructions",
         #[cfg(unix)]
         Command::AcquireInstallerLock { .. } => "acquire-installer-lock",
         Command::Purpose { .. } => "purpose",
