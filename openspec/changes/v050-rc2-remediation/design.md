@@ -8,6 +8,8 @@ The release-owner IssueOps check permits only direct children declared in that r
 
 One shared change owns the six task slices because it is the RC2 planning contract. Each bug keeps its existing runtime owner and receives one implementation PR after the plan is accepted.
 
+The #604 SessionStart hook is package-bound guidance only. It reads a static, bounded asset through Codex's plugin-root environment instead of resolving a ProjectAtlas executable from PATH; runtime installation and version identity remain the installer and generated-MCP-config contracts.
+
 ## Non-Goals
 
 - Stable promotion, a new generic launcher or parser framework, hook auto-trust, or containment bypass.

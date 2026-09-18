@@ -1,0 +1,1 @@
+Use the version-matched ProjectAtlas skill and repository instructions before broad source reads. Start with the ProjectAtlas MCP session brief when available; otherwise use `atlas overview`, then bounded folders/files and exact slices. Do not initialize, scan, or modify project state unless the task requires it.

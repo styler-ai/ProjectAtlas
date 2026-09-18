@@ -483,7 +483,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 431;
+const CLI_E2E_SYMBOL_COUNT: usize = 432;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -514,7 +514,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "70d2e0e9d05f0044304d8e2a198650cee0cb25c399642fdbb41fb8d613cdb661";
+    "75b8ab7fff594cf81b5f780a3d63f3c098252463935ad1b9b15a353cf549b1d9";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -535,7 +535,7 @@ const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
     "10033529c2f9e3be0e6b47361f005a1c4370a77c00783277b6cd6cb01a1c0bc9";
 
 const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
-    "cdd9b72f5c1ec65285a955a0383a33b7fcac509e38d1889022cb108f41f5423d";
+    "97ad790565c922f637736d069627f776d221eda3ba8a34f8ac26909bd9770729";
 
 const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
@@ -989,7 +989,7 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
                 .contract_facets
                 .attributes_and_platform_gates
                 .len(),
-            158,
+            159,
         ),
         (
             "timeouts_and_deadlines",
@@ -20880,6 +20880,49 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         plugin_root.join(".codex-plugin").join("plugin.json"),
     )?)?;
     require_json_string(&manifest, &["version"], env!("CARGO_PKG_VERSION"))?;
+    let hooks: Value = serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "hooks", "0", "command"],
+        "cat \"$PLUGIN_ROOT/hooks/agent-instructions.txt\"",
+    )?;
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "hooks", "0", "commandWindows"],
+        "type \"%PLUGIN_ROOT%\\hooks\\agent-instructions.txt\"",
+    )?;
+    let hook_asset = fs::read_to_string(plugin_root.join("hooks/agent-instructions.txt"))?;
+    if !hook_asset.contains("ProjectAtlas skill")
+        || hook_asset.contains("projectatlas agent-instructions")
+    {
+        return Err(io::Error::other("packaged ProjectAtlas hook guidance asset drifted").into());
+    }
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "matcher"],
+        "startup|resume|compact",
+    )?;
+    require_json_string(
+        &hooks,
+        &["hooks", "SessionStart", "0", "hooks", "0", "statusMessage"],
+        "Loading ProjectAtlas guidance",
+    )?;
+    if json_at(
+        &hooks,
+        &[
+            "hooks",
+            "SessionStart",
+            "0",
+            "hooks",
+            "0",
+            "additionalContextLimit",
+        ],
+    )?
+    .as_u64()
+        != Some(200)
+    {
+        return Err(io::Error::other("packaged ProjectAtlas hook context limit drifted").into());
+    }
     let skill_bytes = fs::read(
         plugin_root
             .join(PROJECTATLAS_SKILL_DIR)

@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"$PLUGIN_ROOT/hooks/agent-instructions.txt\"",
+            "commandWindows": "type \"%PLUGIN_ROOT%\\hooks\\agent-instructions.txt\"",
+            "statusMessage": "Loading ProjectAtlas guidance",
+            "additionalContextLimit": 200
+          }
+        ]
+      }
+    ]
+  }
+}

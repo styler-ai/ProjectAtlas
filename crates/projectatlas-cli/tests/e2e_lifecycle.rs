@@ -63,6 +63,8 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read as IoRead, Write as IoWrite};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -191,6 +193,69 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
         .stderr(predicate::str::contains(
             "does not satisfy required version",
         ));
+    Ok(())
+}
+
+#[test]
+fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn Error>> {
+    let workspace = workspace_root()?;
+    let plugin_root = workspace.join("plugins").join("projectatlas");
+    let hook_asset = plugin_root.join("hooks").join("agent-instructions.txt");
+    let shadow = tempfile::tempdir()?;
+    #[cfg(windows)]
+    fs::write(
+        shadow.path().join("projectatlas.cmd"),
+        "@echo shadow-projectatlas-should-not-run\r\n",
+    )?;
+    #[cfg(not(windows))]
+    {
+        let shadow_command = shadow.path().join("projectatlas");
+        fs::write(
+            &shadow_command,
+            "#!/bin/sh\necho shadow-projectatlas-should-not-run\n",
+        )?;
+        let mut permissions = fs::metadata(&shadow_command)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+        }
+        fs::set_permissions(shadow_command, permissions)?;
+    }
+    let path = std::env::join_paths(std::iter::once(shadow.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))?;
+    #[cfg(windows)]
+    let output = {
+        let mut command = StdCommand::new("cmd.exe");
+        command
+            .args(["/d", "/c"])
+            .raw_arg("type \"%PLUGIN_ROOT%\\hooks\\agent-instructions.txt\"")
+            .env("PLUGIN_ROOT", &plugin_root)
+            .env("PATH", path);
+        command.output()?
+    };
+    #[cfg(not(windows))]
+    let output = StdCommand::new("sh")
+        .args(["-c", "cat \"$PLUGIN_ROOT/hooks/agent-instructions.txt\""])
+        .env("PLUGIN_ROOT", &plugin_root)
+        .env("PATH", path)
+        .output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let expected = fs::read_to_string(hook_asset)?.replace("\r\n", "\n");
+    let actual = stdout.replace("\r\n", "\n");
+    if !output.status.success()
+        || actual != expected
+        || stdout.contains("shadow-projectatlas-should-not-run")
+    {
+        return Err(io::Error::other(format!(
+            "bundled hook guidance did not stay package-bound: plugin_root={} status={} stdout={actual:?} stderr={}",
+            plugin_root.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        ))
+        .into());
+    }
     Ok(())
 }
 
