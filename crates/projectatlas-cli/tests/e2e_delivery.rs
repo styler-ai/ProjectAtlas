@@ -25309,6 +25309,21 @@ fn assert_json_contract_subset(
     }
 }
 
+fn assert_packaged_readme_command_order(readme: &str) -> io::Result<()> {
+    let mut offset = 0;
+    for command in [
+        "projectatlas --require-version 0.5.0-rc2 --version",
+        "projectatlas init",
+        "atlas overview",
+        "projectatlas overview",
+    ] {
+        let position = readme[offset..].find(command).ok_or_else(|| {
+            io::Error::other(format!("packaged README command order omitted {command:?}"))
+        })?;
+        offset += position + command.len();
+    }
+    Ok(())
+}
 /// Exercise the real package producer and pre-install digest consumer with substituted inputs.
 #[cfg(windows)]
 fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
@@ -25415,6 +25430,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
+    assert_packaged_readme_command_order(&readme)?;
     if readme.contains("](docs/") {
         return Err(
             io::Error::other("packaged Windows README retained a broken local docs link").into(),
@@ -25536,6 +25552,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
+    assert_packaged_readme_command_order(&readme)?;
     if readme.contains("Windows") || readme.contains("```powershell") || readme.contains("](docs/")
     {
         return Err(io::Error::other(
