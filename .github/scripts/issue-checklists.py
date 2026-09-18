@@ -1981,34 +1981,46 @@ def base_local_tasks(
     return tasks
 
 
-def release_owner_child_issues(
-    issue_map_path: str | Path, owner_issue: int
-) -> set[int]:
-    """Return children the selected release owner may introduce in its own PR."""
+def release_owner_child_issues(repo: str, owner_issue: int) -> set[int]:
+    """Read the complete native child set before admitting new task authority."""
 
-    try:
-        payload = json.loads(Path(issue_map_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    graphs = payload.get("release_graphs") if isinstance(payload, dict) else None
-    if not isinstance(graphs, dict):
-        return set()
-    children: set[int] = set()
-    for declaration in graphs.values():
-        if (
-            not isinstance(declaration, dict)
-            or declaration.get("release_issue") != owner_issue
-        ):
-            continue
-        issues = declaration.get("issues")
-        if not isinstance(issues, dict):
-            continue
-        for number in issues:
-            if isinstance(number, str) and re.fullmatch(r"[1-9][0-9]*", number):
-                child = int(number)
-                if child != owner_issue:
-                    children.add(child)
-    return children
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "graphql",
+            "-f",
+            (
+                "query=query($owner:String!,$name:String!,$number:Int!){"
+                "repository(owner:$owner,name:$name){issue(number:$number){"
+                "subIssues(first:100){totalCount nodes{number}}}}}"
+            ),
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={owner_issue}",
+        ]
+    )
+    data = payload.get("data") if isinstance(payload, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    children = issue.get("subIssues") if isinstance(issue, dict) else None
+    nodes = children.get("nodes") if isinstance(children, dict) else None
+    total = children.get("totalCount") if isinstance(children, dict) else None
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+        or not all(isinstance(node, dict) for node in nodes)
+    ):
+        raise SystemExit(f"GitHub release owner #{owner_issue} child set was incomplete")
+    return {
+        positive_issue(node.get("number"), "release child")
+        for node in nodes
+    }
 
 
 def check_pull_request_tasks(
@@ -2084,9 +2096,10 @@ def check_pull_request_tasks(
         else root / "openspec" / "issue-map.json"
     )
     base_label = "pull-request" if scope_label == "pull request" else scope_label
-    release_children = release_owner_child_issues(
-        configured_issue_map_path, owner_issue
-    )
+    try:
+        release_children = release_owner_child_issues(repo, owner_issue)
+    except SystemExit as error:
+        return [f"{scope_label} native release children {error}"]
     related_issues = {owner_issue}
     try:
         accepted_issue_map = base_issue_map(
@@ -3918,6 +3931,7 @@ Timeout --> Recovery
                 "issue_state_payloads",
                 "issue_contract_failures",
                 "issue_checklist_tasks",
+                "gh_api_json",
             )
         }
         pull_request = {"title": "Incremental work for #2", "body": ""}
@@ -3965,6 +3979,13 @@ Timeout --> Recovery
                 for number, payload in live_payloads.items()
             ]
             globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            globals()["gh_api_json"] = lambda _args: {
+                "data": {
+                    "repository": {
+                        "issue": {"subIssues": {"totalCount": 0, "nodes": []}}
+                    }
+                }
+            }
             assert check_pull_request_tasks(
                 "owner/repo", branch_root, issue_map, 7, "accepted-base"
             ) == []
@@ -4351,6 +4372,7 @@ Timeout --> Recovery
                 "issue_state_payloads",
                 "issue_contract_failures",
                 "candidate_tree_file_text",
+                "gh_api_json",
             )
         }
         live_payloads = {
@@ -4360,6 +4382,7 @@ Timeout --> Recovery
         live_payloads[1]["body"] = issue_contract.replace("- [ ] 2.1", "- [x] 2.1")
         live_reads: list[int] = []
         base_reads: list[str] = []
+        native_children: set[int] = set()
         try:
             def fake_run(args: list[str]) -> str:
                 if len(args) == 3 and args[:2] == ["git", "show"]:
@@ -4383,6 +4406,20 @@ Timeout --> Recovery
                 for number, payload in live_payloads.items()
             ]
             globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            globals()["gh_api_json"] = lambda _args: {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "subIssues": {
+                                "totalCount": len(native_children),
+                                "nodes": [
+                                    {"number": number} for number in native_children
+                                ],
+                            }
+                        }
+                    }
+                }
+            }
 
             assert check_candidate_tasks(
                 "owner/repo", branch_root, issue_map, 2, "accepted-base"
@@ -4413,6 +4450,13 @@ Timeout --> Recovery
             child_tasks.write_text(candidate_tasks, encoding="utf-8")
             live_payloads[3] = {"state": "OPEN", "body": issue_contract}
             release_issue_map = {**issue_map, "change-child": (Owner(3),)}
+            assert any(
+                "adds unrelated mapped OpenSpec authority" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+                )
+            )
+            native_children.add(3)
             live_reads.clear()
             assert check_candidate_tasks(
                 "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
