@@ -2674,6 +2674,7 @@ fn append_paired_file_nodes_selected(
     let hydrated = store
         .load_nodes_by_paths(&candidates)?
         .into_iter()
+        .filter(|node| node.node.kind == NodeKind::File)
         .map(|node| (node.node.path.clone(), node))
         .collect::<HashMap<_, _>>();
     let classifications = file_content_classifications_by_path(store, hydrated.keys().cloned())?;

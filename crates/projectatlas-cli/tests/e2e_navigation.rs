@@ -4589,10 +4589,12 @@ fn classified_files_ignore_absent_inferred_test_paths_across_cli_and_mcp()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("classified-inferred-paths");
+    let owner_file = "owner.rs";
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(repo.join("docs"))?;
+    fs::create_dir_all(repo.join("tests").join(owner_file))?;
     fs::write(
-        repo.join(SRC_DIR_NAME).join("owner.rs"),
+        repo.join(SRC_DIR_NAME).join(owner_file),
         "pub fn owner() {}\n",
     )?;
     fs::write(repo.join("docs").join("owner.md"), "# Owner\n")?;
