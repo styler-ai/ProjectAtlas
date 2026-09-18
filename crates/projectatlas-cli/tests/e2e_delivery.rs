@@ -25508,7 +25508,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     )?;
     let script = temp.path().join("package.sh");
     fs::write(&script, format!("set -eu\n{producer}"))?;
-    let output = StdCommand::new("sh")
+    let output = StdCommand::new("bash")
         .current_dir(temp.path())
         .arg(&script)
         .env("RELEASE_VERSION", "v0.5.0-rc2")
