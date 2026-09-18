@@ -24,7 +24,7 @@
         "488": { "blocked_by": [] },
         "489": { "blocked_by": [] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593] },
+        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593, 604, 605, 606, 607, 608, 609] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -45,7 +45,13 @@
         "574": { "blocked_by": [] },
         "586": { "blocked_by": [] },
         "590": { "blocked_by": [] },
-        "593": { "blocked_by": [] }
+        "593": { "blocked_by": [] },
+        "604": { "blocked_by": [] },
+        "605": { "blocked_by": [] },
+        "606": { "blocked_by": [] },
+        "607": { "blocked_by": [] },
+        "608": { "blocked_by": [] },
+        "609": { "blocked_by": [607] }
       }
     },
     "v0.6.0-00": {
@@ -131,7 +137,19 @@
         { "issue": 489, "first_task": "23.1", "last_task": "23.4" },
         { "issue": 490, "first_task": "24.1", "last_task": "24.4" },
         { "issue": 491, "first_task": "25.1", "last_task": "25.4" },
-        { "issue": 492, "first_task": "26.1", "last_task": "26.7" }
+        { "issue": 492, "first_task": "26.1", "last_task": "27.5" }
+      ]
+    },
+    "v050-rc2-remediation": {
+      "contract": "checklist-v1",
+      "primary_issue": 604,
+      "owners": [
+        { "issue": 604, "first_task": "1.1", "last_task": "2.4" },
+        { "issue": 605, "first_task": "3.1", "last_task": "3.4" },
+        { "issue": 606, "first_task": "4.1", "last_task": "4.4" },
+        { "issue": 607, "first_task": "5.1", "last_task": "5.4" },
+        { "issue": 608, "first_task": "6.1", "last_task": "6.4" },
+        { "issue": 609, "first_task": "7.1", "last_task": "7.4" }
       ]
     },
     "complete-v060-release-acceptance": {

@@ -1981,6 +1981,92 @@ def base_local_tasks(
     return tasks
 
 
+def release_owner_child_issues(repo: str, owner_issue: int) -> set[int]:
+    """Read the complete native child set before admitting new task authority."""
+
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "graphql",
+            "-f",
+            (
+                "query=query($owner:String!,$name:String!,$number:Int!){"
+                "repository(owner:$owner,name:$name){issue(number:$number){"
+                "subIssues(first:100){totalCount nodes{number}}}}}"
+            ),
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={owner_issue}",
+        ]
+    )
+    data = payload.get("data") if isinstance(payload, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    children = issue.get("subIssues") if isinstance(issue, dict) else None
+    nodes = children.get("nodes") if isinstance(children, dict) else None
+    total = children.get("totalCount") if isinstance(children, dict) else None
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+        or not all(isinstance(node, dict) for node in nodes)
+    ):
+        raise SystemExit(f"GitHub release owner #{owner_issue} child set was incomplete")
+    return {
+        positive_issue(node.get("number"), "release child")
+        for node in nodes
+    }
+
+
+def candidate_release_owner_graph(
+    path: Path,
+    owner_issue: int,
+    mapped_issues: set[int],
+    *,
+    root: Path | None = None,
+    candidate_tree_ref: str | None = None,
+) -> "ReleaseGraph":
+    """Require one structurally valid candidate graph for new release-child authority."""
+
+    if candidate_tree_ref is not None:
+        if root is None:
+            raise SystemExit("candidate release graph root is missing")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate_path = Path(temporary) / "issue-map.json"
+            candidate_path.write_text(
+                candidate_tree_file_text(candidate_tree_ref, root, path, "issue-map"),
+                encoding="utf-8",
+            )
+            return candidate_release_owner_graph(
+                candidate_path, owner_issue, mapped_issues
+            )
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
+    graphs = payload.get("release_graphs") if isinstance(payload, dict) else None
+    if not isinstance(graphs, dict):
+        raise SystemExit("candidate release graphs are missing or malformed")
+    matches = [
+        milestone
+        for milestone, graph in graphs.items()
+        if isinstance(graph, dict) and graph.get("release_issue") == owner_issue
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"candidate must declare exactly one release graph for owner #{owner_issue}"
+        )
+    try:
+        graph = publication_graph(path, matches[0], mapped_issues)
+    except (ValueError, SystemExit) as error:
+        raise SystemExit(f"candidate release graph for owner #{owner_issue} is invalid: {error}") from error
+    if graph is None or graph.release_issue != owner_issue:
+        raise SystemExit(f"candidate release graph for owner #{owner_issue} is invalid")
+    return graph
+
+
 def check_pull_request_tasks(
     repo: str,
     root: Path,
@@ -2054,6 +2140,9 @@ def check_pull_request_tasks(
         else root / "openspec" / "issue-map.json"
     )
     base_label = "pull-request" if scope_label == "pull request" else scope_label
+    related_issues = {owner_issue}
+    release_children: set[int] | None = None
+    release_graph: ReleaseGraph | None = None
     try:
         accepted_issue_map = base_issue_map(
             root,
@@ -2072,11 +2161,29 @@ def check_pull_request_tasks(
                 f"{base_ref}: owners {accepted_owners!r}"
             )
         elif accepted_owners is None:
-            if any(owner.issue != owner_issue for owner in candidate_owners):
-                failures.append(
-                    f"{change} adds unrelated mapped OpenSpec authority without an accepted "
-                    f"{base_label} base slice"
-                )
+            if any(owner.issue not in related_issues for owner in candidate_owners):
+                if release_children is None:
+                    try:
+                        release_graph = candidate_release_owner_graph(
+                            Path(configured_issue_map_path),
+                            owner_issue,
+                            {owner.issue for owners in issue_map.values() for owner in owners},
+                            root=root,
+                            candidate_tree_ref=candidate_tree_ref,
+                        )
+                        release_children = (
+                            release_owner_child_issues(repo, owner_issue)
+                            & release_graph.issues
+                        )
+                    except SystemExit as error:
+                        return [f"{scope_label} release child authority {error}"]
+                if any(owner.issue not in release_children for owner in candidate_owners):
+                    failures.append(
+                        f"{change} adds unrelated mapped OpenSpec authority without an accepted "
+                        f"{base_label} base slice"
+                    )
+                else:
+                    related_issues.update(owner.issue for owner in candidate_owners)
         elif candidate_owners != accepted_owners:
             owner_only_range_change = (
                 tuple(owner.issue for owner in candidate_owners)
@@ -2117,7 +2224,7 @@ def check_pull_request_tasks(
         unrelated_slices = [
             (owner, expected)
             for owner, expected in candidate_slices
-            if owner.issue != owner_issue and issue_states[owner.issue] == "OPEN"
+            if owner.issue not in related_issues and issue_states[owner.issue] == "OPEN"
         ]
         base_slices: dict[int, list[tuple[bool, str]]] = {}
         if unrelated_slices:
@@ -2138,7 +2245,7 @@ def check_pull_request_tasks(
                 failures.append(str(error))
                 continue
         for owner, expected in candidate_slices:
-            if owner.issue != owner_issue:
+            if owner.issue not in related_issues:
                 if issue_states[owner.issue] != "OPEN":
                     continue
                 accepted = base_slices.get(owner.issue)
@@ -3881,6 +3988,7 @@ Timeout --> Recovery
                 "issue_state_payloads",
                 "issue_contract_failures",
                 "issue_checklist_tasks",
+                "gh_api_json",
             )
         }
         pull_request = {"title": "Incremental work for #2", "body": ""}
@@ -3928,6 +4036,13 @@ Timeout --> Recovery
                 for number, payload in live_payloads.items()
             ]
             globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            globals()["gh_api_json"] = lambda _args: {
+                "data": {
+                    "repository": {
+                        "issue": {"subIssues": {"totalCount": 0, "nodes": []}}
+                    }
+                }
+            }
             assert check_pull_request_tasks(
                 "owner/repo", branch_root, issue_map, 7, "accepted-base"
             ) == []
@@ -4314,6 +4429,7 @@ Timeout --> Recovery
                 "issue_state_payloads",
                 "issue_contract_failures",
                 "candidate_tree_file_text",
+                "gh_api_json",
             )
         }
         live_payloads = {
@@ -4323,6 +4439,7 @@ Timeout --> Recovery
         live_payloads[1]["body"] = issue_contract.replace("- [ ] 2.1", "- [x] 2.1")
         live_reads: list[int] = []
         base_reads: list[str] = []
+        native_children: set[int] = set()
         try:
             def fake_run(args: list[str]) -> str:
                 if len(args) == 3 and args[:2] == ["git", "show"]:
@@ -4346,12 +4463,116 @@ Timeout --> Recovery
                 for number, payload in live_payloads.items()
             ]
             globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            globals()["gh_api_json"] = lambda _args: {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "subIssues": {
+                                "totalCount": len(native_children),
+                                "nodes": [
+                                    {"number": number} for number in native_children
+                                ],
+                            }
+                        }
+                    }
+                }
+            }
 
             assert check_candidate_tasks(
                 "owner/repo", branch_root, issue_map, 2, "accepted-base"
             ) == []
             assert live_reads == [2], "candidate checks must read live state only for the owner"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            release_map = {
+                "schema_version": 2,
+                "release_graphs": {
+                    "v1.2.3-00": {
+                        "release_issue": 2,
+                        "issues": {
+                            "2": {"blocked_by": [3]},
+                            "3": {"blocked_by": []},
+                        },
+                    }
+                },
+                "changes": {},
+            }
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            child_tasks = (
+                branch_root / "openspec" / "changes" / "change-child" / "tasks.md"
+            )
+            child_tasks.parent.mkdir(parents=True)
+            child_tasks.write_text(candidate_tasks, encoding="utf-8")
+            live_payloads[3] = {"state": "OPEN", "body": issue_contract}
+            release_issue_map = {**issue_map, "change-child": (Owner(3),)}
+            malformed_release_map = json.loads(json.dumps(release_map))
+            malformed_release_map["release_graphs"]["v1.2.3-00"]["issues"] = {
+                "2": {}
+            }
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(malformed_release_map), encoding="utf-8"
+            )
+            assert any(
+                "candidate release graph for owner #2 is invalid" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            assert any(
+                "adds unrelated mapped OpenSpec authority" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+                )
+            )
+            native_children.add(3)
+            live_reads.clear()
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+            ) == []
+            assert live_reads == [2, 3], "release owners must mirror direct child tasks"
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(malformed_release_map), encoding="utf-8"
+            )
+
+            def candidate_tree_release_graph(
+                _ref: str, _root: Path, path: str | Path, _label: str
+            ) -> str:
+                if Path(path).name == "issue-map.json":
+                    return json.dumps(release_map)
+                return candidate_tasks
+            globals()["candidate_tree_file_text"] = candidate_tree_release_graph
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, release_issue_map, 2, "accepted-base",
+                candidate_tree_ref="candidate-head",
+            ) == []
+            globals()["candidate_tree_file_text"] = saved_candidate_helpers[
+                "candidate_tree_file_text"
+            ]
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            unrelated_issue_map = {
+                **release_issue_map,
+                "change-unrelated": (Owner(4),),
+            }
+            unrelated_tasks = (
+                branch_root / "openspec" / "changes" / "change-unrelated" / "tasks.md"
+            )
+            unrelated_tasks.parent.mkdir(parents=True)
+            unrelated_tasks.write_text(candidate_tasks, encoding="utf-8")
+            live_payloads[4] = {"state": "OPEN", "body": issue_contract}
+            native_children.add(4)
+            assert any(
+                "adds unrelated mapped OpenSpec authority" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, unrelated_issue_map, 2, "accepted-base"
+                )
+            )
 
             live_payloads[1] = {"state": "CLOSED", "body": issue_contract}
             change_a_tasks = (
