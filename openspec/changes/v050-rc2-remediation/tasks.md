@@ -14,10 +14,10 @@
 
 ## 3. Classified file discovery (#605)
 
-- [ ] 3.1 Trace inferred companion-path generation, classified candidate admission, classification lookup, CLI `files`, and MCP `atlas_files` callers; isolate the smallest shared real-indexed-file admission boundary.
-- [ ] 3.2 Exclude nonexistent inferred candidates before classification lookup while retaining typed failure for a real indexed file with invalid classification and preserving query, glob, rank, and limit behavior.
-- [ ] 3.3 Add causal CLI and MCP regression coverage for the two-file reproduction, source/documentation/both selections, query/glob/limit combinations, and real-file classification failure behavior.
-- [ ] 3.4 Run the owning Rust and package-level checks, inspect CLI/MCP result and error metadata parity, and review the completed #605 boundary against its acceptance criteria.
+- [x] 3.1 Trace inferred companion-path generation, classified candidate admission, classification lookup, CLI `files`, and MCP `atlas_files` callers; isolate the smallest shared real-indexed-file admission boundary.
+- [x] 3.2 Exclude nonexistent inferred candidates before classification lookup while retaining typed failure for a real indexed file with invalid classification and preserving query, glob, rank, and limit behavior.
+- [x] 3.3 Add causal CLI and MCP regression coverage for the two-file reproduction, source/documentation/both selections, query/glob/limit combinations, and real-file classification failure behavior.
+- [x] 3.4 Run the owning Rust and package-level checks, inspect CLI/MCP result and error metadata parity, and review the completed #605 boundary against its acceptance criteria.
 
 ## 4. Installed CLI and package guidance (#606)
 
