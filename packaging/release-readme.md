@@ -8,6 +8,7 @@ Run these ordinary commands after installation:
 
 ```text
 projectatlas --require-version @PACKAGE_VERSION@ --version
+projectatlas init
 atlas overview
 projectatlas overview
 ```

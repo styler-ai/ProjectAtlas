@@ -25400,6 +25400,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     for expected in [
         "ProjectAtlas v0.5.0-rc2",
         "projectatlas --require-version 0.5.0-rc2 --version",
+        "projectatlas init",
         "atlas overview",
         "projectatlas overview",
         "v0.4.5 (stable)",
@@ -25520,6 +25521,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     for expected in [
         "ProjectAtlas v0.5.0-rc2",
         "projectatlas --require-version 0.5.0-rc2 --version",
+        "projectatlas init",
         "atlas overview",
         "projectatlas overview",
         "v0.4.5 (stable)",
