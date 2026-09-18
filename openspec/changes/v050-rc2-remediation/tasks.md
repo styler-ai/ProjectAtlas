@@ -10,7 +10,7 @@
 - [x] 2.1 Freeze the supported Codex bundled-hook discovery, trust, SessionStart event, output, and command-availability contract from current official host documentation; retain repository instructions and the version-matched skill as separate authorities.
 - [x] 2.2 Add the smallest reviewable hook configuration and one bounded cross-platform command that emits ProjectAtlas-first guidance without initialization, scanning, writes, or full-skill duplication.
 - [x] 2.3 Exercise trusted startup, resume, compaction, untrusted/disabled behavior, path isolation, and Windows host-reader execution; verify the packaged plugin contains the exact hook assets.
-- [ ] 2.4 Reconcile plugin documentation, manifest/package identity, and hook trust wording with the installed artifact, then review the complete #604 boundary against its acceptance criteria.
+- [x] 2.4 Reconcile plugin documentation, manifest/package identity, and hook trust wording with the installed artifact, then review the complete #604 boundary against its acceptance criteria.
 
 ## 3. Classified file discovery (#605)
 
