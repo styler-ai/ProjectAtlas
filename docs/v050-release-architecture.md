@@ -615,11 +615,13 @@ flowchart TB
   uninstall --> clean[Remove only managed pair and private state]
 ```
 
-## v0.5.0 candidate, readback, remediation, and stable promotion
+## v0.5.0 RC2 candidate, readback, remediation, and stable promotion
 
 ```mermaid
 stateDiagram-v2
-  [*] --> PublishedIssueReadback: read exact main OpenSpec and architecture targets
+  [*] --> RC1Audit: published RC1 audit confirms an owning defect
+  RC1Audit --> Remediation: reopen #492 and its six owning child issues
+  Remediation --> PublishedIssueReadback: every owner is accepted on exact main
   PublishedIssueReadback --> PublicationRepair: mapped task, document, heading, or Mermaid is missing or stale
   PublicationRepair --> PublishedIssueReadback: planning PR publishes corrected evidence
   PublishedIssueReadback --> ExactRevision: publication admission and every required review pass
@@ -627,16 +629,16 @@ stateDiagram-v2
   SurfaceInventory --> CandidateBuild: package exact main revision
   CandidateBuild --> InstalledProof: safely execute every supported installed route
   InstalledProof --> UpdateProof: update exercised v0.4.5 installation and database
-  UpdateProof --> RC1: state, migration, failure, retry, and rollback hard gate passes
+  UpdateProof --> RC2: state, migration, failure, retry, and rollback hard gate passes
   UpdateProof --> Remediation: update or migration blocker
-  RC1 --> HostedReadback: independently verify tag, assets, runtime, and Latest
+  RC2 --> HostedReadback: independently verify tag, assets, runtime, hook, parser pack, and Latest
   HostedReadback --> Remediation: confirmed blocker
   Remediation --> PublishedIssueReadback: return defect to owning child issue and restart proof
-  HostedReadback --> RCCloseout: all children closed and RC state synchronized
+  HostedReadback --> RCCloseout: all RC2 children closed and state synchronized
   RCCloseout --> [*]: close 492 last with v0.4.5 Latest
 ```
 
-RC acceptance closes #492 after every accepted child. Stable promotion remains unstarted in [#602](https://github.com/styler-ai/ProjectAtlas/issues/602); it requires separate authorization and repeated proof before Latest or downstream pins change.
+The RC1 audit reopened #492 only for confirmed #604–#609 remediation. RC2 acceptance closes #492 after every accepted child. Stable promotion remains unstarted in [#602](https://github.com/styler-ai/ProjectAtlas/issues/602); it requires separate authorization and repeated proof before Latest or downstream pins change.
 
 ## Installed release acceptance
 
