@@ -24,7 +24,7 @@
 - [x] 4.1 Trace the release README/package assembly and version sources; define the smallest containing-release, stable-channel, short-command, restart, and resolvable-link contract for RC2 artifacts.
 - [x] 4.2 Update the owned documentation/template and release-package assembly so unpacked RC2 assets carry version-matched setup/repair guidance and ordinary `atlas`/`projectatlas` examples without presenting stable as the only route.
 - [x] 4.3 Add an unpacked-artifact regression that validates RC2 links, version/require-version text, command examples, and inherited-PATH restart wording on Windows.
-- [ ] 4.4 Run documentation/package checks and review the final #606 artifact boundary against its acceptance criteria.
+- [x] 4.4 Run documentation/package checks and review the final #606 artifact boundary against its acceptance criteria.
 
 ## 5. Parser-pack filename admission (#607)
 
