@@ -25421,8 +25421,9 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         "projectatlas overview",
         "v0.4.5 (stable)",
         "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
-        "cannot change the\nenvironment inherited by an already-running host",
-        "Restart the environment-owning\nlauncher, Codex, or shell",
+        "cannot change\nthe environment inherited by an already-running host",
+        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
+        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
     ] {
         if !readme.contains(expected) {
             return Err(io::Error::other(format!(
@@ -25556,8 +25557,9 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         "projectatlas overview",
         "v0.4.5 (stable)",
         "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
-        "cannot change the\nenvironment inherited by an already-running host",
-        "Restart the environment-owning\nlauncher, Codex, or shell",
+        "cannot change\nthe environment inherited by an already-running host",
+        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
+        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
     ] {
         if !readme.contains(expected) {
             return Err(io::Error::other(format!(

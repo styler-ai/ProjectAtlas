@@ -16,9 +16,12 @@ projectatlas overview
 `atlas` is the installed short command. `projectatlas` remains available when
 you need to name the native runtime directly.
 
-The installer saves its PATH entry for future processes. It cannot change the
-environment inherited by an already-running host. Restart the environment-owning
-launcher, Codex, or shell before relying on a newly installed bare command.
+The installer makes the commands available in its own process, but cannot change
+the environment inherited by an already-running host. On Windows, it saves its
+PATH entry for future processes; restart the environment-owning launcher, Codex,
+or shell before relying on a newly installed bare command. On Linux and macOS,
+ensure `~/.local/bin` is on your shell PATH, then start a new shell before
+relying on a newly installed bare command.
 
 ## Release channels
 
