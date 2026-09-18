@@ -2023,6 +2023,33 @@ def release_owner_child_issues(repo: str, owner_issue: int) -> set[int]:
     }
 
 
+def candidate_release_owner_graph(
+    path: Path, owner_issue: int, mapped_issues: set[int]
+) -> "ReleaseGraph":
+    """Require one structurally valid candidate graph for new release-child authority."""
+
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
+    graphs = payload.get("release_graphs") if isinstance(payload, dict) else None
+    if not isinstance(graphs, dict):
+        raise SystemExit("candidate release graphs are missing or malformed")
+    matches = [
+        milestone
+        for milestone, graph in graphs.items()
+        if isinstance(graph, dict) and graph.get("release_issue") == owner_issue
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"candidate must declare exactly one release graph for owner #{owner_issue}"
+        )
+    try:
+        graph = publication_graph(path, matches[0], mapped_issues)
+    except (ValueError, SystemExit) as error:
+        raise SystemExit(f"candidate release graph for owner #{owner_issue} is invalid: {error}") from error
+    if graph is None or graph.release_issue != owner_issue:
+        raise SystemExit(f"candidate release graph for owner #{owner_issue} is invalid")
+    return graph
+
+
 def check_pull_request_tasks(
     repo: str,
     root: Path,
@@ -2098,6 +2125,7 @@ def check_pull_request_tasks(
     base_label = "pull-request" if scope_label == "pull request" else scope_label
     related_issues = {owner_issue}
     release_children: set[int] | None = None
+    release_graph: ReleaseGraph | None = None
     try:
         accepted_issue_map = base_issue_map(
             root,
@@ -2119,9 +2147,17 @@ def check_pull_request_tasks(
             if any(owner.issue not in related_issues for owner in candidate_owners):
                 if release_children is None:
                     try:
-                        release_children = release_owner_child_issues(repo, owner_issue)
+                        release_graph = candidate_release_owner_graph(
+                            Path(configured_issue_map_path),
+                            owner_issue,
+                            {owner.issue for owners in issue_map.values() for owner in owners},
+                        )
+                        release_children = (
+                            release_owner_child_issues(repo, owner_issue)
+                            & release_graph.issues
+                        )
                     except SystemExit as error:
-                        return [f"{scope_label} native release children {error}"]
+                        return [f"{scope_label} release child authority {error}"]
                 if any(owner.issue not in release_children for owner in candidate_owners):
                     failures.append(
                         f"{change} adds unrelated mapped OpenSpec authority without an accepted "
@@ -4452,6 +4488,22 @@ Timeout --> Recovery
             child_tasks.write_text(candidate_tasks, encoding="utf-8")
             live_payloads[3] = {"state": "OPEN", "body": issue_contract}
             release_issue_map = {**issue_map, "change-child": (Owner(3),)}
+            malformed_release_map = json.loads(json.dumps(release_map))
+            malformed_release_map["release_graphs"]["v1.2.3-00"]["issues"] = {
+                "2": {}
+            }
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(malformed_release_map), encoding="utf-8"
+            )
+            assert any(
+                "candidate release graph for owner #2 is invalid" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
             assert any(
                 "adds unrelated mapped OpenSpec authority" in failure
                 for failure in check_candidate_tasks(
@@ -4474,6 +4526,7 @@ Timeout --> Recovery
             unrelated_tasks.parent.mkdir(parents=True)
             unrelated_tasks.write_text(candidate_tasks, encoding="utf-8")
             live_payloads[4] = {"state": "OPEN", "body": issue_contract}
+            native_children.add(4)
             assert any(
                 "adds unrelated mapped OpenSpec authority" in failure
                 for failure in check_candidate_tasks(
