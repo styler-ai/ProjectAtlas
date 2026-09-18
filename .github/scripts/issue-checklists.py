@@ -2024,10 +2024,27 @@ def release_owner_child_issues(repo: str, owner_issue: int) -> set[int]:
 
 
 def candidate_release_owner_graph(
-    path: Path, owner_issue: int, mapped_issues: set[int]
+    path: Path,
+    owner_issue: int,
+    mapped_issues: set[int],
+    *,
+    root: Path | None = None,
+    candidate_tree_ref: str | None = None,
 ) -> "ReleaseGraph":
     """Require one structurally valid candidate graph for new release-child authority."""
 
+    if candidate_tree_ref is not None:
+        if root is None:
+            raise SystemExit("candidate release graph root is missing")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate_path = Path(temporary) / "issue-map.json"
+            candidate_path.write_text(
+                candidate_tree_file_text(candidate_tree_ref, root, path, "issue-map"),
+                encoding="utf-8",
+            )
+            return candidate_release_owner_graph(
+                candidate_path, owner_issue, mapped_issues
+            )
     payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
     graphs = payload.get("release_graphs") if isinstance(payload, dict) else None
     if not isinstance(graphs, dict):
@@ -2151,6 +2168,8 @@ def check_pull_request_tasks(
                             Path(configured_issue_map_path),
                             owner_issue,
                             {owner.issue for owners in issue_map.values() for owner in owners},
+                            root=root,
+                            candidate_tree_ref=candidate_tree_ref,
                         )
                         release_children = (
                             release_owner_child_issues(repo, owner_issue)
