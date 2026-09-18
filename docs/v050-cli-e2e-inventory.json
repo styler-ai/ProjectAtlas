@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "557e597bf61088b56617e1dec4a46aac6bcd6e1ee55f1b80cb7fbc09cf41eeba",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "bb7e632bf23c9a2bc019b8ffc5d1779cf7b15ef64473067de06426ea305e7584",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "30796be9dca75c3bc0ad4aed4539982fc2ad5514c990a3edc6112c62b309e70d",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "faed094df8e9b476a723553100fdfb4658ab4942d1b4bd21af2b7a3ec8b38fde",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "eb32c77c752d90ebf7d53152c33b0ca868dadd096ea85633a6ba2c684084f982",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
     }
   },
@@ -14,8 +14,8 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 196,
-  "symbol_count": 432,
+  "test_count": 197,
+  "symbol_count": 433,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
     "e2e_delivery": "installer, release, packaged, and plugin contracts",
@@ -1298,6 +1298,15 @@
       "name": "classified_document_navigation_agrees_across_cli_and_mcp",
       "line": 24176,
       "end_line": 24791,
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "classified_files_ignore_absent_inferred_test_paths_across_cli_and_mcp",
+      "line": 4588,
+      "end_line": 4682,
       "owner": "e2e_navigation",
       "attributes": [
         "#[test]"
@@ -4571,6 +4580,18 @@
       "name": "classified_document_navigation_agrees_across_cli_and_mcp",
       "line": 24176,
       "end_line": 24791,
+      "owners": [
+        "e2e_navigation"
+      ],
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "classified_files_ignore_absent_inferred_test_paths_across_cli_and_mcp",
+      "line": 4588,
+      "end_line": 4682,
       "owners": [
         "e2e_navigation"
       ],
@@ -10207,6 +10228,13 @@
       {
         "test": "classified_document_navigation_agrees_across_cli_and_mcp",
         "line": 24176,
+        "attributes": [
+          "#[test]"
+        ]
+      },
+      {
+        "test": "classified_files_ignore_absent_inferred_test_paths_across_cli_and_mcp",
+        "line": 4588,
         "attributes": [
           "#[test]"
         ]

@@ -483,7 +483,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 432;
+const CLI_E2E_SYMBOL_COUNT: usize = 433;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -514,7 +514,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "75b8ab7fff594cf81b5f780a3d63f3c098252463935ad1b9b15a353cf549b1d9";
+    "57a41af6dc34347e02acacb2006517c51ee27a1009ed448c6424dcb9bfe92530";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -535,7 +535,7 @@ const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
     "10033529c2f9e3be0e6b47361f005a1c4370a77c00783277b6cd6cb01a1c0bc9";
 
 const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
-    "97ad790565c922f637736d069627f776d221eda3ba8a34f8ac26909bd9770729";
+    "6f2c1bb734a4aa809a3f0fdc5e6719516e6e12895674c17cc07a87021423825d";
 
 const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
@@ -989,7 +989,7 @@ fn assert_cli_e2e_inventory_contract(workspace_root: &Path) -> Result<(), Box<dy
                 .contract_facets
                 .attributes_and_platform_gates
                 .len(),
-            159,
+            160,
         ),
         (
             "timeouts_and_deadlines",

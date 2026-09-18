@@ -4585,6 +4585,104 @@ fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<
 }
 
 #[test]
+fn classified_files_ignore_absent_inferred_test_paths_across_cli_and_mcp()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("classified-inferred-paths");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("owner.rs"),
+        "pub fn owner() {}\n",
+    )?;
+    fs::write(repo.join("docs").join("owner.md"), "# Owner\n")?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &database)?;
+    let executable = mcp_contract_executable();
+
+    for (selection, file_pattern, limit, expected) in [
+        ("source", "src/*.rs", "1", vec!["src/owner.rs"]),
+        ("documentation", "docs/*.md", "1", vec!["docs/owner.md"]),
+        ("both", "**/*", "2", vec!["docs/owner.md", "src/owner.rs"]),
+    ] {
+        let output = Command::new(&executable)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--format")
+            .arg("json")
+            .arg("--db")
+            .arg(&database)
+            .args([
+                "files",
+                "owner",
+                "--file-pattern",
+                file_pattern,
+                "--content-selection",
+                selection,
+                "--limit",
+                limit,
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "classified CLI files failed for {selection}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        let mut paths = payload
+            .as_array()
+            .ok_or_else(|| io::Error::other("classified CLI files omitted rows"))?
+            .iter()
+            .filter_map(|row| row["path"].as_str())
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        if paths != expected {
+            return Err(io::Error::other(format!(
+                "classified CLI files returned unexpected {selection} paths: {paths:?}"
+            ))
+            .into());
+        }
+    }
+
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let operation_result = (|| -> Result<(), Box<dyn Error>> {
+        for (selection, file_pattern, limit, expected) in [
+            ("source", "src/*.rs", 1, vec!["src/owner.rs"]),
+            ("documentation", "docs/*.md", 1, vec!["docs/owner.md"]),
+            ("both", "**/*", 2, vec!["docs/owner.md", "src/owner.rs"]),
+        ] {
+            let payload: Value = toon_format::decode_default(&session.call_tool(
+                "atlas_files",
+                &json!({
+                    "project_path": repo,
+                    "query": "owner",
+                    "file_pattern": file_pattern,
+                    "content_selection": selection,
+                    "limit": limit,
+                }),
+            )?)?;
+            let mut paths = payload["files"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("classified MCP files omitted rows"))?
+                .iter()
+                .filter_map(|row| row["path"].as_str())
+                .collect::<Vec<_>>();
+            paths.sort_unstable();
+            if paths != expected {
+                return Err(io::Error::other(format!(
+                    "classified MCP files returned unexpected {selection} paths: {paths:?}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation_result, || session.shutdown())
+}
+
+#[test]
 fn default_scan_indexes_complete_accepted_core_surface() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
