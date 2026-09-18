@@ -182,3 +182,11 @@
 - [x] 26.5 With explicit publication authorization, publish `v0.5.0-rc1` as a non-draft prerelease from the exact accepted revision, independently read back tag, metadata, assets, checksums, installers, runtime/plugin/skill/MCP/CLI/host identity and E2E results, preserve v0.4.5 as Latest, and return every confirmed defect to its sanitized owning IssueOps/OpenSpec issue before another complete candidate.
 - [x] 26.6 After independent RC acceptance, preserve the unperformed stable v0.5.0 installed and hosted proof, publication, Latest movement, and downstream-pin reconciliation in separate follow-up #602 requiring explicit promotion authorization; synchronize RC OpenSpec/issues/reviews/milestone state and close #492 last.
 - [x] 26.7 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
+
+## 27. v0.5.0 RC2 release acceptance (#492)
+
+- [ ] 27.1 After every child closes from refreshed `main`, update all release-owned runtime, plugin, installer, package, documentation, workflow, and parser-pack identities to `0.5.0-rc2` through their existing single sources of truth.
+- [ ] 27.2 Freeze a clean current-main candidate and run OpenSpec, IssueOps, Rust/toolchain, database, documentation, dependency, packaging, release-policy, checksum, and parser-pack construction gates without weakening RC-first policy.
+- [ ] 27.3 Dispatch and read back the optional-parser-pack workflow for the candidate inputs; verify final versioned assets, native alias parity, hook package identity, parser-pack lifecycle, and installed upgrade behavior on Windows, Linux, macOS x64, and macOS arm64.
+- [ ] 27.4 With release authorization, publish `v0.5.0-rc2` as a non-draft prerelease, independently read back tag, metadata, assets, SHA256SUMS, runtime/plugin/skill/hook/MCP/CLI identity, installed behavior, and v0.4.5 Latest state.
+- [ ] 27.5 Resolve or disposition all automated and human feedback for the published candidate, synchronize release issue/OpenSpec/milestone state, retain stable promotion in #602, and close #492 last only after every required RC2 proof passes.
