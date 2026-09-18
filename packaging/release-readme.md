@@ -1,12 +1,12 @@
 # ProjectAtlas @RELEASE_VERSION@
 
-This archive contains the ProjectAtlas @RELEASE_VERSION@ runtime for Windows.
+This archive contains the ProjectAtlas @RELEASE_VERSION@ runtime.
 
 ## Verify and use this release
 
 Run these ordinary commands after installation:
 
-```powershell
+```text
 projectatlas --require-version @PACKAGE_VERSION@ --version
 atlas overview
 projectatlas overview

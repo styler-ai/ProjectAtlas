@@ -3230,6 +3230,8 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
     #[cfg(windows)]
     assert_windows_packaged_digest_admission()?;
+    #[cfg(not(windows))]
+    assert_unix_packaged_readme_admission()?;
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
@@ -25311,7 +25313,7 @@ fn assert_json_contract_subset(
 #[cfg(windows)]
 fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     let workspace = workspace_root()?;
-    let release = fs::read_to_string(workspace.join(".github/workflows/release.yml"))?;
+    let release = fs::read_to_string(workspace.join(RELEASE_WORKFLOW_PATH))?;
     let package = workflow_job_step(&release, "package-windows", "Package")?;
     let admission = workflow_job_step(
         &release,
@@ -25464,6 +25466,80 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             ))
             .into());
         }
+    }
+    Ok(())
+}
+
+/// Exercise the Unix package producer and inspect its rendered release guidance.
+#[cfg(not(windows))]
+fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
+    let workspace = workspace_root()?;
+    let release = fs::read_to_string(workspace.join(RELEASE_WORKFLOW_PATH))?;
+    let package = workflow_job_step(&release, "package-unix", "Package")?;
+    let producer = package["run"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Unix package script missing"))?
+        .replace("${{ matrix.suffix }}", "x86_64-unknown-linux-gnu");
+    let fixture_root = workspace.join(PROJECT_LOCAL_FIXTURE_DIR);
+    fs::create_dir_all(&fixture_root)?;
+    let temp = tempfile::Builder::new()
+        .prefix("packaged-unix-readme-")
+        .tempdir_in(fixture_root)?;
+    for directory in [
+        "target/release",
+        "packaging/pdf-parser/vendor/pdf-extract",
+        "contract-artifacts",
+    ] {
+        fs::create_dir_all(temp.path().join(directory))?;
+    }
+    fs::write(
+        temp.path().join("target/release/projectatlas"),
+        "packaged runtime authority\n",
+    )?;
+    for file in [
+        "LICENSE",
+        "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md",
+    ] {
+        fs::write(temp.path().join(file), "package fixture\n")?;
+    }
+    fs::copy(
+        workspace.join(RELEASE_README_TEMPLATE),
+        temp.path().join(RELEASE_README_TEMPLATE),
+    )?;
+    let script = temp.path().join("package.sh");
+    fs::write(&script, format!("set -eu\n{producer}"))?;
+    let output = StdCommand::new("sh")
+        .current_dir(temp.path())
+        .arg(&script)
+        .env("RELEASE_VERSION", "v0.5.0-rc2")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("Unix package producer failed: {output:?}")).into());
+    }
+    let readme = fs::read_to_string(temp.path().join("dist/projectatlas/README.md"))?;
+    for expected in [
+        "ProjectAtlas v0.5.0-rc2",
+        "projectatlas --require-version 0.5.0-rc2 --version",
+        "atlas overview",
+        "projectatlas overview",
+        "v0.4.5 (stable)",
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
+        "cannot change the\nenvironment inherited by an already-running host",
+        "Restart the environment-owning\nlauncher, Codex, or shell",
+    ] {
+        if !readme.contains(expected) {
+            return Err(io::Error::other(format!(
+                "packaged Unix README omitted required guidance: {expected:?}"
+            ))
+            .into());
+        }
+    }
+    if readme.contains("Windows") || readme.contains("```powershell") || readme.contains("](docs/")
+    {
+        return Err(io::Error::other(
+            "packaged Unix README retained platform-specific or local-link guidance",
+        )
+        .into());
     }
     Ok(())
 }
