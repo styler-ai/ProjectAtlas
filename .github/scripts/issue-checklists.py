@@ -2096,11 +2096,8 @@ def check_pull_request_tasks(
         else root / "openspec" / "issue-map.json"
     )
     base_label = "pull-request" if scope_label == "pull request" else scope_label
-    try:
-        release_children = release_owner_child_issues(repo, owner_issue)
-    except SystemExit as error:
-        return [f"{scope_label} native release children {error}"]
     related_issues = {owner_issue}
+    release_children: set[int] | None = None
     try:
         accepted_issue_map = base_issue_map(
             root,
@@ -2120,6 +2117,11 @@ def check_pull_request_tasks(
             )
         elif accepted_owners is None:
             if any(owner.issue not in related_issues for owner in candidate_owners):
+                if release_children is None:
+                    try:
+                        release_children = release_owner_child_issues(repo, owner_issue)
+                    except SystemExit as error:
+                        return [f"{scope_label} native release children {error}"]
                 if any(owner.issue not in release_children for owner in candidate_owners):
                     failures.append(
                         f"{change} adds unrelated mapped OpenSpec authority without an accepted "
