@@ -293,7 +293,11 @@ jobs:
           archive="projectatlas-${RELEASE_VERSION}-${{ matrix.suffix }}.tar.gz"
           mkdir -p "dist/projectatlas"
           cp target/release/projectatlas "dist/projectatlas/"
-          cp README.md LICENSE "dist/projectatlas/"
+          sed \
+            -e "s|@RELEASE_VERSION@|${RELEASE_VERSION}|g" \
+            -e "s|@PACKAGE_VERSION@|${RELEASE_VERSION#v}|g" \
+            packaging/release-readme.md > "dist/projectatlas/README.md"
+          cp LICENSE "dist/projectatlas/"
           cp packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md "dist/projectatlas/PDF-PARSER.md"
           tar -czf "$archive" -C dist projectatlas
           mkdir -p release-assets
@@ -438,7 +442,9 @@ jobs:
           $archive = "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
           New-Item -ItemType Directory -Force -Path "dist/projectatlas" | Out-Null
           Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
-          Copy-Item "README.md" "dist/projectatlas/"
+          $packageVersion = $env:RELEASE_VERSION.TrimStart('v')
+          (Get-Content "packaging/release-readme.md" -Raw).Replace("@RELEASE_VERSION@", $env:RELEASE_VERSION).Replace("@PACKAGE_VERSION@", $packageVersion) |
+            Set-Content -LiteralPath "dist/projectatlas/README.md" -Encoding utf8
           Copy-Item "LICENSE" "dist/projectatlas/"
           Copy-Item "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md" "dist/projectatlas/PDF-PARSER.md"
           Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force

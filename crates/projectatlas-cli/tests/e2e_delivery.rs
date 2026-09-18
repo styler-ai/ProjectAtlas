@@ -88,6 +88,8 @@ use support::{
     synchronize_prompt_exit_before_delayed_observation, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
+#[cfg(windows)]
+use zip::ZipArchive;
 
 const TEST_REPO_DIR: &str = "repo";
 const TEST_ISOLATED_HOME_DIR_NAME: &str = "isolated home";
@@ -104,6 +106,7 @@ const TEST_ATLAS_FORWARDER_FILE_NAME: &str = "atlas";
 const SRC_DIR_NAME: &str = "src";
 const PROJECT_LOCAL_FIXTURE_DIR: &str = ".tmp";
 const POSIX_INSTALLER_SCRIPT: &str = "plugins/projectatlas/scripts/install-runtime.sh";
+const RELEASE_README_TEMPLATE: &str = "packaging/release-readme.md";
 
 const DUPLICATE_RS_FILE_NAME: &str = "duplicate.rs";
 
@@ -25344,17 +25347,21 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         runtime_bytes,
     )?;
     for file in [
-        "README.md",
         "LICENSE",
         "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md",
     ] {
         fs::write(temp.path().join(file), "package fixture\n")?;
     }
+    fs::copy(
+        workspace.join(RELEASE_README_TEMPLATE),
+        temp.path().join(RELEASE_README_TEMPLATE),
+    )?;
     let script = temp.path().join("digest-admission.ps1");
     fs::write(
         &script,
         format!("$ErrorActionPreference = 'Stop'\n{producer}"),
     )?;
+    let release_version = "v0.5.0-rc2";
     let run = |runner: &Path| -> Result<std::process::Output, Box<dyn Error>> {
         Ok(StdCommand::new("pwsh")
             .current_dir(temp.path())
@@ -25366,7 +25373,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
                 "-File",
             ])
             .arg(&script)
-            .env("RELEASE_VERSION", format!("v{}", env!("CARGO_PKG_VERSION")))
+            .env("RELEASE_VERSION", release_version)
             .env("RUNNER_TEMP", runner)
             .output()?)
     };
@@ -25374,10 +25381,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     if !output.status.success() {
         return Err(io::Error::other(format!("Windows digest producer failed: {output:?}")).into());
     }
-    let archive_name = format!(
-        "projectatlas-v{}-x86_64-pc-windows-msvc.zip",
-        env!("CARGO_PKG_VERSION")
-    );
+    let archive_name = format!("projectatlas-{release_version}-x86_64-pc-windows-msvc.zip");
     let archive = temp.path().join("release-assets").join(&archive_name);
     let manifest = temp
         .path()
@@ -25386,6 +25390,33 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     let archive_bytes = fs::read(&archive)?;
     let manifest_bytes = fs::read(&manifest)?;
     let manifest_text = String::from_utf8(manifest_bytes.clone())?;
+    let mut archive_reader = ZipArchive::new(io::Cursor::new(&archive_bytes))?;
+    let mut readme = String::new();
+    archive_reader
+        .by_name("README.md")?
+        .read_to_string(&mut readme)?;
+    for expected in [
+        "ProjectAtlas v0.5.0-rc2",
+        "projectatlas --require-version 0.5.0-rc2 --version",
+        "atlas overview",
+        "projectatlas overview",
+        "v0.4.5 (stable)",
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
+        "cannot change the\nenvironment inherited by an already-running host",
+        "Restart the environment-owning\nlauncher, Codex, or shell",
+    ] {
+        if !readme.contains(expected) {
+            return Err(io::Error::other(format!(
+                "packaged Windows README omitted required guidance: {expected:?}"
+            ))
+            .into());
+        }
+    }
+    if readme.contains("](docs/") {
+        return Err(
+            io::Error::other("packaged Windows README retained a broken local docs link").into(),
+        );
+    }
     for expected in [
         format!("{}  {archive_name}", sha256_hex(&archive_bytes)),
         format!("{}  projectatlas.exe", sha256_hex(runtime_bytes)),
