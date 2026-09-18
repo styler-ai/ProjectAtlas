@@ -4535,6 +4535,27 @@ Timeout --> Recovery
                 "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
             ) == []
             assert live_reads == [2, 3], "release owners must mirror direct child tasks"
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(malformed_release_map), encoding="utf-8"
+            )
+
+            def candidate_tree_release_graph(
+                _ref: str, _root: Path, path: str | Path, _label: str
+            ) -> str:
+                if Path(path).name == "issue-map.json":
+                    return json.dumps(release_map)
+                return candidate_tasks
+            globals()["candidate_tree_file_text"] = candidate_tree_release_graph
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, release_issue_map, 2, "accepted-base",
+                candidate_tree_ref="candidate-head",
+            ) == []
+            globals()["candidate_tree_file_text"] = saved_candidate_helpers[
+                "candidate_tree_file_text"
+            ]
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
             unrelated_issue_map = {
                 **release_issue_map,
                 "change-unrelated": (Owner(4),),
