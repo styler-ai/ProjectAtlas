@@ -140,6 +140,18 @@
         { "issue": 492, "first_task": "26.1", "last_task": "27.5" }
       ]
     },
+    "v050-rc2-remediation": {
+      "contract": "checklist-v1",
+      "primary_issue": 604,
+      "owners": [
+        { "issue": 604, "first_task": "1.1", "last_task": "2.4" },
+        { "issue": 605, "first_task": "3.1", "last_task": "3.4" },
+        { "issue": 606, "first_task": "4.1", "last_task": "4.4" },
+        { "issue": 607, "first_task": "5.1", "last_task": "5.4" },
+        { "issue": 608, "first_task": "6.1", "last_task": "6.4" },
+        { "issue": 609, "first_task": "7.1", "last_task": "7.4" }
+      ]
+    },
     "complete-v060-release-acceptance": {
       "contract": "checklist-v1",
       "primary_issue": 493,

@@ -1981,6 +1981,36 @@ def base_local_tasks(
     return tasks
 
 
+def release_owner_child_issues(
+    issue_map_path: str | Path, owner_issue: int
+) -> set[int]:
+    """Return children the selected release owner may introduce in its own PR."""
+
+    try:
+        payload = json.loads(Path(issue_map_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    graphs = payload.get("release_graphs") if isinstance(payload, dict) else None
+    if not isinstance(graphs, dict):
+        return set()
+    children: set[int] = set()
+    for declaration in graphs.values():
+        if (
+            not isinstance(declaration, dict)
+            or declaration.get("release_issue") != owner_issue
+        ):
+            continue
+        issues = declaration.get("issues")
+        if not isinstance(issues, dict):
+            continue
+        for number in issues:
+            if isinstance(number, str) and re.fullmatch(r"[1-9][0-9]*", number):
+                child = int(number)
+                if child != owner_issue:
+                    children.add(child)
+    return children
+
+
 def check_pull_request_tasks(
     repo: str,
     root: Path,
@@ -2054,6 +2084,10 @@ def check_pull_request_tasks(
         else root / "openspec" / "issue-map.json"
     )
     base_label = "pull-request" if scope_label == "pull request" else scope_label
+    release_children = release_owner_child_issues(
+        configured_issue_map_path, owner_issue
+    )
+    related_issues = {owner_issue}
     try:
         accepted_issue_map = base_issue_map(
             root,
@@ -2072,11 +2106,14 @@ def check_pull_request_tasks(
                 f"{base_ref}: owners {accepted_owners!r}"
             )
         elif accepted_owners is None:
-            if any(owner.issue != owner_issue for owner in candidate_owners):
-                failures.append(
-                    f"{change} adds unrelated mapped OpenSpec authority without an accepted "
-                    f"{base_label} base slice"
-                )
+            if any(owner.issue not in related_issues for owner in candidate_owners):
+                if any(owner.issue not in release_children for owner in candidate_owners):
+                    failures.append(
+                        f"{change} adds unrelated mapped OpenSpec authority without an accepted "
+                        f"{base_label} base slice"
+                    )
+                else:
+                    related_issues.update(owner.issue for owner in candidate_owners)
         elif candidate_owners != accepted_owners:
             owner_only_range_change = (
                 tuple(owner.issue for owner in candidate_owners)
@@ -2117,7 +2154,7 @@ def check_pull_request_tasks(
         unrelated_slices = [
             (owner, expected)
             for owner, expected in candidate_slices
-            if owner.issue != owner_issue and issue_states[owner.issue] == "OPEN"
+            if owner.issue not in related_issues and issue_states[owner.issue] == "OPEN"
         ]
         base_slices: dict[int, list[tuple[bool, str]]] = {}
         if unrelated_slices:
@@ -2138,7 +2175,7 @@ def check_pull_request_tasks(
                 failures.append(str(error))
                 continue
         for owner, expected in candidate_slices:
-            if owner.issue != owner_issue:
+            if owner.issue not in related_issues:
                 if issue_states[owner.issue] != "OPEN":
                     continue
                 accepted = base_slices.get(owner.issue)
@@ -4352,6 +4389,51 @@ Timeout --> Recovery
             ) == []
             assert live_reads == [2], "candidate checks must read live state only for the owner"
             assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            release_map = {
+                "schema_version": 2,
+                "release_graphs": {
+                    "v1.2.3-00": {
+                        "release_issue": 2,
+                        "issues": {
+                            "2": {"blocked_by": [3]},
+                            "3": {"blocked_by": []},
+                        },
+                    }
+                },
+                "changes": {},
+            }
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            child_tasks = (
+                branch_root / "openspec" / "changes" / "change-child" / "tasks.md"
+            )
+            child_tasks.parent.mkdir(parents=True)
+            child_tasks.write_text(candidate_tasks, encoding="utf-8")
+            live_payloads[3] = {"state": "OPEN", "body": issue_contract}
+            release_issue_map = {**issue_map, "change-child": (Owner(3),)}
+            live_reads.clear()
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+            ) == []
+            assert live_reads == [2, 3], "release owners must mirror direct child tasks"
+            unrelated_issue_map = {
+                **release_issue_map,
+                "change-unrelated": (Owner(4),),
+            }
+            unrelated_tasks = (
+                branch_root / "openspec" / "changes" / "change-unrelated" / "tasks.md"
+            )
+            unrelated_tasks.parent.mkdir(parents=True)
+            unrelated_tasks.write_text(candidate_tasks, encoding="utf-8")
+            live_payloads[4] = {"state": "OPEN", "body": issue_contract}
+            assert any(
+                "adds unrelated mapped OpenSpec authority" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, unrelated_issue_map, 2, "accepted-base"
+                )
+            )
 
             live_payloads[1] = {"state": "CLOSED", "body": issue_contract}
             change_a_tasks = (
