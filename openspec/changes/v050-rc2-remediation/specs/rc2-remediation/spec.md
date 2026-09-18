@@ -10,6 +10,10 @@ The reopened v0.5.0 release owner SHALL map #604 through #609 to non-overlapping
 ### Requirement: RC2 repairs the six audited installed-product boundaries
 RC2 SHALL deliver bounded lifecycle guidance (#604), real-indexed classified discovery (#605), version-matched package guidance (#606), versioned parser-pack filename admission (#607), argument-preserving Windows atlas invocation (#608), and causal recoverable Windows parser-pack containment admission (#609).
 
+#### Scenario: Lifecycle guidance is independent of host PATH
+- **WHEN** a trusted Codex SessionStart hook emits ProjectAtlas guidance while PATH contains a shadow `projectatlas` executable
+- **THEN** the hook reads its bounded guidance asset through the installed plugin root and does not execute the shadow or any ProjectAtlas runtime
+
 #### Scenario: All owning fixes are accepted
 - **WHEN** each mapped remediation issue is completed
 - **THEN** its focused regression and installed-product proof pass without relaxing containment, trust, or stable-release policy
