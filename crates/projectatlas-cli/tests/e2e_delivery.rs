@@ -25310,17 +25310,18 @@ fn assert_json_contract_subset(
 }
 
 fn assert_packaged_readme_command_order(readme: &str) -> io::Result<()> {
+    let readme = readme.replace("\r\n", "\n");
     let mut offset = 0;
     for command in [
-        "projectatlas --require-version 0.5.0-rc2 --version",
-        "projectatlas init",
-        "atlas overview",
-        "projectatlas overview",
+        "\nprojectatlas --require-version 0.5.0-rc2 --version\n",
+        "\nprojectatlas init\n",
+        "\natlas overview\n",
+        "\nprojectatlas overview\n",
     ] {
         let position = readme[offset..].find(command).ok_or_else(|| {
-            io::Error::other(format!("packaged README command order omitted {command:?}"))
+            io::Error::other(format!("packaged README omitted or reordered {command:?}"))
         })?;
-        offset += position + command.len();
+        offset += position + command.len() - 1;
     }
     Ok(())
 }
@@ -25533,7 +25534,20 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     if !output.status.success() {
         return Err(io::Error::other(format!("Unix package producer failed: {output:?}")).into());
     }
-    let readme = fs::read_to_string(temp.path().join("dist/projectatlas/README.md"))?;
+    let archive = temp
+        .path()
+        .join("release-assets/projectatlas-v0.5.0-rc2-x86_64-unknown-linux-gnu.tar.gz");
+    let output = StdCommand::new("tar")
+        .args(["-xOf"])
+        .arg(&archive)
+        .arg("projectatlas/README.md")
+        .output()?;
+    if !output.status.success() {
+        return Err(
+            io::Error::other(format!("Unix package archive read failed: {output:?}")).into(),
+        );
+    }
+    let readme = String::from_utf8(output.stdout)?;
     for expected in [
         "ProjectAtlas v0.5.0-rc2",
         "projectatlas --require-version 0.5.0-rc2 --version",
