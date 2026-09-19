@@ -7,7 +7,7 @@ This archive contains the ProjectAtlas @RELEASE_VERSION@ runtime.
 Run these ordinary commands after installation:
 
 ```text
-projectatlas --require-version @PACKAGE_VERSION@ --version
+projectatlas --require-version @PACKAGE_VERSION@ --format json runtime-info
 projectatlas init
 atlas overview
 projectatlas overview

@@ -25351,7 +25351,7 @@ fn assert_packaged_readme_command_order(readme: &str) -> io::Result<()> {
     let readme = readme.replace("\r\n", "\n");
     let mut offset = 0;
     for command in [
-        "\nprojectatlas --require-version 0.5.0-rc2 --version\n",
+        "\nprojectatlas --require-version 0.5.0-rc2 --format json runtime-info\n",
         "\nprojectatlas init\n",
         "\natlas overview\n",
         "\nprojectatlas overview\n",
@@ -25458,7 +25458,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         .read_to_string(&mut readme)?;
     for expected in [
         "ProjectAtlas v0.5.0-rc2",
-        "projectatlas --require-version 0.5.0-rc2 --version",
+        "projectatlas --require-version 0.5.0-rc2 --format json runtime-info",
         "projectatlas init",
         "atlas overview",
         "projectatlas overview",
@@ -25623,7 +25623,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     let readme = String::from_utf8(output.stdout)?;
     for expected in [
         "ProjectAtlas v0.5.0-rc2",
-        "projectatlas --require-version 0.5.0-rc2 --version",
+        "projectatlas --require-version 0.5.0-rc2 --format json runtime-info",
         "projectatlas init",
         "atlas overview",
         "projectatlas overview",
