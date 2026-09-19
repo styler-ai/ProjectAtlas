@@ -44,6 +44,7 @@ jobs:
       stable_tag: ${{ steps.release_version.outputs.stable_tag }}
       milestone: ${{ steps.release_version.outputs.milestone }}
       is_prerelease: ${{ steps.release_version.outputs.is_prerelease }}
+      current_stable_tag: ${{ steps.current_stable.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -58,6 +59,18 @@ jobs:
             "$RELEASE_VERSION" \
             --source release \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Resolve current stable release
+        id: current_stable
+        if: ${{ steps.release_version.outputs.is_prerelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          python3 .github/scripts/release_version.py "$tag" --source release |
+            grep -Fx 'is_prerelease=false' > /dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Verify workspace version
         env:
@@ -215,7 +228,7 @@ jobs:
     timeout-minutes: 30
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
-      RELEASE_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
+      RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -297,7 +310,7 @@ jobs:
           mkdir -p "dist/projectatlas"
           cp target/release/projectatlas "dist/projectatlas/"
           if [[ "$RELEASE_IS_PRERELEASE" == "true" ]]; then
-            release_channel_guidance="This archive is the ${RELEASE_VERSION} prerelease. For the stable channel, use [$RELEASE_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$RELEASE_STABLE_TAG)."
+            release_channel_guidance="This archive is the ${RELEASE_VERSION} prerelease. For the stable channel, use [$RELEASE_CURRENT_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$RELEASE_CURRENT_STABLE_TAG)."
           else
             release_channel_guidance="This archive is the ${RELEASE_VERSION} stable release."
           fi
@@ -348,7 +361,7 @@ jobs:
     timeout-minutes: 30
     env:
       RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
-      RELEASE_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
+      RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -456,7 +469,7 @@ jobs:
           Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
           $packageVersion = $env:RELEASE_VERSION.TrimStart('v')
           if ($env:RELEASE_IS_PRERELEASE -eq "true") {
-            $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) prerelease. For the stable channel, use [$env:RELEASE_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$env:RELEASE_STABLE_TAG)."
+            $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) prerelease. For the stable channel, use [$env:RELEASE_CURRENT_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$env:RELEASE_CURRENT_STABLE_TAG)."
           } else {
             $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) stable release."
           }
