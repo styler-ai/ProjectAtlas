@@ -35,9 +35,9 @@
 
 ## 6. Windows atlas argument parity (#608)
 
-- [ ] 6.1 Trace installer ownership, collision handling, atomic replacement, repair, uninstall, PATH registration, and existing `atlas.cmd` callers; confirm the direct executable-alias mechanism preserves the verified runtime contract without a new forwarding framework.
-- [ ] 6.2 Replace the Windows batch argument-reconstruction path with the smallest collision-safe, atomic, version-matched native `atlas` alias and retain canonical `projectatlas` plus exact result propagation.
-- [ ] 6.3 Exercise PowerShell JSON entrypoint and trace-target routes, empty values, spaces, Unicode, metacharacters, collision refusal, stale-alias repair, update, uninstall, and runtime/version identity parity.
+- [x] 6.1 Trace installer ownership, collision handling, atomic replacement, repair, uninstall, PATH registration, and existing `atlas.cmd` callers; confirm the direct executable-alias mechanism preserves the verified runtime contract without a new forwarding framework.
+- [x] 6.2 Replace the Windows batch argument-reconstruction path with the smallest collision-safe, atomic, version-matched native `atlas` alias and retain canonical `projectatlas` plus exact result propagation.
+- [x] 6.3 Exercise PowerShell JSON entrypoint and trace-target routes, empty values, spaces, Unicode, metacharacters, collision refusal, stale-alias repair, update, uninstall, and runtime/version identity parity.
 - [ ] 6.4 Run the owning Windows installer/E2E proof and review the final #608 boundary against its acceptance criteria.
 
 ## 7. Windows parser-pack containment admission (#609)

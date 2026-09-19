@@ -95,6 +95,14 @@ const TEST_REPO_DIR: &str = "repo";
 const TEST_ISOLATED_HOME_DIR_NAME: &str = "isolated home";
 const TEST_RUNTIME_DIR_NAME: &str = "runtime";
 const TEST_FORWARDER_PROVENANCE_FILE_NAME: &str = ".atlas-forwarder.provenance";
+
+fn test_atlas_forwarder_provenance_file_name() -> &'static str {
+    if cfg!(windows) {
+        ".atlas-exe-forwarder.provenance"
+    } else {
+        TEST_FORWARDER_PROVENANCE_FILE_NAME
+    }
+}
 const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
 const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
 const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
@@ -2457,7 +2465,7 @@ fn windows_installer_fresh_path_probe_respects_machine_precedence() -> Result<()
         r#"
 $ErrorActionPreference = 'Stop'
 $source = [IO.File]::ReadAllText($env:PROJECTATLAS_DISCOVERY_INSTALLER)
-foreach ($name in @('Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Get-ProjectAtlasAtlasForwarderPath', 'Assert-ProjectAtlasAtlasForwarderCollisionFree', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Write-ProjectAtlasPathShadowReport', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
+foreach ($name in @('Test-ProjectAtlasWindows', 'Get-NormalizedPathEntry', 'Get-ProjectAtlasShellCommand', 'Get-ProjectAtlasAtlasForwarderPath', 'Assert-ProjectAtlasAtlasForwarderCollisionFree', 'Test-ProjectAtlasBareCommandResolutionOnPath', 'Write-ProjectAtlasPathShadowReport', 'Find-Cargo', 'Resolve-ProjectAtlasCodexCommand', 'Test-ProjectAtlasCodexCommandAvailable')) {
     $definition = [regex]::Match($source, "(?ms)^function $name \{.*?^\}")
     if (-not $definition.Success) { throw "Missing command discovery owner: $name" }
     Invoke-Expression $definition.Value
@@ -31030,11 +31038,11 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     let forwarder = runtime
         .parent()
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
-        .join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+        .join(if cfg!(windows) { "atlas.exe" } else { "atlas" });
     let provenance = runtime
         .parent()
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
-        .join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+        .join(test_atlas_forwarder_provenance_file_name());
     let unmanaged_collision = b"unmanaged atlas collision\n";
     fs::write(&forwarder, unmanaged_collision)?;
     let project_state_before_collision = repository_filesystem_snapshot(&repo)?;
@@ -31077,22 +31085,23 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             String::from_utf8_lossy(&first_output.stderr)
         ),
     )?;
-    let forwarder_text = fs::read_to_string(&forwarder)?;
+    #[cfg(windows)]
+    let mut forwarder_bytes = fs::read(&forwarder)?;
+    #[cfg(not(windows))]
+    let forwarder_bytes = fs::read(&forwarder)?;
     let canonical_runtime = runtime.to_string_lossy();
-    let expected_forwarder_text = if cfg!(windows) {
-        format!(
-            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
-            canonical_runtime.replace('%', "%%"),
-        )
-    } else {
+    #[cfg(windows)]
+    let mut expected_forwarder_bytes = fs::read(&runtime)?;
+    #[cfg(not(windows))]
+    let expected_forwarder_bytes = {
         format!(
             "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
-        )
+        ).into_bytes()
     };
     require(
-        forwarder_text == expected_forwarder_text,
+        forwarder_bytes == expected_forwarder_bytes,
         format!(
-            "installer did not publish the exact managed forwarder body to the canonical runtime: {}\nactual={forwarder_text:?}\nexpected={expected_forwarder_text:?}",
+            "installer did not publish the exact managed forwarder bytes to the canonical runtime: {}",
             forwarder.display()
         ),
     )?;
@@ -31199,7 +31208,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         require(
             repaired.status.success()
                 && fs::metadata(&forwarder)?.permissions().mode() & 0o777 == 0o755
-                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read(&forwarder)? == expected_forwarder_bytes
                 && fs::read_to_string(&provenance)? == expected_provenance
                 && fs::read(&installer_state)? == retained_state
                 && StdCommand::new(&forwarder)
@@ -31229,6 +31238,49 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     #[cfg(windows)]
     {
+        let stale_forwarder_bytes = fs::read(&forwarder)?;
+        expected_forwarder_bytes.extend_from_slice(b"ProjectAtlas RC2 owned alias update\r\n");
+        fs::write(&runtime, &expected_forwarder_bytes)?;
+        let runtime_replacement = run_install()?;
+        require(
+            runtime_replacement.status.success()
+                && fs::read(&forwarder)? == expected_forwarder_bytes
+                && fs::read(&forwarder)? != stale_forwarder_bytes
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? != retained_state,
+            format!(
+                "installer did not refresh an owned native alias after its runtime changed in place:\n{}\n{}",
+                String::from_utf8_lossy(&runtime_replacement.stdout),
+                String::from_utf8_lossy(&runtime_replacement.stderr)
+            ),
+        )?;
+        let refreshed_state = fs::read(&installer_state)?;
+        expected_forwarder_bytes.extend_from_slice(b"ProjectAtlas RC2 state refresh retry\r\n");
+        fs::write(&runtime, &expected_forwarder_bytes)?;
+        let refresh_failure = run_install_with_env(
+            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STATE_REFRESH_FAILURE",
+            Path::new("1"),
+        )?;
+        require(
+            !refresh_failure.status.success()
+                && fs::read(&forwarder)? == expected_forwarder_bytes
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? == refreshed_state,
+            "state refresh failure did not preserve the new alias with its prior state for retry",
+        )?;
+        let refresh_recovery = run_install()?;
+        require(
+            refresh_recovery.status.success()
+                && fs::read(&forwarder)? == expected_forwarder_bytes
+                && fs::read_to_string(&provenance)? == expected_provenance
+                && fs::read(&installer_state)? != refreshed_state,
+            format!(
+                "installer did not repair a retained state hash after refresh failure:\n{}\n{}",
+                String::from_utf8_lossy(&refresh_recovery.stdout),
+                String::from_utf8_lossy(&refresh_recovery.stderr),
+            ),
+        )?;
+        forwarder_bytes = expected_forwarder_bytes.clone();
         let runtime_casing = PathBuf::from(runtime.to_string_lossy().to_uppercase());
         let run_with_runtime_casing =
             |uninstall: bool| -> Result<std::process::Output, Box<dyn Error>> {
@@ -31253,7 +31305,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         let update = run_with_runtime_casing(false)?;
         require(
             update.status.success()
-                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read(&forwarder)? == expected_forwarder_bytes
                 && fs::read_to_string(&provenance)? == expected_provenance
                 && fs::read(&installer_state)? == retained_state,
             format!(
@@ -31265,7 +31317,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         fs::remove_file(&forwarder)?;
         require(
             run_with_runtime_casing(false)?.status.success()
-                && fs::read_to_string(&forwarder)? == expected_forwarder_text
+                && fs::read(&forwarder)? == expected_forwarder_bytes
                 && fs::read_to_string(&provenance)? == expected_provenance
                 && installer_state.is_file(),
             "runtime path casing prevented missing-forwarder repair",
@@ -31282,62 +31334,18 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     #[cfg(windows)]
     {
-        let legacy_body = format!(
-            "@echo off\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
-            canonical_runtime.replace('%', "%%"),
-        );
         let retained_state = fs::read(&installer_state)?;
-        fs::write(&forwarder, &legacy_body)?;
-        let failed_stage = run_install_with_env(
-            "PROJECTATLAS_TEST_ATLAS_FORWARDER_STAGE_FAILURE",
-            Path::new("1"),
-        )?;
+        fs::write(&forwarder, b"foreign native alias collision\r\n")?;
+        let failed_stage = run_install()?;
         require(
             !failed_stage.status.success()
-                && fs::read_to_string(&forwarder)? == legacy_body
+                && fs::read(&forwarder)? == b"foreign native alias collision\r\n"
                 && fs::read_to_string(&provenance)? == expected_provenance
                 && fs::read(&installer_state)? == retained_state,
-            "legacy forwarder staging failure changed the owned installation",
+            "native alias collision changed authenticated ownership",
         )?;
-        let repaired = run_install()?;
-        require(
-            repaired.status.success()
-                && fs::read_to_string(&forwarder)? == expected_forwarder_text
-                && fs::read_to_string(&provenance)? == expected_provenance
-                && fs::read(&installer_state)? == retained_state,
-            "same-path update retained the legacy forwarder or changed its ownership metadata",
-        )?;
-        for race in [
-            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RACE_PATH",
-            "PROJECTATLAS_TEST_ATLAS_FORWARDER_RETIRE_RACE_PATH",
-        ] {
-            fs::write(&forwarder, &legacy_body)?;
-            let prior_paths = fs::read_dir(&runtime_dir)?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<Result<Vec<_>, io::Error>>()?;
-            let collided = run_install_with_env(race, &forwarder)?;
-            require(
-                !collided.status.success()
-                    && fs::read_to_string(&forwarder)?.starts_with("# foreign ")
-                    && fs::read_to_string(&provenance)? == expected_provenance
-                    && fs::read(&installer_state)? == retained_state
-                    && fs::read_dir(&runtime_dir)?
-                        .collect::<Result<Vec<_>, io::Error>>()?
-                        .iter()
-                        .any(|entry| {
-                            !prior_paths.contains(&entry.path())
-                                && entry
-                                    .file_name()
-                                    .to_string_lossy()
-                                    .starts_with(".atlas-forwarder-retire-")
-                                && fs::read_to_string(entry.path())
-                                    .is_ok_and(|body| body == legacy_body)
-                        }),
-                "legacy update collision lost the prior forwarder or changed foreign/owned state",
-            )?;
-            fs::remove_file(&forwarder)?;
-        }
-        fs::write(&forwarder, &expected_forwarder_text)?;
+        fs::remove_file(&forwarder)?;
+        fs::write(&forwarder, &expected_forwarder_bytes)?;
     }
 
     #[cfg(unix)]
@@ -31764,15 +31772,20 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     };
     let direct_output = run_direct(&direct_database)?;
     let alias_output = if cfg!(windows) {
-        StdCommand::new("cmd")
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+        let runtime_dir = runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?;
+        let script = format!(
+            "$env:PATH = {} + ';' + $env:PATH; & atlas --require-version {} --format json --db {} init; exit $LASTEXITCODE",
+            quote(&runtime_dir.to_string_lossy()),
+            quote(env!("CARGO_PKG_VERSION")),
+            quote(&alias_database.to_string_lossy()),
+        );
+        StdCommand::new("powershell")
             .current_dir(&repo)
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .args(["/D", "/C", "call"])
-            .env("PATH", &run_path)
-            .arg("atlas")
-            .args(arguments)
-            .arg(&alias_database)
-            .arg("init")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()?
     } else {
         StdCommand::new(&forwarder)
@@ -31796,6 +31809,181 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             String::from_utf8_lossy(&alias_output.stderr)
         ),
     )?;
+    #[cfg(windows)]
+    {
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+        let runtime_dir = runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?;
+        for (label, arguments) in [
+            (
+                "entrypoint JSON",
+                vec![
+                    "--db".to_string(),
+                    alias_database.to_string_lossy().to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "symbols".to_string(),
+                    "relations".to_string(),
+                    "--view".to_string(),
+                    "analysis".to_string(),
+                    "--analysis-mode".to_string(),
+                    "entrypoint".to_string(),
+                    "--profile-name=".to_string(),
+                    "--entrypoint".to_string(),
+                    r#"{\"kind\":\"file\",\"file\":\"src/missing.rs\"}"#.to_string(),
+                ],
+            ),
+            (
+                "trace-target JSON",
+                vec![
+                    "--db".to_string(),
+                    alias_database.to_string_lossy().to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "symbols".to_string(),
+                    "relations".to_string(),
+                    "--view".to_string(),
+                    "analysis".to_string(),
+                    "--analysis-mode".to_string(),
+                    "trace".to_string(),
+                    "--file".to_string(),
+                    "src/lib.rs".to_string(),
+                    "--trace-target".to_string(),
+                    r#"{\"kind\":\"file\",\"file\":\"src/missing.rs\"}"#.to_string(),
+                ],
+            ),
+        ] {
+            let script_for = |command: &str| {
+                format!(
+                    "$env:PATH = {} + ';' + $env:PATH; & {command} {}; exit $LASTEXITCODE",
+                    quote(&runtime_dir.to_string_lossy()),
+                    arguments
+                        .iter()
+                        .map(|argument| quote(argument))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            };
+            let direct_script = script_for("projectatlas");
+            let direct = StdCommand::new("powershell")
+                .current_dir(&repo)
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &direct_script])
+                .output()?;
+            let script = script_for("atlas");
+            let alias = StdCommand::new("powershell")
+                .current_dir(&repo)
+                .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()?;
+            let direct_stderr =
+                String::from_utf8_lossy(&direct.stderr).replace("projectatlas.exe", "<runtime>");
+            let alias_stderr =
+                String::from_utf8_lossy(&alias.stderr).replace("atlas.exe", "<runtime>");
+            require(
+                direct.status == alias.status
+                    && direct.stdout == alias.stdout
+                    && direct_stderr == alias_stderr
+                    && direct_stderr.contains("is not indexed"),
+                format!(
+                    "PowerShell atlas changed {label}: direct={} stdout={:?} stderr={:?}; alias={} stdout={:?} stderr={:?}",
+                    direct.status,
+                    String::from_utf8_lossy(&direct.stdout),
+                    String::from_utf8_lossy(&direct.stderr),
+                    alias.status,
+                    String::from_utf8_lossy(&alias.stdout),
+                    String::from_utf8_lossy(&alias.stderr),
+                ),
+            )?;
+        }
+        let special_json = r#"{"kind":"file","file":"src/space & ünicode; $literal !.rs"}"#;
+        for (label, arguments) in [
+            (
+                "entrypoint JSON with PowerShell metacharacters",
+                vec![
+                    "--db".to_string(),
+                    alias_database.to_string_lossy().to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "symbols".to_string(),
+                    "relations".to_string(),
+                    "--view".to_string(),
+                    "analysis".to_string(),
+                    "--analysis-mode".to_string(),
+                    "entrypoint".to_string(),
+                    "--entrypoint".to_string(),
+                    special_json.to_string(),
+                ],
+            ),
+            (
+                "trace-target JSON with PowerShell metacharacters",
+                vec![
+                    "--db".to_string(),
+                    alias_database.to_string_lossy().to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "symbols".to_string(),
+                    "relations".to_string(),
+                    "--view".to_string(),
+                    "analysis".to_string(),
+                    "--analysis-mode".to_string(),
+                    "trace".to_string(),
+                    "--file".to_string(),
+                    "src/lib.rs".to_string(),
+                    "--trace-target".to_string(),
+                    special_json.to_string(),
+                ],
+            ),
+        ] {
+            let script_for = |command: &str| {
+                let command_line = arguments
+                    .iter()
+                    .map(|argument| format!("\"{}\"", argument.replace('"', r#"\""#)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "$env:PATH = {} + ';' + $env:PATH\n$startInfo = [System.Diagnostics.ProcessStartInfo]::new()\n$startInfo.FileName = '{command}'\n$startInfo.Arguments = '{}'\n$startInfo.UseShellExecute = $false\n$startInfo.RedirectStandardOutput = $true\n$startInfo.RedirectStandardError = $true\n$process = [System.Diagnostics.Process]::Start($startInfo)\n$stdout = $process.StandardOutput.ReadToEnd()\n$stderr = $process.StandardError.ReadToEnd()\n$process.WaitForExit()\n[Console]::Out.Write($stdout)\n[Console]::Error.Write($stderr)\nexit $process.ExitCode\n",
+                    quote(&runtime_dir.to_string_lossy()),
+                    command_line.replace('\'', "''"),
+                )
+            };
+            let run =
+                |command: &str, file_stem: &str| -> Result<std::process::Output, Box<dyn Error>> {
+                    let script_path = repo.join(format!("{file_stem}.ps1"));
+                    let mut script = vec![0xef, 0xbb, 0xbf];
+                    script.extend_from_slice(script_for(command).as_bytes());
+                    fs::write(&script_path, script)?;
+                    Ok(StdCommand::new("powershell")
+                        .current_dir(&repo)
+                        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+                        .args(["-NoProfile", "-NonInteractive", "-File"])
+                        .arg(script_path)
+                        .output()?)
+                };
+            let direct = run("projectatlas", "projectatlas-special-json")?;
+            let alias = run("atlas", "atlas-special-json")?;
+            let direct_stderr =
+                String::from_utf8_lossy(&direct.stderr).replace("projectatlas.exe", "<runtime>");
+            let alias_stderr =
+                String::from_utf8_lossy(&alias.stderr).replace("atlas.exe", "<runtime>");
+            require(
+                direct.status == alias.status
+                    && direct.stdout == alias.stdout
+                    && direct_stderr == alias_stderr
+                    && direct_stderr.contains("is not indexed"),
+                format!(
+                    "PowerShell atlas changed {label}: direct={} stdout={:?} stderr={:?}; alias={} stdout={:?} stderr={:?}",
+                    direct.status,
+                    String::from_utf8_lossy(&direct.stdout),
+                    String::from_utf8_lossy(&direct.stderr),
+                    alias.status,
+                    String::from_utf8_lossy(&alias.stdout),
+                    String::from_utf8_lossy(&alias.stderr),
+                ),
+            )?;
+        }
+    }
     let direct_health = StdCommand::new(&runtime)
         .current_dir(&repo)
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
@@ -31803,26 +31991,13 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         .arg(&direct_database)
         .args(["health", "--summary-only"])
         .output()?;
-    let alias_health = if cfg!(windows) {
-        StdCommand::new("cmd")
-            .current_dir(&repo)
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .args(["/D", "/C", "call"])
-            .env("PATH", &run_path)
-            .arg("atlas")
-            .args(arguments)
-            .arg(&direct_database)
-            .args(["health", "--summary-only"])
-            .output()?
-    } else {
-        StdCommand::new(&forwarder)
-            .current_dir(&repo)
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .args(arguments)
-            .arg(&direct_database)
-            .args(["health", "--summary-only"])
-            .output()?
-    };
+    let alias_health = StdCommand::new(&forwarder)
+        .current_dir(&repo)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(arguments)
+        .arg(&direct_database)
+        .args(["health", "--summary-only"])
+        .output()?;
     require(
         direct_health.status == alias_health.status
             && direct_health.stdout == alias_health.stdout
@@ -31839,23 +32014,28 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .args(["--format", "toon", "runtime-info"])
         .output()?;
-    let alias_info = if cfg!(windows) {
-        StdCommand::new("cmd")
-            .args(["/D", "/C", "call"])
-            .env("PATH", &run_path)
-            .arg("atlas")
-            .args(["--format", "toon", "runtime-info"])
-            .output()?
-    } else {
-        StdCommand::new(&forwarder)
-            .args(["--format", "toon", "runtime-info"])
-            .output()?
-    };
+    let alias_info = StdCommand::new(&forwarder)
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let direct_info_text = String::from_utf8_lossy(&direct_info.stdout).replace(
+        &runtime.to_string_lossy().replace('\\', "/"),
+        "<verified-runtime>",
+    );
+    let alias_info_text = String::from_utf8_lossy(&alias_info.stdout).replace(
+        &forwarder.to_string_lossy().replace('\\', "/"),
+        "<verified-runtime>",
+    );
     require(
         direct_info.status == alias_info.status
-            && direct_info.stdout == alias_info.stdout
+            && direct_info_text == alias_info_text
             && direct_info.stderr == alias_info.stderr,
-        "atlas and projectatlas runtime-info streams diverged",
+        format!(
+            "atlas and projectatlas runtime-info streams diverged: direct={} stdout={direct_info_text:?} stderr={:?}; alias={} stdout={alias_info_text:?} stderr={:?}",
+            direct_info.status,
+            String::from_utf8_lossy(&direct_info.stderr),
+            alias_info.status,
+            String::from_utf8_lossy(&alias_info.stderr),
+        ),
     )?;
 
     let delayed_expansion_version = format!("{}!argv!", env!("CARGO_PKG_VERSION"));
@@ -31869,32 +32049,16 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "runtime-info",
         ])
         .output()?;
-    let alias_delayed_expansion = if cfg!(windows) {
-        StdCommand::new("cmd")
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .args(["/V:ON", "/D", "/C", "call"])
-            .env("PATH", &run_path)
-            .arg("atlas")
-            .args([
-                "--require-version",
-                delayed_expansion_version.as_str(),
-                "--format",
-                "toon",
-                "runtime-info",
-            ])
-            .output()?
-    } else {
-        StdCommand::new(&forwarder)
-            .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .args([
-                "--require-version",
-                delayed_expansion_version.as_str(),
-                "--format",
-                "toon",
-                "runtime-info",
-            ])
-            .output()?
-    };
+    let alias_delayed_expansion = StdCommand::new(&forwarder)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args([
+            "--require-version",
+            delayed_expansion_version.as_str(),
+            "--format",
+            "toon",
+            "runtime-info",
+        ])
+        .output()?;
     require(
         !direct_delayed_expansion.status.success()
             && direct_delayed_expansion.status == alias_delayed_expansion.status
@@ -31928,7 +32092,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     require(
         !hardlink_output.status.success()
             && hardlink_text.contains("atlas command collision")
-            && fs::read_to_string(&forwarder)? == forwarder_text
+            && fs::read(&forwarder)? == forwarder_bytes
             && fs::read_to_string(&provenance)? == expected_provenance,
         format!("installer accepted or modified a hard-linked atlas forwarder:\n{hardlink_text}"),
     )?;
@@ -32098,7 +32262,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         ),
     )?;
     fs::remove_file(&forwarder)?;
-    fs::write(&forwarder, &forwarder_text)?;
+    fs::write(&forwarder, &forwarder_bytes)?;
     clear_retirement_quarantine(
         runtime
             .parent()
@@ -32116,7 +32280,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     );
     require(
         !provenance_retirement_race.status.success()
-            && fs::read_to_string(&forwarder)? == forwarder_text
+            && fs::read(&forwarder)? == forwarder_bytes
             && fs::read_to_string(&provenance)?.contains("foreign provenance retirement race")
             && installer_state.exists(),
         format!(
@@ -32399,7 +32563,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
             .env("PATH", &run_path);
         let alternate_forwarder =
-            runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+            runtime_dir.join(if cfg!(windows) { "atlas.exe" } else { "atlas" });
         for missing_forwarder in [false, true] {
             require(
                 install.output()?.status.success(),
@@ -32430,7 +32594,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             require(
                 output.status.success()
                     && !alternate_forwarder.exists()
-                    && !runtime_dir.join(".atlas-forwarder.provenance").exists()
+                    && !runtime_dir
+                        .join(test_atlas_forwarder_provenance_file_name())
+                        .exists()
                     && fs::read_dir(&installer_state_dir)?
                         .collect::<Result<Vec<_>, io::Error>>()?
                         .iter()
@@ -32478,6 +32644,87 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 ),
             )?;
         }
+    }
+    #[cfg(windows)]
+    {
+        require(
+            run_install()?.status.success(),
+            "legacy migration fixture could not restore the native alias",
+        )?;
+        let legacy_forwarder = runtime_directory.join("atlas.cmd");
+        let legacy_provenance = runtime_directory.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+        let native_state = fs::read_to_string(&installer_state)?;
+        let capability = native_state
+            .lines()
+            .find_map(|line| line.strip_prefix("capability: "))
+            .ok_or_else(|| io::Error::other("native alias state capability missing"))?;
+        let legacy_state_path = {
+            let mut hash = Sha256::new();
+            hash.update(legacy_forwarder.to_string_lossy().to_lowercase().as_bytes());
+            let mut digest = String::with_capacity(64);
+            for byte in hash.finalize() {
+                write!(&mut digest, "{byte:02x}")?;
+            }
+            installer_state_dir.join(format!("atlas-forwarder-{digest}.state"))
+        };
+        let legacy_body = format!(
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
+            canonical_runtime.replace('%', "%%"),
+        );
+        let legacy_provenance_content = format!(
+            "# ProjectAtlas atlas forwarder provenance v1\r\nforwarder: {}\r\nruntime: {}\r\n",
+            legacy_forwarder.display(),
+            runtime.display(),
+        );
+        let legacy_state_content = format!(
+            "# ProjectAtlas atlas forwarder installer state v1\r\nforwarder: {}\r\nruntime: {}\r\ncapability: {capability}\r\n",
+            legacy_forwarder.display(),
+            runtime.display(),
+        );
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        fs::write(&legacy_forwarder, &legacy_body)?;
+        fs::write(&legacy_provenance, &legacy_provenance_content)?;
+        fs::write(&legacy_state_path, &legacy_state_content)?;
+        let legacy_uninstall = run_uninstall()?;
+        require(
+            legacy_uninstall.status.success()
+                && !legacy_forwarder.exists()
+                && !legacy_provenance.exists()
+                && !legacy_state_path.exists()
+                && runtime.is_file(),
+            format!(
+                "explicit-runtime uninstall did not remove the owned RC1 atlas.cmd:\n{}\n{}",
+                String::from_utf8_lossy(&legacy_uninstall.stdout),
+                String::from_utf8_lossy(&legacy_uninstall.stderr),
+            ),
+        )?;
+        require(
+            run_install()?.status.success(),
+            "legacy migration fixture could not reinstall the native alias after explicit RC1 uninstall",
+        )?;
+        fs::remove_file(&forwarder)?;
+        fs::remove_file(&provenance)?;
+        fs::remove_file(&installer_state)?;
+        fs::write(&legacy_forwarder, &legacy_body)?;
+        fs::write(&legacy_provenance, &legacy_provenance_content)?;
+        fs::write(&legacy_state_path, &legacy_state_content)?;
+        let migrated = run_install()?;
+        require(
+            migrated.status.success()
+                && forwarder.is_file()
+                && provenance.is_file()
+                && installer_state.is_file()
+                && !legacy_forwarder.exists()
+                && !legacy_provenance.exists()
+                && !legacy_state_path.exists(),
+            format!(
+                "installer did not retire the owned RC1 atlas.cmd after publishing atlas.exe:\n{}\n{}",
+                String::from_utf8_lossy(&migrated.stdout),
+                String::from_utf8_lossy(&migrated.stderr),
+            ),
+        )?;
     }
     Ok(())
 }
@@ -32613,9 +32860,9 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
             String::from_utf8_lossy(&first_output.stderr)
         ),
     )?;
-    let first_forwarder = first_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+    let first_forwarder = first_runtime_dir.join(if cfg!(windows) { "atlas.exe" } else { "atlas" });
     let second_forwarder =
-        second_runtime_dir.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
+        second_runtime_dir.join(if cfg!(windows) { "atlas.exe" } else { "atlas" });
     let installer_state_dir = if cfg!(windows) {
         home.join(TEST_WINDOWS_INSTALLER_STATE_DIR)
     } else {
@@ -32625,8 +32872,8 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         first_forwarder.is_file(),
         "first managed atlas forwarder was not installed",
     )?;
-    let first_provenance = first_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
-    let second_provenance = second_runtime_dir.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+    let first_provenance = first_runtime_dir.join(test_atlas_forwarder_provenance_file_name());
+    let second_provenance = second_runtime_dir.join(test_atlas_forwarder_provenance_file_name());
     let first_forwarder_before_failure = fs::read(&first_forwarder)?;
     let first_forwarder_permissions = fs::metadata(&first_forwarder)?.permissions();
     let first_provenance_before_failure = fs::read(&first_provenance)?;
@@ -32811,24 +33058,24 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         .env("PROJECTATLAS_NO_TELEMETRY", "1")
         .args(["--format", "toon", "runtime-info"])
         .output()?;
-    let alias_output = if cfg!(windows) {
-        StdCommand::new("cmd")
-            .args(["/D", "/C", "call"])
-            .arg(&second_forwarder)
-            .args(["--format", "toon", "runtime-info"])
-            .output()?
-    } else {
-        StdCommand::new(&second_forwarder)
-            .env("PATH", &installer_path)
-            .args(["--format", "toon", "runtime-info"])
-            .output()?
-    };
+    let alias_output = StdCommand::new(&second_forwarder)
+        .env("PATH", &installer_path)
+        .args(["--format", "toon", "runtime-info"])
+        .output()?;
+    let direct_info_text = String::from_utf8_lossy(&direct_output.stdout).replace(
+        &second_runtime.to_string_lossy().replace('\\', "/"),
+        "<verified-runtime>",
+    );
+    let alias_info_text = String::from_utf8_lossy(&alias_output.stdout).replace(
+        &second_forwarder.to_string_lossy().replace('\\', "/"),
+        "<verified-runtime>",
+    );
     require(
         direct_output.status == alias_output.status
-            && direct_output.stdout == alias_output.stdout
+            && direct_info_text == alias_info_text
             && direct_output.stderr == alias_output.stderr,
         format!(
-            "migrated atlas forwarder diverged from the new runtime:\ndirect={} {}\nalias={} {}",
+            "migrated atlas forwarder diverged from the new runtime:\ndirect={} stdout={direct_info_text:?} stderr={}\nalias={} stdout={alias_info_text:?} stderr={}",
             direct_output.status,
             String::from_utf8_lossy(&direct_output.stderr),
             alias_output.status,
@@ -32990,8 +33237,9 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         }
     };
     let forwarder_for =
-        |directory: &Path| directory.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" });
-    let provenance_for = |directory: &Path| directory.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
+        |directory: &Path| directory.join(if cfg!(windows) { "atlas.exe" } else { "atlas" });
+    let provenance_for =
+        |directory: &Path| directory.join(test_atlas_forwarder_provenance_file_name());
     let pair_is_complete = |directory: &Path, runtime: &Path| -> Result<bool, Box<dyn Error>> {
         let forwarder = forwarder_for(directory);
         let provenance = provenance_for(directory);
@@ -33000,13 +33248,11 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         }
         let canonical_runtime = runtime.to_string_lossy();
         let expected_forwarder = if cfg!(windows) {
-            format!(
-                "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {canonical_runtime}\r\n\"{canonical_runtime}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n"
-            )
+            fs::read(runtime)?
         } else {
             format!(
                 "#!/bin/sh\n# ProjectAtlas managed atlas forwarder.\n# target: {canonical_runtime}\nexec '{canonical_runtime}' \"$@\"\n"
-            )
+            ).into_bytes()
         };
         let expected_provenance = if cfg!(windows) {
             format!(
@@ -33021,7 +33267,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
                 runtime.display()
             )
         };
-        Ok(fs::read_to_string(&forwarder)? == expected_forwarder
+        Ok(fs::read(&forwarder)? == expected_forwarder
             && fs::read_to_string(&provenance)? == expected_provenance)
     };
     let first_forwarder = forwarder_for(&first_runtime_dir);
