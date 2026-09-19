@@ -114,12 +114,39 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST: &str =
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST: &str =
     "323321adb18b8f7c9ddc045949fc097bd0e6933422228c2c25a8ee5b07daeac9";
 
+/// Historical acceptance seal for capability-set version 15.
+///
+/// Version 15 preserves version 14 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc2 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST: &str =
+    "f560cb41478d81ac46b3ac5d79ad9e94a27a235f1b4209091c4e0220298d2b1a";
+
 /// Historical acceptance seal for capability-set version 16.
 ///
 /// Version 16 preserves version 15 membership and capability strength while
 /// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc2 runtime.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST: &str =
     "75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a";
+
+const HISTORICAL_ACCEPTED_LANGUAGE_CAPABILITY_DIGESTS: [&str;
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION as usize] = [
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V1_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V8_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V9_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V10_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST,
+];
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -2346,28 +2373,22 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         )));
     }
     let accepted_digest = accepted_language_capability_digest();
-    let expected_accepted_digest = match ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION {
-        1 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V1_DIGEST,
-        2 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST,
-        3 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
-        4 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
-        5 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST,
-        6 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST,
-        7 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST,
-        8 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V8_DIGEST,
-        9 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V9_DIGEST,
-        10 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V10_DIGEST,
-        11 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST,
-        12 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST,
-        13 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST,
-        14 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST,
-        16 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST,
-        version => {
-            return Err(LanguageRegistryError::new(format!(
-                "accepted language capability-set version {version} lacks a historical digest seal"
-            )));
-        }
-    };
+    let version_index = ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION
+        .checked_sub(1)
+        .and_then(|version| usize::try_from(version).ok())
+        .ok_or_else(|| {
+            LanguageRegistryError::new(format!(
+                "accepted language capability-set version {ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION} lacks a historical digest seal"
+            ))
+        })?;
+    let expected_accepted_digest = HISTORICAL_ACCEPTED_LANGUAGE_CAPABILITY_DIGESTS
+        .get(version_index)
+        .copied()
+        .ok_or_else(|| {
+            LanguageRegistryError::new(format!(
+                "accepted language capability-set version {ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION} lacks a historical digest seal"
+            ))
+        })?;
     if accepted_digest != expected_accepted_digest {
         return Err(LanguageRegistryError::new(format!(
             "accepted language capability-set version {ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION} changed from {expected_accepted_digest} to {accepted_digest}; bump the set version for an explicit compatibility decision"
