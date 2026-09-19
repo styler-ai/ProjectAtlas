@@ -871,7 +871,7 @@ impl OptionalParserPackLifecycle {
                 platform.as_str()
             )));
         }
-        require_archive_name(archive, platform)?;
+        require_archive_name(archive, &artifact.projectatlas_version, platform)?;
         validate_observed_inventory(&extracted.observed, &artifact)?;
         let projectatlas_version = artifact.projectatlas_version;
         let supervisor = OptionalParserSupervisor::open(&extracted.pack_root)?;
@@ -1861,12 +1861,16 @@ fn validate_observed_inventory(
     Ok(())
 }
 
-/// Require the canonical archive basename for the current platform.
+/// Require the published release archive basename for the current platform.
 fn require_archive_name(
     path: &Path,
+    projectatlas_version: &str,
     platform: PackPlatform,
 ) -> Result<(), OptionalParserPackLifecycleError> {
-    let expected = format!("{ARCHIVE_ROOT}-{}.tar.zst", platform.as_str());
+    let expected = format!(
+        "projectatlas-v{projectatlas_version}-broad-parser-{}.tar.zst",
+        platform.as_str()
+    );
     if path.file_name().and_then(std::ffi::OsStr::to_str) != Some(expected.as_str()) {
         return Err(invalid_data(format!(
             "archive basename must be {expected:?} for {}",
@@ -4606,6 +4610,38 @@ mod tests {
                 && fs::read(retry.selection_path())? == selection_after_retry,
             "identical retry rewrote or changed the selected candidate",
         )
+    }
+
+    #[test]
+    fn archive_name_requires_the_versioned_release_asset() -> TestResult {
+        let version = OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
+        let platform = PackPlatform::LinuxX86_64;
+        let expected = format!(
+            "projectatlas-v{version}-broad-parser-{}.tar.zst",
+            platform.as_str()
+        );
+        require(
+            require_archive_name(Path::new(&expected), version, platform).is_ok(),
+            "published versioned parser-pack archive was rejected",
+        )?;
+        for name in [
+            format!("{ARCHIVE_ROOT}-{}.tar.zst", platform.as_str()),
+            format!(
+                "projectatlas-v0.0.0-broad-parser-{}.tar.zst",
+                platform.as_str()
+            ),
+            format!(
+                "projectatlas-v{version}-broad-parser-{}.tar.zst",
+                PackPlatform::WindowsX86_64.as_str()
+            ),
+            "renamed-parser-pack.tar.zst".to_owned(),
+        ] {
+            require(
+                require_archive_name(Path::new(&name), version, platform).is_err(),
+                "non-canonical parser-pack archive name was accepted: {name}",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
