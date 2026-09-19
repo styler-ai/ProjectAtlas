@@ -4142,7 +4142,7 @@ gate_status=0
 python3() {{
   case "$1" in
     .github/scripts/issue-checklists.py)
-      [[ "$*" == *'--publication-version v0.5.0-rc1'* ]] || return 42
+      [[ "$*" == *'--publication-version v0.5.0-rc2'* ]] || return 42
       echo gate >> calls
       return "$gate_status" ;;
     .github/scripts/verify-main-atlas-seed-release-assets.py) return 0 ;;
@@ -4164,7 +4164,7 @@ gate_status={gate_status}
                 .current_dir(fixture.path())
                 .env("GITHUB_REPOSITORY", "fixture/repository")
                 .env("GITHUB_SHA", "1111111111111111111111111111111111111111")
-                .env("RELEASE_VERSION", "v0.5.0-rc1")
+                .env("RELEASE_VERSION", "v0.5.0-rc2")
                 .env("EXPECTED_RELEASE_PRERELEASE", "true")
                 .env("EXPECTED_STABLE_TAG", "v0.5.0")
                 .env("PROJECTATLAS_RELEASE_EXISTS", repair.to_string())

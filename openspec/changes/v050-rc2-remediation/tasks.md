@@ -28,21 +28,21 @@
 
 ## 5. Parser-pack filename admission (#607)
 
-- [ ] 5.1 Trace release asset construction, archive-name validation, platform/manifest/digest admission, and verify/install callers; freeze the exact versioned publication-name contract for supported targets.
-- [ ] 5.2 Admit the final versioned release filename at the shared lifecycle boundary while preserving target, release identity, manifest, digest, content, and containment validation.
-- [ ] 5.3 Cover verify and install through canonical `projectatlas` and Windows `atlas` using the final published-name shape, plus corrupt, wrong-target, wrong-version, and renamed/untrusted negative inputs.
-- [ ] 5.4 Run the owning Rust/parser-pack proof and review the final #607 boundary against its acceptance criteria.
+- [x] 5.1 Trace release asset construction, archive-name validation, platform/manifest/digest admission, and verify/install callers; freeze the exact versioned publication-name contract for supported targets.
+- [x] 5.2 Admit the final versioned release filename at the shared lifecycle boundary while preserving target, release identity, manifest, digest, content, and containment validation.
+- [x] 5.3 Cover verify and install through canonical `projectatlas` and Windows `atlas` using the final published-name shape, plus corrupt, wrong-target, wrong-version, and renamed/untrusted negative inputs.
+- [x] 5.4 Run the owning Rust/parser-pack proof and review the final #607 boundary against its acceptance criteria.
 
 ## 6. Windows atlas argument parity (#608)
 
 - [x] 6.1 Trace installer ownership, collision handling, atomic replacement, repair, uninstall, PATH registration, and existing `atlas.cmd` callers; confirm the direct executable-alias mechanism preserves the verified runtime contract without a new forwarding framework.
 - [x] 6.2 Replace the Windows batch argument-reconstruction path with the smallest collision-safe, atomic, version-matched native `atlas` alias and retain canonical `projectatlas` plus exact result propagation.
 - [x] 6.3 Exercise PowerShell JSON entrypoint and trace-target routes, empty values, spaces, Unicode, metacharacters, collision refusal, stale-alias repair, update, uninstall, and runtime/version identity parity.
-- [ ] 6.4 Run the owning Windows installer/E2E proof and review the final #608 boundary against its acceptance criteria.
+- [x] 6.4 Run the owning Windows installer/E2E proof and review the final #608 boundary against its acceptance criteria.
 
 ## 7. Windows parser-pack containment admission (#609)
 
-- [ ] 7.1 Reproduce the checksum-verified final Windows parser-pack failure from an isolated installed RC1/RC2-equivalent runtime; trace broker, worker, protocol, resource, timeout, and cleanup phases without changing containment or timeouts.
-- [ ] 7.2 Add the smallest causal phase diagnostics and fix the demonstrated Windows admission root cause at its existing supervisor/lifecycle owner; preserve bounded cleanup, no partial selection, and retry safety.
-- [ ] 7.3 Cover installed-artifact verify/install success, each causal admission failure class, selection absence after failure, retry, wrong-target/corrupt archive refusal, and containment persistence on Windows.
-- [ ] 7.4 Run the focused parser-pack, Rust, and Windows proof bound to the constructed parser-pack asset and source inputs, then review the final #609 boundary against its acceptance criteria.
+- [x] 7.1 Reproduce the checksum-verified final Windows parser-pack failure from an isolated installed RC1/RC2-equivalent runtime; trace broker, worker, protocol, resource, timeout, and cleanup phases without changing containment or timeouts.
+- [x] 7.2 Add the smallest causal phase diagnostics and fix the demonstrated Windows admission root cause at its existing supervisor/lifecycle owner; preserve bounded cleanup, no partial selection, and retry safety.
+- [x] 7.3 Cover installed-artifact verify/install success, each causal admission failure class, selection absence after failure, retry, wrong-target/corrupt archive refusal, and containment persistence on Windows.
+- [x] 7.4 Run the focused parser-pack, Rust, and Windows proof bound to the constructed parser-pack asset and source inputs, then review the final #609 boundary against its acceptance criteria.

@@ -185,7 +185,7 @@
 
 ## 27. v0.5.0 RC2 release acceptance (#492)
 
-- [ ] 27.1 After every child closes from refreshed `main`, update all release-owned runtime, plugin, installer, package, documentation, workflow, and parser-pack identities to `0.5.0-rc2` through their existing single sources of truth.
+- [x] 27.1 After every child closes from refreshed `main`, update all release-owned runtime, plugin, installer, package, documentation, workflow, and parser-pack identities to `0.5.0-rc2` through their existing single sources of truth.
 - [ ] 27.2 Freeze a clean current-main candidate and run OpenSpec, IssueOps, Rust/toolchain, database, documentation, dependency, packaging, release-policy, checksum, and parser-pack construction gates without weakening RC-first policy.
 - [ ] 27.3 Dispatch and read back the optional-parser-pack workflow for the candidate inputs; verify final versioned assets, native alias parity, hook package identity, parser-pack lifecycle, and installed upgrade behavior on Windows, Linux, macOS x64, and macOS arm64.
 - [ ] 27.4 With release authorization, publish `v0.5.0-rc2` as a non-draft prerelease, independently read back tag, metadata, assets, SHA256SUMS, runtime/plugin/skill/hook/MCP/CLI identity, installed behavior, and v0.4.5 Latest state.
