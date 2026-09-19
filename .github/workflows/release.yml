@@ -213,6 +213,9 @@ jobs:
     needs: verify
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      RELEASE_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -293,9 +296,15 @@ jobs:
           archive="projectatlas-${RELEASE_VERSION}-${{ matrix.suffix }}.tar.gz"
           mkdir -p "dist/projectatlas"
           cp target/release/projectatlas "dist/projectatlas/"
+          if [[ "$RELEASE_IS_PRERELEASE" == "true" ]]; then
+            release_channel_guidance="This archive is the ${RELEASE_VERSION} prerelease. For the stable channel, use [$RELEASE_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$RELEASE_STABLE_TAG)."
+          else
+            release_channel_guidance="This archive is the ${RELEASE_VERSION} stable release."
+          fi
           sed \
             -e "s|@RELEASE_VERSION@|${RELEASE_VERSION}|g" \
             -e "s|@PACKAGE_VERSION@|${RELEASE_VERSION#v}|g" \
+            -e "s|@RELEASE_CHANNEL_GUIDANCE@|${release_channel_guidance}|g" \
             packaging/release-readme.md > "dist/projectatlas/README.md"
           cp LICENSE "dist/projectatlas/"
           cp packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md "dist/projectatlas/PDF-PARSER.md"
@@ -337,6 +346,9 @@ jobs:
     needs: verify
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      RELEASE_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -443,7 +455,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/projectatlas" | Out-Null
           Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
           $packageVersion = $env:RELEASE_VERSION.TrimStart('v')
-          (Get-Content "packaging/release-readme.md" -Raw).Replace("@RELEASE_VERSION@", $env:RELEASE_VERSION).Replace("@PACKAGE_VERSION@", $packageVersion) |
+          if ($env:RELEASE_IS_PRERELEASE -eq "true") {
+            $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) prerelease. For the stable channel, use [$env:RELEASE_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$env:RELEASE_STABLE_TAG)."
+          } else {
+            $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) stable release."
+          }
+          (Get-Content "packaging/release-readme.md" -Raw).Replace("@RELEASE_VERSION@", $env:RELEASE_VERSION).Replace("@PACKAGE_VERSION@", $packageVersion).Replace("@RELEASE_CHANNEL_GUIDANCE@", $releaseChannelGuidance) |
             Set-Content -LiteralPath "dist/projectatlas/README.md" -Encoding utf8
           Copy-Item "LICENSE" "dist/projectatlas/"
           Copy-Item "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md" "dist/projectatlas/PDF-PARSER.md"

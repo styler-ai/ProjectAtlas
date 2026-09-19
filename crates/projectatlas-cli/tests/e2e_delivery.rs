@@ -25392,6 +25392,8 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             ])
             .arg(&script)
             .env("RELEASE_VERSION", release_version)
+            .env("RELEASE_IS_PRERELEASE", "true")
+            .env("RELEASE_STABLE_TAG", "v0.5.0")
             .env("RUNNER_TEMP", runner)
             .output()?)
     };
@@ -25419,8 +25421,8 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         "projectatlas init",
         "atlas overview",
         "projectatlas overview",
-        "v0.4.5 (stable)",
-        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
+        "v0.5.0 (stable)",
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0",
         "cannot change\nthe environment inherited by an already-running host",
         "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
         "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
@@ -25531,6 +25533,8 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         .current_dir(temp.path())
         .arg(&script)
         .env("RELEASE_VERSION", "v0.5.0-rc2")
+        .env("RELEASE_IS_PRERELEASE", "true")
+        .env("RELEASE_STABLE_TAG", "v0.5.0")
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!("Unix package producer failed: {output:?}")).into());
@@ -25555,8 +25559,8 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         "projectatlas init",
         "atlas overview",
         "projectatlas overview",
-        "v0.4.5 (stable)",
-        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
+        "v0.5.0 (stable)",
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0",
         "cannot change\nthe environment inherited by an already-running host",
         "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
         "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
