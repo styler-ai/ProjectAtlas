@@ -2,7 +2,7 @@
 
 This document is generated from the versioned Rust language capability registry. Do not edit the capability table or totals by hand. Canonical rows count once; aliases and extensions never increase a capability total.
 
-Registry version: `5`. Accepted capability-set version: `15`. Detection policy version: `1`. Registry digest: `c00d25ab8b28d445e71ede18954e92b57e5102eaecef3c7fb5b1b71ddfe57f7a`. Accepted-set digest: `c00d25ab8b28d445e71ede18954e92b57e5102eaecef3c7fb5b1b71ddfe57f7a`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
+Registry version: `5`. Accepted capability-set version: `16`. Detection policy version: `1`. Registry digest: `75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a`. Accepted-set digest: `75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a`. Semantic-provider digest: `b26c4aa768ebe3bb185d5929350d2f41c6b1b2f93630080248dec7eb6ec00e82`.
 
 Optional catalog input: `tree-sitter-language-pack@1.13.2` revision `6258abac30304283763a0d2dc8a48cb87fbcf438` under `MIT` metadata license. This catalog identity is not a grammar-license or runtime-support claim.
 
@@ -290,7 +290,7 @@ Broad candidate rows are admitted only when the pinned catalog supplies a stable
 
 ## Language & Ecosystem Support
 
-Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `4c7ff17a39e0f986cce265f4725adebfd904ddb099203d04c53264ba092e6859`.
+Complete-support schema version: `1`. Ecosystem catalog version: `1`. Catalog digest: `8d329b1f5a423044f04e92b75cb124f76bd6ee6a0088450d99a431d379cc9b29`.
 
 `Complete` means conformance to the fixed ProjectAtlas navigation contract, not compiler, build-system, runtime, or whole-language completeness. Final v0.4 MCP navigation revalidation retained every runtime candidate at its achieved detected/parsed/symbol/semantic/benchmarked tier: none has the complete schema-bound capability and agent-navigation evidence required for promotion.
 

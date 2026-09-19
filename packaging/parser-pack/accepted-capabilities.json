@@ -25,9 +25,9 @@
   },
   "registry": {
     "registry_version": 5,
-    "registry_digest": "c00d25ab8b28d445e71ede18954e92b57e5102eaecef3c7fb5b1b71ddfe57f7a",
-    "accepted_set_version": 15,
-    "accepted_set_digest": "c00d25ab8b28d445e71ede18954e92b57e5102eaecef3c7fb5b1b71ddfe57f7a"
+    "registry_digest": "75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a",
+    "accepted_set_version": 16,
+    "accepted_set_digest": "75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a"
   },
   "required_platforms": [
     "x86_64-unknown-linux-gnu",
@@ -7597,5 +7597,5 @@
       "capability_digest": "d11ac33f63f87c732d6bcac6b300eace2a4eba4775097f03c0f835f5fa2db4e9"
     }
   ],
-  "capability_set_digest": "220d4eeb902c2af728dfe4271538426790264ef1d2262d60cfc8c2deebe1baf6"
+  "capability_set_digest": "558e6bcd8cb1793380295607902f89dd7ec184d1b8e87f398fd4ede46965d3e9"
 }
