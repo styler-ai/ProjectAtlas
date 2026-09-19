@@ -88,6 +88,8 @@ use support::{
     synchronize_prompt_exit_before_delayed_observation, workspace_root,
 };
 use yaml_rust2::{Yaml, YamlLoader};
+#[cfg(windows)]
+use zip::ZipArchive;
 
 const TEST_REPO_DIR: &str = "repo";
 const TEST_ISOLATED_HOME_DIR_NAME: &str = "isolated home";
@@ -104,6 +106,7 @@ const TEST_ATLAS_FORWARDER_FILE_NAME: &str = "atlas";
 const SRC_DIR_NAME: &str = "src";
 const PROJECT_LOCAL_FIXTURE_DIR: &str = ".tmp";
 const POSIX_INSTALLER_SCRIPT: &str = "plugins/projectatlas/scripts/install-runtime.sh";
+const RELEASE_README_TEMPLATE: &str = "packaging/release-readme.md";
 
 const DUPLICATE_RS_FILE_NAME: &str = "duplicate.rs";
 
@@ -3227,6 +3230,8 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
     #[cfg(windows)]
     assert_windows_packaged_digest_admission()?;
+    #[cfg(not(windows))]
+    assert_unix_packaged_readme_admission()?;
     let workspace_root = workspace_root()?;
     let github = workspace_root.join(".github");
     let workflows = github.join("workflows");
@@ -4243,6 +4248,44 @@ gate_status={gate_status}
             "hosted RC-first admission must not block non-publishing package proof",
         )
         .into());
+    }
+    let current_stable_resolver = release
+        .split("      - name: Resolve current stable release")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| io::Error::other("release omitted the current stable resolver"))?;
+    for required in [
+        "id: current_stable",
+        "if: ${{ steps.release_version.outputs.is_prerelease == 'true' }}",
+        "GH_TOKEN: ${{ github.token }}",
+        "gh api \"/repos/$GITHUB_REPOSITORY/releases/latest\" --jq .tag_name",
+        "python3 .github/scripts/release_version.py \"$tag\" --source release",
+        "grep -Fx 'is_prerelease=false' > /dev/null",
+        "echo \"tag=$tag\" >> \"$GITHUB_OUTPUT\"",
+    ] {
+        if !current_stable_resolver.contains(required) {
+            return Err(io::Error::other(format!(
+                "release current stable resolver omitted required contract {required:?}"
+            ))
+            .into());
+        }
+    }
+    let verify = workflow_job_block(&release, "verify")?;
+    if !verify.contains("current_stable_tag: ${{ steps.current_stable.outputs.tag }}") {
+        return Err(io::Error::other(
+            "release verify job omitted the current stable package output",
+        )
+        .into());
+    }
+    for job in ["package-unix", "package-windows"] {
+        if !workflow_job_block(&release, job)?
+            .contains("RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}")
+        {
+            return Err(io::Error::other(format!(
+                "release {job} package job omitted the current stable tag binding"
+            ))
+            .into());
+        }
     }
     let exact_main_gate = release
         .split("      - name: Require exact main head for publication")
@@ -25304,11 +25347,27 @@ fn assert_json_contract_subset(
     }
 }
 
+fn assert_packaged_readme_command_order(readme: &str) -> io::Result<()> {
+    let readme = readme.replace("\r\n", "\n");
+    let mut offset = 0;
+    for command in [
+        "\nprojectatlas --require-version 0.5.0-rc2 --format json runtime-info\n",
+        "\nprojectatlas init\n",
+        "\natlas overview\n",
+        "\nprojectatlas overview\n",
+    ] {
+        let position = readme[offset..].find(command).ok_or_else(|| {
+            io::Error::other(format!("packaged README omitted or reordered {command:?}"))
+        })?;
+        offset += position + command.len() - 1;
+    }
+    Ok(())
+}
 /// Exercise the real package producer and pre-install digest consumer with substituted inputs.
 #[cfg(windows)]
 fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     let workspace = workspace_root()?;
-    let release = fs::read_to_string(workspace.join(".github/workflows/release.yml"))?;
+    let release = fs::read_to_string(workspace.join(RELEASE_WORKFLOW_PATH))?;
     let package = workflow_job_step(&release, "package-windows", "Package")?;
     let admission = workflow_job_step(
         &release,
@@ -25344,18 +25403,25 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         runtime_bytes,
     )?;
     for file in [
-        "README.md",
         "LICENSE",
         "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md",
     ] {
         fs::write(temp.path().join(file), "package fixture\n")?;
     }
+    fs::copy(
+        workspace.join(RELEASE_README_TEMPLATE),
+        temp.path().join(RELEASE_README_TEMPLATE),
+    )?;
     let script = temp.path().join("digest-admission.ps1");
     fs::write(
         &script,
         format!("$ErrorActionPreference = 'Stop'\n{producer}"),
     )?;
-    let run = |runner: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+    let release_version = "v0.5.0-rc2";
+    let run = |runner: &Path,
+               version: &str,
+               prerelease: &str|
+     -> Result<std::process::Output, Box<dyn Error>> {
         Ok(StdCommand::new("pwsh")
             .current_dir(temp.path())
             .args([
@@ -25366,18 +25432,17 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
                 "-File",
             ])
             .arg(&script)
-            .env("RELEASE_VERSION", format!("v{}", env!("CARGO_PKG_VERSION")))
+            .env("RELEASE_VERSION", version)
+            .env("RELEASE_IS_PRERELEASE", prerelease)
+            .env("RELEASE_CURRENT_STABLE_TAG", "v0.4.5")
             .env("RUNNER_TEMP", runner)
             .output()?)
     };
-    let output = run(temp.path())?;
+    let output = run(temp.path(), release_version, "true")?;
     if !output.status.success() {
         return Err(io::Error::other(format!("Windows digest producer failed: {output:?}")).into());
     }
-    let archive_name = format!(
-        "projectatlas-v{}-x86_64-pc-windows-msvc.zip",
-        env!("CARGO_PKG_VERSION")
-    );
+    let archive_name = format!("projectatlas-{release_version}-x86_64-pc-windows-msvc.zip");
     let archive = temp.path().join("release-assets").join(&archive_name);
     let manifest = temp
         .path()
@@ -25386,6 +25451,36 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     let archive_bytes = fs::read(&archive)?;
     let manifest_bytes = fs::read(&manifest)?;
     let manifest_text = String::from_utf8(manifest_bytes.clone())?;
+    let mut archive_reader = ZipArchive::new(io::Cursor::new(&archive_bytes))?;
+    let mut readme = String::new();
+    archive_reader
+        .by_name("README.md")?
+        .read_to_string(&mut readme)?;
+    for expected in [
+        "ProjectAtlas v0.5.0-rc2",
+        "projectatlas --require-version 0.5.0-rc2 --format json runtime-info",
+        "projectatlas init",
+        "atlas overview",
+        "projectatlas overview",
+        "v0.4.5 (stable)",
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
+        "cannot change\nthe environment inherited by an already-running host",
+        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
+        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
+    ] {
+        if !readme.contains(expected) {
+            return Err(io::Error::other(format!(
+                "packaged Windows README omitted required guidance: {expected:?}"
+            ))
+            .into());
+        }
+    }
+    assert_packaged_readme_command_order(&readme)?;
+    if readme.contains("](docs/") {
+        return Err(
+            io::Error::other("packaged Windows README retained a broken local docs link").into(),
+        );
+    }
     for expected in [
         format!("{}  {archive_name}", sha256_hex(&archive_bytes)),
         format!("{}  projectatlas.exe", sha256_hex(runtime_bytes)),
@@ -25396,6 +25491,33 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             );
         }
     }
+    let stable_runner = temp.path().join("stable");
+    fs::create_dir(&stable_runner)?;
+    let stable_output = run(&stable_runner, "v0.5.0", "false")?;
+    if !stable_output.status.success() {
+        return Err(io::Error::other(format!(
+            "Windows stable package producer failed: {stable_output:?}"
+        ))
+        .into());
+    }
+    let stable_archive = temp
+        .path()
+        .join("release-assets/projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip");
+    let mut stable_reader = ZipArchive::new(io::Cursor::new(fs::read(stable_archive)?))?;
+    let mut stable_readme = String::new();
+    stable_reader
+        .by_name("README.md")?
+        .read_to_string(&mut stable_readme)?;
+    if !stable_readme.contains("This archive is the v0.5.0 stable release.")
+        || stable_readme.contains("prerelease")
+        || stable_readme.contains("For the stable channel")
+    {
+        return Err(io::Error::other(
+            "packaged Windows stable README channel guidance is incorrect",
+        )
+        .into());
+    }
+
     fs::write(
         &script,
         format!("$ErrorActionPreference = 'Stop'\n{consumer}"),
@@ -25418,7 +25540,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         }
         let runner = temp.path().join(fault);
         fs::create_dir(&runner)?;
-        let output = run(&runner)?;
+        let output = run(&runner, release_version, "true")?;
         if output.status.success() != (fault == "valid") {
             return Err(io::Error::other(format!(
                 "Windows {fault} digest admission behaved incorrectly: {output:?}"
@@ -25433,6 +25555,136 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             ))
             .into());
         }
+    }
+    Ok(())
+}
+
+/// Exercise the Unix package producer and inspect its rendered release guidance.
+#[cfg(not(windows))]
+fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
+    let workspace = workspace_root()?;
+    let release = fs::read_to_string(workspace.join(RELEASE_WORKFLOW_PATH))?;
+    let package = workflow_job_step(&release, "package-unix", "Package")?;
+    let producer = package["run"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Unix package script missing"))?
+        .replace("${{ matrix.suffix }}", "x86_64-unknown-linux-gnu");
+    let fixture_root = workspace.join(PROJECT_LOCAL_FIXTURE_DIR);
+    fs::create_dir_all(&fixture_root)?;
+    let temp = tempfile::Builder::new()
+        .prefix("packaged-unix-readme-")
+        .tempdir_in(fixture_root)?;
+    for directory in [
+        "target/release",
+        "packaging/pdf-parser/vendor/pdf-extract",
+        "contract-artifacts",
+    ] {
+        fs::create_dir_all(temp.path().join(directory))?;
+    }
+    fs::write(
+        temp.path().join("target/release/projectatlas"),
+        "packaged runtime authority\n",
+    )?;
+    for file in [
+        "LICENSE",
+        "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md",
+    ] {
+        fs::write(temp.path().join(file), "package fixture\n")?;
+    }
+    fs::copy(
+        workspace.join(RELEASE_README_TEMPLATE),
+        temp.path().join(RELEASE_README_TEMPLATE),
+    )?;
+    let script = temp.path().join("package.sh");
+    fs::write(&script, format!("set -eu\n{producer}"))?;
+    let output = StdCommand::new("bash")
+        .current_dir(temp.path())
+        .arg(&script)
+        .env("RELEASE_VERSION", "v0.5.0-rc2")
+        .env("RELEASE_IS_PRERELEASE", "true")
+        .env("RELEASE_CURRENT_STABLE_TAG", "v0.4.5")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("Unix package producer failed: {output:?}")).into());
+    }
+    let archive = temp
+        .path()
+        .join("release-assets/projectatlas-v0.5.0-rc2-x86_64-unknown-linux-gnu.tar.gz");
+    let output = StdCommand::new("tar")
+        .args(["-xOf"])
+        .arg(&archive)
+        .arg("projectatlas/README.md")
+        .output()?;
+    if !output.status.success() {
+        return Err(
+            io::Error::other(format!("Unix package archive read failed: {output:?}")).into(),
+        );
+    }
+    let readme = String::from_utf8(output.stdout)?;
+    for expected in [
+        "ProjectAtlas v0.5.0-rc2",
+        "projectatlas --require-version 0.5.0-rc2 --format json runtime-info",
+        "projectatlas init",
+        "atlas overview",
+        "projectatlas overview",
+        "v0.4.5 (stable)",
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
+        "cannot change\nthe environment inherited by an already-running host",
+        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
+        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
+    ] {
+        if !readme.contains(expected) {
+            return Err(io::Error::other(format!(
+                "packaged Unix README omitted required guidance: {expected:?}"
+            ))
+            .into());
+        }
+    }
+    assert_packaged_readme_command_order(&readme)?;
+    if readme.contains("runtime for Windows")
+        || readme.contains("```powershell")
+        || readme.contains("](docs/")
+    {
+        return Err(io::Error::other(
+            "packaged Unix README retained platform-specific or local-link guidance",
+        )
+        .into());
+    }
+    let stable_output = StdCommand::new("bash")
+        .current_dir(temp.path())
+        .arg(&script)
+        .env("RELEASE_VERSION", "v0.5.0")
+        .env("RELEASE_IS_PRERELEASE", "false")
+        .env("RELEASE_CURRENT_STABLE_TAG", "v0.4.5")
+        .output()?;
+    if !stable_output.status.success() {
+        return Err(io::Error::other(format!(
+            "Unix stable package producer failed: {stable_output:?}"
+        ))
+        .into());
+    }
+    let stable_archive = temp
+        .path()
+        .join("release-assets/projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz");
+    let stable_output = StdCommand::new("tar")
+        .args(["-xOf"])
+        .arg(stable_archive)
+        .arg("projectatlas/README.md")
+        .output()?;
+    if !stable_output.status.success() {
+        return Err(io::Error::other(format!(
+            "Unix stable package archive read failed: {stable_output:?}"
+        ))
+        .into());
+    }
+    let stable_readme = String::from_utf8(stable_output.stdout)?;
+    if !stable_readme.contains("This archive is the v0.5.0 stable release.")
+        || stable_readme.contains("prerelease")
+        || stable_readme.contains("For the stable channel")
+    {
+        return Err(
+            io::Error::other("packaged Unix stable README channel guidance is incorrect").into(),
+        );
     }
     Ok(())
 }
