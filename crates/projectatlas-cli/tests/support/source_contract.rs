@@ -3,7 +3,7 @@
 pub(super) const CLI_E2E_SOURCE_SHA256: &[(&str, &str)] = &[
     (
         "crates/projectatlas-cli/tests/e2e_delivery.rs",
-        "6376929ad8c7fb62db972bdacf62640d037d496b8f01cca99293a748fa4faff0",
+        "586ef079be48290da796d351c4cccb1ec0d7bb211f9b373b5411c5c32bca49c9",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_lifecycle.rs",

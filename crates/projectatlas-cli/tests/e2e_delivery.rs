@@ -4249,6 +4249,44 @@ gate_status={gate_status}
         )
         .into());
     }
+    let current_stable_resolver = release
+        .split("      - name: Resolve current stable release")
+        .nth(1)
+        .and_then(|tail| tail.split("\n      - name:").next())
+        .ok_or_else(|| io::Error::other("release omitted the current stable resolver"))?;
+    for required in [
+        "id: current_stable",
+        "if: ${{ steps.release_version.outputs.is_prerelease == 'true' }}",
+        "GH_TOKEN: ${{ github.token }}",
+        "gh api \"/repos/$GITHUB_REPOSITORY/releases/latest\" --jq .tag_name",
+        "python3 .github/scripts/release_version.py \"$tag\" --source release",
+        "grep -Fx 'is_prerelease=false' > /dev/null",
+        "echo \"tag=$tag\" >> \"$GITHUB_OUTPUT\"",
+    ] {
+        if !current_stable_resolver.contains(required) {
+            return Err(io::Error::other(format!(
+                "release current stable resolver omitted required contract {required:?}"
+            ))
+            .into());
+        }
+    }
+    let verify = workflow_job_block(&release, "verify")?;
+    if !verify.contains("current_stable_tag: ${{ steps.current_stable.outputs.tag }}") {
+        return Err(io::Error::other(
+            "release verify job omitted the current stable package output",
+        )
+        .into());
+    }
+    for job in ["package-unix", "package-windows"] {
+        if !workflow_job_block(&release, job)?
+            .contains("RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}")
+        {
+            return Err(io::Error::other(format!(
+                "release {job} package job omitted the current stable tag binding"
+            ))
+            .into());
+        }
+    }
     let exact_main_gate = release
         .split("      - name: Require exact main head for publication")
         .nth(1)
