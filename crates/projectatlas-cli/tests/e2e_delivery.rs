@@ -32023,10 +32023,15 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         &runtime.to_string_lossy().replace('\\', "/"),
         "<verified-runtime>",
     );
-    let alias_info_text = String::from_utf8_lossy(&alias_info.stdout).replace(
-        &forwarder.to_string_lossy().replace('\\', "/"),
-        "<verified-runtime>",
-    );
+    let alias_info_text = String::from_utf8_lossy(&alias_info.stdout)
+        .replace(
+            &runtime.to_string_lossy().replace('\\', "/"),
+            "<verified-runtime>",
+        )
+        .replace(
+            &forwarder.to_string_lossy().replace('\\', "/"),
+            "<verified-runtime>",
+        );
     require(
         direct_info.status == alias_info.status
             && direct_info_text == alias_info_text
@@ -33147,10 +33152,15 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
         &second_runtime.to_string_lossy().replace('\\', "/"),
         "<verified-runtime>",
     );
-    let alias_info_text = String::from_utf8_lossy(&alias_output.stdout).replace(
-        &second_forwarder.to_string_lossy().replace('\\', "/"),
-        "<verified-runtime>",
-    );
+    let alias_info_text = String::from_utf8_lossy(&alias_output.stdout)
+        .replace(
+            &second_runtime.to_string_lossy().replace('\\', "/"),
+            "<verified-runtime>",
+        )
+        .replace(
+            &second_forwarder.to_string_lossy().replace('\\', "/"),
+            "<verified-runtime>",
+        );
     require(
         direct_output.status == alias_output.status
             && direct_info_text == alias_info_text
