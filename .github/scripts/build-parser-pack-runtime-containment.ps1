@@ -1469,8 +1469,8 @@ namespace ProjectAtlas.Release
                 FileSystemAccessRule existing = authorization as FileSystemAccessRule;
                 if (existing != null
                     && existing.IdentityReference.Equals(sid)
-                    && !existing.IsInherited
-                    && (existing.AccessControlType != AccessControlType.Allow
+                    && (existing.IsInherited
+                        || existing.AccessControlType != AccessControlType.Allow
                         || existing.FileSystemRights != expectedRights
                         || existing.InheritanceFlags
                             != (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
@@ -1935,6 +1935,7 @@ namespace ProjectAtlas.Release
                     0,
                     SelfTestAdmissionRecord);
                 RunWiderPackAclSelfTest(packRoot, profile.Sid);
+                RunInheritedWiderPackAclSelfTest(packRoot, profile.Sid);
                 RunBrokerSelfTest(
                     packRoot,
                     "admission-success-repeat",
@@ -2108,6 +2109,60 @@ namespace ProjectAtlas.Release
                     PropagationFlags.None,
                     AccessControlType.Allow));
                 directory.SetAccessControl(security);
+            }
+        }
+
+        private static void RunInheritedWiderPackAclSelfTest(
+            string packRoot,
+            SecurityIdentifier sid)
+        {
+            DirectoryInfo directory = new DirectoryInfo(packRoot);
+            DirectoryInfo parent = directory.Parent;
+            if (parent == null)
+            {
+                throw new ContainmentFailure("self-test-pack-parent-missing");
+            }
+            DirectorySecurity parentSecurity = parent.GetAccessControl(AccessControlSections.Access);
+            parentSecurity.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            parent.SetAccessControl(parentSecurity);
+            try
+            {
+                try
+                {
+                    GrantPackReadExecute(packRoot, sid);
+                }
+                catch (ContainmentFailure failure)
+                {
+                    if (String.Equals(
+                        failure.Message,
+                        "pack-profile-acl",
+                        StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                    throw;
+                }
+                throw new ContainmentFailure("self-test-inherited-wider-pack-acl-accepted");
+            }
+            finally
+            {
+                parentSecurity = parent.GetAccessControl(AccessControlSections.Access);
+                RemoveIdentityRules(parentSecurity, sid);
+                parent.SetAccessControl(parentSecurity);
+                DirectorySecurity directorySecurity = directory.GetAccessControl(AccessControlSections.Access);
+                RemoveIdentityRules(directorySecurity, sid);
+                directorySecurity.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                directory.SetAccessControl(directorySecurity);
             }
         }
 
