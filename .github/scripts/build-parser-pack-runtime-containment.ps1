@@ -1459,6 +1459,8 @@ namespace ProjectAtlas.Release
         {
             DirectoryInfo directory = new DirectoryInfo(packRoot);
             DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
+            FileSystemRights expectedRights = FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize;
+            bool exactRule = false;
             foreach (AuthorizationRule authorization in security.GetAccessRules(
                 true,
                 true,
@@ -1467,20 +1469,29 @@ namespace ProjectAtlas.Release
                 FileSystemAccessRule existing = authorization as FileSystemAccessRule;
                 if (existing != null
                     && existing.IdentityReference.Equals(sid)
-                    && existing.AccessControlType == AccessControlType.Allow
                     && !existing.IsInherited
-                    && (existing.FileSystemRights & (FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize))
-                        == (FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize)
-                    && (existing.InheritanceFlags & (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit))
-                        == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
-                    && existing.PropagationFlags == PropagationFlags.None)
+                    && (existing.AccessControlType != AccessControlType.Allow
+                        || existing.FileSystemRights != expectedRights
+                        || existing.InheritanceFlags
+                            != (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
+                        || existing.PropagationFlags != PropagationFlags.None))
                 {
-                    return;
+                    throw new ContainmentFailure("pack-profile-acl");
                 }
+                if (existing != null
+                    && existing.IdentityReference.Equals(sid)
+                    && !existing.IsInherited)
+                {
+                    exactRule = true;
+                }
+            }
+            if (exactRule)
+            {
+                return;
             }
             FileSystemAccessRule rule = new FileSystemAccessRule(
                 sid,
-                FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+                expectedRights,
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
                 PropagationFlags.None,
                 AccessControlType.Allow);
@@ -1901,6 +1912,7 @@ namespace ProjectAtlas.Release
                 "projectatlas-parser-containment-" + Guid.NewGuid().ToString("N"));
             string packRoot = Path.Combine(root, "pack");
             string profileName = null;
+            ProfileIdentity profile = null;
             Directory.CreateDirectory(packRoot);
             try
             {
@@ -1914,13 +1926,15 @@ namespace ProjectAtlas.Release
                 byte[] manifest = Encoding.UTF8.GetBytes(
                     "{\"self_test\":\"" + Guid.NewGuid().ToString("N") + "\"}\n");
                 File.WriteAllBytes(Path.Combine(packRoot, ArtifactManifestFileName), manifest);
-                profileName = ProfileName(manifest);
+                profile = EnsureArtifactProfile(manifest);
+                profileName = profile.Name;
 
                 RunBrokerSelfTest(
                     packRoot,
                     "admission-success",
                     0,
                     SelfTestAdmissionRecord);
+                RunWiderPackAclSelfTest(packRoot, profile.Sid);
                 RunBrokerSelfTest(
                     packRoot,
                     "admission-success-repeat",
@@ -2048,6 +2062,52 @@ namespace ProjectAtlas.Release
                 {
                     throw new ContainmentFailure("self-test-cleanup-attempt-order");
                 }
+            }
+        }
+
+        private static void RunWiderPackAclSelfTest(
+            string packRoot,
+            SecurityIdentifier sid)
+        {
+            DirectoryInfo directory = new DirectoryInfo(packRoot);
+            DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            directory.SetAccessControl(security);
+            try
+            {
+                try
+                {
+                    GrantPackReadExecute(packRoot, sid);
+                }
+                catch (ContainmentFailure failure)
+                {
+                    if (String.Equals(
+                        failure.Message,
+                        "pack-profile-acl",
+                        StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                    throw;
+                }
+                throw new ContainmentFailure("self-test-wider-pack-acl-accepted");
+            }
+            finally
+            {
+                security = directory.GetAccessControl(AccessControlSections.Access);
+                RemoveIdentityRules(security, sid);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                directory.SetAccessControl(security);
             }
         }
 
