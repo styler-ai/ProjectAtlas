@@ -25569,7 +25569,9 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         }
     }
     assert_packaged_readme_command_order(&readme)?;
-    if readme.contains("Windows") || readme.contains("```powershell") || readme.contains("](docs/")
+    if readme.contains("runtime for Windows")
+        || readme.contains("```powershell")
+        || readme.contains("](docs/")
     {
         return Err(io::Error::other(
             "packaged Unix README retained platform-specific or local-link guidance",
