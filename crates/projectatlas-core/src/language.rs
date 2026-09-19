@@ -117,7 +117,7 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST: &str =
 /// Historical acceptance seal for capability-set version 15.
 ///
 /// Version 15 preserves version 14 membership and capability strength while
-/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc1 runtime.
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc2 runtime.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST: &str =
     "f560cb41478d81ac46b3ac5d79ad9e94a27a235f1b4209091c4e0220298d2b1a";
 
