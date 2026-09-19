@@ -1019,6 +1019,22 @@ jobs:
           name: parser-pack-${{ matrix.target }}-construction
           path: ${{ runner.temp }}/parser-pack-runtime-e2e
 
+      - name: Name runtime archive as published release asset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $directory = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-e2e"
+          $source = Join-Path $directory "projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+          $accepted = Get-Content -Raw -LiteralPath "packaging/parser-pack/accepted-capabilities.json" |
+            ConvertFrom-Json -Depth 8
+          $releaseVersion = [string]$accepted.runtime.projectatlas_version
+          if ([string]::IsNullOrWhiteSpace($releaseVersion)) {
+            throw "Optional parser-pack release version is missing."
+          }
+          "PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION=$releaseVersion" >> $env:GITHUB_ENV
+          $destination = Join-Path $directory "projectatlas-v$releaseVersion-broad-parser-${{ matrix.target }}.tar.zst"
+          Move-Item -LiteralPath $source -Destination $destination
+
       - name: Exercise adversarial supervisor protocol and cleanup
         shell: pwsh
         run: |
@@ -1052,7 +1068,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path `
             $env:RUNNER_TEMP `
-            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+            "parser-pack-runtime-e2e/projectatlas-v$env:PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION-broad-parser-${{ matrix.target }}.tar.zst"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw "Normal-runtime parser-pack archive is missing."
           }
@@ -1118,7 +1134,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path `
             $env:RUNNER_TEMP `
-            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+            "parser-pack-runtime-e2e/projectatlas-v$env:PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION-broad-parser-${{ matrix.target }}.tar.zst"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw "Normal-runtime parser-pack archive is missing."
           }
@@ -1154,7 +1170,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path `
             $env:RUNNER_TEMP `
-            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+            "parser-pack-runtime-e2e/projectatlas-v$env:PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION-broad-parser-${{ matrix.target }}.tar.zst"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw "Normal-runtime parser-pack archive is missing."
           }
@@ -1184,7 +1200,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path `
             $env:RUNNER_TEMP `
-            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+            "parser-pack-runtime-e2e/projectatlas-v$env:PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION-broad-parser-${{ matrix.target }}.tar.zst"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw "Normal-runtime parser-pack archive is missing."
           }
@@ -1214,7 +1230,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path `
             $env:RUNNER_TEMP `
-            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+            "parser-pack-runtime-e2e/projectatlas-v$env:PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION-broad-parser-${{ matrix.target }}.tar.zst"
           if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
             throw "Normal-runtime parser-pack archive is missing."
           }
@@ -1244,7 +1260,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $archive = Join-Path `
             $env:RUNNER_TEMP `
-            "parser-pack-runtime-e2e/projectatlas-broad-parser-${{ matrix.target }}.tar.zst"
+            "parser-pack-runtime-e2e/projectatlas-v$env:PROJECTATLAS_OPTIONAL_PARSER_RELEASE_VERSION-broad-parser-${{ matrix.target }}.tar.zst"
           $measurementDirectory = Join-Path $env:RUNNER_TEMP "parser-pack-runtime-measurement"
           [System.IO.Directory]::CreateDirectory($measurementDirectory) | Out-Null
           pwsh -NoProfile -NonInteractive `
