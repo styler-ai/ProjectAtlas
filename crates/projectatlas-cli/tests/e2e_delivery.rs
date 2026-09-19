@@ -25380,7 +25380,10 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         format!("$ErrorActionPreference = 'Stop'\n{producer}"),
     )?;
     let release_version = "v0.5.0-rc2";
-    let run = |runner: &Path| -> Result<std::process::Output, Box<dyn Error>> {
+    let run = |runner: &Path,
+               version: &str,
+               prerelease: &str|
+     -> Result<std::process::Output, Box<dyn Error>> {
         Ok(StdCommand::new("pwsh")
             .current_dir(temp.path())
             .args([
@@ -25391,13 +25394,13 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
                 "-File",
             ])
             .arg(&script)
-            .env("RELEASE_VERSION", release_version)
-            .env("RELEASE_IS_PRERELEASE", "true")
+            .env("RELEASE_VERSION", version)
+            .env("RELEASE_IS_PRERELEASE", prerelease)
             .env("RELEASE_STABLE_TAG", "v0.5.0")
             .env("RUNNER_TEMP", runner)
             .output()?)
     };
-    let output = run(temp.path())?;
+    let output = run(temp.path(), release_version, "true")?;
     if !output.status.success() {
         return Err(io::Error::other(format!("Windows digest producer failed: {output:?}")).into());
     }
@@ -25450,6 +25453,33 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             );
         }
     }
+    let stable_runner = temp.path().join("stable");
+    fs::create_dir(&stable_runner)?;
+    let stable_output = run(&stable_runner, "v0.5.0", "false")?;
+    if !stable_output.status.success() {
+        return Err(io::Error::other(format!(
+            "Windows stable package producer failed: {stable_output:?}"
+        ))
+        .into());
+    }
+    let stable_archive = temp
+        .path()
+        .join("release-assets/projectatlas-v0.5.0-x86_64-pc-windows-msvc.zip");
+    let mut stable_reader = ZipArchive::new(io::Cursor::new(fs::read(stable_archive)?))?;
+    let mut stable_readme = String::new();
+    stable_reader
+        .by_name("README.md")?
+        .read_to_string(&mut stable_readme)?;
+    if !stable_readme.contains("This archive is the v0.5.0 stable release.")
+        || stable_readme.contains("prerelease")
+        || stable_readme.contains("For the stable channel")
+    {
+        return Err(io::Error::other(
+            "packaged Windows stable README channel guidance is incorrect",
+        )
+        .into());
+    }
+
     fs::write(
         &script,
         format!("$ErrorActionPreference = 'Stop'\n{consumer}"),
@@ -25472,7 +25502,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         }
         let runner = temp.path().join(fault);
         fs::create_dir(&runner)?;
-        let output = run(&runner)?;
+        let output = run(&runner, release_version, "true")?;
         if output.status.success() != (fault == "valid") {
             return Err(io::Error::other(format!(
                 "Windows {fault} digest admission behaved incorrectly: {output:?}"
@@ -25581,6 +25611,42 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
             "packaged Unix README retained platform-specific or local-link guidance",
         )
         .into());
+    }
+    let stable_output = StdCommand::new("bash")
+        .current_dir(temp.path())
+        .arg(&script)
+        .env("RELEASE_VERSION", "v0.5.0")
+        .env("RELEASE_IS_PRERELEASE", "false")
+        .env("RELEASE_STABLE_TAG", "v0.5.0")
+        .output()?;
+    if !stable_output.status.success() {
+        return Err(io::Error::other(format!(
+            "Unix stable package producer failed: {stable_output:?}"
+        ))
+        .into());
+    }
+    let stable_archive = temp
+        .path()
+        .join("release-assets/projectatlas-v0.5.0-x86_64-unknown-linux-gnu.tar.gz");
+    let stable_output = StdCommand::new("tar")
+        .args(["-xOf"])
+        .arg(stable_archive)
+        .arg("projectatlas/README.md")
+        .output()?;
+    if !stable_output.status.success() {
+        return Err(io::Error::other(format!(
+            "Unix stable package archive read failed: {stable_output:?}"
+        ))
+        .into());
+    }
+    let stable_readme = String::from_utf8(stable_output.stdout)?;
+    if !stable_readme.contains("This archive is the v0.5.0 stable release.")
+        || stable_readme.contains("prerelease")
+        || stable_readme.contains("For the stable channel")
+    {
+        return Err(
+            io::Error::other("packaged Unix stable README channel guidance is incorrect").into(),
+        );
     }
     Ok(())
 }
