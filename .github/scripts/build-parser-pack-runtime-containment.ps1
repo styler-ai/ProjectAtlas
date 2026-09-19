@@ -1459,6 +1459,25 @@ namespace ProjectAtlas.Release
         {
             DirectoryInfo directory = new DirectoryInfo(packRoot);
             DirectorySecurity security = directory.GetAccessControl(AccessControlSections.Access);
+            foreach (AuthorizationRule authorization in security.GetAccessRules(
+                true,
+                true,
+                typeof(SecurityIdentifier)))
+            {
+                FileSystemAccessRule existing = authorization as FileSystemAccessRule;
+                if (existing != null
+                    && existing.IdentityReference.Equals(sid)
+                    && existing.AccessControlType == AccessControlType.Allow
+                    && !existing.IsInherited
+                    && (existing.FileSystemRights & (FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize))
+                        == (FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize)
+                    && (existing.InheritanceFlags & (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit))
+                        == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
+                    && existing.PropagationFlags == PropagationFlags.None)
+                {
+                    return;
+                }
+            }
             FileSystemAccessRule rule = new FileSystemAccessRule(
                 sid,
                 FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
@@ -1900,6 +1919,11 @@ namespace ProjectAtlas.Release
                 RunBrokerSelfTest(
                     packRoot,
                     "admission-success",
+                    0,
+                    SelfTestAdmissionRecord);
+                RunBrokerSelfTest(
+                    packRoot,
+                    "admission-success-repeat",
                     0,
                     SelfTestAdmissionRecord);
                 File.WriteAllText(
