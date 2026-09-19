@@ -106,6 +106,8 @@ fn test_atlas_forwarder_provenance_file_name() -> &'static str {
 const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
 const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
 const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
+#[cfg(windows)]
+const TEST_WINDOWS_LEGACY_ATLAS_FORWARDER_FILE_NAME: &str = "atlas.cmd";
 const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
 const TEST_POSIX_USER_BIN_DIR: &str = ".local/bin";
 #[cfg(unix)]
@@ -32187,6 +32189,84 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     fs::remove_file(&effective_collision_path)?;
 
+    #[cfg(windows)]
+    {
+        let retained_runtime = runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+            .join("projectatlas-retained-runtime.exe");
+        let native_before_invalid_runtime = fs::read(&forwarder)?;
+        let provenance_before_invalid_runtime = fs::read(&provenance)?;
+        let state_before_invalid_runtime = fs::read(&installer_state)?;
+        fs::rename(&runtime, &retained_runtime)?;
+        fs::write(&runtime, b"unrelated invalid runtime")?;
+        fs::write(&forwarder, b"foreign native alias")?;
+        let invalid_runtime_uninstall = run_uninstall()?;
+        let invalid_runtime_uninstall_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&invalid_runtime_uninstall.stdout),
+            String::from_utf8_lossy(&invalid_runtime_uninstall.stderr)
+        );
+        require(
+            !invalid_runtime_uninstall.status.success()
+                && invalid_runtime_uninstall_text.contains("unmanaged")
+                && fs::read(&forwarder)? == b"foreign native alias"
+                && fs::read(&provenance)? == provenance_before_invalid_runtime
+                && fs::read(&installer_state)? == state_before_invalid_runtime,
+            format!(
+                "uninstall accepted a foreign native alias after runtime invalidation:\n{invalid_runtime_uninstall_text}"
+            ),
+        )?;
+        fs::remove_file(&runtime)?;
+        fs::rename(&retained_runtime, &runtime)?;
+        fs::write(&forwarder, &native_before_invalid_runtime)?;
+
+        let sibling = runtime
+            .parent()
+            .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?
+            .join(TEST_WINDOWS_LEGACY_ATLAS_FORWARDER_FILE_NAME);
+        let sibling_bytes = b"@echo off\r\nrem foreign atlas sibling\r\n";
+        let native_before = fs::read(&forwarder)?;
+        let provenance_before = fs::read(&provenance)?;
+        let state_before = fs::read(&installer_state)?;
+        fs::write(&sibling, sibling_bytes)?;
+        let sibling_install = run_install()?;
+        let sibling_install_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&sibling_install.stdout),
+            String::from_utf8_lossy(&sibling_install.stderr)
+        );
+        require(
+            !sibling_install.status.success()
+                && sibling_install_text.contains("atlas command collision")
+                && fs::read(&forwarder)? == native_before
+                && fs::read(&provenance)? == provenance_before
+                && fs::read(&installer_state)? == state_before
+                && fs::read(&sibling)? == sibling_bytes,
+            format!(
+                "installer masked an unmanaged atlas.cmd sibling beside the native alias:\n{sibling_install_text}"
+            ),
+        )?;
+        let sibling_uninstall = run_uninstall()?;
+        let sibling_uninstall_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&sibling_uninstall.stdout),
+            String::from_utf8_lossy(&sibling_uninstall.stderr)
+        );
+        require(
+            !sibling_uninstall.status.success()
+                && sibling_uninstall_text.contains("unmanaged")
+                && fs::read(&forwarder)? == native_before
+                && fs::read(&provenance)? == provenance_before
+                && fs::read(&installer_state)? == state_before
+                && fs::read(&sibling)? == sibling_bytes,
+            format!(
+                "uninstall partially removed the native alias before rejecting atlas.cmd:\n{sibling_uninstall_text}"
+            ),
+        )?;
+        fs::remove_file(sibling)?;
+    }
+
     fs::remove_file(&forwarder)?;
     fs::remove_file(&provenance)?;
     fs::remove_file(&installer_state)?;
@@ -32651,7 +32731,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             run_install()?.status.success(),
             "legacy migration fixture could not restore the native alias",
         )?;
-        let legacy_forwarder = runtime_directory.join("atlas.cmd");
+        let legacy_forwarder =
+            runtime_directory.join(TEST_WINDOWS_LEGACY_ATLAS_FORWARDER_FILE_NAME);
         let legacy_provenance = runtime_directory.join(TEST_FORWARDER_PROVENANCE_FILE_NAME);
         let native_state = fs::read_to_string(&installer_state)?;
         let capability = native_state

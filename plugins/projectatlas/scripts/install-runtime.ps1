@@ -2698,9 +2698,16 @@ function Test-ProjectAtlasManagedAtlasForwarder {
                 -or [System.IO.File]::ReadAllText($provenancePath) -cne (Get-ProjectAtlasAtlasForwarderProvenanceContent $state.ForwarderPath $state.RuntimePath)) {
                 return $false
             }
+            if ([string]::IsNullOrWhiteSpace($state.RuntimeHash) `
+                -or (Test-ProjectAtlasHardLinkedFile $FilePath)) {
+                return $false
+            }
+            $fileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $FilePath).Hash
+            if ($fileHash -ine $state.RuntimeHash) {
+                return $false
+            }
             if ((Test-ProjectAtlasRuntime $state.RuntimePath $null) `
-                -and ((Test-ProjectAtlasHardLinkedFile $FilePath) `
-                    -or (Get-FileHash -Algorithm SHA256 -LiteralPath $FilePath).Hash -ine (Get-FileHash -Algorithm SHA256 -LiteralPath $state.RuntimePath).Hash)) {
+                -and $fileHash -ine (Get-FileHash -Algorithm SHA256 -LiteralPath $state.RuntimePath).Hash) {
                 return $false
             }
             $targetIdentity = [System.IO.Path]::GetFullPath($state.RuntimePath)
@@ -3102,6 +3109,7 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
     foreach ($candidate in @(
             $forwarder,
             (Join-Path (Split-Path -Parent $forwarder) "atlas.exe"),
+            (Join-Path (Split-Path -Parent $forwarder) "atlas.cmd"),
             (Join-Path (Split-Path -Parent $forwarder) "atlas.bat"),
             (Join-Path (Split-Path -Parent $forwarder) "atlas.ps1"),
             (Join-Path (Split-Path -Parent $forwarder) "atlas.com")
@@ -3109,9 +3117,15 @@ function Assert-ProjectAtlasAtlasForwarderCollisionFree {
         if (-not (Test-Path -LiteralPath $candidate)) {
             continue
         }
-        if ((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
-            -and ((Test-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath) `
-                -or (Test-ProjectAtlasOwnedNativeAtlasForwarder $candidate $VerifiedPath))) {
+        $candidateIsManaged = Test-ProjectAtlasManagedAtlasForwarder $candidate $VerifiedPath
+        $candidateNeedsStateRefresh = Test-ProjectAtlasNativeAtlasForwarderStateRefreshNeeded $candidate $VerifiedPath
+        if (((Get-NormalizedPathEntry $candidate) -ieq $forwarderNormalized `
+                -and ($candidateIsManaged `
+                    -or (Test-ProjectAtlasOwnedNativeAtlasForwarder $candidate $VerifiedPath) `
+                    -or $candidateNeedsStateRefresh)) `
+            -or ((Test-ProjectAtlasWindows) `
+                -and [System.IO.Path]::GetExtension($candidate) -ieq ".cmd" `
+                -and $candidateIsManaged)) {
             continue
         }
         throw "ProjectAtlas atlas command collision at intended path; refusing to overwrite unmanaged file: $candidate"
@@ -3152,6 +3166,16 @@ function Write-ProjectAtlasAtlasForwarder {
     else {
         $previousCandidate = $null
     }
+    if ((Test-ProjectAtlasWindows) -and -not $previousCandidate) {
+        $legacyCandidate = Get-ProjectAtlasLegacyAtlasForwarderPath $VerifiedPath
+        if ((Test-Path -LiteralPath $legacyCandidate) `
+            -and (Test-ProjectAtlasManagedAtlasForwarder $legacyCandidate $VerifiedPath)) {
+            $previousCandidate = $legacyCandidate
+            $previousCandidateIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $legacyCandidate).SortKey
+            $previousOwnedAtDiscovery = $true
+            $previousIdentity = $previousCandidateIdentity
+        }
+    }
     Invoke-ProjectAtlasAtlasForwarderLockDiscoveryPause
     Invoke-ProjectAtlasAtlasForwarderLockAttemptSignal
     $lifecycleLock = Enter-ProjectAtlasAtlasForwarderLifecycleLockSet $forwarder $previousCandidate
@@ -3163,13 +3187,23 @@ function Write-ProjectAtlasAtlasForwarder {
             if ($currentCommand.Path) { $currentCommand.Path } else { $currentCommand.Source }
         }
         if ($previousCandidate) {
+            $previousIsLegacy = (Test-ProjectAtlasWindows) `
+                -and [System.IO.Path]::GetExtension($previousCandidate) -ieq ".cmd"
             if ($currentPath `
-                -and (Get-NormalizedPathEntry $currentPath) -ine $previousCandidateIdentity) {
+                -and (Get-NormalizedPathEntry $currentPath) -ine $previousCandidateIdentity `
+                -and (-not $previousIsLegacy `
+                    -or (Get-NormalizedPathEntry $currentPath) -ine (Get-NormalizedPathEntry $forwarder))) {
                 throw "ProjectAtlas effective atlas command changed while acquiring its lifecycle locks; refusing to publish: $currentPath"
             }
             if ($currentPath) {
                 $currentIdentity = (Get-ProjectAtlasAtlasForwarderLifecycleLockKey $currentPath).SortKey
-                if (Test-ProjectAtlasOwnedAtlasForwarder $currentPath) {
+                if ($previousIsLegacy `
+                    -and $previousOwnedAtDiscovery `
+                    -and (Get-NormalizedPathEntry $currentPath) -ieq (Get-NormalizedPathEntry $forwarder)) {
+                    $previousPath = $previousCandidate
+                    $previousIdentity = $previousCandidateIdentity
+                }
+                elseif (Test-ProjectAtlasOwnedAtlasForwarder $currentPath) {
                     $previousPath = $currentPath
                     $previousIdentity = $currentIdentity
                 }
@@ -3386,6 +3420,7 @@ function Remove-ProjectAtlasAtlasForwarders {
             }
         }
     }
+    $uniqueCandidates = @()
     $seen = @{}
     foreach ($candidate in $candidates) {
         $normalized = Get-NormalizedPathEntry $candidate
@@ -3393,6 +3428,27 @@ function Remove-ProjectAtlasAtlasForwarders {
             continue
         }
         $seen[$normalized] = $true
+        $uniqueCandidates += $candidate
+    }
+    foreach ($candidate in $uniqueCandidates) {
+        $candidateItem = Get-Item -Force -LiteralPath $candidate -ErrorAction SilentlyContinue
+        if (-not $candidateItem) {
+            continue
+        }
+        $verifiedPath = $RuntimePath
+        if (-not $verifiedPath) {
+            $state = Read-ProjectAtlasAtlasForwarderState $candidate $null
+            if (-not $state) {
+                throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate"
+            }
+            $verifiedPath = $state.RuntimePath
+        }
+        if (-not (Test-ProjectAtlasManagedAtlasForwarder $candidate $verifiedPath)) {
+            $managedTarget = Get-ProjectAtlasManagedAtlasForwarderTarget $candidate
+            throw "ProjectAtlas atlas uninstall refused to remove an unmanaged file: $candidate (resolved target: $managedTarget; verified runtime: $verifiedPath)"
+        }
+    }
+    foreach ($candidate in $uniqueCandidates) {
         $candidateItem = Get-Item -Force -LiteralPath $candidate -ErrorAction SilentlyContinue
         $provenancePath = Get-ProjectAtlasAtlasForwarderProvenancePath $candidate
         $statePath = Get-ProjectAtlasAtlasForwarderStatePath $candidate
