@@ -10,8 +10,8 @@ For RC3, this DOCX requirement supersedes the #465 `repository-content-intellige
 - **THEN** the result preserves its exact font/code, story-part identity, and occurrence locator through publication and reopen, retains verifiable surrounding text, identifies unresolved Unicode-text coverage, and never advertises the glyph as decoded
 
 #### Scenario: Rendered symbols outside the main body
-- **WHEN** a DOCX references rendered headers, footers, footnotes, endnotes, comments, frames, or nested text boxes containing `w:sym`
-- **THEN** their symbols are admitted with exact story-part provenance, or that document exposes explicit incomplete coverage rather than claiming full symbol/text coverage
+- **WHEN** a safely admitted DOCX references rendered headers, footers, footnotes, endnotes, comments, frames, or nested text boxes containing `w:sym` within retained parser bounds
+- **THEN** every such symbol is admitted with exact story-part provenance; an incomplete-coverage fallback does not satisfy this supported-story case
 
 #### Scenario: Referenced story is not examined
 - **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
