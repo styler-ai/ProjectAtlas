@@ -19,7 +19,7 @@
 
 ## 4. PDF execution-fuel continuity (#625)
 
-- [ ] 4.1 Reproduce a PDF that exhausts Wasmi execution fuel; distinguish the parser limit from text-index byte caps and trace text/symbol callers, document identity, coverage, and publication ownership.
-- [ ] 4.2 Fix a demonstrated parser inefficiency if present; otherwise reuse the accepted document-local incomplete outcome with exact path/typed fuel and finite cancellation, time, memory, and output limits.
-- [ ] 4.3 Add full/incremental CLI and MCP regression for the fuel fixture, malformed/oversized negative inputs, fault/rollback/retry, and supported Windows/Linux/macOS package behavior.
+- [ ] 4.1 Reproduce a valid PDF that exhausts RC2 Wasmi execution fuel; measure fuel, wall time, memory, and output against adversarial controls, distinguish parser fuel from text-index byte caps, and trace document/publication ownership.
+- [ ] 4.2 Fix demonstrated parser inefficiency and raise the finite fuel budget if measured valid-input proof justifies it under retained limits; represent remaining exhaustion with exact path, typed reason, and document-local incomplete coverage.
+- [ ] 4.3 Add full/incremental CLI and MCP regressions for a valid PDF above the old ceiling and ordinary source beside a PDF that still exhausts retained fuel, plus malformed/oversized inputs, fault/rollback/retry, and supported Windows/Linux/macOS package behavior.
 - [ ] 4.4 Run `cargo test -p projectatlas-symbols`, the owning qualified CLI E2E, `cargo fmt --check`, affected workspace Clippy/check/tests, OpenSpec and IssueOps gates; obtain independent review and resolve findings.
