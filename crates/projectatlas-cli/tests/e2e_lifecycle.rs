@@ -447,7 +447,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     {
         let alias = fixture.path().join("repo-alias");
         std::os::unix::fs::symlink(&repo, &alias)?;
-        let mut alias_args = args.clone();
+        let mut alias_args = args;
         alias_args[3] = alias
             .join(ATLAS_DIR_NAME)
             .join("projectatlas.db")
@@ -459,9 +459,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             .display()
             .to_string();
         let mut alias_registry = registry.clone();
-        alias_registry["transport"]["args"] = json!(alias_args.clone());
+        alias_registry["transport"]["args"] = json!(alias_args);
         let mut alias_generated = generated.clone();
-        alias_generated["mcpServers"]["projectatlas"]["args"] = json!(alias_args.clone());
+        alias_generated["mcpServers"]["projectatlas"]["args"] = json!(alias_args);
         alias_generated["mcpServers"]["projectatlas"]["cwd"] = json!(alias);
         fs::write(&registry_path, serde_json::to_vec(&alias_registry)?)?;
         fs::write(&host_config, serde_json::to_vec(&alias_generated)?)?;
