@@ -222,7 +222,6 @@ const FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME: &str = "codex-registry-current.json
 
 const FAKE_CODEX_REGISTRY_STALE_FILE_NAME: &str = "codex-registry-stale.json";
 
-#[cfg(windows)]
 const FAKE_CODEX_REGISTRY_STATE_FILE_NAME: &str = "codex-registry-state.txt";
 
 #[cfg(windows)]

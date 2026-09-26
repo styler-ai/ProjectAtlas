@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "c8ff201a83afb92de57c2b73a131d2f9105cf1067fa8cbb0ef90533222ac769d",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "19417c4049b192cfe4e3ec79d999f1498f40b333bb1f888a1e408e396ebb0e79",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "a219715c46f19eff7590766c4ddab1996b8500ec970c2385edffe9872b08d845",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "7a5c3d8208fd163059b79bef1a4eeb3dddd1449ef663543af12750c2c1d89b5f",
@@ -19637,6 +19637,11 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 650,
       "text": "        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 717,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_lifecycle bundled_hook -- --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
