@@ -53,7 +53,7 @@
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; rendered font-coded symbols retain durable font/code/part/occurrence identity and produce Unicode only for verified mappings, with unknown mappings marked as incomplete text coverage
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
-- **AND** live page-number and date blocks requiring evaluation remain unresolved; footnote/endnote references admit their validated in-package note stories without fabricating evaluated marker text; deleted, moved-from, and unselected blocks remain excluded
+- **AND** live page-number and date blocks requiring evaluation remain unresolved with typed file-local incomplete text coverage; footnote/endnote references admit their validated in-package note stories without fabricating evaluated marker text; deleted, moved-from, and unselected blocks remain excluded
 - **AND** deleted and moved-from revision containers suppress all text leaves, separators, and field-state changes while preserving source paragraph/run numbering
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
 - **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence
@@ -89,7 +89,7 @@ PDF/DOCX extracted text, locators, provenance, coverage, and any document/source
 - **THEN** no new schema or index is added
 
 #### Scenario: Accepted document-local incomplete coverage
-- **WHEN** a safely admitted document has an accepted parser output/fact/memory or PDF-fuel limit, an unresolved DOCX symbol mapping, or a safe referenced unsupported story type outside the named supported set
+- **WHEN** a safely admitted document has an accepted parser output/fact/memory or PDF-fuel limit, an unresolved DOCX symbol mapping or live page-number/date field requiring evaluation, or a safe referenced unsupported story type outside the named supported set
 - **THEN** the new generation may publish only with verified source and durable, queryable file-specific incomplete coverage; it MUST NOT advertise omitted document evidence as complete
 
 #### Scenario: Publication or replacement fails
