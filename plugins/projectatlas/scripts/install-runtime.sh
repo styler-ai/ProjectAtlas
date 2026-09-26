@@ -2350,6 +2350,26 @@ update_codex_plugin_locked() {
   fi
 }
 
+codex_mcp_registry_absent() {
+  inventory=$("$codex_bin" mcp list --json 2>/dev/null) || return 1
+  [ "${#inventory}" -le 1048576 ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$inventory" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+    valid = isinstance(rows, list) and all(isinstance(row, dict) and isinstance(row.get("name"), str) for row in rows)
+    sys.exit(0 if valid and not any(row["name"] == "projectatlas" for row in rows) else 1)
+except (ValueError, TypeError):
+    sys.exit(1)
+'
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$inventory" | jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; type == "object" and (.name | type == "string")) and all(.[]; .name != "projectatlas"))' >/dev/null
+  else
+    return 1
+  fi
+}
+
 update_codex_mcp_registry() {
   if truthy "${PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE:-}"; then
     printf '%s\n' "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
@@ -2364,26 +2384,29 @@ update_codex_mcp_registry() {
     printf '%s\n' "Codex MCP registry update skipped: ProjectAtlas version is unknown."
     return 0
   fi
-  existing=$("$codex_bin" mcp get projectatlas 2>&1) || {
-    printf '%s\n' "Codex MCP registry update skipped: no global projectatlas MCP server is configured."
+  existing=$("$codex_bin" mcp get projectatlas 2>&1) || existing=
+  if [ -z "$existing" ] && ! codex_mcp_registry_absent; then
+    printf '%s\n' "warning: Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent." >&2
     return 0
-  }
+  fi
   expected_config=
   if [ -f "$project_config" ]; then
     expected_config=$project_config
   elif [ -f "$flat_config" ]; then
     expected_config=$flat_config
   fi
-  if printf '%s\n' "$existing" | grep -F "$projectatlas_bin" >/dev/null &&
+  if [ -n "$existing" ] && printf '%s\n' "$existing" | grep -F "$projectatlas_bin" >/dev/null &&
     printf '%s\n' "$existing" | grep -F "$runtime_version" >/dev/null &&
     printf '%s\n' "$existing" | grep -F "$atlas_dir/projectatlas.db" >/dev/null &&
     { [ -z "$expected_config" ] || printf '%s\n' "$existing" | grep -F "$expected_config" >/dev/null; }; then
     printf 'Codex MCP registry already points to ProjectAtlas %s for %s.\n' "$runtime_version" "$atlas_dir/projectatlas.db"
     return 0
   fi
-  if ! "$codex_bin" mcp remove projectatlas >/dev/null 2>&1; then
-    printf '%s\n' "warning: Codex MCP registry update failed: could not remove stale global projectatlas server." >&2
-    return 0
+  if [ -n "$existing" ]; then
+    if ! "$codex_bin" mcp remove projectatlas >/dev/null 2>&1; then
+      printf '%s\n' "warning: Codex MCP registry update failed: could not remove stale global projectatlas server." >&2
+      return 0
+    fi
   fi
   set -- mcp add projectatlas -- "$projectatlas_bin" --require-version "$runtime_version" --db "$atlas_dir/projectatlas.db"
   if [ -n "$expected_config" ]; then
@@ -2395,6 +2418,93 @@ update_codex_mcp_registry() {
   else
     printf '%s\n' "warning: Codex MCP registry update failed: could not add verified global projectatlas server." >&2
   fi
+}
+
+codex_mcp_registry_ready() {
+  resolve_codex_command "Codex readiness receipt" || return 1
+  registration=$("$codex_bin" mcp get projectatlas --json 2>/dev/null) || return 1
+  runtime_version=$(expected_runtime_version)
+  expected_config=$(effective_config_path)
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$registration" | python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin)
+    runtime, version, database, config = sys.argv[1:]
+    args = ["--require-version", version, "--db", database]
+    if config:
+        args += ["--config", config]
+    args += ["mcp"]
+    transport = row["transport"]
+    sys.exit(0 if row["name"] == "projectatlas" and row["enabled"] is True and
+             transport["type"] == "stdio" and transport["command"] == runtime and
+             transport["args"] == args else 1)
+except (ValueError, TypeError, KeyError):
+    sys.exit(1)
+' "$projectatlas_bin" "$runtime_version" "$atlas_dir/projectatlas.db" "$expected_config"
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$registration" | jq -se --arg command "$projectatlas_bin" --arg version "$runtime_version" --arg db "$atlas_dir/projectatlas.db" --arg config "$expected_config" '
+      length == 1 and (.[0] | .name == "projectatlas" and .enabled == true and
+        .transport.type == "stdio" and .transport.command == $command and
+        .transport.args == (["--require-version", $version, "--db", $db] +
+          (if $config == "" then [] else ["--config", $config] end) + ["mcp"]))
+    ' >/dev/null
+  else
+    return 1
+  fi
+}
+
+write_codex_readiness_receipt() {
+  codex_mcp_registry_ready || return 0
+  load_codex_projectatlas_plugin_inventory || return 0
+  [ "$codex_projectatlas_inventory_version" = "$(expected_runtime_version)" ] &&
+    codex_projectatlas_plugin_artifacts_ready "$codex_projectatlas_inventory_version" "$codex_projectatlas_inventory_source_path" || return 0
+  codex_config=$(codex_config_path)
+  [ -f "$codex_config" ] || return 0
+  [ "$(wc -c < "$codex_config")" -le 1048576 ] &&
+    [ "$(wc -c < "$mcp_config_path")" -le 1048576 ] || return 0
+  state_root=$(atlas_forwarder_state_root) || return 0
+  mkdir -p -- "$state_root" || return 0
+  [ -d "$state_root" ] && [ ! -L "$state_root" ] || return 0
+  runtime_path=$(canonical_atlas_runtime_path "$projectatlas_bin") || return 0
+  project_path=$(canonical_path "$project_root") || return 0
+  codex_path=$(canonical_file "$codex_config") || return 0
+  runtime_hash=$(archive_sha256 "$runtime_path") || return 0
+  generated_hash=$(archive_sha256 "$mcp_config_path") || return 0
+  codex_hash=$(archive_sha256 "$codex_path") || return 0
+  version=$(expected_runtime_version)
+  receipt=$state_root/codex-readiness.json
+  temporary=$(mktemp "$state_root/.codex-readiness.XXXXXX") || return 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+keys = ("version", "project_root", "runtime", "runtime_sha256", "generated_sha256", "codex_config", "codex_config_sha256")
+payload = dict(zip(keys, sys.argv[1:8]))
+payload["direct_cli"] = payload["runtime"]
+payload["direct_cli_sha256"] = payload["runtime_sha256"]
+row = json.loads(sys.argv[8])
+transport = row["transport"]
+payload["registry"] = {"name": row["name"], "enabled": row["enabled"],
+                       "transport": {"type": transport["type"], "command": transport["command"],
+                                     "args": transport["args"]}}
+print(json.dumps(payload, separators=(",", ":")))
+' "$version" "$project_path" "$runtime_path" "$runtime_hash" "$generated_hash" "$codex_path" "$codex_hash" "$registration" >"$temporary" || {
+      rm -f -- "$temporary"
+      return 0
+    }
+  elif command -v jq >/dev/null 2>&1; then
+    jq -n --arg version "$version" --arg project_root "$project_path" --arg runtime "$runtime_path" \
+      --arg runtime_sha256 "$runtime_hash" --arg generated_sha256 "$generated_hash" \
+      --arg codex_config "$codex_path" --arg codex_config_sha256 "$codex_hash" --argjson registry "$registration" \
+      '{version:$version,project_root:$project_root,runtime:$runtime,runtime_sha256:$runtime_sha256,direct_cli:$runtime,direct_cli_sha256:$runtime_sha256,generated_sha256:$generated_sha256,codex_config:$codex_config,codex_config_sha256:$codex_config_sha256,registry:{name:$registry.name,enabled:$registry.enabled,transport:{type:$registry.transport.type,command:$registry.transport.command,args:$registry.transport.args}}}' >"$temporary" || {
+      rm -f -- "$temporary"
+      return 0
+    }
+  else
+    rm -f -- "$temporary"
+    return 0
+  fi
+  chmod 600 "$temporary" && mv -f -- "$temporary" "$receipt" || rm -f -- "$temporary"
 }
 
 report_projectatlas_workflow_pins() {
@@ -2911,6 +3021,7 @@ verify_generated_mcp_config "$claude_mcp_config_path" "Claude Code"
 verify_generated_mcp_config "$opencode_config_path" "OpenCode"
 update_codex_plugin
 update_codex_mcp_registry
+write_codex_readiness_receipt
 report_projectatlas_workflow_pins
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"

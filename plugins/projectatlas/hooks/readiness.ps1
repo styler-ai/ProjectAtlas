@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $skill = Join-Path $pluginRoot 'skills/projectatlas/SKILL.md'
 $expected = (Get-Content -Raw -LiteralPath (Join-Path $pluginRoot '.codex-plugin/plugin.json') | ConvertFrom-Json).version
-$reason = 'runtime unavailable or not version-matched'
+$reason = 'installer readiness receipt or host files changed; rerun the installer'
 $startingRoot = (Get-Location).Path
 $projectRoot = $startingRoot
 $homeRoot = if ($env:USERPROFILE) { [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\') } else { $null }
@@ -45,54 +45,122 @@ if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
 $runtime = $null
 $registry = $null
 $generated = $null
+$atlasDir = Join-Path $projectRoot '.projectatlas'
+$hostConfig = Join-Path $atlasDir 'projectatlas.mcp.json'
+$stateBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $env:USERPROFILE }
+$receiptPath = if ($stateBase) { Join-Path $stateBase 'ProjectAtlas/state/codex-readiness.json' } else { $null }
+$codexConfig = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'config.toml' } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.codex/config.toml' } else { $null }
+function FileSha256([string]$path) {
+    $stream = [IO.File]::OpenRead($path)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $hash.Dispose(); $stream.Dispose() }
+}
+$argsExpected = @('--require-version', $expected, '--db', $db)
+if ($config) { $argsExpected += @('--config', $config) }
+$argsExpected += 'mcp'
+$samePath = {
+    param($actual, $wanted)
+    $actual -and [IO.Path]::IsPathRooted([string]$actual) -and
+    [string]$actual -notmatch '^[A-Za-z]:[^\\/]' -and
+    [IO.Path]::GetFullPath([string]$actual) -ieq [IO.Path]::GetFullPath([string]$wanted)
+}
+$sameArgs = {
+    param($actual)
+    $actualArgs = @($actual)
+    if ($actualArgs.Count -ne $argsExpected.Count) { return $false }
+    for ($i = 0; $i -lt $argsExpected.Count; $i++) {
+        if (($i -eq 3) -or (($i -eq 5) -and $config)) {
+            if (-not (& $samePath $actualArgs[$i] $argsExpected[$i])) { return $false }
+        } elseif ([string]$actualArgs[$i] -cne [string]$argsExpected[$i]) {
+            return $false
+        }
+    }
+    return $true
+}
+$bindingReady = {
+    param($registered, $configured)
+    $registered.name -ceq 'projectatlas' -and
+    $registered.enabled -is [bool] -and $registered.enabled -and
+    $registered.transport.type -ceq 'stdio' -and
+    (& $samePath $receipt.runtime $registered.transport.command) -and
+    (& $sameArgs $registered.transport.args) -and
+    (& $samePath $configured.mcpServers.projectatlas.command $receipt.runtime) -and
+    (& $sameArgs $configured.mcpServers.projectatlas.args) -and
+    (& $samePath $configured.mcpServers.projectatlas.cwd $projectRoot)
+}
 try {
-    $runtime = & projectatlas --format json runtime-info 2>$null | ConvertFrom-Json
-    if ($runtime.project -ceq 'ProjectAtlas' -and $runtime.version -ceq $expected -and $runtime.executable) {
+    $directCommand = Get-Command projectatlas -ErrorAction SilentlyContinue
+    $directPath = if ($directCommand -and $directCommand.CommandType -eq 'Application') { $directCommand.Source } else { $null }
+    $runtime = [pscustomobject]@{ version = $null; executable = $directPath }
+    $cursor = $startingRoot
+    while ($true) {
+        if (Test-Path -LiteralPath (Join-Path $cursor '.codex/config.toml') -PathType Leaf) {
+            throw 'project Codex config may override the global MCP binding'
+        }
+        if ($cursor -ieq $projectRoot) { break }
+        $cursor = Split-Path -Parent $cursor
+    }
+    $receiptDir = Get-Item -Force -LiteralPath (Split-Path -Parent $receiptPath) -ErrorAction Stop
+    $receiptFile = Get-Item -Force -LiteralPath $receiptPath -ErrorAction Stop
+    if (($receiptDir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $receiptFile.Length -gt 65536 -or
+        (($receiptFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+        ($receiptFile.PSObject.Properties.Name -contains 'LinkType' -and $receiptFile.LinkType -eq 'HardLink')) {
+        throw 'untrusted readiness state'
+    }
+    $receipt = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+    if ((Get-Item -LiteralPath $codexConfig).Length -gt 1048576 -or
+        (Get-Item -LiteralPath $hostConfig).Length -gt 1048576) {
+        throw 'oversized host config'
+    }
+    if ($receipt.version -cne $expected -or
+        -not (& $samePath $receipt.project_root $projectRoot) -or
+        (-not (& $samePath $receipt.runtime $directPath) -and
+         -not (& $samePath $receipt.direct_cli $directPath)) -or
+        -not (& $samePath $receipt.codex_config $codexConfig) -or
+        $receipt.runtime_sha256 -cne (FileSha256 $receipt.runtime) -or
+        $receipt.direct_cli_sha256 -cne $receipt.runtime_sha256 -or
+        $receipt.runtime_sha256 -cne (FileSha256 $directPath) -or
+        $receipt.codex_config_sha256 -cne (FileSha256 $codexConfig) -or
+        $receipt.generated_sha256 -cne (FileSha256 $hostConfig)) {
+        $reason = 'installer readiness receipt or host files changed; rerun the installer'
+        throw 'not ready'
+    }
+    $registry = $receipt.registry
+    if (-not (Test-Path -LiteralPath $db -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $hostConfig -PathType Leaf)) {
         $reason = 'project database or generated host config unavailable'
-        $atlasDir = Join-Path $projectRoot '.projectatlas'
-        $hostConfig = Join-Path $atlasDir 'projectatlas.mcp.json'
-        if (Test-Path -LiteralPath $db -PathType Leaf) {
-            if (Test-Path -LiteralPath $hostConfig -PathType Leaf) {
+        throw 'not ready'
+    }
+    $generated = Get-Content -Raw -LiteralPath $hostConfig | ConvertFrom-Json
+    if (& $bindingReady $registry $generated) {
+        $runtime = & $directPath --format json runtime-info 2>$null | ConvertFrom-Json
+    }
+    else {
+        $reason = 'direct CLI, Codex MCP, or generated config does not match this project/runtime'
+        throw 'not ready'
+    }
+    if ($runtime.project -ceq 'ProjectAtlas' -and $runtime.version -ceq $expected -and
+        (& $samePath $runtime.executable $directPath)) {
+        $reason = 'project database is incompatible or bound to another root'
                 $verifyArgs = @('--db', $db)
                 if ($config) { $verifyArgs += @('--config', $config) }
                 $verifyArgs += @('--format', 'json', 'root', 'verify', '--binding-only', '--project-root', $projectRoot)
-                $reason = 'project database is incompatible or bound to another root'
-                & projectatlas @verifyArgs 2>$null | Out-Null
+                & $directPath @verifyArgs 2>$null | Out-Null
                 if ($LASTEXITCODE -ne 0) {
                     throw 'not ready'
                 }
                 $reason = 'Codex MCP or generated config does not match this project/runtime'
-                $registry = & codex mcp get projectatlas --json 2>$null | ConvertFrom-Json
                 $generated = Get-Content -Raw -LiteralPath $hostConfig | ConvertFrom-Json
-                $argsExpected = @('--require-version', $expected, '--db', $db)
-                if ($config) { $argsExpected += @('--config', $config) }
-                $argsExpected += 'mcp'
-                $samePath = { param($actual, $wanted) $actual -and
-                    [IO.Path]::GetFullPath([string]$actual) -ieq [IO.Path]::GetFullPath([string]$wanted) }
-                $sameArgs = {
-                    param($actual)
-                    $actualArgs = @($actual)
-                    if ($actualArgs.Count -ne $argsExpected.Count) { return $false }
-                    for ($i = 0; $i -lt $argsExpected.Count; $i++) {
-                        if (($i -eq 3) -or (($i -eq 5) -and $config)) {
-                            if (-not (& $samePath $actualArgs[$i] $argsExpected[$i])) { return $false }
-                        } elseif ([string]$actualArgs[$i] -cne [string]$argsExpected[$i]) {
-                            return $false
-                        }
-                    }
-                    return $true
-                }
-                if ($registry.enabled -is [bool] -and $registry.enabled -and $registry.transport.type -ceq 'stdio' -and
-                    (& $samePath $registry.transport.command $runtime.executable) -and
-                    (& $sameArgs $registry.transport.args) -and
-                    (& $samePath $generated.mcpServers.projectatlas.command $runtime.executable) -and
-                    (& $sameArgs $generated.mcpServers.projectatlas.args) -and
-                    (& $samePath $generated.mcpServers.projectatlas.cwd $projectRoot)) {
+                if ($receipt.runtime_sha256 -ceq (FileSha256 $receipt.runtime) -and
+                    $receipt.direct_cli_sha256 -ceq (FileSha256 $directPath) -and
+                    $receipt.codex_config_sha256 -ceq (FileSha256 $codexConfig) -and
+                    $receipt.generated_sha256 -ceq (FileSha256 $hostConfig) -and
+                    (& $bindingReady $registry $generated)) {
                     Write-Output "ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match $expected for this project. Use the version-matched ProjectAtlas skill and repository instructions."
                     exit 0
                 }
-            }
-        }
     }
 } catch {
     # Missing commands and malformed records are incomplete, never ready.

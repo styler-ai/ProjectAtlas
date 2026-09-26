@@ -1,6 +1,10 @@
 #!/bin/sh
 # Read-only session check. The installer, not a hook, owns runtime and MCP changes.
 set -u
+direct_path=$(command -v projectatlas 2>/dev/null || true)
+case "$direct_path" in /*) ;; *) direct_path= ;; esac
+PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin
+export PATH
 
 plugin_root=${PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
 manifest=$plugin_root/.codex-plugin/plugin.json
@@ -50,102 +54,167 @@ same_json_path() {
 }
 runtime=
 registry=
-generated=$(cat "$host_config" 2>/dev/null || true)
-if [ -n "$expected" ] && command -v projectatlas >/dev/null 2>&1 &&
-  { command -v python3 >/dev/null 2>&1 || command -v jq >/dev/null 2>&1; }; then
-  runtime=$(projectatlas --format json runtime-info 2>/dev/null || true)
+generated=
+if [ -f "$host_config" ] && [ "$(wc -c < "$host_config")" -le 1048576 ]; then
+  generated=$(cat "$host_config" 2>/dev/null || true)
+fi
+state_base=${XDG_STATE_HOME:-${HOME:-}/.local/state}
+if [ -d "$state_base" ]; then
+  state_base=$(CDPATH= cd -P -- "$state_base" 2>/dev/null && pwd -P) || state_base=
+else
+  state_base=
+fi
+receipt=${state_base:+$state_base/projectatlas/codex-readiness.json}
+codex_config=${CODEX_HOME:-${HOME:-}/.codex}/config.toml
+receipt_valid() {
+  [ -n "$receipt" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
+    [ -d "$state_base/projectatlas" ] && [ ! -L "$state_base/projectatlas" ] &&
+    [ -f "$db" ] && [ -f "$host_config" ] && [ -f "$codex_config" ] &&
+    [ -n "$direct_path" ] && [ -f "$direct_path" ] || return 1
+  [ "$(wc -c < "$receipt")" -le 65536 ] || return 1
+  [ "$(wc -c < "$host_config")" -le 1048576 ] &&
+    [ "$(wc -c < "$codex_config")" -le 1048576 ] || return 1
+  cursor=$starting_root
+  while :; do
+    [ ! -f "$cursor/.codex/config.toml" ] || return 1
+    [ "$cursor" = "$project_root" ] && break
+    cursor=$(dirname -- "$cursor")
+  done
   if command -v python3 >/dev/null 2>&1; then
-    executable=$(printf '%s\n' "$runtime" | python3 -c '
-import json, sys
+    python3 - "$receipt" "$host_config" "$expected" "$project_root" "$direct_path" "$db" "$config" "$codex_config" <<'PY'
+import hashlib, json, os, sys
+receipt_path, generated_path, version, root, runtime, database, config, codex_config = sys.argv[1:]
+def same_path(actual, wanted):
+    return isinstance(actual, str) and os.path.isabs(actual) and os.path.realpath(actual) == os.path.realpath(wanted)
+def digest(path):
+    with open(path, "rb") as source:
+        value = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1048576), b""):
+            value.update(chunk)
+        return value.hexdigest()
 try:
-    identity = json.load(sys.stdin)
-    if identity.get("project") == "ProjectAtlas" and identity.get("version") == sys.argv[1] and isinstance(identity.get("executable"), str):
-        print(identity["executable"])
-except (ValueError, AttributeError):
-    pass
-' "$expected" 2>/dev/null || true)
-  else
-    executable=$(printf '%s\n' "$runtime" | jq -r --arg v "$expected" 'select(.project == "ProjectAtlas" and .version == $v) | .executable // empty' 2>/dev/null || true)
-  fi
-  if [ -n "$executable" ]; then
-    reason='project database or generated host config unavailable'
-    if [ -f "$db" ] && [ -f "$host_config" ] && command -v codex >/dev/null 2>&1; then
-      set -- projectatlas --db "$db"
-      [ -z "$config" ] || set -- "$@" --config "$config"
-      set -- "$@" --format json root verify --binding-only --project-root "$project_root"
-      if ! (cd "$project_root" && "$@" >/dev/null 2>&1); then
-        reason='project database is incompatible or bound to another root'
-      else
-      registry=$(codex mcp get projectatlas --json 2>/dev/null || true)
-      generated=$(cat "$host_config" 2>/dev/null || true)
-      if { command -v python3 >/dev/null 2>&1 &&
-        printf '%s\n' "$registry" | python3 -c '
-import json, os, sys
-try:
-    registry = json.load(sys.stdin)
-    with open(sys.argv[1], encoding="utf-8") as source:
+    with open(receipt_path, encoding="utf-8") as source:
+        receipt = json.load(source)
+    with open(generated_path, encoding="utf-8") as source:
         generated = json.load(source)["mcpServers"]["projectatlas"]
-    executable, version, database, config, root = sys.argv[2:]
+    registry = receipt["registry"]
+    transport = registry["transport"]
     args = ["--require-version", version, "--db", database]
     if config:
         args += ["--config", config]
     args += ["mcp"]
-    transport = registry["transport"]
-    def same_path(actual, wanted):
-        return isinstance(actual, str) and os.path.realpath(actual) == os.path.realpath(wanted)
     def same_args(actual):
         return (isinstance(actual, list) and len(actual) == len(args) and
                 all(same_path(value, args[index]) if index == 3 or (index == 5 and config)
                     else value == args[index] for index, value in enumerate(actual)))
-    ready = (registry["enabled"] is True and transport["type"] == "stdio" and
-             same_path(transport["command"], executable) and same_args(transport["args"]) and
-             same_path(generated["command"], executable) and same_args(generated["args"]) and
-             same_path(generated["cwd"], root))
+    ready = (receipt["version"] == version and
+             same_path(receipt["project_root"], root) and same_path(receipt["runtime"], runtime) and
+             same_path(receipt["direct_cli"], runtime) and
+             same_path(receipt["codex_config"], codex_config) and
+             receipt["runtime_sha256"] == digest(runtime) and
+             receipt["direct_cli_sha256"] == receipt["runtime_sha256"] and
+             receipt["generated_sha256"] == digest(generated_path) and
+             receipt["codex_config_sha256"] == digest(codex_config) and
+             registry["name"] == "projectatlas" and registry["enabled"] is True and
+             transport["type"] == "stdio" and same_path(transport["command"], runtime) and
+             same_args(transport["args"]) and same_path(generated["command"], runtime) and
+             same_args(generated["args"]) and same_path(generated["cwd"], root))
     sys.exit(0 if ready else 1)
 except (OSError, ValueError, TypeError, KeyError, IndexError):
     sys.exit(1)
-' "$host_config" "$executable" "$expected" "$db" "$config" "$project_root" 2>/dev/null; } ||
-        { ! command -v python3 >/dev/null 2>&1 &&
-        printf '%s\n' "$registry" | jq -se --arg v "$expected" --arg cfg "$config" '
-          def clean_path: if type == "string" then length > 0 and index("\u0000") == null else false end;
-          length == 1 and (.[0] |
-            .transport.args as $args |
-            .enabled == true and .transport.type == "stdio" and
-            ($args | type) == "array" and
-            (.transport.command | clean_path) and ($args[3] | clean_path) and
-            (if $cfg == "" then true else ($args[5] | clean_path) end) and
-            $args == (["--require-version", $v, "--db", $args[3]] +
-              (if $cfg == "" then [] else ["--config", $args[5]] end) + ["mcp"]))
-        ' >/dev/null 2>&1 &&
-        printf '%s\n' "$generated" | jq -se --arg v "$expected" --arg cfg "$config" '
-          def clean_path: if type == "string" then length > 0 and index("\u0000") == null else false end;
-          length == 1 and (.[0] |
-            .mcpServers.projectatlas.args as $args |
-            ($args | type) == "array" and
-            (.mcpServers.projectatlas.command | clean_path) and
-            (.mcpServers.projectatlas.cwd | clean_path) and
-            ($args[3] | clean_path) and
-            (if $cfg == "" then true else ($args[5] | clean_path) end) and
-            $args == (["--require-version", $v, "--db", $args[3]] +
-              (if $cfg == "" then [] else ["--config", $args[5]] end) + ["mcp"]))
-        ' >/dev/null 2>&1 &&
-        same_json_path "$registry" '.[0].transport.command | strings' "$executable" &&
-        same_json_path "$registry" '.[0].transport.args[3] | strings' "$db" &&
-        same_json_path "$generated" '.[0].mcpServers.projectatlas.command | strings' "$executable" &&
-        same_json_path "$generated" '.[0].mcpServers.projectatlas.args[3] | strings' "$db" &&
-        same_json_path "$generated" '.[0].mcpServers.projectatlas.cwd | strings' "$project_root" &&
-        { [ -z "$config" ] || {
-          same_json_path "$registry" '.[0].transport.args[5] | strings' "$config" &&
-          same_json_path "$generated" '.[0].mcpServers.projectatlas.args[5] | strings' "$config"; }; }; }; then
+PY
+  elif command -v jq >/dev/null 2>&1; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      hash_file() { sha256sum "$1" | awk '{print $1}'; }
+    elif command -v shasum >/dev/null 2>&1; then
+      hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+    else
+      return 1
+    fi
+    receipt_json=$(cat "$receipt") || return 1
+    printf '%s\n' "$receipt_json" | jq -se --arg v "$expected" \
+      --arg runtime_hash "$(hash_file "$direct_path")" \
+      --arg generated_hash "$(hash_file "$host_config")" \
+      --arg codex_hash "$(hash_file "$codex_config")" '
+      length == 1 and (.[0] |
+        .version == $v and .runtime_sha256 == $runtime_hash and
+        .direct_cli_sha256 == $runtime_hash and
+        .generated_sha256 == $generated_hash and .codex_config_sha256 == $codex_hash and
+        .registry.name == "projectatlas" and .registry.enabled == true and
+        .registry.transport.type == "stdio" and
+        (.registry.transport.args | type) == "array")
+    ' >/dev/null 2>&1 || return 1
+    same_json_path "$receipt_json" '.[0].project_root | strings' "$project_root" &&
+      same_json_path "$receipt_json" '.[0].runtime | strings' "$direct_path" &&
+      same_json_path "$receipt_json" '.[0].direct_cli | strings' "$direct_path" &&
+      same_json_path "$receipt_json" '.[0].codex_config | strings' "$codex_config" &&
+      same_json_path "$receipt_json" '.[0].registry.transport.command | strings' "$direct_path" || return 1
+    registry=$(printf '%s\n' "$receipt_json" | jq -sr '.[] | .registry') || return 1
+    printf '%s\n' "$registry" | jq -se --arg v "$expected" --arg cfg "$config" '
+      length == 1 and (.[0].transport.args as $args |
+        ($args | type) == "array" and
+        $args == (["--require-version", $v, "--db", $args[3]] +
+          (if $cfg == "" then [] else ["--config", $args[5]] end) + ["mcp"]))
+    ' >/dev/null 2>&1 &&
+      printf '%s\n' "$generated" | jq -se --arg v "$expected" --arg cfg "$config" '
+      length == 1 and (.[0].mcpServers.projectatlas.args as $args |
+        ($args | type) == "array" and
+        $args == (["--require-version", $v, "--db", $args[3]] +
+          (if $cfg == "" then [] else ["--config", $args[5]] end) + ["mcp"]))
+    ' >/dev/null 2>&1 &&
+      same_json_path "$registry" '.[0].transport.args[3] | strings' "$db" &&
+      same_json_path "$generated" '.[0].mcpServers.projectatlas.command | strings' "$direct_path" &&
+      same_json_path "$generated" '.[0].mcpServers.projectatlas.args[3] | strings' "$db" &&
+      same_json_path "$generated" '.[0].mcpServers.projectatlas.cwd | strings' "$project_root" &&
+      { [ -z "$config" ] || {
+        same_json_path "$registry" '.[0].transport.args[5] | strings' "$config" &&
+        same_json_path "$generated" '.[0].mcpServers.projectatlas.args[5] | strings' "$config"; }; }
+  else
+    return 1
+  fi
+}
+runtime_info_ok() {
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$runtime" | python3 -c '
+import json, os, sys
+try:
+    identity = json.load(sys.stdin)
+    sys.exit(0 if identity.get("project") == "ProjectAtlas" and
+             identity.get("version") == sys.argv[1] and
+             os.path.realpath(identity["executable"]) == os.path.realpath(sys.argv[2]) else 1)
+except (ValueError, TypeError, KeyError):
+    sys.exit(1)
+' "$expected" "$direct_path" 2>/dev/null
+  else
+    printf '%s\n' "$runtime" | jq -se --arg v "$expected" '
+      length == 1 and (.[0] | .project == "ProjectAtlas" and .version == $v and
+        (.executable | type == "string"))' >/dev/null 2>&1 &&
+      same_json_path "$runtime" '.[0].executable | strings' "$direct_path"
+  fi
+}
+if [ -n "$expected" ] && receipt_valid; then
+  if command -v python3 >/dev/null 2>&1; then
+    registry=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["registry"]))' "$receipt" 2>/dev/null || true)
+  fi
+  runtime=$("$direct_path" --format json runtime-info 2>/dev/null || true)
+  if runtime_info_ok; then
+    reason='project database is incompatible or bound to another root'
+    set -- "$direct_path" --db "$db"
+    [ -z "$config" ] || set -- "$@" --config "$config"
+    set -- "$@" --format json root verify --binding-only --project-root "$project_root"
+    if (cd "$project_root" && "$@" >/dev/null 2>&1); then
+      reason='installer readiness receipt or host files changed; rerun the installer'
+      if receipt_valid; then
         printf 'ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match %s for this project. Use the version-matched ProjectAtlas skill and repository instructions.\n' "$expected"
         exit 0
       fi
-      reason='Codex MCP or generated config does not match this project/runtime'
-      fi
     fi
+  else
+    reason='runtime identity is not version-matched'
   fi
+else
+  reason='installer readiness receipt or host files changed; rerun the installer'
 fi
-
 printf 'ProjectAtlas integration incomplete: %s. Plugin installation alone does not update the native runtime or MCP registry.\n' "$reason"
 printf 'Expected: plugin_version=%s project_db=%s project_config=%s project_root=%s codex_mcp_enabled=true codex_mcp_transport=stdio\n' "$expected" "${db}" "${config:-unavailable}" "$project_root"
 show_identity() {
@@ -189,6 +258,9 @@ print("Observed %s: version=%s executable=%s db=%s config=%s enabled=%s transpor
   fi
 }
 printf '%s\n' "$runtime" | show_identity direct_cli
+if [ -z "$runtime" ]; then
+  printf 'Observed resolved_direct_cli_path: %s\n' "${direct_path:-unavailable}"
+fi
 printf '%s\n' "$registry" | show_identity codex_mcp
 printf '%s\n' "$generated" | show_identity generated_mcp
 shell_quote() {

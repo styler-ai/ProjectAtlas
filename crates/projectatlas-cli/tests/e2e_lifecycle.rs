@@ -125,6 +125,8 @@ const PROJECTATLAS_SKILL_DIR: &str = "skills";
 
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
+const CODEX_FIXTURE_DIR_NAME: &str = ".codex";
+
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
 #[cfg(target_os = "linux")]
@@ -231,14 +233,14 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
         let mut command = StdCommand::new("cmd.exe");
         command
             .args(["/d", "/c"])
-            .raw_arg("powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"")
+            .raw_arg("\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"")
             .env("PLUGIN_ROOT", &plugin_root)
             .env("PATH", path);
         command.output()?
     };
     #[cfg(not(windows))]
     let output = StdCommand::new("sh")
-        .args(["-c", "sh \"$PLUGIN_ROOT/hooks/readiness.sh\""])
+        .args(["-c", "/bin/sh \"$PLUGIN_ROOT/hooks/readiness.sh\""])
         .env("PLUGIN_ROOT", &plugin_root)
         .env("PATH", path)
         .output()?;
@@ -323,21 +325,64 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     let host_config = atlas_dir.join("projectatlas.mcp.json");
     fs::write(&host_config, serde_json::to_vec(&generated)?)?;
     let registry_path = fixture.path().join("registry.json");
-    let registry = json!({"enabled": true, "transport": {
+    let shadow_marker = fixture.path().join("shadow-runtime-invoked");
+    let codex_marker = fixture.path().join("shadow-codex-invoked");
+    let state_root = if cfg!(windows) {
+        fixture.path().join("AppData/Local/ProjectAtlas/state")
+    } else {
+        fixture.path().join(".local/state/projectatlas")
+    };
+    let codex_home = fixture.path().join(CODEX_FIXTURE_DIR_NAME);
+    let codex_config = codex_home.join("config.toml");
+    fs::create_dir_all(&state_root)?;
+    fs::create_dir_all(&codex_home)?;
+    let receipt_path = state_root.join("codex-readiness.json");
+    let registry = json!({"name": "projectatlas", "enabled": true, "transport": {
         "type": "stdio", "command": runtime_command, "args": args
     }});
     fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
     #[cfg(windows)]
     fs::write(
         bin.join("codex.cmd"),
-        "@echo off\r\ntype \"%CODEX_MCP_FIXTURE%\"\r\n",
+        "@echo off\r\necho invoked>\"%PROJECTATLAS_CODEX_MARKER%\"\r\ntype \"%CODEX_MCP_FIXTURE%\"\r\n",
     )?;
     #[cfg(not(windows))]
     {
         let stub = bin.join("codex");
-        fs::write(&stub, "#!/bin/sh\ncat \"$CODEX_MCP_FIXTURE\"\n")?;
+        fs::write(
+            &stub,
+            "#!/bin/sh\nprintf invoked > \"$PROJECTATLAS_CODEX_MARKER\"\ncat \"$CODEX_MCP_FIXTURE\"\n",
+        )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
     }
+    let write_receipt = || -> Result<(), Box<dyn Error>> {
+        let registration: Value =
+            serde_json::from_slice(&fs::read(&registry_path)?).unwrap_or(Value::Null);
+        fs::write(&codex_config, serde_json::to_vec(&registration)?)?;
+        let projected = json!({
+            "name": registration["name"],
+            "enabled": registration["enabled"],
+            "transport": {
+                "type": registration["transport"]["type"],
+                "command": registration["transport"]["command"],
+                "args": registration["transport"]["args"]
+            }
+        });
+        let receipt = json!({
+            "version": version,
+            "project_root": repo,
+            "runtime": runtime_command,
+            "runtime_sha256": sha256_hex(&fs::read(runtime_command)?),
+            "direct_cli": runtime_command,
+            "direct_cli_sha256": sha256_hex(&fs::read(runtime_command)?),
+            "generated_sha256": sha256_hex(&fs::read(&host_config)?),
+            "codex_config": codex_config,
+            "codex_config_sha256": sha256_hex(&fs::read(&codex_config)?),
+            "registry": projected
+        });
+        fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+        Ok(())
+    };
     let path = std::env::join_paths(
         [
             bin,
@@ -351,7 +396,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             &std::env::var_os("PATH").unwrap_or_default(),
         )),
     )?;
-    let run_hook =
+    let run_hook_raw =
         |project_root: &Path, process_path: &std::ffi::OsStr| -> Result<String, Box<dyn Error>> {
             #[cfg(windows)]
             let output = StdCommand::new("powershell.exe")
@@ -360,7 +405,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .current_dir(project_root)
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("CODEX_MCP_FIXTURE", &registry_path)
+                .env("PROJECTATLAS_CODEX_MARKER", &codex_marker)
+                .env("PROJECTATLAS_SHADOW_MARKER", &shadow_marker)
                 .env("USERPROFILE", fixture.path())
+                .env("LOCALAPPDATA", fixture.path().join("AppData/Local"))
+                .env("CODEX_HOME", &codex_home)
                 .env("PATH", process_path)
                 .output()?;
             #[cfg(not(windows))]
@@ -369,7 +418,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .current_dir(project_root)
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("CODEX_MCP_FIXTURE", &registry_path)
+                .env("PROJECTATLAS_CODEX_MARKER", &codex_marker)
+                .env("PROJECTATLAS_SHADOW_MARKER", &shadow_marker)
                 .env("HOME", fixture.path())
+                .env("XDG_STATE_HOME", fixture.path().join(".local/state"))
+                .env("CODEX_HOME", &codex_home)
                 .env("PATH", process_path)
                 .output()?;
             if !output.status.success() {
@@ -381,6 +434,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .into());
             }
             Ok(String::from_utf8(output.stdout)?)
+        };
+    let run_hook =
+        |project_root: &Path, process_path: &std::ffi::OsStr| -> Result<String, Box<dyn Error>> {
+            write_receipt()?;
+            run_hook_raw(project_root, process_path)
         };
     fs::create_dir(fixture.path().join(ATLAS_DIR_NAME))?;
     let plain_directory = fixture.path().join("plain").join("nested");
@@ -443,6 +501,52 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         ))
         .into());
     }
+    if codex_marker.exists() {
+        return Err(io::Error::other("readiness hook executed Codex from PATH").into());
+    }
+    #[cfg(windows)]
+    {
+        let mirror_dir = fixture.path().join("stable-mirror");
+        fs::create_dir(&mirror_dir)?;
+        let mirror = mirror_dir.join("projectatlas.exe");
+        fs::copy(runtime_command, &mirror)?;
+        let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+        receipt["direct_cli"] = json!(mirror);
+        fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+        let mirror_path =
+            std::env::join_paths(std::iter::once(mirror_dir).chain(std::env::split_paths(&path)))?;
+        if !run_hook_raw(&repo, &mirror_path)?.contains("ProjectAtlas integration ready") {
+            return Err(io::Error::other("byte-identical stable CLI mirror was refused").into());
+        }
+        fs::remove_file(&mirror)?;
+        if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
+            return Err(
+                io::Error::other("missing unused mirror blocked the versioned runtime").into(),
+            );
+        }
+        write_receipt()?;
+    }
+    fs::write(&codex_config, "changed host config")?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+        return Err(io::Error::other("changed Codex config kept stale receipt ready").into());
+    }
+    write_receipt()?;
+    fs::write(&receipt_path, "{")?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+        return Err(io::Error::other("malformed readiness receipt was accepted").into());
+    }
+    fs::remove_file(&receipt_path)?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+        return Err(io::Error::other("missing readiness receipt was accepted").into());
+    }
+    write_receipt()?;
+    let project_codex = repo.join(CODEX_FIXTURE_DIR_NAME);
+    fs::create_dir(&project_codex)?;
+    fs::write(project_codex.join("config.toml"), "# project override")?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+        return Err(io::Error::other("project Codex override was accepted").into());
+    }
+    fs::remove_file(project_codex.join("config.toml"))?;
     #[cfg(unix)]
     {
         let alias = fixture.path().join("repo-alias");
@@ -668,24 +772,42 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     #[cfg(windows)]
     fs::write(
         &old_runtime,
-        format!("@echo off\r\necho {old_identity}\r\n"),
+        format!(
+            "@echo off\r\necho invoked>\"%PROJECTATLAS_SHADOW_MARKER%\"\r\necho {old_identity}\r\n"
+        ),
     )?;
     #[cfg(not(windows))]
     {
         fs::write(
             &old_runtime,
-            format!("#!/bin/sh\nprintf '%s\\n' '{old_identity}'\n"),
+            format!(
+                "#!/bin/sh\nprintf invoked > \"$PROJECTATLAS_SHADOW_MARKER\"\nprintf '%s\\n' '{old_identity}'\n"
+            ),
         )?;
         fs::set_permissions(&old_runtime, fs::Permissions::from_mode(0o755))?;
     }
     let old_path =
-        std::env::join_paths(std::iter::once(old_bin).chain(std::env::split_paths(&path)))?;
+        std::env::join_paths(std::iter::once(old_bin.clone()).chain(std::env::split_paths(&path)))?;
     let old_runtime_output = run_hook(&repo, &old_path)?;
     if !old_runtime_output.contains("ProjectAtlas integration incomplete")
         || !old_runtime_output.contains(&format!("plugin_version={version}"))
-        || !old_runtime_output.contains("0.4.5")
+        || !old_runtime_output.contains(&old_runtime.display().to_string())
+        || shadow_marker.exists()
+        || codex_marker.exists()
     {
-        return Err(io::Error::other("old direct runtime identity was not reported").into());
+        return Err(
+            io::Error::other("shadowed direct runtime was executed or not reported").into(),
+        );
+    }
+    let later_shadow_path =
+        std::env::join_paths(std::env::split_paths(&path).chain(std::iter::once(old_bin)))?;
+    if !run_hook(&repo, &later_shadow_path)?.contains("ProjectAtlas integration ready")
+        || shadow_marker.exists()
+        || codex_marker.exists()
+    {
+        return Err(
+            io::Error::other("later PATH entry displaced the receipt-matched runtime").into(),
+        );
     }
     let mut stale = registry;
     stale["transport"]["args"][1] = json!("0.4.5");
@@ -730,8 +852,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::copy(&config, moved_atlas.join("config.toml"))?;
     fs::copy(&host_config, moved_atlas.join("projectatlas.mcp.json"))?;
     let moved_db = fs::read(moved_atlas.join("projectatlas.db"))?;
-    if !run_hook(&moved_root, &path)?
-        .contains("project database is incompatible or bound to another root")
+    if !run_hook(&moved_root, &path)?.contains("ProjectAtlas integration incomplete")
         || fs::read(moved_atlas.join("projectatlas.db"))? != moved_db
     {
         return Err(
@@ -757,7 +878,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     let future_bytes = fs::read(&future_db)?;
     let future_output = run_hook(&future_root, &path)?;
-    if !future_output.contains("project database is incompatible or bound to another root")
+    if !future_output.contains("ProjectAtlas integration incomplete")
         || fs::read(&future_db)? != future_bytes
     {
         return Err(io::Error::other(format!(

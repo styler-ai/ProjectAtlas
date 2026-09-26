@@ -92,6 +92,7 @@ use yaml_rust2::{Yaml, YamlLoader};
 use zip::ZipArchive;
 
 const TEST_REPO_DIR: &str = "repo";
+const TEST_REPO_WITH_SPACES_DIR: &str = "repo with spaces";
 const TEST_ISOLATED_HOME_DIR_NAME: &str = "isolated home";
 const TEST_RUNTIME_DIR_NAME: &str = "runtime";
 const TEST_FORWARDER_PROVENANCE_FILE_NAME: &str = ".atlas-forwarder.provenance";
@@ -106,6 +107,7 @@ fn test_atlas_forwarder_provenance_file_name() -> &'static str {
 const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
 const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
 const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
+const TEST_WINDOWS_RUNTIME_MIRROR_DIR: &str = "AppData/Local/ProjectAtlas/bin";
 #[cfg(windows)]
 const TEST_WINDOWS_LEGACY_ATLAS_FORWARDER_FILE_NAME: &str = "atlas.cmd";
 const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
@@ -6733,6 +6735,187 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
         "opencode cwd",
     )?;
 
+    Ok(())
+}
+
+#[test]
+fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_WITH_SPACES_DIR);
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let fake_path = temp.path().join("fake-bin");
+    let home = temp.path().join(ISOLATED_HOME_DIR);
+    fs::create_dir_all(&atlas_dir)?;
+    fs::create_dir_all(&fake_path)?;
+    fs::create_dir_all(&home)?;
+    let workspace = workspace_root()?;
+    let codex_home = home.join(CODEX_CONFIG_DIR);
+    let skill =
+        fs::read_to_string(workspace.join("plugins/projectatlas/skills/projectatlas/SKILL.md"))?;
+    let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
+        &codex_home,
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION"),
+        &skill,
+    )?;
+    fs::write(codex_home.join("config.toml"), "# isolated Codex fixture\n")?;
+    let plugin_inventory = home.join("plugin-inventory.json");
+    fs::write(
+        &plugin_inventory,
+        serde_json::to_vec(&json!({"installed": [{
+            "pluginId": "projectatlas@projectatlas", "name": "projectatlas",
+            "marketplaceName": "projectatlas", "version": env!("CARGO_PKG_VERSION"),
+            "installed": true, "enabled": true,
+            "marketplaceSource": {"source": "https://github.com/styler-ai/ProjectAtlas.git"},
+            "source": {"path": plugin_source}
+        }], "available": []}))?,
+    )?;
+    let config = atlas_dir.join("config.toml");
+    let db = atlas_dir.join("projectatlas.db");
+    fs::write(&config, "[project]\nroot = \".\"\n")?;
+    let runtime = isolated_installer_runtime(temp.path())?;
+    let initialized = StdCommand::new(&runtime)
+        .arg("init")
+        .current_dir(&repo)
+        .output()?;
+    if !initialized.status.success() {
+        return Err(io::Error::other(format!(
+            "fixture init failed: {}",
+            String::from_utf8_lossy(&initialized.stderr)
+        ))
+        .into());
+    }
+    let registry = json!({"name": "projectatlas", "enabled": true, "transport": {
+        "type": "stdio", "command": runtime,
+        "args": ["--require-version", env!("CARGO_PKG_VERSION"), "--db", db,
+                 "--config", config, "mcp"],
+        "env": {"DO_NOT_COPY_SECRET": "private-fixture-value"}
+    }});
+    let registry_path = home.join("current-registry.json");
+    fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
+    let state = home.join("registry-added");
+    let log = home.join(FAKE_CODEX_LOG_FILE);
+    fs::write(&log, "")?;
+    let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    let script = if cfg!(windows) {
+        "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (type \"%PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST%\"& exit /b 0)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if not exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" exit /b 1\r\n  type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"list\" (\r\n  if \"%PROJECTATLAS_FAKE_CODEX_INVALID_LIST%\"==\"1\" (echo {}& exit /b 0)\r\n  echo []\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo added>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n"
+    } else {
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${1:-}\" = plugin ] && [ \"${2:-}\" = list ]; then cat \"$PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST\"; exit 0; fi\nif [ \"${1:-}\" = mcp ] && [ \"${2:-}\" = get ]; then\n  [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ] || exit 1\n  cat \"$PROJECTATLAS_FAKE_CODEX_REGISTRY\"\n  exit 0\nfi\nif [ \"${1:-}\" = mcp ] && [ \"${2:-}\" = list ]; then\n  if [ \"${PROJECTATLAS_FAKE_CODEX_INVALID_LIST:-}\" = 1 ]; then printf '%s\\n' '{}'; else printf '%s\\n' '[]'; fi\n  exit 0\nfi\nif [ \"${1:-}\" = mcp ] && [ \"${2:-}\" = add ]; then\n  printf added > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\n  exit 0\nfi\nexit 1\n"
+    };
+    write_executable_script(&fake_codex, script)?;
+    let run = |invalid_list: bool| -> Result<String, Box<dyn Error>> {
+        let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
+            &workspace_root()?,
+            &repo,
+            &runtime,
+            Some(&fake_path),
+            Some(&home),
+        )?;
+        command
+            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+            .env("PROJECTATLAS_FAKE_CODEX_STATE", &state)
+            .env("PROJECTATLAS_FAKE_CODEX_REGISTRY", &registry_path)
+            .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &plugin_inventory)
+            .env(
+                "PROJECTATLAS_FAKE_CODEX_INVALID_LIST",
+                if invalid_list { "1" } else { "0" },
+            );
+        let output = require_successful_plugin_installer_output(command.output()?)?;
+        Ok(format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    };
+    let added = run(false)?;
+    let calls = fs::read_to_string(&log)?;
+    if !state.exists()
+        || !calls.contains("mcp list --json")
+        || !calls.contains("mcp add projectatlas --")
+        || calls.contains("mcp remove projectatlas")
+        || !added.contains("Codex MCP registry updated to ProjectAtlas runtime")
+    {
+        return Err(io::Error::other(format!(
+            "confirmed missing registration did not converge safely: {added}\n{calls}"
+        ))
+        .into());
+    }
+    let receipt_path = if cfg!(windows) {
+        home.join("AppData/Local/ProjectAtlas/state/codex-readiness.json")
+    } else {
+        home.join(".local/state/projectatlas/codex-readiness.json")
+    };
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    if receipt["version"] != json!(env!("CARGO_PKG_VERSION"))
+        || receipt["registry"]["transport"]["command"] != json!(runtime)
+        || receipt.to_string().contains("private-fixture-value")
+        || receipt.to_string().contains("DO_NOT_COPY_SECRET")
+    {
+        return Err(
+            io::Error::other("installer receipt did not bind clean, non-secret state").into(),
+        );
+    }
+    let mut hook_directories = vec![fake_path.clone()];
+    if cfg!(windows) {
+        hook_directories.push(home.join(TEST_WINDOWS_RUNTIME_MIRROR_DIR));
+    }
+    hook_directories.push(
+        runtime
+            .parent()
+            .ok_or("runtime parent missing")?
+            .to_path_buf(),
+    );
+    let hook_path = std::env::join_paths(hook_directories.into_iter().chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))?;
+    let mut hook = if cfg!(windows) {
+        let mut command = StdCommand::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(workspace.join("plugins/projectatlas/hooks/readiness.ps1"));
+        command
+    } else {
+        let mut command = StdCommand::new("sh");
+        command.arg(workspace.join("plugins/projectatlas/hooks/readiness.sh"));
+        command
+    };
+    let calls_before_hook = fs::read(&log)?;
+    let hook_output = hook
+        .current_dir(&repo)
+        .env("PATH", hook_path)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("CODEX_HOME", &codex_home)
+        .output()?;
+    if !hook_output.status.success()
+        || !String::from_utf8_lossy(&hook_output.stdout).contains("ProjectAtlas integration ready")
+        || fs::read(&log)? != calls_before_hook
+    {
+        return Err(io::Error::other(format!(
+            "installer receipt was not accepted by packaged hook: {} {}",
+            String::from_utf8_lossy(&hook_output.stdout),
+            String::from_utf8_lossy(&hook_output.stderr)
+        ))
+        .into());
+    }
+    fs::remove_file(&state)?;
+    fs::write(&log, "")?;
+    let prior_db = fs::read(&db)?;
+    let ambiguous = run(true)?;
+    let calls = fs::read_to_string(&log)?;
+    if state.exists()
+        || calls.contains("mcp add projectatlas")
+        || calls.contains("mcp remove projectatlas")
+        || fs::read(&db)? != prior_db
+        || !ambiguous.contains("could not confirm that the global projectatlas entry is absent")
+    {
+        return Err(io::Error::other(format!(
+            "ambiguous registry inventory did not fail closed: {ambiguous}\n{calls}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -13786,6 +13969,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         env!("CARGO_PKG_VERSION"),
         FAKE_CODEX_SKILL_CONTENT,
     )?;
+    fs::write(codex_dir.join("config.toml"), "# isolated Codex fixture\n")?;
     let fake_plugin_source_json =
         serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let plugin_list_json = format!(
@@ -14197,6 +14381,11 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("HOME", &isolated_home)
                 .env("USERPROFILE", &isolated_home)
+                .env(
+                    "LOCALAPPDATA",
+                    isolated_home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR),
+                )
+                .env("CODEX_HOME", &codex_dir)
                 .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
                 .env(
                     "PROJECTATLAS_FAKE_CODEX_STATE",
@@ -15034,7 +15223,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         || installer_output_text.contains("Codex ProjectAtlas plugin skill verified")
         || !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
         || !installer_output_text.contains(
-            "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
+            "Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent",
         )
     {
         return Err(io::Error::other(format!(
@@ -16076,7 +16265,7 @@ fn assert_plugin_update_refuses_retained_recovery_state_before_mutation()
     let normalized_output_text = output_text.split_whitespace().collect::<Vec<_>>().join(" ");
     if !normalized_output_text.contains("retained recovery state requires inspection")
         || !normalized_output_text.contains(
-            "Codex MCP registry update skipped: no global projectatlas MCP server is configured",
+            "Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent",
         )
     {
         return Err(io::Error::other(format!(
@@ -18223,7 +18412,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             .env("HOME", &home)
             .env("USERPROFILE", &home)
             .env("APPDATA", home.join("AppData/Roaming"))
-            .env("LOCALAPPDATA", home.join("AppData/Local"))
+            .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
             .env("CODEX_HOME", home.join(CODEX_CONFIG_DIR))
             .env("XDG_DATA_HOME", &xdg_data)
             .env("XDG_CONFIG_HOME", &xdg_config)
@@ -21003,12 +21192,12 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "command"],
-        "sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
+        "/bin/sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
     )?;
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "commandWindows"],
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"",
+        "\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"",
     )?;
     let hook_asset = fs::read_to_string(plugin_root.join("hooks/agent-instructions.txt"))?;
     let posix_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.sh"))?;
@@ -30818,7 +31007,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         normalize_native_path_display(temp.path().canonicalize()?)
             .replace('/', std::path::MAIN_SEPARATOR_STR),
     );
-    let repo = fixture_root.join("repo with spaces");
+    let repo = fixture_root.join(TEST_REPO_WITH_SPACES_DIR);
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&atlas_dir)?;
     fs::write(
@@ -31128,7 +31317,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     fs::write(&forwarder, unmanaged_collision)?;
     let project_state_before_collision = repository_filesystem_snapshot(&repo)?;
     let project_database = atlas_dir.join("projectatlas.db");
-    let mirror_dir = home.join("AppData/Local/ProjectAtlas/bin");
+    let mirror_dir = home.join(TEST_WINDOWS_RUNTIME_MIRROR_DIR);
     let collision_output = run_install()?;
     let collision_text = format!(
         "{}\n{}",

@@ -233,7 +233,9 @@ older in-process skill metadata, restart the host after installation. If a
 global Codex MCP server named `projectatlas` exists but points to a stale runtime
 version or another project's DB/config, the installer removes and re-adds that
 registry entry with the verified absolute runtime, current project database,
-current config, and matching `--require-version`. On Windows, the LocalAppData
+current config, and matching `--require-version`. On a first install it adds
+the entry only after a well-formed `codex mcp list --json` confirms absence;
+an ambiguous inventory leaves the registry unchanged. On Windows, the LocalAppData
 stable mirror is repaired for bare `projectatlas` PATH use, but MCP configs and
 Codex registry entries stay pinned to the verified runtime path. Set
 `PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1` only when a managed environment
@@ -255,6 +257,25 @@ verify `codex plugin list --marketplace projectatlas --json` and
 `codex mcp get projectatlas --json` or `codex mcp list`; stale entries should be
 repaired by rerunning the ProjectAtlas installer instead of left for the next
 Codex restart.
+
+After plugin, runtime, generated-config, and registry checks pass, the installer
+writes a small readiness receipt in user state (`%LOCALAPPDATA%/ProjectAtlas/state`
+on Windows or `${XDG_STATE_HOME:-$HOME/.local/state}/projectatlas` on POSIX).
+It binds the selected project, registered runtime, and installer-owned direct
+CLI to SHA-256 hashes of the runtime, generated host config, and user Codex
+config. On Windows the direct CLI can be the byte-identical stable mirror while
+MCP remains pinned to the versioned runtime. Only the MCP name,
+enabled state, transport type, command, and ordered arguments are retained;
+MCP environment values are not copied. The read-only SessionStart hook checks
+the receipt before invoking the exact runtime, then verifies database
+root/schema binding. It never runs a PATH-resolved `codex` command or repairs
+external state itself. Missing/stale receipts, PATH shadows, and a project
+`.codex/config.toml` override report incomplete with the version-matched
+installer command. A custom Codex profile, CLI `-c` override, managed policy,
+or already-running host process can differ from this user-config proof; check
+the effective host with `codex mcp get projectatlas --json` and restart the
+environment-owning host where needed. Disabled/untrusted hooks require the
+same explicit manual check and make no automatic readiness claim.
 
 On Windows, a running obsolete MCP child can lock the stable LocalAppData
 mirror. The installer takes one Windows process snapshot with a five-second

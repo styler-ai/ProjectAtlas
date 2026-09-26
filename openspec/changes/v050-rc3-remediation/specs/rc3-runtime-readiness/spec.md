@@ -2,7 +2,9 @@
 
 ### Requirement: Marketplace integration readiness is separate from plugin installation
 ProjectAtlas SHALL expose whether the installed plugin, directly resolved runtime, generated host config, and registered Codex MCP target are version-matched, and SHALL report a mismatch as incomplete with a supported packaged repair action. It MUST NOT imply that Codex marketplace installation atomically updates external runtime or MCP state.
-The recurring startup hook SHALL verify the selected database schema and root binding through a bounded read-only probe, not repeat a full database integrity scan; full integrity verification remains an explicit command.
+The installer SHALL add a missing Codex MCP entry only after a well-formed inventory confirms absence, and SHALL issue a bounded user-state readiness receipt only after verifying the runtime, generated host config, plugin, and exact MCP entry. The receipt SHALL bind the selected root, version, absolute registered runtime, installer-owned direct CLI, and config identities with hashes, and retain only the MCP fields needed for readiness, never MCP environment values or unrelated config. On Windows, the stable direct CLI mirror may differ in path from the versioned MCP runtime only when its bytes match the verified runtime. The recurring startup hook SHALL verify that receipt and the selected database schema/root binding through a bounded read-only probe, not repeat a full database integrity scan or execute a PATH-resolved Codex/ProjectAtlas command before its trust checks. Missing, stale, malformed, overridden, or unverifiable host state SHALL be incomplete with an installer repair route; full integrity verification remains an explicit command.
+
+This RC3 requirement supersedes RC2's blanket no-runtime-execution rule for any shadow entry anywhere in PATH: a competing executable that wins direct resolution SHALL prevent all ProjectAtlas runtime execution, while a later, non-selected PATH entry does not prevent an already receipt-matched exact runtime from undergoing read-only verification.
 
 #### Scenario: Older runtime and MCP after plugin update
 - **WHEN** a new ProjectAtlas plugin is installed while a fresh shell resolves an older CLI and Codex MCP still targets an older runtime or another project database
@@ -11,6 +13,14 @@ The recurring startup hook SHALL verify the selected database schema and root bi
 #### Scenario: Version-matched repaired installation
 - **WHEN** the packaged installer has converged the runtime, generated host configs, and registry for the selected project without replacing its database
 - **THEN** a fresh child process verifies the matching identities and a live host restart boundary is stated separately if required
+
+#### Scenario: First install has no MCP entry
+- **WHEN** Codex reports no ProjectAtlas MCP entry and a well-formed registry inventory confirms its absence
+- **THEN** the installer adds the exact version-matched entry without removing any unrelated registration and records readiness only after readback
+
+#### Scenario: Host state or PATH changes after installation
+- **WHEN** a PATH-shadowed CLI or Codex command appears, the runtime or host config hash changes, the receipt is absent or malformed, or a project config can override the global MCP entry
+- **THEN** the startup hook runs neither shadow command nor a database mutation and reports integration incomplete with the selected project's repair command
 
 #### Scenario: Untrusted or disabled plugin hook
 - **WHEN** the host does not run the trusted startup hook
