@@ -3,8 +3,16 @@ $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $expected = (Get-Content -Raw -LiteralPath (Join-Path $pluginRoot '.codex-plugin/plugin.json') | ConvertFrom-Json).version
 $reason = 'runtime unavailable or not version-matched'
-$projectRoot = (Get-Location).Path
-while (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas/projectatlas.db') -PathType Leaf)) {
+$startingRoot = (Get-Location).Path
+$projectRoot = $startingRoot
+$homeRoot = if ($env:USERPROFILE) { [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\') } else { $null }
+while ($true) {
+    if ($projectRoot -ne $startingRoot -and $homeRoot -and
+        [IO.Path]::GetFullPath($projectRoot).TrimEnd('\') -ieq $homeRoot) {
+        $projectRoot = $startingRoot
+        break
+    }
+    if (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas/projectatlas.db') -PathType Leaf) { break }
     if ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -or
         (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container)) { break }
     $parent = Split-Path -Parent $projectRoot
@@ -13,9 +21,15 @@ while (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas/proje
 }
 Get-Content -LiteralPath (Join-Path $pluginRoot 'hooks/agent-instructions.txt')
 
+if (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -and
+    -not (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container)) {
+    Write-Output 'ProjectAtlas integration incomplete: no project root was identified. Select the intended project directory before running the version-matched installer with an explicit project root.'
+    exit 0
+}
+
 try {
     $runtime = & projectatlas --format json runtime-info 2>$null | ConvertFrom-Json
-    if ($runtime.project -eq 'ProjectAtlas' -and $runtime.version -ceq $expected -and $runtime.executable) {
+    if ($runtime.project -ceq 'ProjectAtlas' -and $runtime.version -ceq $expected -and $runtime.executable) {
         $reason = 'project database or generated host config unavailable'
         $atlasDir = Join-Path $projectRoot '.projectatlas'
         $db = Join-Path $atlasDir 'projectatlas.db'
@@ -42,7 +56,7 @@ try {
                     -not (Compare-Object -CaseSensitive -ReferenceObject $argsExpected -DifferenceObject @($actual) -SyncWindow 0) }
                 $samePath = { param($actual, $wanted) $actual -and
                     [IO.Path]::GetFullPath([string]$actual) -ieq [IO.Path]::GetFullPath([string]$wanted) }
-                if ($registry.enabled -eq $true -and $registry.transport.type -eq 'stdio' -and
+                if ($registry.enabled -is [bool] -and $registry.enabled -and $registry.transport.type -ceq 'stdio' -and
                     (& $samePath $registry.transport.command $runtime.executable) -and
                     (& $sameArgs $registry.transport.args) -and
                     (& $samePath $generated.mcpServers.projectatlas.command $runtime.executable) -and

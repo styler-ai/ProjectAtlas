@@ -348,6 +348,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .current_dir(project_root)
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("CODEX_MCP_FIXTURE", &registry_path)
+                .env("USERPROFILE", fixture.path())
                 .env("PATH", process_path)
                 .output()?;
             #[cfg(not(windows))]
@@ -356,6 +357,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .current_dir(project_root)
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("CODEX_MCP_FIXTURE", &registry_path)
+                .env("HOME", fixture.path())
                 .env("PATH", process_path)
                 .output()?;
             if !output.status.success() {
@@ -368,6 +370,19 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             }
             Ok(String::from_utf8(output.stdout)?)
         };
+    fs::create_dir(fixture.path().join(ATLAS_DIR_NAME))?;
+    let plain_directory = fixture.path().join("plain").join("nested");
+    fs::create_dir_all(&plain_directory)?;
+    let no_root = run_hook(&plain_directory, &path)?;
+    if !no_root.contains("ProjectAtlas integration incomplete: no project root was identified")
+        || no_root.contains("Repair command:")
+        || fs::read(&db)? != original_db
+    {
+        return Err(io::Error::other(format!(
+            "unbound directory produced unsafe repair guidance: {no_root}"
+        ))
+        .into());
+    }
     #[cfg(not(windows))]
     if StdCommand::new("jq").arg("--version").output().is_err() {
         if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
@@ -378,6 +393,39 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
         return Err(io::Error::other("matching installed layers were not ready").into());
     }
+    for malformed_enabled in [json!("true"), json!(1)] {
+        let mut malformed = registry.clone();
+        malformed["enabled"] = malformed_enabled;
+        fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;
+        if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+            return Err(io::Error::other("non-Boolean MCP enabled was accepted").into());
+        }
+    }
+    let mut malformed = registry.clone();
+    malformed["transport"]["type"] = json!("STDIO");
+    fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;
+    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+        return Err(io::Error::other("non-exact MCP transport was accepted").into());
+    }
+    let other_repo = fixture.path().join("mcp-other-project");
+    fs::create_dir(&other_repo)?;
+    let other_initialized = StdCommand::new(&executable)
+        .arg("init")
+        .current_dir(&other_repo)
+        .output()?;
+    if !other_initialized.status.success() {
+        return Err(io::Error::other("second project fixture init failed").into());
+    }
+    let mut wrong_project = registry.clone();
+    wrong_project["transport"]["args"][3] =
+        json!(other_repo.join(ATLAS_DIR_NAME).join("projectatlas.db"));
+    fs::write(&registry_path, serde_json::to_vec(&wrong_project)?)?;
+    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete")
+        || fs::read(&db)? != original_db
+    {
+        return Err(io::Error::other("other-project MCP database was accepted").into());
+    }
+    fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
     let old_bin = fixture.path().join("old-bin");
     fs::create_dir(&old_bin)?;
     let old_runtime = old_bin.join(if cfg!(windows) {

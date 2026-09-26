@@ -6,12 +6,26 @@ plugin_root=${PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
 manifest=$plugin_root/.codex-plugin/plugin.json
 expected=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)
 reason='runtime unavailable, mismatched, or JSON validator unavailable'
-project_root=$(pwd -P)
-while [ ! -f "$project_root/.projectatlas/projectatlas.db" ] && [ "$project_root" != / ]; do
+starting_root=$(pwd -P)
+project_root=$starting_root
+home_root=
+[ -z "${HOME:-}" ] || home_root=$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd -P) || true
+while :; do
+  if [ "$project_root" != "$starting_root" ] && [ "$project_root" = "$home_root" ]; then
+    project_root=$starting_root
+    break
+  fi
+  [ -f "$project_root/.projectatlas/projectatlas.db" ] && break
+  [ "$project_root" = / ] && break
   { [ -e "$project_root/.git" ] || [ -d "$project_root/.projectatlas" ]; } && break
   project_root=$(dirname -- "$project_root")
 done
 cat "$plugin_root/hooks/agent-instructions.txt"
+
+if [ ! -e "$project_root/.git" ] && [ ! -d "$project_root/.projectatlas" ]; then
+  printf 'ProjectAtlas integration incomplete: no project root was identified. Select the intended project directory before running the version-matched installer with an explicit project root.\n'
+  exit 0
+fi
 
 if [ -n "$expected" ] && command -v projectatlas >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   runtime=$(projectatlas --format json runtime-info 2>/dev/null || true)

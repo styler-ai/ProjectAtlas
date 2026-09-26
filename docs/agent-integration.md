@@ -520,6 +520,8 @@ review; users must trust the current hook definition before it runs. Disabled or
 cannot establish readiness, so use `projectatlas --format json runtime-info` and
 `codex mcp get projectatlas --json` manually. A fresh child-process check does not prove an
 already-running Codex parent has refreshed its inherited PATH or MCP child.
+When no project boundary is found, the hook withholds a repair command instead of inferring the
+filesystem or user-profile root; select the intended project directory explicitly first.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
 ## Claude Code Plugin And OpenCode MCP Config
