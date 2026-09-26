@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Map routes return a current map without a legacy file write
-`projectatlas map` and MCP `atlas_map` SHALL remain available. They SHALL render the selected project's current map as a CLI/MCP response in TOON or JSON, and MUST NOT create, overwrite, or delete a TOON snapshot at the default or a configured alternate `map_path`. Explicit `--json`/`json: true` SHALL retain its existing adjacent JSON sidecar export behavior. An oversized response MUST fail explicitly before emission, not claim a complete partial map.
+`projectatlas map` and MCP `atlas_map` SHALL remain available. They SHALL render the selected project's current map as a CLI/MCP response in TOON or JSON, and MUST NOT create, overwrite, or delete a TOON snapshot at the default or a configured alternate `map_path`. Global CLI `--format` SHALL select stdout format independently of map-local `--json`, which SHALL retain its existing adjacent JSON sidecar export behavior. MCP `json: true` SHALL retain the sidecar and select JSON map response content. An oversized response MUST fail explicitly before emission, not claim a complete partial map.
 
 #### Scenario: CLI map from a project without a legacy snapshot
 - **WHEN** a user runs `projectatlas map` or `projectatlas map --json` in a supported project
 - **THEN** stdout contains the selected format's map data, the TOON snapshot is not created, and the JSON sidecar is written only when explicitly requested
+
+#### Scenario: CLI response format and JSON sidecar are independent
+- **WHEN** a user runs `projectatlas --format toon map --json` or `projectatlas --format json map`
+- **THEN** the first call emits TOON and writes the JSON sidecar, while the second emits JSON and does not write a sidecar
 
 #### Scenario: Existing legacy snapshot
 - **WHEN** a user runs the map command while a legacy snapshot already exists
@@ -14,6 +18,10 @@
 #### Scenario: MCP map and compatibility flags
 - **WHEN** `atlas_map` is called with the selected root and optional `json` or `force` compatibility flags
 - **THEN** the response reports the correct map format/content and no TOON file write; `json` retains its explicit JSON sidecar behavior and `force` only bypasses the existing CI skip policy for that sidecar
+
+#### Scenario: CI skips only the optional JSON write
+- **WHEN** CI calls CLI map `--json` or MCP `atlas_map` with `json: true`, first without `force` and then with `force`
+- **THEN** both calls return the complete current map; the first reports a skipped JSON sidecar and the second writes only that sidecar, never a TOON snapshot
 
 #### Scenario: Response exceeds a finite limit
 - **WHEN** the full map cannot fit the supported response budget

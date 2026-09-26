@@ -12,7 +12,7 @@ The explicit `projectatlas map` and `atlas_map` routes call one `write_map` owne
 
 ### Reuse the existing snapshot and renderers
 
-Replace only the TOON disk-writer boundary with a renderer returning map content. CLI emits it on stdout; MCP includes it in the map response. Keep the existing snapshot/purpose computation rather than creating another map model. `--json`/`json: true` retain the explicit adjacent JSON export and also select JSON response content. `--force`/`force: true` retain their CI bypass for that JSON write, but cannot cause a TOON file write. Retain the global CLI format contract where it can be reconciled without duplicate serialization.
+Replace only the TOON disk-writer boundary with a renderer returning map content. CLI emits it on stdout; MCP includes it in the map response. Keep the existing snapshot/purpose computation rather than creating another map model. The global CLI `--format` alone selects stdout TOON or JSON; map-local `--json` controls only the adjacent JSON sidecar. Thus `projectatlas --format toon map --json` emits TOON and writes the JSON sidecar, while `projectatlas --format json map` emits JSON without a sidecar. MCP `json: true` retains the sidecar and selects JSON map content in its response. `--force`/`force: true` retain their CI bypass for that JSON write, but cannot cause a TOON file write.
 
 ### Preserve legacy input, never touch existing output
 
