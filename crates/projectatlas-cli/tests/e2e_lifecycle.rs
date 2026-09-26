@@ -698,11 +698,22 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         return Err(io::Error::other("stale MCP was not refused without mutation").into());
     }
     #[cfg(windows)]
-    if !stale_output.contains(&format!(
-        "-ProjectRoot '{}'",
-        repo.display().to_string().replace('\'', "''")
-    )) {
-        return Err(io::Error::other("PowerShell repair root was not a literal path").into());
+    {
+        let reported_root = stale_output
+            .split_once(" project_root=")
+            .and_then(|(_, value)| value.split_once(" codex_mcp_enabled="))
+            .map(|(root, _)| root);
+        if reported_root.and_then(|root| fs::canonicalize(root).ok())
+            != Some(fs::canonicalize(&repo)?)
+            || !reported_root.is_some_and(|root| {
+                stale_output.contains(&format!("-ProjectRoot '{}'", root.replace('\'', "''")))
+            })
+        {
+            return Err(io::Error::other(format!(
+                "PowerShell repair root was not a literal path for the selected project: {stale_output}"
+            ))
+            .into());
+        }
     }
     #[cfg(windows)]
     {
