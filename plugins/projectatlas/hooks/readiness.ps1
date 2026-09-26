@@ -55,7 +55,7 @@ try {
             if (Test-Path -LiteralPath $hostConfig -PathType Leaf) {
                 $verifyArgs = @('--db', $db)
                 if ($config) { $verifyArgs += @('--config', $config) }
-                $verifyArgs += @('--format', 'json', 'root', 'verify')
+                $verifyArgs += @('--format', 'json', 'root', 'verify', '--binding-only', '--project-root', $projectRoot)
                 $reason = 'project database is incompatible or bound to another root'
                 & projectatlas @verifyArgs 2>$null | Out-Null
                 if ($LASTEXITCODE -ne 0) {

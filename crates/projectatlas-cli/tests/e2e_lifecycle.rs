@@ -765,6 +765,85 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         ))
         .into());
     }
+    stale["transport"]["args"][1] = json!(version);
+    fs::write(&registry_path, serde_json::to_vec(&stale)?)?;
+    let run_binding = |database: &Path| {
+        StdCommand::new(&executable)
+            .args(["--db"])
+            .arg(database)
+            .args(["--config"])
+            .arg(&config)
+            .args([
+                "--format",
+                "json",
+                "root",
+                "verify",
+                "--binding-only",
+                "--project-root",
+            ])
+            .arg(&repo)
+            .output()
+    };
+    let custom_db = fixture.path().join("custom-project.db");
+    fs::copy(&db, &custom_db)?;
+    if !run_binding(&custom_db)?.status.success() {
+        return Err(io::Error::other("custom-path database binding was refused").into());
+    }
+    let selected_config = fs::read(&config)?;
+    fs::write(
+        &config,
+        format!(
+            "[project]\nroot = {:?}\n",
+            other_repo.display().to_string().replace('\\', "/")
+        ),
+    )?;
+    let wrong_config_probe = run_binding(&custom_db)?;
+    let wrong_config_output = run_hook(&repo, &path)?;
+    fs::write(&config, selected_config)?;
+    if wrong_config_probe.status.success()
+        || !String::from_utf8_lossy(&wrong_config_probe.stderr)
+            .contains("selected root disagrees with the project config")
+        || !wrong_config_output
+            .contains("project database is incompatible or bound to another root")
+    {
+        return Err(io::Error::other(format!(
+            "other-project config root did not produce the binding refusal: direct={} stderr={} hook={wrong_config_output}",
+            wrong_config_probe.status,
+            String::from_utf8_lossy(&wrong_config_probe.stderr)
+        ))
+        .into());
+    }
+    {
+        let connection = Connection::open(&db)?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             INSERT INTO purposes(node_id, source, status)
+             VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM nodes), 'agent', 'approved');",
+        )?;
+    }
+    let binding = run_binding(&db)?;
+    let integrity = StdCommand::new(&executable)
+        .args(["--db"])
+        .arg(&db)
+        .args(["--config"])
+        .arg(&config)
+        .args(["--format", "json", "root", "verify"])
+        .output()?;
+    if !binding.status.success()
+        || serde_json::from_slice::<Value>(&binding.stdout)?["binding_verified"] != json!(true)
+        || integrity.status.success()
+    {
+        return Err(io::Error::other(format!(
+            "binding-only probe did not remain distinct from full integrity verification: binding={} integrity={} {}",
+            binding.status,
+            integrity.status,
+            String::from_utf8_lossy(&integrity.stdout)
+        ))
+        .into());
+    }
+    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other("readiness hook ran the full integrity scan").into());
+    }
     Ok(())
 }
 

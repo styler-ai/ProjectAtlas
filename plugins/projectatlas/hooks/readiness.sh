@@ -72,7 +72,7 @@ except (ValueError, AttributeError):
     if [ -f "$db" ] && [ -f "$host_config" ] && command -v codex >/dev/null 2>&1; then
       set -- projectatlas --db "$db"
       [ -z "$config" ] || set -- "$@" --config "$config"
-      set -- "$@" --format json root verify
+      set -- "$@" --format json root verify --binding-only --project-root "$project_root"
       if ! (cd "$project_root" && "$@" >/dev/null 2>&1); then
         reason='project database is incompatible or bound to another root'
       else

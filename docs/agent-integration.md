@@ -513,7 +513,9 @@ ProjectAtlas ships public agent guidance through repository docs and the package
 The packaged Codex plugin also includes `hooks/hooks.json`. At trusted startup, resume, and
 compaction, its read-only command prints the package-bound routing reminder and compares the
 manifest version with the directly resolved runtime, current project host config, and global Codex
-MCP registration. A stale/missing layer reports `integration incomplete` with a versioned installer
+MCP registration. Its read-only database check verifies schema and selected-root binding without
+running a full integrity scan on every session event; `projectatlas root verify` remains the
+explicit integrity check. A stale/missing layer reports `integration incomplete` with a versioned installer
 command; it never repairs, initializes, scans, or rebinds anything itself. On POSIX, the hook
 uses `python3` or `jq` to validate JSON; without either, it reports incomplete. Codex presents bundled hooks for
 review; users must trust the current hook definition before it runs. Disabled or untrusted hooks

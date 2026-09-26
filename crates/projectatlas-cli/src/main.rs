@@ -1455,7 +1455,14 @@ enum RootCommand {
         path: PathBuf,
     },
     /// Verify DB/config/root identity agree.
-    Verify,
+    Verify {
+        /// Check schema and root binding without scanning database integrity.
+        #[arg(long, requires = "project_root")]
+        binding_only: bool,
+        /// Exact selected root for a binding-only check.
+        #[arg(long, requires = "binding_only")]
+        project_root: Option<PathBuf>,
+    },
 }
 
 /// Manual ignore management subcommands.
@@ -2726,17 +2733,45 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     &report,
                 )?;
             }
-            Some(RootCommand::Verify) => {
+            Some(RootCommand::Verify {
+                binding_only,
+                project_root,
+            }) => {
                 cli.preflight_implicit_project_root()?;
-                let report = build_root_report(&cli.db, cli.config.as_deref())?;
-                let verified = report.verified;
-                if verified {
-                    let root = cli.project_root()?;
-                    verify_project_database(&cli.db, &root)?;
-                }
-                print_output(cli.format, &render_root_report(&report), &report)?;
-                if !verified {
-                    std::process::exit(1);
+                if *binding_only {
+                    let selected_root =
+                        canonical_source_project_root(project_root.as_deref().ok_or_else(
+                            || CliError::InvalidInput("binding-only root is required".to_string()),
+                        )?)?;
+                    let store = open_atlas_store_read_only_for_project(&cli.db, &selected_root)?;
+                    let config_root =
+                        projectatlas_core::CanonicalProjectRoot::from_path(&cli.project_root()?)
+                            .map_err(|source| {
+                                CliError::InvalidInput(format!(
+                                    "project config root is invalid: {source}"
+                                ))
+                            })?;
+                    if !store.project_root_identity_matches(&config_root) {
+                        return Err(CliError::InvalidInput(
+                            "selected root disagrees with the project config".to_string(),
+                        ));
+                    }
+                    print_output(
+                        cli.format,
+                        "binding_verified: true",
+                        &json!({ "binding_verified": true }),
+                    )?;
+                } else {
+                    let report = build_root_report(&cli.db, cli.config.as_deref())?;
+                    let verified = report.verified;
+                    if verified {
+                        let root = cli.project_root()?;
+                        verify_project_database(&cli.db, &root)?;
+                    }
+                    print_output(cli.format, &render_root_report(&report), &report)?;
+                    if !verified {
+                        std::process::exit(1);
+                    }
                 }
             }
         },

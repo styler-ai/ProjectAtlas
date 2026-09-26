@@ -2,6 +2,7 @@
 
 ### Requirement: Marketplace integration readiness is separate from plugin installation
 ProjectAtlas SHALL expose whether the installed plugin, directly resolved runtime, generated host config, and registered Codex MCP target are version-matched, and SHALL report a mismatch as incomplete with a supported packaged repair action. It MUST NOT imply that Codex marketplace installation atomically updates external runtime or MCP state.
+The recurring startup hook SHALL verify the selected database schema and root binding through a bounded read-only probe, not repeat a full database integrity scan; full integrity verification remains an explicit command.
 
 #### Scenario: Older runtime and MCP after plugin update
 - **WHEN** a new ProjectAtlas plugin is installed while a fresh shell resolves an older CLI and Codex MCP still targets an older runtime or another project database
