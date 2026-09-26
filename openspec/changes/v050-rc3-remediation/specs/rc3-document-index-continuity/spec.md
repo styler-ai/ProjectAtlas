@@ -1,15 +1,27 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded document failures are file-specific and truthful
-DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` SHALL retain its exact font/code identity; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
+DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` in the main body, headers, footers, footnotes, endnotes, or rendered nested text boxes and within those bounds SHALL retain its exact font/code, story-part, and occurrence identity in durable queryable evidence; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. Package-reachable rendered story parts SHALL be examined through validated relationships or recorded as explicitly incomplete; absence of symbols in an unexamined part MUST NOT be inferred. Reaching a retained input, output, fact, or memory limit SHALL produce a typed outcome without claiming that unexamined symbols were retained. Cancellation and the shared indexing deadline SHALL remain generation-fatal. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
 
 #### Scenario: Rendered DOCX font-specific symbol
-- **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph whose font mapping is not known
-- **THEN** the result preserves its exact font/code identity and verifiable surrounding text, identifies unresolved Unicode-text coverage, and never advertises the glyph as decoded
+- **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph in any supported story part whose font mapping is not known
+- **THEN** the result preserves its exact font/code, story-part identity, and occurrence locator through publication and reopen, retains verifiable surrounding text, identifies unresolved Unicode-text coverage, and never advertises the glyph as decoded
+
+#### Scenario: Rendered symbols outside the main body
+- **WHEN** a DOCX references rendered headers, footers, footnotes, endnotes, or nested text boxes containing `w:sym`
+- **THEN** their symbols are admitted with exact story-part provenance, or that document exposes explicit incomplete coverage rather than claiming full symbol/text coverage
 
 #### Scenario: Verified symbol mapping
 - **WHEN** a rendered `w:sym` has a verified mapping for its font and code
 - **THEN** its Unicode text and exact symbol provenance are indexed without an unsupported-symbol error
+
+#### Scenario: Symbol extraction reaches a retained limit
+- **WHEN** a valid DOCX exceeds a retained input, output, fact, or memory ceiling before all rendered story parts are processed
+- **THEN** the document has a typed limit outcome and no unexamined symbol is claimed as retained; file-local publication requires an explicit incomplete-coverage record
+
+#### Scenario: Cancellation or shared deadline
+- **WHEN** cancellation or the shared indexing deadline stops DOCX extraction
+- **THEN** the generation fails without publishing partial document evidence
 
 #### Scenario: Non-rendered symbol
 - **WHEN** the same symbol is inside deleted or otherwise non-rendered content
