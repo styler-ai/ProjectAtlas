@@ -1,0 +1,49 @@
+## Context
+
+RC2 packaged plugin state can advance independently of the installed executable and Codex MCP registration. Codex marketplace installation has no ProjectAtlas-owned post-install transaction that can atomically update those external layers. Its trusted SessionStart hook and the existing installers are the supported integration surfaces. Separately, DOCX `w:sym` currently returns `UnsupportedDocxInput`, and the PDF Wasmi extractor returns a finite `ExecutionFuel` limit. CLI text-index and symbol paths translate these to scan-fatal errors, leaving no publication. PDF per-file text byte settings do not control execution fuel.
+
+## Goals / Non-Goals
+
+**Goals:** Make plugin/runtime/MCP mismatch explicit with an actionable version-matched repair path; keep document parsing bounded and truthful; allow usable repository evidence when one document cannot be fully extracted under an explicitly incomplete coverage contract; preserve last-valid publication and authored SQLite state; prove Windows, Linux, and macOS installed behavior before RC3 release acceptance.
+
+**Non-Goals:** Claim that Codex's marketplace transaction installs external binaries, guess arbitrary font-specific Unicode mappings, raise/remove parser ceilings as the sole repair, publish partial content as complete, reinitialize a user database, or promote stable v0.5.0.
+
+## Decisions
+
+### Keep plugin installation and integration readiness distinct (#620)
+
+The plugin will use its supported trusted startup/diagnostic surface and existing installer to compare version-matched plugin, direct CLI, generated config, and registered MCP identity. A mismatch yields an incomplete/actionable state and the exact packaged installer/verification commands. The installer remains the only mutation owner; no startup hook silently updates PATH, MCP, or project databases. An already-running host may require restart after the external state converges. Changing Codex marketplace success semantics was rejected because the plugin does not own that command or a post-install event.
+
+### Treat document parser limits as file-local coverage, not a global work-budget increase (#624, #625)
+
+First reproduce the exact PDF fuel input and DOCX symbol package in isolated fixtures. Correct any demonstrable parser bug at the shared extractor. When content is genuinely unsupported or exceeds a retained safety limit, the shared document-admission outcome must carry the path, typed reason, and incomplete coverage into both text and symbol paths. The repository generation may publish only if every other admitted file is verified and every incomplete document is explicitly represented as such; queries must not infer that missing document facts or text are absent. Reuse existing skip/provenance fields where sufficient. If durable coverage cannot be represented without a schema change, make the smallest compatible migration with rollback proof, not an in-memory-only label.
+
+### Preserve atomic generation ownership
+
+Stage parsing before the SQLite write transaction. A cancellation, source change, I/O fault, malformed package, or publication fault preserves the prior complete generation and authored state. A supported bounded-resource/unsupported-document outcome is not a fabricated successful parse. A later repaired document replaces its incomplete status through the normal incremental refresh. Existing fail-closed malformed XML, package-integrity, wrong-root, and incompatible-schema behavior stays intact.
+
+### Keep issue boundaries independent and the release owner read-only for product fixes
+
+#620 owns installer/plugin host convergence. #624 owns DOCX extraction and document coverage. #625 owns PDF fuel behavior and the same coverage contract; the first document issue to land establishes any shared representation, and the second refreshes from main rather than duplicating it. #492 owns only the exact RC3 package/platform acceptance after all children close. No new serial dependency is declared until one issue's implementation actually requires a shared landed baseline.
+
+## Risks / Trade-offs
+
+- [A startup diagnostic is unavailable when hooks are disabled/untrusted] → Document this host state and retain an explicit manual check/installer route; never claim readiness from plugin cache alone.
+- [A file-local skip could be misread as complete source evidence] → Persist/query typed incomplete coverage and test search, summary, graph, health, and MCP output before publication.
+- [A parser/resource fallback could hide malformed or changing input] → Keep malformed, I/O, source-change, cancellation, and limits outside the accepted document-local class fail-closed.
+- [Shared document coverage changes conflict across issues] → Land one owning boundary first; rebase and reuse it for the other, with independent causal tests.
+- [Mac-only reproduction can overstate Windows impact] → Exercise the same fixtures on supported hosted/packaged platforms and label unobserved behavior as pending until readback.
+
+## Migration Plan
+
+1. Map #620, #624, and #625 to exact OpenSpec task slices; reopen #492 and reconcile the native/mapped release graph.
+2. Implement one issue/PR at a time against current main, preserving the database and complete-generation contract; independently review each completed boundary.
+3. After all children merge, update version-owned artifacts to `0.5.0-rc3`, run the complete installed upgrade and CLI/MCP/host/platform inventory from an exact candidate, and publish a non-Latest prerelease only with separate release authorization.
+
+## Dependencies / Cross-Issue Impact
+
+#620, #624, and #625 are independent direct children of #492. A shared document-coverage representation first landed by #624 is a baseline for #625 only if that implementation chooses the same storage boundary; then #625 refreshes from accepted main. #602 stable promotion remains separate.
+
+## Open Questions
+
+None.
