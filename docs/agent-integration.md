@@ -154,8 +154,9 @@ configs instead; they are version-guarded and point at the verified runtime by a
 Use `projectatlas --format json runtime-info` as the compatibility probe. It reports runtime identity
 and capabilities without creating `.projectatlas` or touching the project-local database.
 
-The plugin installation must install or invoke the native `projectatlas` runtime before any server
-is registered. From a source checkout, use:
+Marketplace plugin installation copies plugin files; it does not install the native runtime or
+replace a Codex MCP registration. Run the version-matched installer for the intended project
+before claiming CLI/MCP integration readiness. From a source checkout, use:
 
 ```powershell
 plugins/projectatlas/scripts/install-runtime.ps1
@@ -509,7 +510,16 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 ## Codex skills
 
 ProjectAtlas ships public agent guidance through repository docs and the packaged plugin skill.
-The packaged Codex plugin also includes `hooks/hooks.json`, which reads a short ProjectAtlas-first routing reminder from the installed plugin through Codex's `PLUGIN_ROOT` at trusted startup, resume, and compaction. It does not invoke `projectatlas` from PATH, so a host's inherited executable cannot change the reminder. Codex presents bundled hooks for review; users must trust the current hook definition before it runs. The reminder is read-only and does not replace repository instructions or the full version-matched skill.
+The packaged Codex plugin also includes `hooks/hooks.json`. At trusted startup, resume, and
+compaction, its read-only command prints the package-bound routing reminder and compares the
+manifest version with the directly resolved runtime, current project host config, and global Codex
+MCP registration. A stale/missing layer reports `integration incomplete` with a versioned installer
+command; it never repairs, initializes, scans, or rebinds anything itself. On POSIX, a missing
+`jq` makes the check incomplete rather than guessing from JSON. Codex presents bundled hooks for
+review; users must trust the current hook definition before it runs. Disabled or untrusted hooks
+cannot establish readiness, so use `projectatlas --format json runtime-info` and
+`codex mcp get projectatlas --json` manually. A fresh child-process check does not prove an
+already-running Codex parent has refreshed its inherited PATH or MCP child.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
 
 ## Claude Code Plugin And OpenCode MCP Config
@@ -517,7 +527,8 @@ Personal workspace memory is local state and should stay ignored/untracked throu
 The ProjectAtlas plugin package includes:
 
 - `.codex-plugin/plugin.json` for Codex plugin metadata.
-- `hooks/hooks.json` plus `hooks/agent-instructions.txt` for trusted, package-bound Codex SessionStart guidance.
+- `hooks/hooks.json`, `hooks/agent-instructions.txt`, and platform readiness scripts for trusted,
+  package-bound, read-only Codex SessionStart guidance.
 - `.claude-plugin/plugin.json` plus the root `skills/` folder for Claude Code plugin packaging.
 - `opencode/opencode.json` as a disabled OpenCode MCP config template with absolute-path placeholders.
 - Installer scripts that generate project-local Codex-compatible, Claude Code, and OpenCode config files after runtime verification.

@@ -230,14 +230,14 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
         let mut command = StdCommand::new("cmd.exe");
         command
             .args(["/d", "/c"])
-            .raw_arg("type \"%PLUGIN_ROOT%\\hooks\\agent-instructions.txt\"")
+            .raw_arg("powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"")
             .env("PLUGIN_ROOT", &plugin_root)
             .env("PATH", path);
         command.output()?
     };
     #[cfg(not(windows))]
     let output = StdCommand::new("sh")
-        .args(["-c", "cat \"$PLUGIN_ROOT/hooks/agent-instructions.txt\""])
+        .args(["-c", "sh \"$PLUGIN_ROOT/hooks/readiness.sh\""])
         .env("PLUGIN_ROOT", &plugin_root)
         .env("PATH", path)
         .output()?;
@@ -245,7 +245,8 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
     let expected = fs::read_to_string(hook_asset)?.replace("\r\n", "\n");
     let actual = stdout.replace("\r\n", "\n");
     if !output.status.success()
-        || actual != expected
+        || !actual.starts_with(&expected)
+        || !actual.contains("ProjectAtlas integration incomplete")
         || stdout.contains("shadow-projectatlas-should-not-run")
     {
         return Err(io::Error::other(format!(
@@ -253,6 +254,221 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
             plugin_root.display(),
             output.status,
             String::from_utf8_lossy(&output.stderr),
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[test]
+fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(), Box<dyn Error>> {
+    let workspace = workspace_root()?;
+    let plugin_root = workspace.join("plugins").join("projectatlas");
+    let fixture = tempfile::tempdir()?;
+    let repo = fixture.path().join("repo '$HOME'`x");
+    let atlas_dir = repo.join(".projectatlas");
+    let bin = fixture.path().join("bin");
+    fs::create_dir_all(&atlas_dir)?;
+    fs::create_dir_all(&bin)?;
+    let db = atlas_dir.join("projectatlas.db");
+    let config = atlas_dir.join("config.toml");
+    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
+    let initialized = StdCommand::new(&executable)
+        .arg("init")
+        .current_dir(&repo)
+        .output()?;
+    if !initialized.status.success() {
+        return Err(io::Error::other(format!(
+            "fixture init failed: {}",
+            String::from_utf8_lossy(&initialized.stderr)
+        ))
+        .into());
+    }
+    let original_db = fs::read(&db)?;
+    let runtime: Value = serde_json::from_slice(
+        &StdCommand::new(&executable)
+            .args(["--format", "json", "runtime-info"])
+            .output()?
+            .stdout,
+    )?;
+    let runtime_command = runtime["executable"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("runtime-info did not expose its executable"))?;
+    let version = env!("CARGO_PKG_VERSION");
+    let args = [
+        "--require-version".to_owned(),
+        version.to_owned(),
+        "--db".to_owned(),
+        db.display().to_string(),
+        "--config".to_owned(),
+        config.display().to_string(),
+        "mcp".to_owned(),
+    ];
+    let generated = json!({"mcpServers": {"projectatlas": {
+        "command": runtime_command, "args": args, "cwd": repo
+    }}});
+    let host_config = atlas_dir.join("projectatlas.mcp.json");
+    fs::write(&host_config, serde_json::to_vec(&generated)?)?;
+    let registry_path = fixture.path().join("registry.json");
+    let registry = json!({"enabled": true, "transport": {
+        "type": "stdio", "command": runtime_command, "args": args
+    }});
+    fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
+    #[cfg(windows)]
+    fs::write(
+        bin.join("codex.cmd"),
+        "@echo off\r\ntype \"%CODEX_MCP_FIXTURE%\"\r\n",
+    )?;
+    #[cfg(not(windows))]
+    {
+        let stub = bin.join("codex");
+        fs::write(&stub, "#!/bin/sh\ncat \"$CODEX_MCP_FIXTURE\"\n")?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
+    }
+    let path = std::env::join_paths(
+        [
+            bin,
+            executable
+                .parent()
+                .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
+                .to_path_buf(),
+        ]
+        .into_iter()
+        .chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )?;
+    let run_hook =
+        |project_root: &Path, process_path: &std::ffi::OsStr| -> Result<String, Box<dyn Error>> {
+            #[cfg(windows)]
+            let output = StdCommand::new("powershell.exe")
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(plugin_root.join("hooks/readiness.ps1"))
+                .current_dir(project_root)
+                .env("PLUGIN_ROOT", &plugin_root)
+                .env("CODEX_MCP_FIXTURE", &registry_path)
+                .env("PATH", process_path)
+                .output()?;
+            #[cfg(not(windows))]
+            let output = StdCommand::new("sh")
+                .arg(plugin_root.join("hooks/readiness.sh"))
+                .current_dir(project_root)
+                .env("PLUGIN_ROOT", &plugin_root)
+                .env("CODEX_MCP_FIXTURE", &registry_path)
+                .env("PATH", process_path)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "readiness hook exited {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(String::from_utf8(output.stdout)?)
+        };
+    #[cfg(not(windows))]
+    if StdCommand::new("jq").arg("--version").output().is_err() {
+        if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+            return Err(io::Error::other("missing JSON validator was reported ready").into());
+        }
+        return Ok(());
+    }
+    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other("matching installed layers were not ready").into());
+    }
+    let old_bin = fixture.path().join("old-bin");
+    fs::create_dir(&old_bin)?;
+    let old_runtime = old_bin.join(if cfg!(windows) {
+        "projectatlas.cmd"
+    } else {
+        "projectatlas"
+    });
+    let old_identity =
+        json!({"project": "ProjectAtlas", "version": "0.4.5", "executable": old_runtime});
+    #[cfg(windows)]
+    fs::write(
+        &old_runtime,
+        format!("@echo off\r\necho {old_identity}\r\n"),
+    )?;
+    #[cfg(not(windows))]
+    {
+        fs::write(
+            &old_runtime,
+            format!("#!/bin/sh\nprintf '%s\\n' '{old_identity}'\n"),
+        )?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&old_runtime, fs::Permissions::from_mode(0o755))?;
+    }
+    let old_path =
+        std::env::join_paths(std::iter::once(old_bin).chain(std::env::split_paths(&path)))?;
+    if !run_hook(&repo, &old_path)?.contains("ProjectAtlas integration incomplete") {
+        return Err(io::Error::other("old direct runtime was accepted").into());
+    }
+    let mut stale = registry;
+    stale["transport"]["args"][1] = json!("0.4.5");
+    fs::write(&registry_path, serde_json::to_vec(&stale)?)?;
+    let stale_output = run_hook(&repo, &path)?;
+    if !stale_output.contains("ProjectAtlas integration incomplete")
+        || fs::read(&db)? != original_db
+    {
+        return Err(io::Error::other("stale MCP was not refused without mutation").into());
+    }
+    #[cfg(windows)]
+    if !stale_output.contains(&format!(
+        "-ProjectRoot '{}'",
+        repo.display().to_string().replace('\'', "''")
+    )) {
+        return Err(io::Error::other("PowerShell repair root was not a literal path").into());
+    }
+    #[cfg(windows)]
+    {
+        stale["transport"]["args"][1] = json!(version.to_ascii_uppercase());
+        fs::write(&registry_path, serde_json::to_vec(&stale)?)?;
+        if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+            return Err(io::Error::other("case-mismatched version guard was accepted").into());
+        }
+    }
+    let moved_root = fixture.path().join("moved-repo");
+    let moved_atlas = moved_root.join(".projectatlas");
+    fs::create_dir_all(&moved_atlas)?;
+    fs::copy(&db, moved_atlas.join("projectatlas.db"))?;
+    fs::copy(&config, moved_atlas.join("config.toml"))?;
+    fs::copy(&host_config, moved_atlas.join("projectatlas.mcp.json"))?;
+    let moved_db = fs::read(moved_atlas.join("projectatlas.db"))?;
+    if !run_hook(&moved_root, &path)?
+        .contains("project database is incompatible or bound to another root")
+        || fs::read(moved_atlas.join("projectatlas.db"))? != moved_db
+    {
+        return Err(
+            io::Error::other("wrong-root database was not refused without mutation").into(),
+        );
+    }
+    let future_root = fixture.path().join("future-schema-repo");
+    let future_atlas = future_root.join(".projectatlas");
+    fs::create_dir_all(&future_atlas)?;
+    fs::copy(&config, future_atlas.join("config.toml"))?;
+    fs::copy(&host_config, future_atlas.join("projectatlas.mcp.json"))?;
+    let future_db = future_atlas.join("projectatlas.db");
+    {
+        let connection = Connection::open(&future_db)?;
+        connection
+            .execute_batch("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('schema_version', ?1)",
+            [projectatlas_db::CURRENT_SCHEMA_VERSION
+                .saturating_add(1)
+                .to_string()],
+        )?;
+    }
+    let future_bytes = fs::read(&future_db)?;
+    let future_output = run_hook(&future_root, &path)?;
+    if !future_output.contains("project database is incompatible or bound to another root")
+        || fs::read(&future_db)? != future_bytes
+    {
+        return Err(io::Error::other(format!(
+            "newer-schema database was not refused without mutation: {future_output}"
         ))
         .into());
     }

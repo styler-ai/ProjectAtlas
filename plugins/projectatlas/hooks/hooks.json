@@ -6,10 +6,10 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat \"$PLUGIN_ROOT/hooks/agent-instructions.txt\"",
-            "commandWindows": "type \"%PLUGIN_ROOT%\\hooks\\agent-instructions.txt\"",
-            "statusMessage": "Loading ProjectAtlas guidance",
-            "additionalContextLimit": 200
+            "command": "sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"",
+            "statusMessage": "Checking ProjectAtlas integration",
+            "additionalContextLimit": 400
           }
         ]
       }

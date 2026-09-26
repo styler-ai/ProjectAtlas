@@ -20937,16 +20937,20 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "command"],
-        "cat \"$PLUGIN_ROOT/hooks/agent-instructions.txt\"",
+        "sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
     )?;
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "commandWindows"],
-        "type \"%PLUGIN_ROOT%\\hooks\\agent-instructions.txt\"",
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"",
     )?;
     let hook_asset = fs::read_to_string(plugin_root.join("hooks/agent-instructions.txt"))?;
+    let posix_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.sh"))?;
+    let windows_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.ps1"))?;
     if !hook_asset.contains("ProjectAtlas skill")
         || hook_asset.contains("projectatlas agent-instructions")
+        || !posix_readiness.contains("ProjectAtlas integration incomplete")
+        || !windows_readiness.contains("ProjectAtlas integration incomplete")
     {
         return Err(io::Error::other("packaged ProjectAtlas hook guidance asset drifted").into());
     }
@@ -20958,7 +20962,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "statusMessage"],
-        "Loading ProjectAtlas guidance",
+        "Checking ProjectAtlas integration",
     )?;
     if json_at(
         &hooks,
@@ -20972,7 +20976,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         ],
     )?
     .as_u64()
-        != Some(200)
+        != Some(400)
     {
         return Err(io::Error::other("packaged ProjectAtlas hook context limit drifted").into());
     }
@@ -34252,6 +34256,14 @@ fn is_shared_test_runtime_directory(path: &Path) -> bool {
             .replace('/', "\\")
             .to_ascii_lowercase()
     };
+    // Installer fixtures must not inherit a host's already-installed atlas forwarders.
+    #[cfg(windows)]
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let host_root = normalize(&PathBuf::from(local_app_data).join("ProjectAtlas")) + "\\";
+        if normalize(path).starts_with(&host_root) {
+            return true;
+        }
+    }
     if normalize(path) == normalize(runtime_directory)
         || normalize(path) == normalize(&runtime_directory.join("deps"))
     {
