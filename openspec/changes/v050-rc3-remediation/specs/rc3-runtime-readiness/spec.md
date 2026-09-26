@@ -15,6 +15,8 @@ ProjectAtlas SHALL expose whether the installed plugin, directly resolved runtim
 - **WHEN** the host does not run the trusted startup hook
 - **THEN** ProjectAtlas makes no automatic mutation or readiness claim and provides a manual diagnostic/repair route
 
+Packaged hook and installer fixtures own the causal #620 checks. Actual Codex hook trust/disable behavior, an already-running host restart, and installed platform convergence are final #492 release acceptance, not claims inferred from a fresh child process.
+
 ### Requirement: Existing project databases are preserved during integration repair
 The version-matched installer MUST refuse incompatible schema or project binding rather than reset, downgrade, replace, or silently rebind another project's database.
 

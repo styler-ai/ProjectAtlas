@@ -415,7 +415,12 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         return Err(io::Error::other("filesystem root produced a repair command").into());
     }
     #[cfg(not(windows))]
-    if StdCommand::new("jq").arg("--version").output().is_err() {
+    if StdCommand::new("jq").arg("--version").output().is_err()
+        && StdCommand::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+    {
         if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
             return Err(io::Error::other("missing JSON validator was reported ready").into());
         }
@@ -423,6 +428,34 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
         return Err(io::Error::other("matching installed layers were not ready").into());
+    }
+    #[cfg(not(windows))]
+    if StdCommand::new("python3").arg("--version").output().is_ok() {
+        let no_jq_bin = fixture.path().join("no-jq-bin");
+        fs::create_dir(&no_jq_bin)?;
+        for name in ["sh", "python3", "sed", "head", "dirname", "cat"] {
+            let source = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .map(|directory| directory.join(name))
+                .find(|candidate| candidate.is_file())
+                .ok_or_else(|| io::Error::other(format!("required POSIX tool {name} missing")))?;
+            std::os::unix::fs::symlink(fs::canonicalize(source)?, no_jq_bin.join(name))?;
+        }
+        let no_jq_path = std::env::join_paths([
+            no_jq_bin,
+            fixture.path().join("bin"),
+            executable
+                .parent()
+                .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
+                .to_path_buf(),
+        ])?;
+        if !run_hook(&repo, &no_jq_path)?.contains("ProjectAtlas integration ready") {
+            return Err(io::Error::other("python-only POSIX host was reported incomplete").into());
+        }
+    }
+    let nested = repo.join("nested");
+    fs::create_dir(&nested)?;
+    if !run_hook(&nested, &path)?.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other("nested project directory was reported incomplete").into());
     }
     #[cfg(windows)]
     {
@@ -449,12 +482,35 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             return Err(io::Error::other("non-Boolean MCP enabled was accepted").into());
         }
     }
+    let mut disabled = registry.clone();
+    disabled["enabled"] = json!(false);
+    fs::write(&registry_path, serde_json::to_vec(&disabled)?)?;
+    let disabled_output = run_hook(&repo, &path)?;
+    if !disabled_output.contains("ProjectAtlas integration incomplete")
+        || !disabled_output.contains("enabled=false")
+    {
+        return Err(io::Error::other("disabled MCP identity was not reported").into());
+    }
     let mut malformed = registry.clone();
     malformed["transport"]["type"] = json!("STDIO");
     fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;
-    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
-        return Err(io::Error::other("non-exact MCP transport was accepted").into());
+    let transport_output = run_hook(&repo, &path)?;
+    if !transport_output.contains("ProjectAtlas integration incomplete")
+        || !transport_output.contains("transport=STDIO")
+    {
+        return Err(io::Error::other("non-exact MCP transport identity was not reported").into());
     }
+    fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
+    let mut wrong_cwd = generated.clone();
+    wrong_cwd["mcpServers"]["projectatlas"]["cwd"] = json!(fixture.path().join("wrong-cwd"));
+    fs::write(&host_config, serde_json::to_vec(&wrong_cwd)?)?;
+    let wrong_cwd_output = run_hook(&repo, &path)?;
+    if !wrong_cwd_output.contains("ProjectAtlas integration incomplete")
+        || !wrong_cwd_output.contains(&fixture.path().join("wrong-cwd").display().to_string())
+    {
+        return Err(io::Error::other("generated MCP cwd mismatch was not reported").into());
+    }
+    fs::write(&host_config, serde_json::to_vec(&generated)?)?;
     let other_repo = fixture.path().join("mcp-other-project");
     fs::create_dir(&other_repo)?;
     let other_initialized = StdCommand::new(&executable)
@@ -468,10 +524,20 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     wrong_project["transport"]["args"][3] =
         json!(other_repo.join(ATLAS_DIR_NAME).join("projectatlas.db"));
     fs::write(&registry_path, serde_json::to_vec(&wrong_project)?)?;
-    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete")
+    let wrong_project_output = run_hook(&repo, &path)?;
+    if !wrong_project_output.contains("ProjectAtlas integration incomplete")
+        || !wrong_project_output.contains(
+            &other_repo
+                .join(ATLAS_DIR_NAME)
+                .join("projectatlas.db")
+                .display()
+                .to_string(),
+        )
         || fs::read(&db)? != original_db
     {
-        return Err(io::Error::other("other-project MCP database was accepted").into());
+        return Err(
+            io::Error::other("other-project MCP database identity was not reported").into(),
+        );
     }
     let flat_config = repo.join("projectatlas.toml");
     fs::rename(&config, &flat_config)?;
@@ -512,14 +578,19 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     let old_path =
         std::env::join_paths(std::iter::once(old_bin).chain(std::env::split_paths(&path)))?;
-    if !run_hook(&repo, &old_path)?.contains("ProjectAtlas integration incomplete") {
-        return Err(io::Error::other("old direct runtime was accepted").into());
+    let old_runtime_output = run_hook(&repo, &old_path)?;
+    if !old_runtime_output.contains("ProjectAtlas integration incomplete")
+        || !old_runtime_output.contains(&format!("plugin_version={version}"))
+        || !old_runtime_output.contains("0.4.5")
+    {
+        return Err(io::Error::other("old direct runtime identity was not reported").into());
     }
     let mut stale = registry;
     stale["transport"]["args"][1] = json!("0.4.5");
     fs::write(&registry_path, serde_json::to_vec(&stale)?)?;
     let stale_output = run_hook(&repo, &path)?;
     if !stale_output.contains("ProjectAtlas integration incomplete")
+        || !stale_output.contains("0.4.5")
         || fs::read(&db)? != original_db
     {
         return Err(io::Error::other("stale MCP was not refused without mutation").into());

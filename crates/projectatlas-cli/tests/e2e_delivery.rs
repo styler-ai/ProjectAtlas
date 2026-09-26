@@ -14166,6 +14166,73 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         .into());
     }
 
+    if cfg!(windows)
+        || StdCommand::new("jq").arg("--version").output().is_ok()
+        || StdCommand::new("python3").arg("--version").output().is_ok()
+    {
+        let plugin_root = workspace_root.join("plugins/projectatlas");
+        let hook = plugin_root.join(if cfg!(windows) {
+            "hooks/readiness.ps1"
+        } else {
+            "hooks/readiness.sh"
+        });
+        let run_hook = |first_path: &Path| -> Result<String, Box<dyn Error>> {
+            let mut command = if cfg!(windows) {
+                let mut command = StdCommand::new("powershell.exe");
+                command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+                command
+            } else {
+                StdCommand::new("sh")
+            };
+            let path = std::env::join_paths(
+                [first_path.to_path_buf(), stale_runtime_dir.clone()]
+                    .into_iter()
+                    .chain(std::env::split_paths(
+                        &std::env::var_os("PATH").unwrap_or_default(),
+                    )),
+            )?;
+            let output = command
+                .arg(&hook)
+                .current_dir(&repo)
+                .env("PATH", path)
+                .env("PLUGIN_ROOT", &plugin_root)
+                .env("HOME", &isolated_home)
+                .env("USERPROFILE", &isolated_home)
+                .env("PROJECTATLAS_FAKE_CODEX_LOG", &fake_codex_log)
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_STATE",
+                    isolated_home.join(FAKE_CODEX_REGISTRY_STATE_FILE_NAME),
+                )
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE",
+                    isolated_home.join(FAKE_CODEX_REGISTRY_STALE_FILE_NAME),
+                )
+                .env(
+                    "PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT",
+                    isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME),
+                )
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "bundled readiness hook failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(String::from_utf8(output.stdout)?)
+        };
+        let stale_host = run_hook(&stale_runtime_dir)?;
+        let fresh_host = run_hook(runtime.parent().ok_or("runtime has no parent")?)?;
+        if !stale_host.contains("ProjectAtlas integration incomplete")
+            || !fresh_host.contains("ProjectAtlas integration ready")
+        {
+            return Err(io::Error::other(format!(
+                "hook did not distinguish stale host PATH from repaired fresh child:\nstale={stale_host}\nfresh={fresh_host}"
+            ))
+            .into());
+        }
+    }
+
     Ok(())
 }
 
@@ -20985,7 +21052,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         ],
     )?
     .as_u64()
-        != Some(400)
+        != Some(800)
     {
         return Err(io::Error::other("packaged ProjectAtlas hook context limit drifted").into());
     }

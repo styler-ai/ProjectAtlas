@@ -514,8 +514,8 @@ The packaged Codex plugin also includes `hooks/hooks.json`. At trusted startup, 
 compaction, its read-only command prints the package-bound routing reminder and compares the
 manifest version with the directly resolved runtime, current project host config, and global Codex
 MCP registration. A stale/missing layer reports `integration incomplete` with a versioned installer
-command; it never repairs, initializes, scans, or rebinds anything itself. On POSIX, a missing
-`jq` makes the check incomplete rather than guessing from JSON. Codex presents bundled hooks for
+command; it never repairs, initializes, scans, or rebinds anything itself. On POSIX, the hook
+uses `python3` or `jq` to validate JSON; without either, it reports incomplete. Codex presents bundled hooks for
 review; users must trust the current hook definition before it runs. Disabled or untrusted hooks
 cannot establish readiness, so use `projectatlas --format json runtime-info` and
 `codex mcp get projectatlas --json` manually. A fresh child-process check does not prove an

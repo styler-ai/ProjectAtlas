@@ -36,19 +36,22 @@ if ($projectRoot -ieq [IO.Path]::GetPathRoot($projectRoot) -or
     exit 0
 }
 
+$db = Join-Path $projectRoot '.projectatlas/projectatlas.db'
+$config = Join-Path $projectRoot '.projectatlas/config.toml'
+if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
+    $config = Join-Path $projectRoot 'projectatlas.toml'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { $config = $null }
+}
+$runtime = $null
+$registry = $null
+$generated = $null
 try {
     $runtime = & projectatlas --format json runtime-info 2>$null | ConvertFrom-Json
     if ($runtime.project -ceq 'ProjectAtlas' -and $runtime.version -ceq $expected -and $runtime.executable) {
         $reason = 'project database or generated host config unavailable'
         $atlasDir = Join-Path $projectRoot '.projectatlas'
-        $db = Join-Path $atlasDir 'projectatlas.db'
-        $config = Join-Path $atlasDir 'config.toml'
         $hostConfig = Join-Path $atlasDir 'projectatlas.mcp.json'
         if (Test-Path -LiteralPath $db -PathType Leaf) {
-            if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
-                $config = Join-Path $projectRoot 'projectatlas.toml'
-                if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { $config = $null }
-            }
             if (Test-Path -LiteralPath $hostConfig -PathType Leaf) {
                 $verifyArgs = @('--db', $db)
                 if ($config) { $verifyArgs += @('--config', $config) }
@@ -96,6 +99,18 @@ try {
 }
 
 Write-Output "ProjectAtlas integration incomplete: $reason. Plugin installation alone does not update the native runtime or MCP registry."
+function IdentityValue($value) {
+    if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return 'unavailable' }
+    if ($value -is [bool]) { return $value.ToString().ToLowerInvariant() }
+    return [string]$value
+}
+$registryArgs = @($registry.transport.args)
+$generatedArgs = @($generated.mcpServers.projectatlas.args)
+Write-Output ('Expected: plugin_version={0} project_db={1} project_config={2} project_root={3} codex_mcp_enabled=true codex_mcp_transport=stdio' -f $expected, $db, (IdentityValue $config), $projectRoot)
+Write-Output ('Observed: direct_cli_version={0} direct_cli_executable={1}; codex_mcp_version={2} codex_mcp_executable={3} codex_mcp_db={4} codex_mcp_config={5} codex_mcp_enabled={6} codex_mcp_transport={7}; generated_mcp_version={8} generated_mcp_executable={9} generated_mcp_db={10} generated_mcp_config={11} generated_mcp_cwd={12}' -f
+    (IdentityValue $runtime.version), (IdentityValue $runtime.executable),
+    (IdentityValue $registryArgs[1]), (IdentityValue $registry.transport.command), (IdentityValue $registryArgs[3]), (IdentityValue $registryArgs[5]), (IdentityValue $registry.enabled), (IdentityValue $registry.transport.type),
+    (IdentityValue $generatedArgs[1]), (IdentityValue $generated.mcpServers.projectatlas.command), (IdentityValue $generatedArgs[3]), (IdentityValue $generatedArgs[5]), (IdentityValue $generated.mcpServers.projectatlas.cwd))
 Write-Output 'Use the version-matched ProjectAtlas skill. Do not reset a database.'
 Write-Output 'Repair command:'
 function Quote-PowerShellLiteral([string]$value) { return "'" + $value.Replace("'", "''") + "'" }
