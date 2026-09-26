@@ -1,7 +1,9 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded document failures are file-specific and truthful
-DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` in package-reachable document stories—including the main body, headers, footers, footnotes, endnotes, referenced comments, frames, and nested text boxes—and within those bounds SHALL retain its exact font/code, story-part, and occurrence identity in durable queryable evidence; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. Unreferenced glossary content is non-rendered; a referenced glossary, subdocument, or other rendered story that cannot be safely examined SHALL be recorded as explicitly incomplete, not silently treated as symbol-free. Story relationships SHALL be validated for type, existence, and package containment without external fetch or path escape. Reaching a retained input, output, fact, or memory limit SHALL produce a typed outcome without claiming that unexamined symbols were retained. Cancellation and the shared indexing deadline SHALL remain generation-fatal. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
+DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` in package-reachable document stories—including the main body, headers, footers, footnotes, endnotes, referenced comments, frames, and nested text boxes—and within those bounds SHALL retain its exact font/code, story-part, and occurrence identity in durable queryable evidence; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. Unreferenced glossary content is non-rendered; a referenced glossary, subdocument, or other rendered story that cannot be safely examined SHALL be recorded as explicitly incomplete, not silently treated as symbol-free. Story relationships SHALL be validated for type, existence, and package containment without external fetch or path escape. An accepted parser output, fact, or memory limit after safe package admission SHALL produce typed document-local incomplete coverage without claiming unexamined symbols were retained. Unsafe package/ZIP input limits, cancellation, and the shared indexing deadline SHALL remain generation-fatal. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
+
+For RC3, this DOCX requirement supersedes the #465 `repository-content-intelligence` restrictions that admitted only `word/document.xml`, refused font-coded symbols, and refused to read footnote/endnote parts. It does not permit OCR, macros, scripts, remote references, arbitrary processes, recursive embedded parsers, or unsafe ZIP admission. A reference marker needing dynamic evaluation remains unresolved coverage rather than fabricated text even when its in-package note story is examined.
 
 #### Scenario: Rendered DOCX font-specific symbol
 - **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph in any supported story part whose font mapping is not known
@@ -24,8 +26,12 @@ DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bo
 - **THEN** its Unicode text and exact symbol provenance are indexed without an unsupported-symbol error
 
 #### Scenario: Symbol extraction reaches a retained limit
-- **WHEN** a valid DOCX exceeds a retained input, output, fact, or memory ceiling before all rendered story parts are processed
-- **THEN** the document has a typed limit outcome and no unexamined symbol is claimed as retained; file-local publication requires an explicit incomplete-coverage record
+- **WHEN** a safely admitted DOCX exceeds a retained parser output, fact, or memory ceiling before all rendered story parts are processed
+- **THEN** the document publishes a typed file-local incomplete-coverage record and no unexamined symbol is claimed as retained
+
+#### Scenario: Package safety limit
+- **WHEN** a DOCX exceeds ZIP entry, path, compressed, expanded, recursion, or other unsafe input limits before safe admission
+- **THEN** extraction fails closed without publishing a new generation or changing the last complete one
 
 #### Scenario: Cancellation or shared deadline
 - **WHEN** cancellation or the shared indexing deadline stops DOCX extraction

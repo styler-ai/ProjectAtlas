@@ -30,7 +30,7 @@ Stage parsing before the SQLite write transaction. A cancellation, source change
 
 - [A startup diagnostic is unavailable when hooks are disabled/untrusted] → Document this host state and retain an explicit manual check/installer route; never claim readiness from plugin cache alone.
 - [A file-local skip could be misread as complete source evidence] → Persist/query typed incomplete coverage and test search, summary, graph, health, and MCP output before publication.
-- [A parser/resource fallback could hide malformed or changing input] → Keep malformed, I/O, source-change, cancellation, and limits outside the accepted document-local class fail-closed.
+- [A parser/resource fallback could hide malformed or changing input] → Only accepted parser output/fact/memory or PDF fuel limits on a safely admitted package become typed document-local incomplete coverage. Malformed or unsafe package/ZIP limits, I/O, source change, cancellation, and shared deadline remain generation-fatal.
 - [Shared document coverage changes conflict across issues] → Land one owning boundary first; rebase and reuse it for the other, with independent causal tests.
 - [Mac-only reproduction can overstate Windows impact] → Exercise the same fixtures on supported hosted/packaged platforms and label unobserved behavior as pending until readback.
 

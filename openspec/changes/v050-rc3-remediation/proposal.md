@@ -22,7 +22,7 @@ The separately requested map cleanup (#627) is also in RC3 scope: retain the cor
 
 ### Modified Capabilities
 
-None. This change defines RC3 remediation requirements without changing the stable `v0.4.5` public contract.
+- `repository-content-intelligence`: RC3 supersedes the #465 DOCX main-part-only, font-symbol refusal, and footnote/endnote no-read restrictions while preserving its package-safety and no-external-execution boundaries. The stable `v0.4.5` public contract is unchanged.
 
 ## Impact
 
