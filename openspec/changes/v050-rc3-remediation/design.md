@@ -6,7 +6,7 @@ RC2 packaged plugin state can advance independently of the installed executable 
 
 **Goals:** Make plugin/runtime/MCP mismatch explicit with an actionable version-matched repair path; keep document parsing bounded and truthful; allow usable repository evidence when one document cannot be fully extracted under an explicitly incomplete coverage contract; preserve last-valid publication and authored SQLite state; prove Windows, Linux, and macOS installed behavior before RC3 release acceptance.
 
-**Non-Goals:** Claim that Codex's marketplace transaction installs external binaries, guess arbitrary font-specific Unicode mappings, raise/remove parser ceilings as the sole repair, publish partial content as complete, reinitialize a user database, or promote stable v0.5.0.
+**Non-Goals:** Claim that Codex's marketplace transaction installs external binaries, guess arbitrary font-specific Unicode mappings, raise/remove parser ceilings without measured valid-input evidence and retained bounds, publish partial content as complete, reinitialize a user database, or promote stable v0.5.0.
 
 ## Decisions
 
@@ -16,7 +16,7 @@ The plugin will use its supported trusted startup/diagnostic surface and existin
 
 ### Treat document parser limits as file-local coverage, not a global work-budget increase (#624, #625)
 
-First reproduce the exact PDF fuel input and DOCX symbol package in isolated fixtures. Correct any demonstrable parser bug at the shared extractor. When content is genuinely unsupported or exceeds a retained safety limit, the shared document-admission outcome must carry the path, typed reason, and incomplete coverage into both text and symbol paths. The repository generation may publish only if every other admitted file is verified and every incomplete document is explicitly represented as such; queries must not infer that missing document facts or text are absent. Reuse existing skip/provenance fields where sufficient. If durable coverage cannot be represented without a schema change, make the smallest compatible migration with rollback proof, not an in-memory-only label.
+First reproduce the PDF fuel input and DOCX symbol package in isolated fixtures. Measure PDF parser work and fix a demonstrated inefficiency; a finite fuel increase is allowed when representative valid-input and wall-time/memory/output/cancellation proof justify it. When content is genuinely unsupported or exceeds a retained safety limit, the shared document-admission outcome must carry the path, typed reason, and incomplete coverage into both text and symbol paths. The repository generation may publish only if every other admitted file is verified and every incomplete document is explicitly represented as such; queries must not infer that missing document facts or text are absent. Reuse existing skip/provenance fields where sufficient. If durable coverage cannot be represented without a schema change, make the smallest compatible migration with rollback proof, not an in-memory-only label.
 
 ### Preserve atomic generation ownership
 

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded document failures are file-specific and truthful
-DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. A genuinely unsupported rendered DOCX font-specific symbol or PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
+DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. A genuinely unsupported rendered DOCX font-specific symbol SHALL identify its file and typed reason. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
 
 #### Scenario: Rendered DOCX font-specific symbol
 - **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph whose font mapping is unsupported
@@ -14,6 +14,10 @@ DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bo
 #### Scenario: PDF exhausts parser fuel
 - **WHEN** a PDF consumes its finite Wasmi execution-fuel budget during text indexing
 - **THEN** the result identifies the PDF and typed execution-fuel limit while retaining cancellation and other resource ceilings
+
+#### Scenario: Valid PDF exceeds the old fuel ceiling
+- **WHEN** a reproducible valid PDF exceeds the RC2 fuel ceiling but completes under a measured finite budget within wall-time, memory, output, and cancellation limits
+- **THEN** that justified budget is admitted and its exact text is indexed, while adversarial or larger inputs still stop at a finite limit
 
 ### Requirement: Repository publication is atomic and coverage-aware
 A scan SHALL publish a navigable generation only when all accepted source facts are verified and every document-local incomplete outcome is explicitly represented in persisted/queryable coverage. Queries MUST NOT infer absence of facts from an incomplete document. A malformed package, wrong root, source change, I/O fault, cancellation, or publication failure SHALL retain the previous complete generation and authored state.
