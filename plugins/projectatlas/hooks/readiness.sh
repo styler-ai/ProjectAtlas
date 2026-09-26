@@ -4,6 +4,7 @@ set -u
 
 plugin_root=${PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
 manifest=$plugin_root/.codex-plugin/plugin.json
+skill=$plugin_root/skills/projectatlas/SKILL.md
 expected=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)
 reason='runtime unavailable, mismatched, or JSON validator unavailable'
 starting_root=$(pwd -P)
@@ -17,12 +18,20 @@ while :; do
   fi
   [ -f "$project_root/.projectatlas/projectatlas.db" ] && break
   [ "$project_root" = / ] && break
-  { [ -e "$project_root/.git" ] || [ -d "$project_root/.projectatlas" ]; } && break
+  { [ -e "$project_root/.git" ] || [ -d "$project_root/.projectatlas" ] ||
+    [ -f "$project_root/projectatlas.toml" ]; } && break
   project_root=$(dirname -- "$project_root")
 done
 cat "$plugin_root/hooks/agent-instructions.txt"
+printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$skill"
+if [ ! -f "$skill" ]; then
+  printf 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.\n'
+  exit 0
+fi
 
-if [ ! -e "$project_root/.git" ] && [ ! -d "$project_root/.projectatlas" ]; then
+if [ "$project_root" = / ] ||
+  { [ ! -e "$project_root/.git" ] && [ ! -d "$project_root/.projectatlas" ] &&
+    [ ! -f "$project_root/projectatlas.toml" ]; }; then
   printf 'ProjectAtlas integration incomplete: no project root was identified. Select the intended project directory before running the version-matched installer with an explicit project root.\n'
   exit 0
 fi
@@ -36,7 +45,10 @@ if [ -n "$expected" ] && command -v projectatlas >/dev/null 2>&1 && command -v j
     db=$project_root/.projectatlas/projectatlas.db
     host_config=$project_root/.projectatlas/projectatlas.mcp.json
     config=$project_root/.projectatlas/config.toml
-    [ -f "$config" ] || config=
+    if [ ! -f "$config" ]; then
+      config=$project_root/projectatlas.toml
+      [ -f "$config" ] || config=
+    fi
     if [ -f "$db" ] && [ -f "$host_config" ] && command -v codex >/dev/null 2>&1; then
       set -- projectatlas --db "$db"
       [ -z "$config" ] || set -- "$@" --config "$config"

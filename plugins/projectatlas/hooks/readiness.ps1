@@ -1,6 +1,7 @@
 # Read-only session check. The installer, not a hook, owns runtime and MCP changes.
 $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
+$skill = Join-Path $pluginRoot 'skills/projectatlas/SKILL.md'
 $expected = (Get-Content -Raw -LiteralPath (Join-Path $pluginRoot '.codex-plugin/plugin.json') | ConvertFrom-Json).version
 $reason = 'runtime unavailable or not version-matched'
 $startingRoot = (Get-Location).Path
@@ -14,15 +15,23 @@ while ($true) {
     }
     if (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas/projectatlas.db') -PathType Leaf) { break }
     if ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -or
-        (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container)) { break }
+        (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container) -or
+        (Test-Path -LiteralPath (Join-Path $projectRoot 'projectatlas.toml') -PathType Leaf)) { break }
     $parent = Split-Path -Parent $projectRoot
     if (-not $parent -or $parent -eq $projectRoot) { break }
     $projectRoot = $parent
 }
 Get-Content -LiteralPath (Join-Path $pluginRoot 'hooks/agent-instructions.txt')
+Write-Output "Read the complete installed ProjectAtlas skill now: $skill"
+if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) {
+    Write-Output 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.'
+    exit 0
+}
 
-if (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -and
-    -not (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container)) {
+if ($projectRoot -ieq [IO.Path]::GetPathRoot($projectRoot) -or
+    -not (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -and
+    -not (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container) -and
+    -not (Test-Path -LiteralPath (Join-Path $projectRoot 'projectatlas.toml') -PathType Leaf)) {
     Write-Output 'ProjectAtlas integration incomplete: no project root was identified. Select the intended project directory before running the version-matched installer with an explicit project root.'
     exit 0
 }
@@ -36,7 +45,10 @@ try {
         $config = Join-Path $atlasDir 'config.toml'
         $hostConfig = Join-Path $atlasDir 'projectatlas.mcp.json'
         if (Test-Path -LiteralPath $db -PathType Leaf) {
-            if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { $config = $null }
+            if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
+                $config = Join-Path $projectRoot 'projectatlas.toml'
+                if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { $config = $null }
+            }
             if (Test-Path -LiteralPath $hostConfig -PathType Leaf) {
                 $verifyArgs = @('--db', $db)
                 if ($config) { $verifyArgs += @('--config', $config) }
