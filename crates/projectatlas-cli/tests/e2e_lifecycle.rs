@@ -404,7 +404,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         || !flat_uninitialized.contains("Repair command:")
         || !flat_uninitialized.contains(&flat_root.display().to_string())
     {
-        return Err(io::Error::other("flat config did not identify its project root").into());
+        return Err(io::Error::other(format!(
+            "flat config did not identify its project root {}: {flat_uninitialized}",
+            flat_root.display()
+        ))
+        .into());
     }
     let filesystem_root = fixture
         .path()
