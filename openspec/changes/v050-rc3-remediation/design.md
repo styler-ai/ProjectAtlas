@@ -36,13 +36,15 @@ Stage parsing before the SQLite write transaction. A cancellation, source change
 
 ## Migration Plan
 
-1. Map #620, #624, and #625 to exact OpenSpec task slices; reopen #492 and reconcile the native/mapped release graph.
+1. Map the three original defects #620, #624, and #625 to exact OpenSpec task slices; add the separately accepted #627 map change; reopen #492 and reconcile the native/mapped release graph.
 2. Implement one issue/PR at a time against current main, preserving the database and complete-generation contract; independently review each completed boundary.
 3. After all children merge, update version-owned artifacts to `0.5.0-rc3`, run the complete installed upgrade and CLI/MCP/host/platform inventory from an exact candidate, and publish a non-Latest prerelease only with separate release authorization.
 
 ## Dependencies / Cross-Issue Impact
 
-#620, #624, and #625 are independent direct children of #492. A shared document-coverage representation first landed by #624 is a baseline for #625 only if that implementation chooses the same storage boundary; then #625 refreshes from accepted main. #602 stable promotion remains separate.
+#620, #624, #625, and the separately accepted #627 are independent direct children of #492. A shared document-coverage representation first landed by #624 is a baseline for #625 only if that implementation chooses the same storage boundary; then #625 refreshes from accepted main. #602 stable promotion remains separate.
+
+The separate #627 OpenSpec change owns the fileless map contract; the RC3 release owner must prove the installed map CLI/MCP behavior without assuming a TOON snapshot file.
 
 ## Open Questions
 

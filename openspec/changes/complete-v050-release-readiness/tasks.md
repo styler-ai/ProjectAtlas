@@ -193,8 +193,8 @@
 
 ## 28. v0.5.0 RC3 release acceptance (#492)
 
-- [ ] 28.1 After #620, #624, and #625 close on refreshed `main`, reconcile their task mirrors, reviews, milestone, native parent/blocker graph, and all release-owned runtime/plugin/installer/package/documentation/workflow identities to `0.5.0-rc3`.
+- [ ] 28.1 After #620, #624, #625, and #627 close on refreshed `main`, reconcile their task mirrors, reviews, milestone, native parent/blocker graph, and all release-owned runtime/plugin/installer/package/documentation/workflow identities to `0.5.0-rc3`.
 - [ ] 28.2 Freeze one clean current-main RC3 candidate and run OpenSpec, IssueOps, Rust/toolchain, database, documentation, dependency, packaging, release-policy, checksum, and parser-pack construction gates without weakening RC-first policy.
-- [ ] 28.3 From the exact installed candidate, safely execute the complete CLI/nested-command/MCP inventory and version-matched plugin/hook/installer upgrade paths on Windows, Linux, macOS x64, and macOS arm64, including the DOCX/PDF regressions, parser limits, incomplete coverage, failure/retry, existing database preservation, and compatible rollback.
+- [ ] 28.3 From the exact installed candidate, safely execute the complete CLI/nested-command/MCP inventory and version-matched plugin/hook/installer upgrade paths on Windows, Linux, macOS x64, and macOS arm64, including fileless map responses with no legacy snapshot write, the DOCX/PDF regressions, parser limits, incomplete coverage, failure/retry, existing database preservation, and compatible rollback.
 - [ ] 28.4 With separate release authorization, publish `v0.5.0-rc3` as a non-draft prerelease and independently read back tag, metadata, assets, SHA256SUMS, runtime/plugin/skill/hook/MCP/CLI/host identity, installed behavior, and v0.4.5 Latest state.
 - [ ] 28.5 Resolve or disposition current automated/human feedback, synchronize release issue/OpenSpec/milestone state, retain stable promotion in #602, and close #492 last only after every required RC3 proof passes.

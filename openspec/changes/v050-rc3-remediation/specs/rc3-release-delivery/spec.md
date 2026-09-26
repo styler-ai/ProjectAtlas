@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: RC3 owns a reconciled release graph and exact installed acceptance
-The `v0.5.0-00` release owner #492 SHALL be the sole direct native parent and direct blocker consumer for accepted RC3 bugs #620, #624, and #625, implement no product fixes, and close last. An RC3 candidate MUST come from exact accepted main after every child task, review, and required gate passes.
+The `v0.5.0-00` release owner #492 SHALL be the sole direct native parent and direct blocker consumer for accepted RC3 work #620, #624, #625, and #627, implement no product fixes, and close last. An RC3 candidate MUST come from exact accepted main after every child task, review, and required gate passes.
 
 #### Scenario: Planning and child implementation
 - **WHEN** RC3 work is active
@@ -9,7 +9,7 @@ The `v0.5.0-00` release owner #492 SHALL be the sole direct native parent and di
 
 #### Scenario: Installed candidate proof
 - **WHEN** all child fixes are accepted and merged
-- **THEN** the release owner exercises the exact package across Windows, Linux, macOS x64, and macOS arm64 with version-matched direct CLI, plugin, hook, generated config, MCP, database upgrade/rollback, document fixtures, and safe complete command/tool inventory
+- **THEN** the release owner exercises the exact package across Windows, Linux, macOS x64, and macOS arm64 with version-matched direct CLI, plugin, hook, generated config, MCP, database upgrade/rollback, document fixtures, fileless map output, and safe complete command/tool inventory
 
 #### Scenario: Publication boundary
 - **WHEN** RC3 has explicit publication authorization and exact candidate proof is complete
