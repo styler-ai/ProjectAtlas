@@ -72,7 +72,7 @@
 - **AND** ordinary source retains its existing ceiling, while a document above 8 MiB fails before replacing the prior complete generation
 
 #### Scenario: Malformed, encrypted, bomb, oversized, unsupported, or canceled input
-- **WHEN** magic mismatches, PDF is malformed/encrypted/password-protected, DOCX has duplicate/unsafe/recursive/expansive entries, or package input bounds/cancellation trigger
+- **WHEN** magic mismatches, PDF is malformed/encrypted/password-protected, DOCX has duplicate/unsafe/recursive/expansive entries, non-accepted unsupported content such as live ruby, alternate-format chunks, or unsupported XML encoding is encountered, or package input bounds/cancellation trigger
 - **THEN** extraction returns typed bounded/unsupported coverage, publishes no truncated-complete text or new generation, and never invokes external code/network
 - **AND** accepted parser output/fact/memory or PDF-fuel limits after safe package admission publish only with durable file-specific incomplete coverage under the RC3 document-index-continuity contract
 
@@ -89,9 +89,9 @@ PDF/DOCX extracted text, locators, provenance, coverage, and any document/source
 - **THEN** no new schema or index is added
 
 #### Scenario: Accepted document-local incomplete coverage
-- **WHEN** a safely admitted document has an accepted parser output/fact/memory or PDF-fuel limit, or an unresolved DOCX symbol mapping or unsupported rendered story
+- **WHEN** a safely admitted document has an accepted parser output/fact/memory or PDF-fuel limit, an unresolved DOCX symbol mapping, or a safe referenced unsupported story type outside the named supported set
 - **THEN** the new generation may publish only with verified source and durable, queryable file-specific incomplete coverage; it MUST NOT advertise omitted document evidence as complete
 
 #### Scenario: Publication or replacement fails
-- **WHEN** malformed or unsafe extraction, source/I/O change, incremental replace/delete, database write, cancellation, or shared deadline fails
+- **WHEN** malformed, unsafe, or non-accepted unsupported extraction, source/I/O change, incremental replace/delete, database write, cancellation, or shared deadline fails
 - **THEN** the prior complete generation remains current and no partial extracted evidence is advertised
