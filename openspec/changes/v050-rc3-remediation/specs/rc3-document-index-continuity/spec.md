@@ -12,8 +12,8 @@ DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bo
 - **THEN** it does not degrade the rendered document's coverage
 
 #### Scenario: PDF exhausts parser fuel
-- **WHEN** a PDF consumes its finite Wasmi execution-fuel budget during text indexing
-- **THEN** the result identifies the PDF and typed execution-fuel limit while retaining cancellation and other resource ceilings
+- **WHEN** a PDF beside ordinary source consumes its finite Wasmi execution-fuel budget during text indexing
+- **THEN** the published generation retains verified source, identifies that PDF with durable file-local incomplete coverage and a typed execution-fuel limit, and retains cancellation and other resource ceilings
 
 #### Scenario: Valid PDF exceeds the old fuel ceiling
 - **WHEN** a reproducible valid PDF exceeds the RC2 fuel ceiling but completes under a measured finite budget within wall-time, memory, output, and cancellation limits
