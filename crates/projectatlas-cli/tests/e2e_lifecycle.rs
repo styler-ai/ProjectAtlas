@@ -63,6 +63,8 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read as IoRead, Write as IoWrite};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -217,7 +219,6 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
         let mut permissions = fs::metadata(&shadow_command)?.permissions();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             permissions.set_mode(0o755);
         }
         fs::set_permissions(shadow_command, permissions)?;
@@ -335,7 +336,6 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     {
         let stub = bin.join("codex");
         fs::write(&stub, "#!/bin/sh\ncat \"$CODEX_MCP_FIXTURE\"\n")?;
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
     }
     let path = std::env::join_paths(
@@ -573,7 +573,6 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             &old_runtime,
             format!("#!/bin/sh\nprintf '%s\\n' '{old_identity}'\n"),
         )?;
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&old_runtime, fs::Permissions::from_mode(0o755))?;
     }
     let old_path =
