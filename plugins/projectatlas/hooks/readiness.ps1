@@ -64,10 +64,21 @@ try {
                 $argsExpected = @('--require-version', $expected, '--db', $db)
                 if ($config) { $argsExpected += @('--config', $config) }
                 $argsExpected += 'mcp'
-                $sameArgs = { param($actual) @($actual).Count -eq $argsExpected.Count -and
-                    -not (Compare-Object -CaseSensitive -ReferenceObject $argsExpected -DifferenceObject @($actual) -SyncWindow 0) }
                 $samePath = { param($actual, $wanted) $actual -and
                     [IO.Path]::GetFullPath([string]$actual) -ieq [IO.Path]::GetFullPath([string]$wanted) }
+                $sameArgs = {
+                    param($actual)
+                    $actualArgs = @($actual)
+                    if ($actualArgs.Count -ne $argsExpected.Count) { return $false }
+                    for ($i = 0; $i -lt $argsExpected.Count; $i++) {
+                        if (($i -eq 3) -or (($i -eq 5) -and $config)) {
+                            if (-not (& $samePath $actualArgs[$i] $argsExpected[$i])) { return $false }
+                        } elseif ([string]$actualArgs[$i] -cne [string]$argsExpected[$i]) {
+                            return $false
+                        }
+                    }
+                    return $true
+                }
                 if ($registry.enabled -is [bool] -and $registry.enabled -and $registry.transport.type -ceq 'stdio' -and
                     (& $samePath $registry.transport.command $runtime.executable) -and
                     (& $sameArgs $registry.transport.args) -and

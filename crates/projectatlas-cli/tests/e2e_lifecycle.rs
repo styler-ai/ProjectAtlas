@@ -244,8 +244,12 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
     let stdout = String::from_utf8(output.stdout)?;
     let expected = fs::read_to_string(hook_asset)?.replace("\r\n", "\n");
     let actual = stdout.replace("\r\n", "\n");
-    let skill = plugin_root.join("skills").join("projectatlas").join("SKILL.md");
-    let hook_config: Value = serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+    let skill = plugin_root
+        .join("skills")
+        .join("projectatlas")
+        .join("SKILL.md");
+    let hook_config: Value =
+        serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
     if !output.status.success()
         || !actual.starts_with(&expected)
         || !actual.contains(&format!(
@@ -418,6 +422,23 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
         return Err(io::Error::other("matching installed layers were not ready").into());
+    }
+    #[cfg(windows)]
+    {
+        let mut cased_registry = registry.clone();
+        let mut cased_generated = generated.clone();
+        for index in [3, 5] {
+            let cased = args[index].to_ascii_uppercase();
+            cased_registry["transport"]["args"][index] = json!(cased.clone());
+            cased_generated["mcpServers"]["projectatlas"]["args"][index] = json!(cased);
+        }
+        fs::write(&registry_path, serde_json::to_vec(&cased_registry)?)?;
+        fs::write(&host_config, serde_json::to_vec(&cased_generated)?)?;
+        if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
+            return Err(io::Error::other("Windows path casing was reported incomplete").into());
+        }
+        fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
+        fs::write(&host_config, serde_json::to_vec(&generated)?)?;
     }
     for malformed_enabled in [json!("true"), json!(1)] {
         let mut malformed = registry.clone();
