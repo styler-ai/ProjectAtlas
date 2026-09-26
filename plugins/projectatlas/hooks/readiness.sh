@@ -43,6 +43,11 @@ if [ ! -f "$config" ]; then
   config=$project_root/projectatlas.toml
   [ -f "$config" ] || config=
 fi
+same_json_path() {
+  actual=$(printf '%s\n' "$1" | jq -srj "$2" && printf '.') || return 1
+  actual=${actual%.}
+  [ -n "$actual" ] && [ "$actual" -ef "$3" ]
+}
 runtime=
 registry=
 generated=$(cat "$host_config" 2>/dev/null || true)
@@ -72,9 +77,10 @@ except (ValueError, AttributeError):
         reason='project database is incompatible or bound to another root'
       else
       registry=$(codex mcp get projectatlas --json 2>/dev/null || true)
+      generated=$(cat "$host_config" 2>/dev/null || true)
       if { command -v python3 >/dev/null 2>&1 &&
         printf '%s\n' "$registry" | python3 -c '
-import json, sys
+import json, os, sys
 try:
     registry = json.load(sys.stdin)
     with open(sys.argv[1], encoding="utf-8") as source:
@@ -85,28 +91,52 @@ try:
         args += ["--config", config]
     args += ["mcp"]
     transport = registry["transport"]
+    def same_path(actual, wanted):
+        return isinstance(actual, str) and os.path.realpath(actual) == os.path.realpath(wanted)
+    def same_args(actual):
+        return (isinstance(actual, list) and len(actual) == len(args) and
+                all(same_path(value, args[index]) if index == 3 or (index == 5 and config)
+                    else value == args[index] for index, value in enumerate(actual)))
     ready = (registry["enabled"] is True and transport["type"] == "stdio" and
-             transport["command"] == executable and transport["args"] == args and
-             generated["command"] == executable and generated["args"] == args and
-             generated["cwd"] == root)
+             same_path(transport["command"], executable) and same_args(transport["args"]) and
+             same_path(generated["command"], executable) and same_args(generated["args"]) and
+             same_path(generated["cwd"], root))
     sys.exit(0 if ready else 1)
 except (OSError, ValueError, TypeError, KeyError, IndexError):
     sys.exit(1)
 ' "$host_config" "$executable" "$expected" "$db" "$config" "$project_root" 2>/dev/null; } ||
         { ! command -v python3 >/dev/null 2>&1 &&
-        printf '%s\n' "$registry" | jq -e --arg exe "$executable" --arg v "$expected" --arg db "$db" --arg cfg "$config" '
-        def expected_args: ["--require-version", $v, "--db", $db] +
-          (if $cfg == "" then [] else ["--config", $cfg] end) + ["mcp"];
-        .enabled == true and .transport.type == "stdio" and
-        .transport.command == $exe and .transport.args == expected_args
-      ' >/dev/null 2>&1 &&
-        jq -e --arg exe "$executable" --arg v "$expected" --arg db "$db" --arg cfg "$config" --arg root "$project_root" '
-          def expected_args: ["--require-version", $v, "--db", $db] +
-            (if $cfg == "" then [] else ["--config", $cfg] end) + ["mcp"];
-          .mcpServers.projectatlas.command == $exe and
-          .mcpServers.projectatlas.args == expected_args and
-          .mcpServers.projectatlas.cwd == $root
-        ' "$host_config" >/dev/null 2>&1; }; then
+        printf '%s\n' "$registry" | jq -se --arg v "$expected" --arg cfg "$config" '
+          def clean_path: if type == "string" then length > 0 and index("\u0000") == null else false end;
+          length == 1 and (.[0] |
+            .transport.args as $args |
+            .enabled == true and .transport.type == "stdio" and
+            ($args | type) == "array" and
+            (.transport.command | clean_path) and ($args[3] | clean_path) and
+            (if $cfg == "" then true else ($args[5] | clean_path) end) and
+            $args == (["--require-version", $v, "--db", $args[3]] +
+              (if $cfg == "" then [] else ["--config", $args[5]] end) + ["mcp"]))
+        ' >/dev/null 2>&1 &&
+        printf '%s\n' "$generated" | jq -se --arg v "$expected" --arg cfg "$config" '
+          def clean_path: if type == "string" then length > 0 and index("\u0000") == null else false end;
+          length == 1 and (.[0] |
+            .mcpServers.projectatlas.args as $args |
+            ($args | type) == "array" and
+            (.mcpServers.projectatlas.command | clean_path) and
+            (.mcpServers.projectatlas.cwd | clean_path) and
+            ($args[3] | clean_path) and
+            (if $cfg == "" then true else ($args[5] | clean_path) end) and
+            $args == (["--require-version", $v, "--db", $args[3]] +
+              (if $cfg == "" then [] else ["--config", $args[5]] end) + ["mcp"]))
+        ' >/dev/null 2>&1 &&
+        same_json_path "$registry" '.[0].transport.command | strings' "$executable" &&
+        same_json_path "$registry" '.[0].transport.args[3] | strings' "$db" &&
+        same_json_path "$generated" '.[0].mcpServers.projectatlas.command | strings' "$executable" &&
+        same_json_path "$generated" '.[0].mcpServers.projectatlas.args[3] | strings' "$db" &&
+        same_json_path "$generated" '.[0].mcpServers.projectatlas.cwd | strings' "$project_root" &&
+        { [ -z "$config" ] || {
+          same_json_path "$registry" '.[0].transport.args[5] | strings' "$config" &&
+          same_json_path "$generated" '.[0].mcpServers.projectatlas.args[5] | strings' "$config"; }; }; }; then
         printf 'ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match %s for this project. Use the version-matched ProjectAtlas skill and repository instructions.\n' "$expected"
         exit 0
       fi

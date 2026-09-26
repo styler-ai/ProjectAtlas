@@ -400,9 +400,15 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::create_dir_all(&flat_nested)?;
     fs::write(flat_root.join("projectatlas.toml"), "")?;
     let flat_uninitialized = run_hook(&flat_nested, &path)?;
+    let reported_root = flat_uninitialized.lines().find_map(|line| {
+        line.split_once(" project_root=")
+            .and_then(|(_, root)| root.split_once(" codex_mcp_enabled="))
+            .map(|(root, _)| root)
+    });
     if !flat_uninitialized.contains("ProjectAtlas integration incomplete")
         || !flat_uninitialized.contains("Repair command:")
-        || !flat_uninitialized.contains(&flat_root.display().to_string())
+        || reported_root.and_then(|root| fs::canonicalize(root).ok())
+            != Some(fs::canonicalize(&flat_root)?)
     {
         return Err(io::Error::other(format!(
             "flat config did not identify its project root {}: {flat_uninitialized}",
@@ -430,8 +436,101 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         }
         return Ok(());
     }
-    if !run_hook(&repo, &path)?.contains("ProjectAtlas integration ready") {
-        return Err(io::Error::other("matching installed layers were not ready").into());
+    let ready_output = run_hook(&repo, &path)?;
+    if !ready_output.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other(format!(
+            "matching installed layers were not ready: {ready_output}"
+        ))
+        .into());
+    }
+    #[cfg(unix)]
+    {
+        let alias = fixture.path().join("repo-alias");
+        std::os::unix::fs::symlink(&repo, &alias)?;
+        let mut alias_args = args.clone();
+        alias_args[3] = alias
+            .join(ATLAS_DIR_NAME)
+            .join("projectatlas.db")
+            .display()
+            .to_string();
+        alias_args[5] = alias
+            .join(ATLAS_DIR_NAME)
+            .join("config.toml")
+            .display()
+            .to_string();
+        let mut alias_registry = registry.clone();
+        alias_registry["transport"]["args"] = json!(alias_args.clone());
+        let mut alias_generated = generated.clone();
+        alias_generated["mcpServers"]["projectatlas"]["args"] = json!(alias_args.clone());
+        alias_generated["mcpServers"]["projectatlas"]["cwd"] = json!(alias);
+        fs::write(&registry_path, serde_json::to_vec(&alias_registry)?)?;
+        fs::write(&host_config, serde_json::to_vec(&alias_generated)?)?;
+        let alias_output = run_hook(&repo, &path)?;
+        if !alias_output.contains("ProjectAtlas integration ready") {
+            return Err(io::Error::other(format!(
+                "equivalent symlinked project paths were reported stale: {alias_output}"
+            ))
+            .into());
+        }
+        if StdCommand::new("jq").arg("--version").output().is_ok() {
+            let jq_only_bin = fixture.path().join("jq-only-bin");
+            fs::create_dir(&jq_only_bin)?;
+            for name in ["sh", "jq", "sed", "head", "dirname", "cat"] {
+                let source = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .map(|directory| directory.join(name))
+                    .find(|candidate| candidate.is_file())
+                    .ok_or_else(|| {
+                        io::Error::other(format!("required POSIX tool {name} missing"))
+                    })?;
+                std::os::unix::fs::symlink(fs::canonicalize(source)?, jq_only_bin.join(name))?;
+            }
+            let jq_only_path = std::env::join_paths([
+                jq_only_bin,
+                fixture.path().join("bin"),
+                executable
+                    .parent()
+                    .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
+                    .to_path_buf(),
+            ])?;
+            let jq_alias_output = run_hook(&repo, &jq_only_path)?;
+            if !jq_alias_output.contains("ProjectAtlas integration ready") {
+                return Err(io::Error::other(format!(
+                    "jq-only host reported equivalent project paths stale: {jq_alias_output}"
+                ))
+                .into());
+            }
+            let mut multiple_values = b"null\n".to_vec();
+            multiple_values.extend(serde_json::to_vec(&alias_generated)?);
+            fs::write(&host_config, &multiple_values)?;
+            if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                return Err(
+                    io::Error::other("jq-only host accepted multi-value generated JSON").into(),
+                );
+            }
+            fs::write(&host_config, serde_json::to_vec(&alias_generated)?)?;
+            for suffix in ["\0", "\n"] {
+                let mut malformed = alias_registry.clone();
+                malformed["transport"]["args"][3] = json!(format!("{}{suffix}", alias_args[3]));
+                fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;
+                if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                    return Err(io::Error::other(format!(
+                        "jq-only host accepted a malformed database path with suffix {suffix:?}"
+                    ))
+                    .into());
+                }
+            }
+            fs::write(&registry_path, serde_json::to_vec(&alias_registry)?)?;
+            multiple_values.truncate(b"null\n".len());
+            multiple_values.extend(serde_json::to_vec(&alias_registry)?);
+            fs::write(&registry_path, &multiple_values)?;
+            if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                return Err(
+                    io::Error::other("jq-only host accepted multi-value registry JSON").into(),
+                );
+            }
+        }
+        fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
+        fs::write(&host_config, serde_json::to_vec(&generated)?)?;
     }
     #[cfg(not(windows))]
     if StdCommand::new("python3").arg("--version").output().is_ok() {
