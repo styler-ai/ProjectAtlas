@@ -75,3 +75,23 @@
 - **WHEN** magic mismatches, PDF is malformed/encrypted/password-protected, DOCX has duplicate/unsafe/recursive/expansive entries, or package input bounds/cancellation trigger
 - **THEN** extraction returns typed bounded/unsupported coverage, publishes no truncated-complete text or new generation, and never invokes external code/network
 - **AND** accepted parser output/fact/memory or PDF-fuel limits after safe package admission publish only with durable file-specific incomplete coverage under the RC3 document-index-continuity contract
+
+### Requirement: Document evidence is exact, sparse, and atomic
+PDF/DOCX extracted text, locators, provenance, coverage, and any document/source relations SHALL publish through existing indexed-text/graph authority when representable; otherwise the smallest constrained SQLite delta SHALL land first. Relations SHALL require exact typed evidence and SHALL not fan a long document out by topical similarity.
+
+#### Scenario: Literal document summary
+- **WHEN** an admitted PDF or DOCX publishes extracted text
+- **THEN** its content summary and generated purpose use a bounded literal text excerpt rather than synthetic graph block names, without inferring headings or titles
+- **AND** empty extracted text produces an explicit empty summary, while authored purposes remain unchanged
+
+#### Scenario: Existing storage is sufficient
+- **WHEN** current text/occurrence/coverage rows express the locator and hot queries within bounds
+- **THEN** no new schema or index is added
+
+#### Scenario: Accepted document-local incomplete coverage
+- **WHEN** a safely admitted document has an accepted parser output/fact/memory or PDF-fuel limit, or an unresolved DOCX symbol mapping or unsupported rendered story
+- **THEN** the new generation may publish only with verified source and durable, queryable file-specific incomplete coverage; it MUST NOT advertise omitted document evidence as complete
+
+#### Scenario: Publication or replacement fails
+- **WHEN** malformed or unsafe extraction, source/I/O change, incremental replace/delete, database write, cancellation, or shared deadline fails
+- **THEN** the prior complete generation remains current and no partial extracted evidence is advertised
