@@ -19,7 +19,7 @@ At startup and after compaction, read this complete installed skill before Atlas
 
 1. On first use in each distinct project root, initialize only if its project-local index is absent or a read-only call returns `init_required`. Call `atlas_init` when exposed or run `projectatlas init` from that root; for `init_required`, execute its exact next call using the returned `worktree` alias or `project_path`. Do not choose a database filename or reuse another root's writable state. Every project root owns its own `.projectatlas/projectatlas.db`, config, generated host configs, and exact index. Do not substitute a scan, symbol build, or hand-written MCP config for init.
 2. Bind the intended control project once. For a registered worktree, keep the agent in the control checkout and pass `worktree` on each root-scoped call. For unrelated or unregistered roots, pass `project_path`; use `atlas_set_project_path` only as a single-client process default. Never send both selectors.
-3. Refresh only when needed. Prefer `atlas_watch_once` for ordinary changed-file updates. Use `atlas_scan` only when the index is absent or typed ProjectAtlas guidance requires a full refresh; never scan merely because a session started.
+3. Refresh only when needed. Prefer `atlas_watch_once` for ordinary changed-file updates. Use `atlas_scan` only when an initialized project has no published index or typed ProjectAtlas guidance requires a full refresh; use init, not scan, for missing project-local state. Never scan merely because a session started.
 4. Call `atlas_session_brief` once at task-oriented startup with `query`, `project_path` when needed, and `compact: true`. For a focused code question, start with `file_limit: 3`, `folder_limit: 3`, `blocker_limit: 1`, and `purpose_limit: 1`; widen only when no actionable candidate is returned. Follow its typed next call directly; do not restart the brief or repeat folder/file discovery for a later caller, source, or public-boundary check.
    When the task has a content role, carry `content_selection: "source"`, `"documentation"`, or `"both"` on the returned files, search, summary, slice, symbol, and detailed-relation calls that expose it. Use `source` for ordinary implementation work, `documentation` for specification or guidance discovery, and `both` only when the task crosses the two. Omit the field only when the legacy candidate universe, including configuration/data and other text, is intentionally required.
 5. Call a returned `atlas_file_summary` recommendation with `compact: true`. Use legacy/default summary output or an explicit `limit` only when full totals, empty sections, and complete coverage state are needed.
@@ -69,10 +69,10 @@ For generated or vendored source, verify the repository's ownership and ignore p
 
 ## Indexing Strategy
 
-- **First use for each project root:** `atlas_init` or `projectatlas init`. This is the normal per-project setup and initial-index path.
+- **First use with no project-local index, or typed `init_required`:** `atlas_init` or `projectatlas init`. This is the per-project setup and initial-index path, not a call to repeat for an existing valid index.
 - **Fresh existing index:** make no indexing call. Start with `atlas_session_brief`.
 - **Changed files:** use `atlas_watch_once`; it incrementally refreshes affected source, summaries, symbols, graph facts, and freshness state.
-- **Full refresh:** use `atlas_scan` only for a missing index, an intentional repository-wide rebuild, or typed full-refresh guidance after continuity, root, policy, or index uncertainty.
+- **Full refresh:** use `atlas_scan` only for an initialized project with no published index, an intentional repository-wide rebuild, or typed full-refresh guidance after continuity, root, policy, or index uncertainty.
 - **Deep symbol/graph rebuild:** use `atlas_symbols_build` only when ProjectAtlas reports the symbol/graph projection missing, stale, or incomplete, or when the user explicitly requests that rebuild. Do not run it at ordinary startup or before every relation query.
 - **Continuous editing:** a human may keep `projectatlas watch` running; agents use `atlas_watch_once` for bounded refreshes.
 
@@ -84,11 +84,11 @@ Never reset or replace an incompatible database as an orientation shortcut. Foll
 | --- | --- | --- |
 | Startup, project state, ranked candidates | `atlas_session_brief` with `compact: true` | Execute the returned summary, search, relations, slice, health, or scan request |
 | Existing Git worktree inventory and registration | `atlas_worktree_list`, then `atlas_worktree_add` with its stable selector | Use the short alias on all subsequent root-scoped calls |
-| Registered worktree first use | `atlas_init` with `worktree` | Accept safe hydration or the explicit ordinary-init fallback; never copy a live DB manually |
+| Registered worktree with no local index or typed `init_required` | `atlas_init` with `worktree` | Accept safe hydration or the explicit ordinary-init fallback; never copy a live DB manually |
 | Registered worktree retirement | `atlas_worktree_remove` with `worktree` | Retained token totals remain in control; Git and target files remain untouched |
-| First use in a project | `atlas_init` | Honor the returned initial-index and purpose-curation handoff |
+| Project with no local index or typed `init_required` | `atlas_init` | Honor the returned initial-index and purpose-curation handoff |
 | Changed files since the last verified index | `atlas_watch_once` | Continue only from the new complete generation |
-| Missing index or typed full-refresh requirement | `atlas_scan` | Do not use for routine session startup |
+| Initialized project missing a published index, or typed full-refresh requirement | `atlas_scan` | Do not use for missing project-local state or routine session startup |
 | Missing, stale, or explicitly requested deep symbol/graph projection | `atlas_symbols_build` | Then use `atlas_symbols` or `atlas_symbol_relations`; do not rebuild repeatedly |
 | Broad work-area selection | `atlas_overview`, `atlas_folders`, `atlas_files` | Summary for the selected file |
 | One-file intelligence or direct impact already shown by crisp connections | `atlas_file_summary` with `compact: true` and task-appropriate `content_selection` | Follow the selected connection to another compact summary or exact slice; use relations only when its stronger trust/path facts are material |
@@ -154,7 +154,7 @@ For a single known wrong or genuinely repurposed accepted purpose, inspect enoug
 
 ## Setup and Runtime Repair
 
-For an unregistered project root, run `atlas_init` when exposed or `projectatlas init` from that root. For a registered worktree, prefer `atlas_init(worktree: "<alias>")` from the control process so a valid control baseline can be reused safely. Both paths create or verify the target's local config, database, host configs, and exact index. Honor any returned hydration/fallback and purpose handoff.
+When project-local state is absent or ProjectAtlas returns `init_required`, use `atlas_init` for an unregistered root when exposed or `projectatlas init` from that root. For a registered worktree in that state, prefer `atlas_init(worktree: "<alias>")` from the control process so a valid control baseline can be reused safely. Both paths create or verify the target's local config, database, host configs, and exact index. Honor any returned hydration/fallback and purpose handoff; do not repeat init for an existing valid index.
 
 After installing ProjectAtlas, read and follow this shipped skill before broad source reads. If the harness does not load plugin skills automatically, preserve the repository's existing guidance and add one durable pointer to the nearest harness instruction file: `AGENTS.md` for Codex, `CLAUDE.md` for Claude Code, or the host's equivalent. The pointer should tell future agents to use the installed/version-matched ProjectAtlas skill and MCP tools, run init only when project-local state is absent, and follow the skill's incremental freshness policy. Do not replace unrelated project instructions or paste a duplicate copy of the full skill.
 
