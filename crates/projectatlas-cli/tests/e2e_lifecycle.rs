@@ -257,6 +257,7 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
             skill.display()
         ))
         || hook_config["hooks"]["SessionStart"][0]["matcher"] != "startup|resume|clear|compact"
+        || hook_config["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] != 30
         || !actual.contains("ProjectAtlas integration incomplete")
         || stdout.contains("shadow-projectatlas-should-not-run")
     {

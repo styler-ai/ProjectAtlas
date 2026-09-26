@@ -9,6 +9,7 @@
             "command": "sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"",
             "statusMessage": "Checking ProjectAtlas integration",
+            "timeout": 30,
             "additionalContextLimit": 400
           }
         ]
