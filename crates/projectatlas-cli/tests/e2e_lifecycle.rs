@@ -266,7 +266,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     let plugin_root = workspace.join("plugins").join("projectatlas");
     let fixture = tempfile::tempdir()?;
     let repo = fixture.path().join("repo '$HOME'`x");
-    let atlas_dir = repo.join(".projectatlas");
+    let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let bin = fixture.path().join("bin");
     fs::create_dir_all(&atlas_dir)?;
     fs::create_dir_all(&bin)?;
@@ -431,7 +431,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         }
     }
     let moved_root = fixture.path().join("moved-repo");
-    let moved_atlas = moved_root.join(".projectatlas");
+    let moved_atlas = moved_root.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&moved_atlas)?;
     fs::copy(&db, moved_atlas.join("projectatlas.db"))?;
     fs::copy(&config, moved_atlas.join("config.toml"))?;
@@ -446,7 +446,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         );
     }
     let future_root = fixture.path().join("future-schema-repo");
-    let future_atlas = future_root.join(".projectatlas");
+    let future_atlas = future_root.join(ATLAS_DIR_NAME);
     fs::create_dir_all(&future_atlas)?;
     fs::copy(&config, future_atlas.join("config.toml"))?;
     fs::copy(&host_config, future_atlas.join("projectatlas.mcp.json"))?;
