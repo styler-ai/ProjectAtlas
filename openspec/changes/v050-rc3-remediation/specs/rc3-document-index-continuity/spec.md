@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded document failures are file-specific and truthful
-DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. A genuinely unsupported rendered DOCX font-specific symbol SHALL identify its file and typed reason. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
+DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` SHALL retain its exact font/code identity; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
 
 #### Scenario: Rendered DOCX font-specific symbol
-- **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph whose font mapping is unsupported
-- **THEN** the result identifies that document as incomplete/unsupported while preserving only verifiable surrounding text and never advertising the glyph as decoded
+- **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph whose font mapping is not known
+- **THEN** the result preserves its exact font/code identity and verifiable surrounding text, identifies unresolved Unicode-text coverage, and never advertises the glyph as decoded
+
+#### Scenario: Verified symbol mapping
+- **WHEN** a rendered `w:sym` has a verified mapping for its font and code
+- **THEN** its Unicode text and exact symbol provenance are indexed without an unsupported-symbol error
 
 #### Scenario: Non-rendered symbol
 - **WHEN** the same symbol is inside deleted or otherwise non-rendered content

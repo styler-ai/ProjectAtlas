@@ -12,8 +12,8 @@
 
 ## 3. DOCX font-specific symbol continuity (#624)
 
-- [ ] 3.1 Reproduce rendered and non-rendered `w:sym` in minimal valid DOCX packages; trace the shared extractor, text-index, symbol, coverage, and atomic-publication callers and confirm the narrowest truthful outcome.
-- [ ] 3.2 Correct the DOCX extraction/admission path and, only if required, shared durable incomplete-coverage representation; retain exact surrounding text, malformed-package refusal, and last-valid database state.
+- [ ] 3.1 Reproduce rendered and non-rendered `w:sym` in minimal valid DOCX packages; trace shared extractor, text-index, symbol, coverage, and publication callers, and identify verified Unicode mappings versus font/code-only identities.
+- [ ] 3.2 Preserve every valid rendered symbol's exact font/code identity, decode verified mappings, and represent unknown Unicode-text coverage without a global scan failure; retain surrounding text, malformed-package refusal, and last-valid database state.
 - [ ] 3.3 Add direct CLI and MCP full/incremental scan, search/overview/graph, fault/cancellation, repair/retry, and Windows/Linux/macOS packaged regressions using the causal DOCX fixture.
 - [ ] 3.4 Run `cargo test -p projectatlas-symbols`, the owning qualified CLI E2E, `cargo fmt --check`, affected workspace Clippy/check/tests, OpenSpec and IssueOps gates; obtain independent review and resolve findings.
 
