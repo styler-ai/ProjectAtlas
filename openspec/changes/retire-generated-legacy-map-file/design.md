@@ -4,7 +4,7 @@ The explicit `projectatlas map` and `atlas_map` routes call one `write_map` owne
 
 ## Goals / Non-Goals
 
-**Goals:** Return the selected root's current map directly through CLI and MCP, with the same data and a truthful non-writing response; never generate, overwrite, or delete the legacy file; retain read-only legacy-purpose import and supported root isolation.
+**Goals:** Return the selected root's current map directly through CLI and MCP, without generating a TOON snapshot at the configured `map_path`; preserve explicit JSON sidecar export, read-only legacy-purpose import, and supported root isolation.
 
 **Non-Goals:** Remove map navigation, TOON, SQLite, the non-source TOON input, or user-owned historical snapshots; silently change unrelated scan/publication behavior; stable promotion.
 
@@ -12,11 +12,11 @@ The explicit `projectatlas map` and `atlas_map` routes call one `write_map` owne
 
 ### Reuse the existing snapshot and renderers
 
-Replace the disk-writer boundary with a renderer returning TOON or JSON. CLI emits it on stdout; MCP includes it in the map response. Keep the existing snapshot/purpose computation rather than creating another map model. `--json`/`json: true` select JSON response, while `--force`/`force: true` remain accepted compatibility no-ops because a read-only response no longer needs a CI write bypass. Document the changed semantics. Retain the global CLI format contract where it can be reconciled without duplicate serialization.
+Replace only the TOON disk-writer boundary with a renderer returning map content. CLI emits it on stdout; MCP includes it in the map response. Keep the existing snapshot/purpose computation rather than creating another map model. `--json`/`json: true` retain the explicit adjacent JSON export and also select JSON response content. `--force`/`force: true` retain their CI bypass for that JSON write, but cannot cause a TOON file write. Retain the global CLI format contract where it can be reconciled without duplicate serialization.
 
 ### Preserve legacy input, never touch existing output
 
-Keep `map_path` as the configured read-only import location for old purpose snapshots, including its publication fingerprint. Do not remove or overwrite a pre-existing file. Stop all implicit and explicit writes of this snapshot; do not change the separate non-source input. The MCP response retains a truthful `written: false` compatibility field during RC3 and identifies the response content/format instead of claiming an on-disk export.
+Keep `map_path` as the configured read-only import location for old purpose snapshots, including its publication fingerprint. Do not remove or overwrite a pre-existing TOON file at the default or a configured alternate path. Stop all writes of that snapshot, but leave the separate explicit JSON sidecar behavior and non-source input unchanged. The MCP response reports TOON `written: false` and JSON sidecar state separately during RC3.
 
 ### Keep the map an explicit full-snapshot operation
 
@@ -24,14 +24,14 @@ The route already walks the selected source tree. Preserve its existing admissio
 
 ## Risks / Trade-offs
 
-- [Old consumers expect a file after `map --force`] → Keep command/flags but document the response migration and verify no file write in installed CLI/MCP tests.
+- [Old consumers expect a TOON file after `map --force`] → Keep command/flags and explicit JSON sidecar behavior, but document the TOON response migration and verify no TOON write at default and alternate `map_path` in installed CLI/MCP tests.
 - [An inline map floods an agent context] → Finite response ceiling and explicit oversized refusal; normal navigation remains bounded.
 - [Legacy purpose metadata is lost] → Retain read-only import and fingerprint tests for a pre-existing snapshot.
 - [Wrong-root MCP request leaks another project's map] → Exercise selected-root and missing-index paths without implicit initialization or mutation.
 
 ## Migration Plan
 
-Update docs/skill and callers to consume CLI stdout or MCP response. Existing `.projectatlas/projectatlas.toon` files remain untouched and may still be imported; users may remove their own old file after reviewing its purpose content. No database migration. Rollback to RC2 restores the explicit file-writing behavior, so RC3 release notes must identify that compatibility difference.
+Update docs/skill and callers to consume CLI stdout or MCP response. Existing TOON files at the default or configured alternate `map_path` remain untouched and may still be imported; users may remove their own old file after reviewing its purpose content. No database migration. Rollback to RC2 restores the explicit TOON file-writing behavior, so RC3 release notes must identify that compatibility difference.
 
 ## Dependencies / Cross-Issue Impact
 

@@ -4,8 +4,8 @@ ProjectAtlas's map is a core live capability, but its explicit CLI/MCP map route
 
 ## What Changes
 
-- `projectatlas map` and `atlas_map` remain available and return the current map in their response, without creating or updating `.projectatlas/projectatlas.toon`.
-- Preserve TOON and JSON response formats, truthful output bounds, existing project-root isolation, and read-only import of pre-existing legacy files.
+- `projectatlas map` and `atlas_map` remain available and return the current map in their response, without creating or updating a TOON file at the default or configured alternate `map_path`.
+- Preserve explicit `--json`/`json: true` sidecar export, TOON and JSON response formats, truthful output bounds, root isolation, and read-only import of pre-existing legacy TOON files.
 - Reconcile compatibility flags, config/report fields, tests, skill guidance, documentation, and installed-product proof with the new behavior.
 - Do not remove or change `.projectatlas/projectatlas-nonsource-files.toon`, the separate authored input.
 
