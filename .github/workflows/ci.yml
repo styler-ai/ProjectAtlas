@@ -711,6 +711,11 @@ jobs:
         timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery
 
+      - name: Bundled plugin hook readiness E2E
+        if: contains(matrix.contracts, 'plugin')
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli --test e2e_lifecycle bundled_hook -- --nocapture
+
       - name: Atlas forwarder lifecycle E2E
         if: contains(matrix.contracts, 'plugin')
         timeout-minutes: 10
