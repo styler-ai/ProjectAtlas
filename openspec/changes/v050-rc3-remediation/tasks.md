@@ -12,9 +12,9 @@
 
 ## 3. DOCX font-specific symbol continuity (#624)
 
-- [ ] 3.1 Reproduce rendered and non-rendered `w:sym` in minimal valid DOCX packages across main body, headers, footers, footnotes, endnotes, and nested text boxes; trace extractor, relationship, text-index, symbol, coverage, and publication callers and identify verified Unicode mappings versus font/code-only identities.
+- [ ] 3.1 Reproduce rendered and non-rendered `w:sym` in minimal valid DOCX packages across main body, headers, footers, footnotes, endnotes, referenced comments, frames, and nested text boxes; classify unreferenced glossary and referenced glossary/subdocument stories, trace extractor/relationship/text-index/symbol/coverage/publication callers, and identify verified Unicode mappings versus font/code-only identities.
 - [ ] 3.2 Preserve every valid rendered symbol across package-reachable story parts within retained bounds by exact font/code, part, and occurrence identity in durable queryable evidence; decode verified mappings and represent unknown Unicode-text, unexamined-part, or accepted limit coverage without a global scan failure; retain surrounding text, malformed/unsafe-package refusal, and last-valid database state.
-- [ ] 3.3 Add direct CLI and MCP full/incremental scan, search/overview/graph, post-reopen story-part identity, unexamined-part and limit versus cancellation/deadline, repair/retry, and Windows/Linux/macOS packaged regressions using causal DOCX fixtures.
+- [ ] 3.3 Add direct CLI and MCP full/incremental scan, search/overview/graph, post-reopen query of font/code/part/distinct repeated occurrences, referenced-unexamined story and limit versus cancellation/deadline, external/escaping/missing/wrong-type relationship refusal, repair/retry, and Windows/Linux/macOS packaged regressions using causal DOCX fixtures.
 - [ ] 3.4 Run `cargo test -p projectatlas-symbols`, the owning qualified CLI E2E, `cargo fmt --check`, affected workspace Clippy/check/tests, OpenSpec and IssueOps gates; obtain independent review and resolve findings.
 
 ## 4. PDF execution-fuel continuity (#625)

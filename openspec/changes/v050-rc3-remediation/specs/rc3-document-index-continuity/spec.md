@@ -1,15 +1,23 @@
 ## ADDED Requirements
 
 ### Requirement: Bounded document failures are file-specific and truthful
-DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` in the main body, headers, footers, footnotes, endnotes, or rendered nested text boxes and within those bounds SHALL retain its exact font/code, story-part, and occurrence identity in durable queryable evidence; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. Package-reachable rendered story parts SHALL be examined through validated relationships or recorded as explicitly incomplete; absence of symbols in an unexamined part MUST NOT be inferred. Reaching a retained input, output, fact, or memory limit SHALL produce a typed outcome without claiming that unexamined symbols were retained. Cancellation and the shared indexing deadline SHALL remain generation-fatal. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
+DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` in package-reachable document stories—including the main body, headers, footers, footnotes, endnotes, referenced comments, frames, and nested text boxes—and within those bounds SHALL retain its exact font/code, story-part, and occurrence identity in durable queryable evidence; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. Unreferenced glossary content is non-rendered; a referenced glossary, subdocument, or other rendered story that cannot be safely examined SHALL be recorded as explicitly incomplete, not silently treated as symbol-free. Story relationships SHALL be validated for type, existence, and package containment without external fetch or path escape. Reaching a retained input, output, fact, or memory limit SHALL produce a typed outcome without claiming that unexamined symbols were retained. Cancellation and the shared indexing deadline SHALL remain generation-fatal. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
 
 #### Scenario: Rendered DOCX font-specific symbol
 - **WHEN** an otherwise valid DOCX contains a rendered `w:sym` glyph in any supported story part whose font mapping is not known
 - **THEN** the result preserves its exact font/code, story-part identity, and occurrence locator through publication and reopen, retains verifiable surrounding text, identifies unresolved Unicode-text coverage, and never advertises the glyph as decoded
 
 #### Scenario: Rendered symbols outside the main body
-- **WHEN** a DOCX references rendered headers, footers, footnotes, endnotes, or nested text boxes containing `w:sym`
+- **WHEN** a DOCX references rendered headers, footers, footnotes, endnotes, comments, frames, or nested text boxes containing `w:sym`
 - **THEN** their symbols are admitted with exact story-part provenance, or that document exposes explicit incomplete coverage rather than claiming full symbol/text coverage
+
+#### Scenario: Referenced story is not examined
+- **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
+- **THEN** it publishes typed incomplete story coverage without claiming that part is symbol-free or fetching external content
+
+#### Scenario: Unsafe or malformed story relationship
+- **WHEN** a story relationship has an external or escaping target, a missing target, or a wrong-type part
+- **THEN** extraction fails closed without reading outside the package or publishing a new generation
 
 #### Scenario: Verified symbol mapping
 - **WHEN** a rendered `w:sym` has a verified mapping for its font and code
