@@ -44,6 +44,8 @@ Stage parsing before the SQLite write transaction. A cancellation, source change
 
 #620, #624, and #625 are independent direct children of #492. A shared document-coverage representation first landed by #624 is a baseline for #625 only if that implementation chooses the same storage boundary; then #625 refreshes from accepted main. #602 stable promotion remains separate.
 
+The later accepted #627 map-file retirement is a fourth independent direct child of #492. Its separate OpenSpec change owns the fileless map contract; the RC3 release owner must prove the installed map CLI/MCP behavior without assuming a snapshot file.
+
 ## Open Questions
 
 None.
