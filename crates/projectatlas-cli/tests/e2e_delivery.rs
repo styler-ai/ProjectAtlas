@@ -20957,13 +20957,22 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "matcher"],
-        "startup|resume|compact",
+        "startup|resume|clear|compact",
     )?;
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "statusMessage"],
         "Checking ProjectAtlas integration",
     )?;
+    if json_at(
+        &hooks,
+        &["hooks", "SessionStart", "0", "hooks", "0", "timeout"],
+    )?
+    .as_u64()
+        != Some(30)
+    {
+        return Err(io::Error::other("packaged ProjectAtlas hook timeout drifted").into());
+    }
     if json_at(
         &hooks,
         &[
