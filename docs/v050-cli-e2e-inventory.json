@@ -3,8 +3,8 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "5f61812e9c88c72ad9507b21371bca87403c186dab7b6eca87be3c1532b55c66",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "157cb4ebcd2dfd88981952a414f1f587567e3f3d7646a95b4903790ea106b620",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "152288c035dce3f678e01ee46e119c432673f79ef5e42dddf9bf2d3780789844",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "90fcd7d737d4398fc91575637a5b344393bf31553613cfa06bb2c43c85a318c4",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "7a5c3d8208fd163059b79bef1a4eeb3dddd1449ef663543af12750c2c1d89b5f",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
@@ -219,7 +219,7 @@
       ]
     },
     {
-      "name": "bundled_hook_guidance_uses_its_package_asset_not_path",
+      "name": "bundled_hook_without_receipt_omits_guidance_and_path_execution",
       "line": 200,
       "end_line": 261,
       "owner": "e2e_lifecycle",
@@ -2914,7 +2914,7 @@
     },
     {
       "kind": "function",
-      "name": "bundled_hook_guidance_uses_its_package_asset_not_path",
+      "name": "bundled_hook_without_receipt_omits_guidance_and_path_execution",
       "line": 200,
       "end_line": 261,
       "owners": [
@@ -9400,7 +9400,7 @@
         ]
       },
       {
-        "test": "bundled_hook_guidance_uses_its_package_asset_not_path",
+        "test": "bundled_hook_without_receipt_omits_guidance_and_path_execution",
         "line": 200,
         "attributes": [
           "#[test]"

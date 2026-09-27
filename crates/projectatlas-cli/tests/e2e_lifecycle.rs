@@ -201,7 +201,7 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn Error>> {
+fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<(), Box<dyn Error>> {
     let workspace = workspace_root()?;
     let plugin_root = workspace.join("plugins").join("projectatlas");
     let hook_asset = plugin_root.join("hooks").join("agent-instructions.txt");
@@ -235,6 +235,9 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
             .args(["/d", "/c"])
             .raw_arg("\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"")
             .env("PLUGIN_ROOT", &plugin_root)
+            .env("USERPROFILE", shadow.path())
+            .env("LOCALAPPDATA", shadow.path().join("isolated-local"))
+            .env("CODEX_HOME", shadow.path().join("isolated-codex"))
             .env("PATH", path);
         command.output()?
     };
@@ -242,6 +245,9 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
     let output = StdCommand::new("sh")
         .args(["-c", "/bin/sh \"$PLUGIN_ROOT/hooks/readiness.sh\""])
         .env("PLUGIN_ROOT", &plugin_root)
+        .env("HOME", shadow.path())
+        .env("XDG_STATE_HOME", shadow.path().join("isolated-state"))
+        .env("CODEX_HOME", shadow.path().join("isolated-codex"))
         .env("PATH", path)
         .output()?;
     let stdout = String::from_utf8(output.stdout)?;
@@ -254,8 +260,8 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
     let hook_config: Value =
         serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
     if !output.status.success()
-        || !actual.starts_with(&expected)
-        || !actual.contains(&format!(
+        || actual.contains(&expected)
+        || actual.contains(&format!(
             "Read the complete installed ProjectAtlas skill now: {}",
             skill.display()
         ))
@@ -435,6 +441,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         "hooks/readiness.sh",
         "hooks/agent-instructions.txt",
         "skills/projectatlas/SKILL.md",
+        "skills/projectatlas/references/language-support.md",
         "skills/projectatlas/references/short-cli.md",
     ] {
         let destination = plugin_root.join(relative);
@@ -541,6 +548,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "generated_sha256": sha256_hex(&fs::read(&host_config)?),
             "codex_config": codex_config,
             "codex_config_sha256": sha256_hex(&fs::read(&codex_config)?),
+            "agent_guidance_sha256": sha256_hex(&fs::read(plugin_root.join("hooks/agent-instructions.txt"))?),
+            "skill_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/SKILL.md"))?),
+            "language_support_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/references/language-support.md"))?),
             "short_cli_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/references/short-cli.md"))?),
             "registry": projected
         });
@@ -694,9 +704,21 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         return Ok(());
     }
     let ready_output = run_hook(&repo, &path)?;
-    if !ready_output.contains("ProjectAtlas integration ready") {
+    let ready = ready_output.contains("ProjectAtlas integration ready");
+    let guidance = ready_output.starts_with(
+        "Before any ProjectAtlas call, read the complete version-matched ProjectAtlas skill",
+    );
+    let skill_path = ready_output.contains(&format!(
+        "Read the complete installed ProjectAtlas skill now: {}",
+        plugin_root
+            .join("skills")
+            .join("projectatlas")
+            .join("SKILL.md")
+            .display()
+    ));
+    if !ready || !guidance || !skill_path {
         return Err(io::Error::other(format!(
-            "matching installed layers were not ready: {ready_output}"
+            "matching installed layers were not ready (ready={ready} guidance={guidance} skill_path={skill_path}): {ready_output}"
         ))
         .into());
     }
@@ -789,6 +811,42 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::write(&short_cli_path, original_short_cli)?;
     if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
         return Err(io::Error::other("restored short CLI guide stayed incomplete").into());
+    }
+    for skill_asset in [
+        "hooks/agent-instructions.txt",
+        "skills/projectatlas/SKILL.md",
+        "skills/projectatlas/references/language-support.md",
+    ] {
+        let asset_path = plugin_root.join(skill_asset);
+        let original = fs::read(&asset_path)?;
+        for damaged_asset in [
+            None,
+            Some(Vec::new()),
+            Some(b"stale skill guidance".to_vec()),
+        ] {
+            if let Some(contents) = damaged_asset {
+                fs::write(&asset_path, contents)?;
+            } else {
+                fs::remove_file(&asset_path)?;
+            }
+            let output = run_hook_raw(&repo, &path)?;
+            if !output.contains("ProjectAtlas integration incomplete")
+                || output.contains("ProjectAtlas integration ready")
+                || (skill_asset == "hooks/agent-instructions.txt"
+                    && output.contains("stale skill guidance"))
+            {
+                return Err(io::Error::other(format!(
+                    "missing or stale {skill_asset} kept integration ready: {output}"
+                ))
+                .into());
+            }
+        }
+        fs::write(&asset_path, original)?;
+        if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
+            return Err(
+                io::Error::other(format!("restored {skill_asset} stayed incomplete")).into(),
+            );
+        }
     }
     if codex_marker.exists() {
         return Err(io::Error::other("readiness hook executed Codex from PATH").into());
@@ -889,7 +947,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         if StdCommand::new("jq").arg("--version").output().is_ok() {
             let jq_only_bin = fixture.path().join("jq-only-bin");
             fs::create_dir(&jq_only_bin)?;
-            for name in ["sh", "jq", "sed", "head", "dirname", "cat"] {
+            for name in [
+                "sh", "jq", "sed", "head", "dirname", "cat", "wc", "awk", "tr",
+            ] {
                 let source = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                     .map(|directory| directory.join(name))
                     .find(|candidate| candidate.is_file())
@@ -898,6 +958,22 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     })?;
                 std::os::unix::fs::symlink(fs::canonicalize(source)?, jq_only_bin.join(name))?;
             }
+            let checksum_name = ["sha256sum", "shasum"]
+                .into_iter()
+                .find(|name| {
+                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                        .any(|directory| directory.join(name).is_file())
+                })
+                .ok_or("required POSIX checksum tool missing")?;
+            let checksum_source =
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                    .map(|directory| directory.join(checksum_name))
+                    .find(|candidate| candidate.is_file())
+                    .ok_or("required POSIX checksum tool missing")?;
+            std::os::unix::fs::symlink(
+                fs::canonicalize(checksum_source)?,
+                jq_only_bin.join(checksum_name),
+            )?;
             let jq_only_path = std::env::join_paths([
                 jq_only_bin,
                 fixture.path().join("bin"),
@@ -906,12 +982,49 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
                     .to_path_buf(),
             ])?;
+            let hook_path = plugin_root.join("hooks/readiness.sh");
+            let original_hook = fs::read_to_string(&hook_path)?;
+            let isolated_hook = original_hook.replace(
+                "PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
+                "PATH=$PATH",
+            );
+            if isolated_hook == original_hook {
+                return Err(io::Error::other("POSIX hook PATH seam was not found").into());
+            }
+            fs::write(&hook_path, isolated_hook)?;
             let jq_alias_output = run_hook(&repo, &jq_only_path)?;
             if !jq_alias_output.contains("ProjectAtlas integration ready") {
                 return Err(io::Error::other(format!(
                     "jq-only host reported equivalent project paths stale: {jq_alias_output}"
                 ))
                 .into());
+            }
+            for skill_asset in [
+                "hooks/agent-instructions.txt",
+                "skills/projectatlas/SKILL.md",
+                "skills/projectatlas/references/language-support.md",
+                "skills/projectatlas/references/short-cli.md",
+            ] {
+                let asset_path = plugin_root.join(skill_asset);
+                let original = fs::read(&asset_path)?;
+                fs::write(&asset_path, b"stale but nonempty skill asset")?;
+                let output = run_hook_raw(&repo, &jq_only_path)?;
+                if !output.contains("ProjectAtlas integration incomplete")
+                    || output.contains("ProjectAtlas integration ready")
+                    || (skill_asset == "hooks/agent-instructions.txt"
+                        && output.contains("stale but nonempty skill asset"))
+                {
+                    return Err(io::Error::other(format!(
+                        "jq-only host accepted stale {skill_asset}: {output}"
+                    ))
+                    .into());
+                }
+                fs::write(&asset_path, original)?;
+            }
+            if !run_hook_raw(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                return Err(
+                    io::Error::other("jq-only host stayed incomplete after guide repair").into(),
+                );
             }
             let mut multiple_values = b"null\n".to_vec();
             multiple_values.extend(serde_json::to_vec(&alias_generated)?);
@@ -942,6 +1055,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     io::Error::other("jq-only host accepted multi-value registry JSON").into(),
                 );
             }
+            fs::write(&hook_path, original_hook)?;
         }
         fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
         fs::write(&host_config, serde_json::to_vec(&generated)?)?;

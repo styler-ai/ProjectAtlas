@@ -5085,6 +5085,9 @@ function Write-ProjectAtlasCodexReadinessReceipt {
             generated_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $GeneratedConfig).Hash.ToLowerInvariant()
             codex_config = [IO.Path]::GetFullPath($codexConfig)
             codex_config_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant()
+            agent_guidance_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'hooks/agent-instructions.txt')).Hash.ToLowerInvariant()
+            skill_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/SKILL.md')).Hash.ToLowerInvariant()
+            language_support_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/references/language-support.md')).Hash.ToLowerInvariant()
             short_cli_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/references/short-cli.md')).Hash.ToLowerInvariant()
             registry = [ordered]@{
                 name = $registration.name
@@ -5149,6 +5152,13 @@ function Test-ProjectAtlasCodexSkillArtifacts {
                 -or (Get-ProjectAtlasSha256 $skillPath) -ne (Get-ProjectAtlasSha256 $installerSkillPath)) {
                 return $false
             }
+        }
+        $guidancePath = Join-Path $PluginSourcePath 'hooks/agent-instructions.txt'
+        $installerGuidancePath = Join-Path $installerPluginRoot 'hooks/agent-instructions.txt'
+        if (-not (Test-Path -LiteralPath $guidancePath -PathType Leaf) `
+            -or -not (Test-Path -LiteralPath $installerGuidancePath -PathType Leaf) `
+            -or (Get-ProjectAtlasSha256 $guidancePath) -ne (Get-ProjectAtlasSha256 $installerGuidancePath)) {
+            return $false
         }
         return $true
     }

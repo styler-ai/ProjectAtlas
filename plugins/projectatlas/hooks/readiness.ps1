@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $skill = Join-Path $pluginRoot 'skills/projectatlas/SKILL.md'
+$languageSupport = Join-Path $pluginRoot 'skills/projectatlas/references/language-support.md'
 $shortCli = Join-Path $pluginRoot 'skills/projectatlas/references/short-cli.md'
 $expected = $null
 try {
@@ -53,19 +54,16 @@ try {
     Write-Output 'ProjectAtlas integration incomplete: bundled agent instructions are missing or invalid; reinstall the version-matched plugin before Atlas use.'
     exit 0
 }
-Write-Output $guidance.TrimEnd()
-Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
-if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) {
-    Write-Output 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.'
-    exit 0
-}
-try {
-    $shortCliFile = Get-Item -LiteralPath $shortCli -ErrorAction Stop
-    if ($shortCliFile.Length -eq 0 -or $shortCliFile.Length -gt 65536) { throw 'invalid short CLI guide size' }
-    [void](Get-Content -Raw -Encoding UTF8 -LiteralPath $shortCli -ErrorAction Stop)
-} catch {
-    Write-Output 'ProjectAtlas integration incomplete: bundled short CLI guide is missing or invalid; reinstall the version-matched plugin before Atlas use.'
-    exit 0
+foreach ($skillAsset in @($skill, $languageSupport, $shortCli)) {
+    try {
+        $assetFile = Get-Item -LiteralPath $skillAsset -ErrorAction Stop
+        $assetLimit = if ($skillAsset -eq $languageSupport) { 1048576 } else { 65536 }
+        if ($assetFile.Length -eq 0 -or $assetFile.Length -gt $assetLimit) { throw 'invalid skill asset size' }
+        [void](Get-Content -Raw -Encoding UTF8 -LiteralPath $skillAsset -ErrorAction Stop)
+    } catch {
+        Write-Output 'ProjectAtlas integration incomplete: bundled skill guidance is missing or invalid; reinstall the version-matched plugin before Atlas use.'
+        exit 0
+    }
 }
 
 if ($projectRoot -ieq [IO.Path]::GetPathRoot($projectRoot) -or
@@ -168,6 +166,9 @@ try {
         $receipt.runtime_sha256 -cne (FileSha256 $directPath) -or
         $receipt.codex_config_sha256 -cne (FileSha256 $codexConfig) -or
         $receipt.generated_sha256 -cne (FileSha256 $hostConfig) -or
+        $receipt.agent_guidance_sha256 -cne (FileSha256 $guidancePath) -or
+        $receipt.skill_sha256 -cne (FileSha256 $skill) -or
+        $receipt.language_support_sha256 -cne (FileSha256 $languageSupport) -or
         $receipt.short_cli_sha256 -cne (FileSha256 $shortCli)) {
         $reason = 'installer readiness receipt or host files changed; rerun the installer'
         throw 'not ready'
@@ -202,8 +203,13 @@ try {
                     $receipt.direct_cli_sha256 -ceq (FileSha256 $directPath) -and
                     $receipt.codex_config_sha256 -ceq (FileSha256 $codexConfig) -and
                     $receipt.generated_sha256 -ceq (FileSha256 $hostConfig) -and
+                    $receipt.agent_guidance_sha256 -ceq (FileSha256 $guidancePath) -and
+                    $receipt.skill_sha256 -ceq (FileSha256 $skill) -and
+                    $receipt.language_support_sha256 -ceq (FileSha256 $languageSupport) -and
                     $receipt.short_cli_sha256 -ceq (FileSha256 $shortCli) -and
                     (& $bindingReady $registry $generated)) {
+                    Write-Output $guidance.TrimEnd()
+                    Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
                     Write-Output ('ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match {0} for this project. Use the version-matched ProjectAtlas skill and repository instructions.' -f (IdentityValue $expected))
                     exit 0
                 }

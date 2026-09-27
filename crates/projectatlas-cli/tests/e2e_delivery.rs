@@ -529,7 +529,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "57a41af6dc34347e02acacb2006517c51ee27a1009ed448c6424dcb9bfe92530";
+    "ed6330043750238d0515d4a16fb37b8c2462d699d6434b8d513f0f6cf79eb698";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -550,7 +550,7 @@ const CLI_E2E_PACKAGED_FACETS_DIGEST: &str =
     "10033529c2f9e3be0e6b47361f005a1c4370a77c00783277b6cd6cb01a1c0bc9";
 
 const CLI_E2E_ATTRIBUTES_FACETS_DIGEST: &str =
-    "6f2c1bb734a4aa809a3f0fdc5e6719516e6e12895674c17cc07a87021423825d";
+    "74187e8099d1a14d3871759ae8687e8334ee3b3caf942a4bc6ca5f4ffb3fc119";
 
 const CLI_E2E_SELECTORS_BEFORE_MOVE_DIGEST: &str =
     "cc3a43c320d863ce3f42e42488959b8e2195b28504835289174c7544f1869689";
@@ -6849,6 +6849,22 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
     if receipt["version"] != json!(env!("CARGO_PKG_VERSION"))
         || receipt["registry"]["transport"]["command"] != json!(runtime)
+        || receipt["agent_guidance_sha256"]
+            != json!(sha256_hex(&fs::read(
+                plugin_source.join("hooks/agent-instructions.txt")
+            )?))
+        || receipt["skill_sha256"]
+            != json!(sha256_hex(&fs::read(
+                plugin_source.join("skills/projectatlas/SKILL.md")
+            )?))
+        || receipt["language_support_sha256"]
+            != json!(sha256_hex(&fs::read(
+                plugin_source.join("skills/projectatlas/references/language-support.md")
+            )?))
+        || receipt["short_cli_sha256"]
+            != json!(sha256_hex(&fs::read(
+                plugin_source.join("skills/projectatlas/references/short-cli.md")
+            )?))
         || receipt.to_string().contains("private-fixture-value")
         || receipt.to_string().contains("DO_NOT_COPY_SECRET")
     {
@@ -13746,6 +13762,11 @@ fn write_fake_codex_projectatlas_integration(
                 "../../../plugins/projectatlas/skills/projectatlas/references/short-cli.md"
             ),
         )?;
+        fs::create_dir_all(root.join("hooks"))?;
+        fs::write(
+            root.join("hooks/agent-instructions.txt"),
+            include_bytes!("../../../plugins/projectatlas/hooks/agent-instructions.txt"),
+        )?;
     }
     Ok((marketplace_root, plugin_source, installed_cache))
 }
@@ -14606,6 +14627,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         .join(PROJECTATLAS_SKILL_NAME)
         .join(SKILL_REFERENCES_DIR)
         .join(SHORT_CLI_FILE_NAME);
+    let cached_guidance = installed_cache.join("hooks/agent-instructions.txt");
     let fake_plugin_source_json =
         serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -14712,6 +14734,11 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
             .as_slice(),
         ),
         ("cache", &cached_skill, FAKE_CODEX_SKILL_CONTENT.as_bytes()),
+        (
+            "cache",
+            &cached_guidance,
+            include_bytes!("../../../plugins/projectatlas/hooks/agent-instructions.txt").as_slice(),
+        ),
         (
             "cache",
             &cached_reference,
@@ -14856,6 +14883,28 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     {
         return Err(io::Error::other(format!(
             "malformed cache manifest was accepted or refreshed the marketplace source:\n{malformed_manifest_output_text}\ncalls:\n{malformed_manifest_calls}"
+        ))
+        .into());
+    }
+    let source_guidance = fake_plugin_source.join("hooks/agent-instructions.txt");
+    fs::write(&source_guidance, b"stale hook guidance")?;
+    let stale_guidance_output = run_plugin_installer_with_codex_fixture(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let stale_guidance_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&stale_guidance_output.stdout),
+        String::from_utf8_lossy(&stale_guidance_output.stderr)
+    );
+    if !stale_guidance_text.contains("Codex ProjectAtlas plugin skill artifact does not match")
+        || stale_guidance_text.contains("Codex ProjectAtlas plugin skill verified at")
+    {
+        return Err(io::Error::other(format!(
+            "stale source hook guidance was accepted: {stale_guidance_text}"
         ))
         .into());
     }

@@ -29,19 +29,19 @@ This RC3 requirement supersedes RC2's blanket no-runtime-execution rule for any 
 Packaged hook and installer fixtures own the causal #620 checks. Actual Codex hook trust/disable behavior, an already-running host restart, and installed platform convergence are final #492 release acceptance, not claims inferred from a fresh child process.
 
 ### Requirement: Packaged agent guidance routes the short CLI and MCP truthfully
-The packaged skill SHALL identify the installed `atlas` short command as the preferred route for ordinary operations in one exact checkout, describe every public CLI command family's function and trigger, and reserve MCP for registered alias routing, compact session briefs/typed continuations, and cross-worktree federation. The installer SHALL verify the short-command guide in the source and cache and bind its digest into the readiness receipt. The trusted startup hook SHALL remind the agent to read the version-matched skill again after compaction. A missing, unreadable, or stale guidance asset MUST be reported as integration incomplete; the hook cannot certify that a model internally read the skill.
+The packaged skill SHALL identify the installed `atlas` short command as the preferred route for ordinary operations in one exact checkout, describe every public CLI command family's function and trigger, and reserve MCP for registered alias routing, compact session briefs/typed continuations, and cross-worktree federation. The installer SHALL verify the hook instruction asset, main skill, language-support reference, and short-command guide in the source and cache and bind each digest into the readiness receipt. The trusted startup hook SHALL remind the agent to read the version-matched skill again after compaction, but SHALL NOT emit mutable hook guidance before validating its receipt digest. A missing, unreadable, or stale skill/guidance asset MUST be reported as integration incomplete; the hook cannot certify that a model internally read the skill.
 
 #### Scenario: Startup or compaction with complete guidance
-- **WHEN** a trusted plugin hook runs at startup or after compaction with its packaged instruction asset present
+- **WHEN** a trusted plugin hook runs at startup or after compaction with packaged guidance and a validated readiness receipt for the selected project
 - **THEN** it injects the skill path and concise CLI/MCP routing guidance without initializing, scanning, or changing project state
 
 #### Scenario: Guidance asset is damaged
 - **WHEN** the packaged instruction asset is missing, unreadable, empty, or oversized
 - **THEN** the hook reports integration incomplete with bounded reinstall guidance and does not report readiness
 
-#### Scenario: Short-command guide is missing or stale
-- **WHEN** a plugin source or cache lacks the shipped short-command guide, or its bytes change after the installer recorded readiness
-- **THEN** the installer refuses to attest that plugin artifact or the hook reports integration incomplete until a matching guide is restored
+#### Scenario: Packaged skill or hook guidance asset is missing or stale
+- **WHEN** a plugin source or cache lacks the shipped hook instructions, main skill, language-support reference, or short-command guide, or any of those assets changes after the installer recorded readiness
+- **THEN** the installer refuses to attest that plugin artifact or the hook reports integration incomplete until the matching asset is restored
 
 ### Requirement: Existing project databases are preserved during integration repair
 The version-matched installer MUST refuse incompatible schema or project binding rather than reset, downgrade, replace, or silently rebind another project's database.
