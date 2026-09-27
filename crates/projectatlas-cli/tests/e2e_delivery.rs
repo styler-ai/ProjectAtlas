@@ -11736,6 +11736,7 @@ public static class Program
     let plugin_manifest = plugin_source
         .join(CODEX_PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
+    let valid_plugin_manifest = fs::read(&plugin_manifest)?;
     let plugin_skill = plugin_source
         .join(PROJECTATLAS_SKILL_DIR)
         .join(PROJECTATLAS_SKILL_NAME)
@@ -12135,12 +12136,7 @@ public static class Program
                 }]))?,
             )?;
             require_plugin_unready("singleton-array-source-manifest")?;
-            fs::write(
-                &plugin_manifest,
-                serde_json::to_vec(&json!({
-                    "version": env!("CARGO_PKG_VERSION")
-                }))?,
-            )?;
+            fs::write(&plugin_manifest, &valid_plugin_manifest)?;
         }
 
         fs::write(
