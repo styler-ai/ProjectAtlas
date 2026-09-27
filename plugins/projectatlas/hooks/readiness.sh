@@ -18,7 +18,39 @@ safe_text() {
 plugin_root=${PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
 manifest=$plugin_root/.codex-plugin/plugin.json
 skill=$plugin_root/skills/projectatlas/SKILL.md
-expected=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)
+expected=
+manifest_reason='bundled plugin manifest is missing or invalid'
+manifest_repair='reinstall the version-matched ProjectAtlas plugin, then run its packaged installer for the selected project'
+manifest_size=
+if [ -f "$manifest" ]; then
+  manifest_size=$(wc -c < "$manifest" 2>/dev/null || true)
+fi
+if [ -n "$manifest_size" ] && [ "$manifest_size" -le 65536 ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    expected=$(python3 - "$manifest" <<'PY' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        manifest = json.load(source)
+    if (isinstance(manifest, dict) and manifest.get("name") == "projectatlas" and
+        isinstance(manifest.get("version"), str) and manifest["version"] and
+        all(char in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.+-"
+            for char in manifest["version"])):
+        print(manifest["version"])
+except (OSError, ValueError, TypeError):
+    pass
+PY
+)
+  elif command -v jq >/dev/null 2>&1; then
+    expected=$(jq -sr 'if length == 1 and .[0].name == "projectatlas" and
+      (.[0].version | type) == "string" and (.[0].version | length) > 0 and
+      (.[0].version | test("[^0-9A-Za-z.+-]") | not)
+      then .[0].version else empty end' "$manifest" 2>/dev/null || true)
+  else
+    manifest_reason='JSON validator unavailable; install Python 3 or jq to verify plugin integration'
+    manifest_repair='install Python 3 or jq, then rerun this readiness check'
+  fi
+fi
 reason='runtime unavailable, mismatched, or JSON validator unavailable'
 starting_root=$(pwd -P)
 project_root=$starting_root
@@ -259,7 +291,11 @@ if [ -n "$expected" ] && receipt_valid; then
     reason='runtime identity is not version-matched'
   fi
 else
-  reason='installer readiness receipt or host files changed; rerun the installer'
+  if [ -n "$expected" ]; then
+    reason='installer readiness receipt or host files changed; rerun the installer'
+  else
+    reason=$manifest_reason
+  fi
 fi
 printf 'ProjectAtlas integration incomplete: %s. Plugin installation alone does not update the native runtime or MCP registry.\n' "$reason"
 printf 'Expected: plugin_version=%s project_db=%s project_config=%s project_root=%s codex_mcp_enabled=true codex_mcp_transport=stdio\n' "$(safe_text "$expected")" "$(safe_text "$db")" "$(safe_text "${config:-unavailable}")" "$(safe_text "$project_root")"
@@ -315,7 +351,9 @@ shell_quote() {
   printf "'"
 }
 printf 'Use the version-matched ProjectAtlas skill. Do not reset a database.\n'
-if [ "$(safe_text "$expected")" != "$expected" ] ||
+if [ -z "$expected" ]; then
+  printf 'Repair command unavailable: %s.\n' "$manifest_repair"
+elif [ "$(safe_text "$expected")" != "$expected" ] ||
   [ "$(safe_text "$plugin_root")" != "$plugin_root" ] ||
   [ "$(safe_text "$project_root")" != "$project_root" ]; then
   printf 'Repair command unavailable: a path contains control characters; select the exact project root manually when invoking the version-matched installer.\n'

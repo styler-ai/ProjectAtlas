@@ -2,7 +2,23 @@
 $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $skill = Join-Path $pluginRoot 'skills/projectatlas/SKILL.md'
-$expected = (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $pluginRoot '.codex-plugin/plugin.json') | ConvertFrom-Json).version
+$expected = $null
+try {
+    $manifestPath = Join-Path $pluginRoot '.codex-plugin/plugin.json'
+    if ((Get-Item -LiteralPath $manifestPath).Length -le 65536) {
+        $manifestText = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath
+        if ($manifestText -cmatch '^[ \t\r\n]*\{') {
+            $manifest = $manifestText | ConvertFrom-Json
+            if ($manifest -is [pscustomobject] -and $manifest.name -ceq 'projectatlas' -and
+                $manifest.version -is [string] -and $manifest.version -and
+                $manifest.version -cnotmatch '[^0-9A-Za-z.+-]') {
+                $expected = $manifest.version
+            }
+        }
+    }
+} catch {
+    # A partial plugin update is incomplete, not a hook startup failure.
+}
 $reason = 'installer readiness receipt or host files changed; rerun the installer'
 function IdentityValue($value) {
     if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return 'unavailable' }
@@ -95,6 +111,10 @@ $bindingReady = {
     (& $samePath $configured.mcpServers.projectatlas.cwd $projectRoot)
 }
 try {
+    if (-not $expected) {
+        $reason = 'bundled plugin manifest is missing or invalid'
+        throw 'not ready'
+    }
     $directCommand = Get-Command projectatlas -ErrorAction SilentlyContinue
     $directPath = if ($directCommand -and $directCommand.CommandType -eq 'Application') { $directCommand.Source } else { $null }
     $runtime = [pscustomobject]@{ version = $null; executable = $directPath }
@@ -182,7 +202,9 @@ Write-Output ('Observed: direct_cli_version={0} direct_cli_executable={1}; codex
 Write-Output 'Use the version-matched ProjectAtlas skill. Do not reset a database.'
 function Quote-PowerShellLiteral([string]$value) { return "'" + $value.Replace("'", "''") + "'" }
 $installerPath = Join-Path $pluginRoot 'scripts/install-runtime.ps1'
-if ((IdentityValue $installerPath) -cne $installerPath -or
+if (-not $expected) {
+    Write-Output 'Repair command unavailable: reinstall the version-matched ProjectAtlas plugin, then run its packaged installer for the selected project.'
+} elseif ((IdentityValue $installerPath) -cne $installerPath -or
     (IdentityValue $projectRoot) -cne $projectRoot -or
     (IdentityValue $expected) -cne $expected) {
     Write-Output 'Repair command unavailable: a path contains control characters; select the exact project root manually when invoking the version-matched installer.'

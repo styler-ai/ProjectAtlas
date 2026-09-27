@@ -322,6 +322,101 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
             }
         }
     }
+    let manifest_parser = source
+        .split_once("expected=\n")
+        .and_then(|(_, tail)| tail.split_once("\nreason=").map(|(body, _)| body))
+        .ok_or("readiness hook manifest parser was not found")?;
+    let parser_script = format!(
+        "manifest=$1\nexpected=\n{manifest_parser}\nprintf '%s|%s|%s' \"$expected\" \"$manifest_reason\" \"$manifest_repair\"\n"
+    );
+    let manifest = fixture.path().join("plugin.json");
+    let version = env!("CARGO_PKG_VERSION");
+    let wc = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("wc"))
+        .find(|candidate| candidate.is_file())
+        .ok_or("POSIX wc is unavailable")?;
+    let wc = fs::canonicalize(wc)?;
+    for name in ["python3", "jq"] {
+        let Some(parser) = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+        else {
+            continue;
+        };
+        let only_parser = fixture.path().join(format!("manifest-{name}-only"));
+        fs::create_dir(&only_parser)?;
+        for (tool_name, tool) in [(name, parser), ("wc", wc.clone())] {
+            std::os::unix::fs::symlink(fs::canonicalize(tool)?, only_parser.join(tool_name))?;
+        }
+        for (contents, expected) in [
+            (
+                serde_json::to_vec(&json!({"name": "projectatlas", "version": version}))?,
+                version,
+            ),
+            (
+                serde_json::to_vec(
+                    &json!({"name": "projectatlas", "version": format!("{version}\n")}),
+                )?,
+                "",
+            ),
+            (
+                serde_json::to_vec(&json!({
+                    "name": "projectatlas", "version": version, "padding": "x".repeat(65536)
+                }))?,
+                "",
+            ),
+        ] {
+            fs::write(&manifest, contents)?;
+            let output = StdCommand::new("/bin/sh")
+                .args([
+                    "-c",
+                    &parser_script,
+                    "hook-manifest",
+                    manifest.to_str().ok_or("manifest path is not UTF-8")?,
+                ])
+                .env("PATH", &only_parser)
+                .output()?;
+            let actual = String::from_utf8(output.stdout)?;
+            if !output.status.success()
+                || !actual.starts_with(&format!("{expected}|"))
+                || (expected.is_empty()
+                    && !actual.contains("bundled plugin manifest is missing or invalid"))
+            {
+                return Err(io::Error::other(format!(
+                    "{name}-only manifest parser accepted invalid package metadata: {actual:?}; stderr={}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+        }
+    }
+    let wc_only = fixture.path().join("manifest-no-validator");
+    fs::create_dir(&wc_only)?;
+    std::os::unix::fs::symlink(wc, wc_only.join("wc"))?;
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&json!({"name": "projectatlas", "version": version}))?,
+    )?;
+    let output = StdCommand::new("/bin/sh")
+        .args([
+            "-c",
+            &parser_script,
+            "hook-manifest",
+            manifest.to_str().ok_or("manifest path is not UTF-8")?,
+        ])
+        .env("PATH", &wc_only)
+        .output()?;
+    let actual = String::from_utf8(output.stdout)?;
+    if !output.status.success()
+        || !actual.starts_with("|JSON validator unavailable;")
+        || !actual.contains("install Python 3 or jq, then rerun this readiness check")
+    {
+        return Err(io::Error::other(format!(
+            "validator-free manifest check gave incorrect repair guidance: {actual:?}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -330,8 +425,20 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     #[cfg(unix)]
     assert_bundled_hook_sanitizes_control_paths_without_python()?;
     let workspace = workspace_root()?;
-    let plugin_root = workspace.join("plugins").join("projectatlas");
     let fixture = tempfile::tempdir()?;
+    let source_plugin = workspace.join("plugins").join("projectatlas");
+    let plugin_root = fixture.path().join("plugin");
+    for relative in [
+        ".codex-plugin/plugin.json",
+        "hooks/readiness.ps1",
+        "hooks/readiness.sh",
+        "hooks/agent-instructions.txt",
+        "skills/projectatlas/SKILL.md",
+    ] {
+        let destination = plugin_root.join(relative);
+        fs::create_dir_all(destination.parent().ok_or("plugin asset has no parent")?)?;
+        fs::copy(source_plugin.join(relative), destination)?;
+    }
     let repo = fixture.path().join("repo '$HOME'`x");
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let bin = fixture.path().join("bin");
@@ -589,6 +696,45 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "matching installed layers were not ready: {ready_output}"
         ))
         .into());
+    }
+    let plugin_manifest = plugin_root.join(".codex-plugin/plugin.json");
+    let original_manifest = fs::read(&plugin_manifest)?;
+    let truncated_manifest = format!(r#"{{"name":"projectatlas","version":"{version}""#);
+    let array_manifest = format!(r#"[{{"name":"projectatlas","version":"{version}"}}]"#);
+    let linefeed_manifest =
+        serde_json::to_vec(&json!({"name": "projectatlas", "version": format!("{version}\n")}))?;
+    let oversized_manifest = serde_json::to_vec(&json!({
+        "name": "projectatlas", "version": version, "padding": "x".repeat(65536)
+    }))?;
+    for damaged_manifest in [
+        None,
+        Some(truncated_manifest.as_bytes()),
+        Some(array_manifest.as_bytes()),
+        Some(linefeed_manifest.as_slice()),
+        Some(oversized_manifest.as_slice()),
+    ] {
+        if let Some(contents) = damaged_manifest {
+            fs::write(&plugin_manifest, contents)?;
+        } else {
+            fs::remove_file(&plugin_manifest)?;
+        }
+        let output = run_hook_raw(&repo, &path)?;
+        if !output.contains(
+            "ProjectAtlas integration incomplete: bundled plugin manifest is missing or invalid",
+        ) || !output.contains(
+            "Repair command unavailable: reinstall the version-matched ProjectAtlas plugin",
+        ) || output.contains("Repair command:")
+            || output.contains("ProjectAtlas integration ready")
+        {
+            return Err(io::Error::other(format!(
+                "damaged plugin manifest did not fail closed with repair guidance: {output}"
+            ))
+            .into());
+        }
+    }
+    fs::write(&plugin_manifest, original_manifest)?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other("restored plugin manifest stayed incomplete").into());
     }
     if codex_marker.exists() {
         return Err(io::Error::other("readiness hook executed Codex from PATH").into());
