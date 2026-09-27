@@ -515,6 +515,10 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     } else {
         fixture.path().join(".local/state/projectatlas")
     };
+    #[cfg(not(windows))]
+    let xdg_state_home = state_root
+        .parent()
+        .ok_or("fixture state root has no parent")?;
     let codex_home = fixture.path().join(CODEX_FIXTURE_DIR_NAME);
     let codex_config = codex_home.join("config.toml");
     fs::create_dir_all(&state_root)?;
@@ -623,7 +627,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .env("PROJECTATLAS_CODEX_MARKER", &codex_marker)
                 .env("PROJECTATLAS_SHADOW_MARKER", &shadow_marker)
                 .env("HOME", fixture.path())
-                .env("XDG_STATE_HOME", fixture.path().join(".local/state"))
+                .env("XDG_STATE_HOME", xdg_state_home)
                 .env("CODEX_HOME", &codex_home)
                 .env("PATH", process_path)
                 .output()?;
@@ -1044,7 +1048,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .arg(&hook_path)
                 .current_dir(&repo)
                 .env("HOME", fixture.path())
-                .env("XDG_STATE_HOME", fixture.path().join(".local/state"))
+                .env("XDG_STATE_HOME", xdg_state_home)
                 .env("CODEX_HOME", &codex_home)
                 .env("PATH", no_tool_path)
                 .output()?;
