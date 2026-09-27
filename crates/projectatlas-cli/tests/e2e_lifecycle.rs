@@ -277,6 +277,7 @@ fn bundled_hook_guidance_uses_its_package_asset_not_path() -> Result<(), Box<dyn
 
 #[cfg(unix)]
 fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Box<dyn Error>> {
+    const WC_TOOL: &str = "wc";
     let source =
         fs::read_to_string(workspace_root()?.join("plugins/projectatlas/hooks/readiness.sh"))?;
     let function_body = source
@@ -332,7 +333,7 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
     let manifest = fixture.path().join("plugin.json");
     let version = env!("CARGO_PKG_VERSION");
     let wc = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|directory| directory.join("wc"))
+        .map(|directory| directory.join(WC_TOOL))
         .find(|candidate| candidate.is_file())
         .ok_or("POSIX wc is unavailable")?;
     let wc = fs::canonicalize(wc)?;
@@ -345,7 +346,7 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
         };
         let only_parser = fixture.path().join(format!("manifest-{name}-only"));
         fs::create_dir(&only_parser)?;
-        for (tool_name, tool) in [(name, parser), ("wc", wc.clone())] {
+        for (tool_name, tool) in [(name, parser), (WC_TOOL, wc.clone())] {
             std::os::unix::fs::symlink(fs::canonicalize(tool)?, only_parser.join(tool_name))?;
         }
         for (contents, expected) in [
@@ -392,7 +393,7 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
     }
     let wc_only = fixture.path().join("manifest-no-validator");
     fs::create_dir(&wc_only)?;
-    std::os::unix::fs::symlink(wc, wc_only.join("wc"))?;
+    std::os::unix::fs::symlink(wc, wc_only.join(WC_TOOL))?;
     fs::write(
         &manifest,
         serde_json::to_vec(&json!({"name": "projectatlas", "version": version}))?,
