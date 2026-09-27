@@ -511,21 +511,39 @@ fn prepend_path(path: &Path) -> Result<OsString, env::JoinPathsError> {
     env::join_paths(paths)
 }
 
-/// Return the inherited PATH without the shared Cargo runtime or dependency directory.
+/// Return the inherited PATH without shared or installed Atlas command authorities.
 fn filtered_inherited_path() -> Result<OsString, env::JoinPathsError> {
     env::join_paths(filtered_path_entries(env::split_paths(
         &env::var_os("PATH").unwrap_or_default(),
     )))
 }
 
-/// Exclude only the target runtime directories that can leak another fixture's authority.
+/// Exclude command directories that can leak another installation's authority.
 fn filtered_path_entries<I>(paths: I) -> Vec<PathBuf>
 where
     I: IntoIterator<Item = PathBuf>,
 {
     paths
         .into_iter()
-        .filter(|path| !is_shared_cargo_runtime_directory(path))
+        .filter(|path| {
+            !is_shared_cargo_runtime_directory(path)
+                && ![
+                    "atlas",
+                    "atlas.exe",
+                    "atlas.cmd",
+                    "atlas.bat",
+                    "atlas.ps1",
+                    "atlas.com",
+                    "projectatlas",
+                    "projectatlas.exe",
+                    "projectatlas.cmd",
+                    "projectatlas.bat",
+                    "projectatlas.ps1",
+                    "projectatlas.com",
+                ]
+                .iter()
+                .any(|name| path.join(name).is_file())
+        })
         .collect()
 }
 
@@ -560,8 +578,24 @@ fn isolated_installer_path_filters_shared_cargo_runtime_and_keeps_fixture_tools(
     let root = tempfile::tempdir()?;
     let fake_bin = root.path().join("fake-bin");
     let second_fake_bin = root.path().join("second-fake-bin");
+    let installed_bin = root.path().join("installed-bin");
+    let installed_cli_bin = root.path().join("installed-cli-bin");
     fs::create_dir(&fake_bin)?;
     fs::create_dir(&second_fake_bin)?;
+    fs::create_dir(&installed_bin)?;
+    fs::create_dir(&installed_cli_bin)?;
+    fs::write(
+        installed_bin.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" }),
+        "",
+    )?;
+    fs::write(
+        installed_cli_bin.join(if cfg!(windows) {
+            "projectatlas.cmd"
+        } else {
+            "projectatlas"
+        }),
+        "",
+    )?;
     let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
     let runtime_directory = runtime
         .parent()
@@ -571,6 +605,8 @@ fn isolated_installer_path_filters_shared_cargo_runtime_and_keeps_fixture_tools(
         fake_bin.clone(),
         runtime_directory.to_path_buf(),
         dependencies,
+        installed_bin,
+        installed_cli_bin,
         second_fake_bin.clone(),
     ]);
     require(

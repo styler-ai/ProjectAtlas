@@ -1271,8 +1271,29 @@ resolve_codex_command() {
 
 codex_projectatlas_marketplace_source() {
   marketplaces=$1
-  command -v jq >/dev/null 2>&1 || return 1
-  printf '%s\n' "$marketplaces" | jq -r '.marketplaces[]? | select(.name == "projectatlas") | .marketplaceSource.source // empty' | head -n 1
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$marketplaces" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)["marketplaces"]
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == "projectatlas"]
+    source = matches[0]["marketplaceSource"]["source"] if len(matches) == 1 else None
+    if not isinstance(source, str) or not source or any(char in source for char in "\r\n\0"):
+        sys.exit(1)
+    print(source)
+except (ValueError, TypeError, KeyError, IndexError):
+    sys.exit(1)
+'
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$marketplaces" | jq -er -s '
+      select(length == 1) | .[0].marketplaces | select(type == "array") |
+      [.[] | select(.name == "projectatlas")] | select(length == 1) |
+      .[0].marketplaceSource.source |
+      select(type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null)
+    '
+  else
+    return 1
+  fi
 }
 
 official_projectatlas_marketplace_source() {
@@ -1511,7 +1532,8 @@ validate_codex_mounts() {
   mount_platform=$(uname -s 2>/dev/null || true)
   case "$mount_platform" in
     Linux)
-      if ! command -v findmnt >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+      if ! command -v findmnt >/dev/null 2>&1 ||
+        { ! command -v python3 >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; }; then
         printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount ownership cannot be established.\n' "$mount_description" >&2
         return 1
       fi
@@ -1519,7 +1541,40 @@ validate_codex_mounts() {
         printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
         return 1
       }
-      mount_targets=$(printf '%s\n' "$mount_inventory" | jq -c '
+      if command -v python3 >/dev/null 2>&1; then
+        if printf '%s\n' "$mount_inventory" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)["filesystems"]
+    if not isinstance(rows, list) or not rows or not all(
+        isinstance(row, dict) and isinstance(row.get("target"), str) and row["target"].startswith("/")
+        for row in rows
+    ):
+        sys.exit(2)
+    targets = [row["target"] for row in rows]
+except (ValueError, TypeError, KeyError):
+    sys.exit(2)
+root, candidate = sys.argv[1:]
+if not any(target == "/" or target == root or root.startswith(target + "/") for target in targets) or any(
+    target.startswith(root + "/") and
+    (target == candidate or candidate.startswith(target + "/") or target.startswith(candidate + "/"))
+    for target in targets
+):
+    sys.exit(3)
+' "$mount_root" "$mount_candidate"; then
+          return 0
+        else
+          mount_status=$?
+        fi
+        if [ "$mount_status" -eq 2 ]; then
+          printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory is malformed.\n' "$mount_description" >&2
+        else
+          printf 'warning: Codex ProjectAtlas plugin update skipped: %s crosses or contains a mounted filesystem.\n' "$mount_description" >&2
+        fi
+        return 1
+      fi
+      mount_targets=$(printf '%s\n' "$mount_inventory" | jq -cs '
+          (if length != 1 then error("invalid findmnt stream") else .[0] end) |
           (if type != "object" or ((.filesystems? | type) != "array") then
              error("invalid findmnt inventory")
            elif (.filesystems | length) == 0
@@ -1941,11 +1996,50 @@ load_codex_projectatlas_plugin_inventory() {
   codex_projectatlas_inventory_version=
   codex_projectatlas_inventory_source_path=
   plugins=$("$codex_bin" plugin list --marketplace projectatlas --json 2>/dev/null) || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  if ! printf '%s\n' "$plugins" | jq -e '
-      type == "object" and
-      (.installed | type == "array") and
-      all(.installed[]; type == "object")
+  [ "${#plugins}" -le 1048576 ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    projection=$(printf '%s\n' "$plugins" | python3 -c '
+import json, sys
+try:
+    root = json.load(sys.stdin)
+    rows = root["installed"]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        sys.exit(1)
+    matches = [row for row in rows if row.get("pluginId") == "projectatlas@projectatlas" or
+               (row.get("name") == "projectatlas" and row.get("marketplaceName") == "projectatlas")]
+    if not matches:
+        print("absent")
+        sys.exit(0)
+    if len(matches) != 1:
+        sys.exit(1)
+    row = matches[0]
+    source = row["marketplaceSource"]["source"]
+    path = row["source"]["path"]
+    version = row["version"]
+    if (row.get("pluginId") != "projectatlas@projectatlas" or
+        row.get("name") != "projectatlas" or row.get("marketplaceName") != "projectatlas" or
+        row.get("installed") is not True or row.get("enabled") is not True or
+        not all(isinstance(value, str) and value and not any(char in value for char in "\r\n\0")
+                for value in (version, path, source))):
+        sys.exit(1)
+    print("present\n" + version + "\n" + path + "\n" + source)
+except (ValueError, TypeError, KeyError, IndexError):
+    sys.exit(1)
+') || return 1
+    if [ "$projection" = absent ]; then
+      codex_projectatlas_inventory_complete=true
+      return 0
+    fi
+    [ "$(printf '%s\n' "$projection" | sed -n '1p')" = present ] || return 1
+    codex_projectatlas_inventory_version=$(printf '%s\n' "$projection" | sed -n '2p')
+    codex_projectatlas_inventory_source_path=$(printf '%s\n' "$projection" | sed -n '3p')
+    codex_projectatlas_inventory_marketplace_source=$(printf '%s\n' "$projection" | sed -n '4p')
+  elif command -v jq >/dev/null 2>&1; then
+    if ! printf '%s\n' "$plugins" | jq -e -s '
+      length == 1 and
+      (.[0] | type == "object") and
+      (.[0].installed | type == "array") and
+      all(.[0].installed[]; type == "object")
     ' >/dev/null 2>&1; then
       return 1
     fi
@@ -1960,6 +2054,7 @@ load_codex_projectatlas_plugin_inventory() {
     fi
     if [ "$projectatlas_inventory_count" -ne 1 ] ||
       ! printf '%s\n' "$plugins" | jq -e '
+        def clean: type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null;
         [
           .installed[] |
           select(.pluginId == "projectatlas@projectatlas" or
@@ -1968,13 +2063,13 @@ load_codex_projectatlas_plugin_inventory() {
         .pluginId == "projectatlas@projectatlas" and
         .name == "projectatlas" and
         .marketplaceName == "projectatlas" and
-        (.version | type == "string") and
+        (.version | clean) and
         .installed == true and
         .enabled == true and
         (.marketplaceSource | type == "object") and
-        (.marketplaceSource.source | type == "string" and length > 0) and
+        (.marketplaceSource.source | clean) and
         (.source | type == "object") and
-        (.source.path | type == "string" and length > 0)
+        (.source.path | clean)
       ' >/dev/null 2>&1; then
       return 1
     fi
@@ -1993,6 +2088,9 @@ load_codex_projectatlas_plugin_inventory() {
       select(.pluginId == "projectatlas@projectatlas" or
         (.name == "projectatlas" and .marketplaceName == "projectatlas"))
     ][0].marketplaceSource.source') || return 1
+  else
+    return 1
+  fi
   official_projectatlas_marketplace_source "$codex_projectatlas_inventory_marketplace_source" || return 1
   case "$codex_projectatlas_inventory_version" in
     [0-9A-Za-z]*) ;;
@@ -2030,11 +2128,24 @@ codex_projectatlas_plugin_source_manifest_version() {
     printf '%s\n' ""
     return 0
   fi
-  if ! command -v jq >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        data = json.load(stream)
+    version = data["version"]
+    if (data.get("name") == "projectatlas" and data.get("skills") == "./skills/" and isinstance(version, str) and
+        version and not any(char in version for char in "\r\n\0")):
+        print(version)
+except (ValueError, TypeError, KeyError, OSError):
+    pass
+' "$manifest_path" 2>/dev/null || printf '%s\n' ""
+  elif command -v jq >/dev/null 2>&1; then
+    jq -r -s 'if length == 1 and (.[0] | type == "object") and .[0].name == "projectatlas" and .[0].skills == "./skills/" and (.[0].version | type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null) then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
+  else
     printf '%s\n' ""
-    return 0
   fi
-  jq -r -s 'if length == 1 and (.[0] | type == "object") and (.[0].version | type == "string") then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
 }
 
 codex_projectatlas_plugin_source_manifest_matches() {
@@ -2053,9 +2164,10 @@ codex_projectatlas_plugin_artifact_ready() (
   artifact_root=$2
   [ -n "$artifact_root" ] || return 1
   codex_projectatlas_plugin_source_manifest_matches "$artifact_version" "$artifact_root" || return 1
-  for skill_asset in SKILL.md references/language-support.md; do
+  for skill_asset in SKILL.md references/language-support.md references/short-cli.md; do
     cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$artifact_root/skills/projectatlas/$skill_asset" || return 1
   done
+  cmp -s "$plugin_root/hooks/agent-instructions.txt" "$artifact_root/hooks/agent-instructions.txt" || return 1
 )
 
 codex_projectatlas_plugin_artifacts_ready() (
@@ -2174,7 +2286,7 @@ update_codex_plugin_locked() {
     return 0
   fi
   marketplace_source=$(codex_projectatlas_marketplace_source "$marketplaces") || {
-    printf '%s\n' "Codex ProjectAtlas plugin update skipped: Codex plugin inventory requires jq for trustworthy JSON validation."
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped: could not validate Codex marketplace inventory with python3 or jq."
     return 0
   }
   if ! official_projectatlas_marketplace_source "$marketplace_source"; then
@@ -2350,6 +2462,26 @@ update_codex_plugin_locked() {
   fi
 }
 
+codex_mcp_registry_absent() {
+  inventory=$("$codex_bin" mcp list --json 2>/dev/null) || return 1
+  [ "${#inventory}" -le 1048576 ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$inventory" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+    valid = isinstance(rows, list) and all(isinstance(row, dict) and isinstance(row.get("name"), str) for row in rows)
+    sys.exit(0 if valid and not any(row["name"] == "projectatlas" for row in rows) else 1)
+except (ValueError, TypeError):
+    sys.exit(1)
+'
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$inventory" | jq -se 'length == 1 and (.[0] | type == "array" and all(.[]; type == "object" and (.name | type == "string")) and all(.[]; .name != "projectatlas"))' >/dev/null
+  else
+    return 1
+  fi
+}
+
 update_codex_mcp_registry() {
   if truthy "${PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE:-}"; then
     printf '%s\n' "Codex MCP registry update skipped by PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE."
@@ -2364,26 +2496,26 @@ update_codex_mcp_registry() {
     printf '%s\n' "Codex MCP registry update skipped: ProjectAtlas version is unknown."
     return 0
   fi
-  existing=$("$codex_bin" mcp get projectatlas 2>&1) || {
-    printf '%s\n' "Codex MCP registry update skipped: no global projectatlas MCP server is configured."
+  existing=$("$codex_bin" mcp get projectatlas 2>&1) || existing=
+  if [ -z "$existing" ] && ! codex_mcp_registry_absent; then
+    printf '%s\n' "warning: Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent." >&2
     return 0
-  }
+  fi
   expected_config=
   if [ -f "$project_config" ]; then
     expected_config=$project_config
   elif [ -f "$flat_config" ]; then
     expected_config=$flat_config
   fi
-  if printf '%s\n' "$existing" | grep -F "$projectatlas_bin" >/dev/null &&
-    printf '%s\n' "$existing" | grep -F "$runtime_version" >/dev/null &&
-    printf '%s\n' "$existing" | grep -F "$atlas_dir/projectatlas.db" >/dev/null &&
-    { [ -z "$expected_config" ] || printf '%s\n' "$existing" | grep -F "$expected_config" >/dev/null; }; then
+  if [ -n "$existing" ] && codex_mcp_registry_ready; then
     printf 'Codex MCP registry already points to ProjectAtlas %s for %s.\n' "$runtime_version" "$atlas_dir/projectatlas.db"
     return 0
   fi
-  if ! "$codex_bin" mcp remove projectatlas >/dev/null 2>&1; then
-    printf '%s\n' "warning: Codex MCP registry update failed: could not remove stale global projectatlas server." >&2
-    return 0
+  if [ -n "$existing" ]; then
+    if ! "$codex_bin" mcp remove projectatlas >/dev/null 2>&1; then
+      printf '%s\n' "warning: Codex MCP registry update failed: could not remove stale global projectatlas server." >&2
+      return 0
+    fi
   fi
   set -- mcp add projectatlas -- "$projectatlas_bin" --require-version "$runtime_version" --db "$atlas_dir/projectatlas.db"
   if [ -n "$expected_config" ]; then
@@ -2395,6 +2527,115 @@ update_codex_mcp_registry() {
   else
     printf '%s\n' "warning: Codex MCP registry update failed: could not add verified global projectatlas server." >&2
   fi
+}
+
+codex_mcp_registry_ready() {
+  resolve_codex_command "Codex readiness receipt" || return 1
+  registration=$("$codex_bin" mcp get projectatlas --json 2>/dev/null) || return 1
+  runtime_version=$(expected_runtime_version)
+  expected_config=$(effective_config_path)
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$registration" | python3 -c '
+import json, sys
+try:
+    row = json.load(sys.stdin)
+    runtime, version, database, config = sys.argv[1:]
+    args = ["--require-version", version, "--db", database]
+    if config:
+        args += ["--config", config]
+    args += ["mcp"]
+    transport = row["transport"]
+    sys.exit(0 if row["name"] == "projectatlas" and row["enabled"] is True and
+             transport["type"] == "stdio" and transport["command"] == runtime and
+             transport["args"] == args and
+             all(entry.get("env") in (None, {}) and
+                 entry.get("env_vars") in (None, []) and
+                 entry.get("cwd") is None for entry in (row, transport)) else 1)
+except (ValueError, TypeError, KeyError, AttributeError):
+    sys.exit(1)
+' "$projectatlas_bin" "$runtime_version" "$atlas_dir/projectatlas.db" "$expected_config"
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$registration" | jq -se --arg command "$projectatlas_bin" --arg version "$runtime_version" --arg db "$atlas_dir/projectatlas.db" --arg config "$expected_config" '
+      length == 1 and (.[0] | .name == "projectatlas" and .enabled == true and
+        .transport.type == "stdio" and .transport.command == $command and
+        .transport.args == (["--require-version", $version, "--db", $db] +
+          (if $config == "" then [] else ["--config", $config] end) + ["mcp"]) and
+        ([., .transport] | all(.[];
+          (.env == null or .env == {}) and
+          (.env_vars == null or .env_vars == []) and .cwd == null)))
+    ' >/dev/null
+  else
+    return 1
+  fi
+}
+
+write_codex_readiness_receipt() {
+  codex_config=$(codex_config_path)
+  [ -f "$codex_config" ] || return 0
+  [ "$(wc -c < "$codex_config")" -le 1048576 ] &&
+    [ "$(wc -c < "$mcp_config_path")" -le 1048576 ] || return 0
+  codex_hash=$(archive_sha256 "$codex_config") || return 0
+  codex_mcp_registry_ready || return 0
+  [ "$(archive_sha256 "$codex_config")" = "$codex_hash" ] || return 0
+  load_codex_projectatlas_plugin_inventory || return 0
+  [ "$codex_projectatlas_inventory_version" = "$(expected_runtime_version)" ] &&
+    codex_projectatlas_plugin_artifacts_ready "$codex_projectatlas_inventory_version" "$codex_projectatlas_inventory_source_path" || return 0
+  state_root=$(atlas_forwarder_state_root) || return 0
+  mkdir -p -- "$state_root" || return 0
+  [ -d "$state_root" ] && [ ! -L "$state_root" ] || return 0
+  runtime_path=$(canonical_atlas_runtime_path "$projectatlas_bin") || return 0
+  project_path=$(canonical_path "$project_root") || return 0
+  codex_path=$(canonical_file "$codex_config") || return 0
+  runtime_hash=$(archive_sha256 "$runtime_path") || return 0
+  generated_hash=$(archive_sha256 "$mcp_config_path") || return 0
+  agent_guidance_hash=$(archive_sha256 "$plugin_root/hooks/agent-instructions.txt") || return 0
+  skill_hash=$(archive_sha256 "$plugin_root/skills/projectatlas/SKILL.md") || return 0
+  language_support_hash=$(archive_sha256 "$plugin_root/skills/projectatlas/references/language-support.md") || return 0
+  short_cli_hash=$(archive_sha256 "$plugin_root/skills/projectatlas/references/short-cli.md") || return 0
+  version=$(expected_runtime_version)
+  receipt=$state_root/codex-readiness.json
+  temporary=$(mktemp "$state_root/.codex-readiness.XXXXXX") || return 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+keys = ("version", "project_root", "runtime", "runtime_sha256", "generated_sha256", "codex_config", "codex_config_sha256")
+payload = dict(zip(keys, sys.argv[1:8]))
+payload["direct_cli"] = payload["runtime"]
+payload["direct_cli_sha256"] = payload["runtime_sha256"]
+payload["agent_guidance_sha256"] = sys.argv[8]
+payload["skill_sha256"] = sys.argv[9]
+payload["language_support_sha256"] = sys.argv[10]
+payload["short_cli_sha256"] = sys.argv[11]
+row = json.loads(sys.argv[12])
+transport = row["transport"]
+payload["registry"] = {"name": row["name"], "enabled": row["enabled"],
+                       "transport": {"type": transport["type"], "command": transport["command"],
+                                     "args": transport["args"]}}
+print(json.dumps(payload, separators=(",", ":")))
+' "$version" "$project_path" "$runtime_path" "$runtime_hash" "$generated_hash" "$codex_path" "$codex_hash" "$agent_guidance_hash" "$skill_hash" "$language_support_hash" "$short_cli_hash" "$registration" >"$temporary" || {
+      rm -f -- "$temporary"
+      return 0
+    }
+  elif command -v jq >/dev/null 2>&1; then
+    jq -n --arg version "$version" --arg project_root "$project_path" --arg runtime "$runtime_path" \
+      --arg runtime_sha256 "$runtime_hash" --arg generated_sha256 "$generated_hash" \
+      --arg codex_config "$codex_path" --arg codex_config_sha256 "$codex_hash" \
+      --arg agent_guidance_sha256 "$agent_guidance_hash" \
+      --arg skill_sha256 "$skill_hash" --arg language_support_sha256 "$language_support_hash" \
+      --arg short_cli_sha256 "$short_cli_hash" --argjson registry "$registration" \
+      '{version:$version,project_root:$project_root,runtime:$runtime,runtime_sha256:$runtime_sha256,direct_cli:$runtime,direct_cli_sha256:$runtime_sha256,generated_sha256:$generated_sha256,codex_config:$codex_config,codex_config_sha256:$codex_config_sha256,agent_guidance_sha256:$agent_guidance_sha256,skill_sha256:$skill_sha256,language_support_sha256:$language_support_sha256,short_cli_sha256:$short_cli_sha256,registry:{name:$registry.name,enabled:$registry.enabled,transport:{type:$registry.transport.type,command:$registry.transport.command,args:$registry.transport.args}}}' >"$temporary" || {
+      rm -f -- "$temporary"
+      return 0
+    }
+  else
+    rm -f -- "$temporary"
+    return 0
+  fi
+  if [ "$(archive_sha256 "$codex_config")" != "$codex_hash" ]; then
+    rm -f -- "$temporary"
+    return 0
+  fi
+  chmod 600 "$temporary" && mv -f -- "$temporary" "$receipt" || rm -f -- "$temporary"
 }
 
 report_projectatlas_workflow_pins() {
@@ -2911,6 +3152,7 @@ verify_generated_mcp_config "$claude_mcp_config_path" "Claude Code"
 verify_generated_mcp_config "$opencode_config_path" "OpenCode"
 update_codex_plugin
 update_codex_mcp_registry
+write_codex_readiness_receipt
 report_projectatlas_workflow_pins
 
 printf 'ProjectAtlas runtime installed and verified: %s\n' "$projectatlas_bin"

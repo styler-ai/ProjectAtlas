@@ -3,8 +3,8 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "d509bfaa712373896ea7b5e2bbd7504665f3674ef9208615c016b6709948a88f",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "30796be9dca75c3bc0ad4aed4539982fc2ad5514c990a3edc6112c62b309e70d",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "7cfb95ff90fab9e905de781d953f895043f44d1c8b6df5278fa59026d58e111d",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "f17200d96abd7811f1667cfd297f16d8944bd7f469dfb81ab0caa98d8a73769e",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "7a5c3d8208fd163059b79bef1a4eeb3dddd1449ef663543af12750c2c1d89b5f",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 197,
+  "test_count": 199,
   "symbol_count": 433,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -219,9 +219,16 @@
       ]
     },
     {
-      "name": "bundled_hook_guidance_uses_its_package_asset_not_path",
+      "name": "bundled_hook_without_receipt_omits_guidance_and_path_execution",
       "line": 200,
       "end_line": 261,
+      "owner": "e2e_lifecycle",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation",
       "owner": "e2e_lifecycle",
       "attributes": [
         "#[test]"
@@ -654,6 +661,13 @@
       "name": "plugin_installer_writes_real_harness_configs",
       "line": 9755,
       "end_line": 9845,
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "plugin_installer_adds_only_confirmed_missing_codex_mcp",
       "owner": "e2e_delivery",
       "attributes": [
         "#[test]"
@@ -2900,7 +2914,7 @@
     },
     {
       "kind": "function",
-      "name": "bundled_hook_guidance_uses_its_package_asset_not_path",
+      "name": "bundled_hook_without_receipt_omits_guidance_and_path_execution",
       "line": 200,
       "end_line": 261,
       "owners": [
@@ -9386,7 +9400,7 @@
         ]
       },
       {
-        "test": "bundled_hook_guidance_uses_its_package_asset_not_path",
+        "test": "bundled_hook_without_receipt_omits_guidance_and_path_execution",
         "line": 200,
         "attributes": [
           "#[test]"
@@ -19630,6 +19644,11 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 650,
       "text": "        run: cargo test --locked -p projectatlas-cli plugin_installer_writes_real_harness_configs --test e2e_delivery"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 717,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_lifecycle bundled_hook -- --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",

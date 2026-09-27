@@ -4630,7 +4630,9 @@ function Get-ProjectAtlasCodexPluginManifestVersion {
             return ""
         }
         $manifest = ConvertFrom-Json -InputObject $manifestText
-        if ((Test-ProjectAtlasJsonObject $manifest) -and $manifest.version -is [string]) {
+        if ((Test-ProjectAtlasJsonObject $manifest) -and $manifest.name -is [string] -and
+            $manifest.name -ceq 'projectatlas' -and $manifest.version -is [string] -and
+            $manifest.skills -is [string] -and $manifest.skills -ceq './skills/') {
             return $manifest.version
         }
     }
@@ -4649,7 +4651,7 @@ function Test-ProjectAtlasCodexPluginSourceManifest {
     if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
         return $false
     }
-    return (Get-ProjectAtlasCodexPluginSourceManifestVersion $ProjectAtlasPlugin) -eq $ExpectedVersion
+    return (Get-ProjectAtlasCodexPluginSourceManifestVersion $ProjectAtlasPlugin) -ceq $ExpectedVersion
 }
 
 function Confirm-ProjectAtlasCodexSkillArtifact {
@@ -4667,7 +4669,7 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
         Write-Warning "Codex ProjectAtlas plugin skill verification skipped: projectatlas plugin is not installed."
         return
     }
-    if ($projectAtlasPlugin.version -ne $runtimeVersion) {
+    if ($projectAtlasPlugin.version -cne $runtimeVersion) {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: installed projectatlas plugin version '$($projectAtlasPlugin.version)' does not match $runtimeVersion."
         return
     }
@@ -4687,7 +4689,7 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
         return
     }
     $manifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
-    if ($manifestVersion -ne $runtimeVersion) {
+    if ($manifestVersion -cne $runtimeVersion) {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$manifestVersion' does not match $runtimeVersion."
         return
     }
@@ -4799,8 +4801,8 @@ function Update-ProjectAtlasCodexPlugin {
         $currentSourceManifestMatches = Test-ProjectAtlasCodexPluginSourceManifest $projectAtlasPlugin $runtimeVersion
         $currentSourceArtifactsReady = $currentSourceManifestMatches -and (Test-ProjectAtlasCodexSkillArtifacts (Get-ProjectAtlasCodexPluginSourcePath $projectAtlasPlugin))
         $currentPluginReady = Test-ProjectAtlasCodexPluginReady $ExpectedVersion
-        if ($previousRef -eq $releaseTag `
-            -and $currentPluginVersion -eq $runtimeVersion `
+        if ($previousRef -ceq $releaseTag `
+            -and $currentPluginVersion -ceq $runtimeVersion `
             -and $currentSourceManifestMatches `
             -and $currentPluginReady) {
             Write-Output "Codex ProjectAtlas plugin marketplace already points to $releaseTag."
@@ -4814,7 +4816,7 @@ function Update-ProjectAtlasCodexPlugin {
         }
         if (-not $currentPluginVersion) {
             $marketplacePluginSourcePath = Join-Path $stateSnapshot.MarketplaceRootPath "plugins\projectatlas"
-            if ((Get-ProjectAtlasCodexPluginManifestVersion $marketplacePluginSourcePath) -eq $runtimeVersion `
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $marketplacePluginSourcePath) -ceq $runtimeVersion `
                 -and (Test-ProjectAtlasCodexSkillArtifacts $marketplacePluginSourcePath)) {
                 $currentSourceArtifactsReady = $true
             }
@@ -4822,12 +4824,12 @@ function Update-ProjectAtlasCodexPlugin {
         $updateSucceeded = $false
         $restoreSucceeded = $false
         try {
-            if ($previousRef -eq $releaseTag) {
-            if ($currentPluginVersion -eq $runtimeVersion -and -not $currentSourceManifestMatches) {
+            if ($previousRef -ceq $releaseTag) {
+            if ($currentPluginVersion -ceq $runtimeVersion -and -not $currentSourceManifestMatches) {
                 $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
                 Write-Output "Codex ProjectAtlas plugin source manifest version '$sourceManifestVersion' does not match $runtimeVersion; refreshing official projectatlas plugin cache."
             }
-            elseif ($currentPluginVersion -eq $runtimeVersion -and -not $currentPluginReady) {
+            elseif ($currentPluginVersion -ceq $runtimeVersion -and -not $currentPluginReady) {
                 Write-Output "Codex ProjectAtlas plugin skill artifact does not match $runtimeVersion; repairing the installed plugin cache."
             }
             $refreshSucceeded = $currentSourceArtifactsReady
@@ -4851,7 +4853,7 @@ function Update-ProjectAtlasCodexPlugin {
                 return
             }
             $installedVersion = $installedInventory.Plugin.version
-            if ($installedVersion -ne $runtimeVersion) {
+            if ($installedVersion -cne $runtimeVersion) {
                 Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
                 return
             }
@@ -4908,7 +4910,7 @@ function Update-ProjectAtlasCodexPlugin {
             return
         }
         $installedVersion = $installedInventory.Plugin.version
-        if ($installedVersion -ne $runtimeVersion) {
+        if ($installedVersion -cne $runtimeVersion) {
             Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
             return
         }
@@ -4970,18 +4972,21 @@ function Update-ProjectAtlasCodexMcpRegistry {
     try {
         $existing = Get-ProjectAtlasCodexMcpRegistryEntry $codexCommandPath
         if (-not $existing) {
-            Write-Output "Codex MCP registry update skipped: no global projectatlas MCP server is configured."
-            return
+            if (-not (Test-ProjectAtlasCodexMcpRegistryAbsent $codexCommandPath)) {
+                Write-Warning "Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent."
+                return
+            }
         }
-        if (Test-ProjectAtlasCodexMcpRegistryEntry $existing $VerifiedPath $launchArgs) {
+        if ($existing -and (Test-ProjectAtlasCodexMcpRegistryEntry $existing $VerifiedPath $launchArgs)) {
             Write-Output "Codex MCP registry already points to ProjectAtlas $runtimeVersion for $DbPath."
             return
         }
-
-        & $codexCommandPath mcp remove projectatlas | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Codex MCP registry update failed: could not remove stale global projectatlas server."
-            return
+        if ($existing) {
+            & $codexCommandPath mcp remove projectatlas | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Codex MCP registry update failed: could not remove stale global projectatlas server."
+                return
+            }
         }
         $addArgs = @("mcp", "add", "projectatlas", "--", $VerifiedPath) + $launchArgs
         & $codexCommandPath @addArgs | Out-Null
@@ -5023,6 +5028,99 @@ function Get-ProjectAtlasCodexMcpRegistryEntry {
     }
 }
 
+function Test-ProjectAtlasCodexMcpRegistryAbsent {
+    param([string]$CodexCommandPath)
+    try {
+        $lines = & $CodexCommandPath mcp list --json 2>$null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $text = [string]::Join("`n", [string[]]@($lines)).Trim()
+        if ($text.Length -gt 1048576 -or -not $text.StartsWith('[')) { return $false }
+        $entries = ConvertFrom-Json -InputObject $text
+        if ($text -match '^\[\s*\]$') { return $true }
+        if ($null -eq $entries) { return $false }
+        foreach ($entry in @($entries)) {
+            if (-not (Test-ProjectAtlasJsonObject $entry) -or -not ($entry.name -is [string])) {
+                return $false
+            }
+            if ($entry.name -ceq 'projectatlas') { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Write-ProjectAtlasCodexReadinessReceipt {
+    param(
+        [string]$Version, [string]$Root, [string]$Runtime, [string]$GeneratedConfig,
+        [string]$StableMirror, [string]$DbPath, [string]$ProjectConfigPath, [string]$FlatConfigPath
+    )
+    $codexConfig = Get-ProjectAtlasCodexConfigPath
+    if (-not $codexConfig -or -not (Test-Path -LiteralPath $codexConfig -PathType Leaf)) {
+        Write-Warning 'Codex readiness receipt skipped: global Codex config is unavailable.'
+        return
+    }
+    try {
+        if ((Get-Item -LiteralPath $codexConfig).Length -gt 1048576 -or
+            (Get-Item -LiteralPath $GeneratedConfig).Length -gt 1048576) {
+            Write-Warning 'Codex readiness receipt skipped: host config exceeds the startup bound.'
+            return
+        }
+        $codexConfigHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant()
+        $codexCommand = Resolve-ProjectAtlasCodexCommand 'Codex readiness receipt'
+        $registration = Get-ProjectAtlasCodexMcpRegistryEntry $codexCommand
+        $expectedArguments = Get-ProjectAtlasMcpLaunchArguments $DbPath $ProjectConfigPath $FlatConfigPath $Version
+        if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $registration $Runtime $expectedArguments)) { return }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant() -cne $codexConfigHash) { return }
+        $stateRoot = Get-ProjectAtlasAtlasForwarderStateRoot
+        Assert-ProjectAtlasDirectPath $stateRoot 'Codex readiness state directory'
+        [IO.Directory]::CreateDirectory($stateRoot) | Out-Null
+        Assert-ProjectAtlasDirectPath $stateRoot 'Codex readiness state directory'
+        $receipt = Join-Path $stateRoot 'codex-readiness.json'
+        Assert-ProjectAtlasDirectFilePath $receipt 'Codex readiness receipt'
+        $runtimeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Runtime).Hash.ToLowerInvariant()
+        $directCli = $Runtime
+        if ((Test-Path -LiteralPath $StableMirror -PathType Leaf) -and
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $StableMirror).Hash.ToLowerInvariant() -ceq $runtimeHash) {
+            $directCli = $StableMirror
+        }
+        $payload = [ordered]@{
+            version = Convert-ProjectAtlasVersionTag $Version
+            project_root = [IO.Path]::GetFullPath($Root)
+            runtime = Get-NormalizedPathEntry $Runtime
+            runtime_sha256 = $runtimeHash
+            direct_cli = Get-NormalizedPathEntry $directCli
+            direct_cli_sha256 = $runtimeHash
+            generated_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $GeneratedConfig).Hash.ToLowerInvariant()
+            codex_config = [IO.Path]::GetFullPath($codexConfig)
+            codex_config_sha256 = $codexConfigHash
+            agent_guidance_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'hooks/agent-instructions.txt')).Hash.ToLowerInvariant()
+            skill_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/SKILL.md')).Hash.ToLowerInvariant()
+            language_support_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/references/language-support.md')).Hash.ToLowerInvariant()
+            short_cli_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/references/short-cli.md')).Hash.ToLowerInvariant()
+            registry = [ordered]@{
+                name = $registration.name
+                enabled = $registration.enabled
+                transport = [ordered]@{
+                    type = $registration.transport.type
+                    command = $registration.transport.command
+                    args = @($registration.transport.args)
+                }
+            }
+        } | ConvertTo-Json -Compress -Depth 8
+        $temporary = Join-Path $stateRoot ('.codex-readiness-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            [IO.File]::WriteAllText($temporary, $payload, [Text.UTF8Encoding]::new($false))
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant() -cne $codexConfigHash) { return }
+            Assert-ProjectAtlasDirectFilePath $receipt 'Codex readiness receipt'
+            Move-Item -LiteralPath $temporary -Destination $receipt -Force
+        }
+        finally {
+            if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+        }
+    }
+    catch { Write-Warning "Codex readiness receipt skipped: $($_.Exception.Message)" }
+}
+
 function Test-ProjectAtlasCodexMcpRegistryEntry {
     param(
         [object]$Registration,
@@ -5041,6 +5139,23 @@ function Test-ProjectAtlasCodexMcpRegistryEntry {
         -or -not (Test-ProjectAtlasJsonStringArray $Registration.transport.args)) {
         return $false
     }
+    foreach ($entry in @($Registration, $Registration.transport)) {
+        if (@($entry.PSObject.Properties.Match('env')).Count -gt 0 `
+            -and $null -ne $entry.env `
+            -and (-not (Test-ProjectAtlasJsonObject $entry.env) `
+                -or @($entry.env.PSObject.Properties).Count -ne 0)) {
+            return $false
+        }
+        if (@($entry.PSObject.Properties.Match('env_vars')).Count -gt 0 `
+            -and $null -ne $entry.env_vars `
+            -and (-not ($entry.env_vars -is [array]) -or @($entry.env_vars).Count -ne 0)) {
+            return $false
+        }
+        if (@($entry.PSObject.Properties.Match('cwd')).Count -gt 0 `
+            -and $null -ne $entry.cwd) {
+            return $false
+        }
+    }
     $actualCommand = $Registration.transport.command
     if (-not [System.IO.Path]::IsPathRooted($actualCommand) `
         -or -not [System.IO.Path]::IsPathRooted($VerifiedPath)) {
@@ -5055,7 +5170,7 @@ function Test-ProjectAtlasCodexSkillArtifacts {
     param([string]$PluginSourcePath)
     try {
         $installerPluginRoot = Split-Path -Parent $PSScriptRoot
-        foreach ($skillAsset in @("SKILL.md", "references\language-support.md")) {
+        foreach ($skillAsset in @("SKILL.md", "references\language-support.md", "references\short-cli.md")) {
             $skillPath = Join-Path $PluginSourcePath "skills\projectatlas\$skillAsset"
             $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\$skillAsset"
             if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf) `
@@ -5063,6 +5178,13 @@ function Test-ProjectAtlasCodexSkillArtifacts {
                 -or (Get-ProjectAtlasSha256 $skillPath) -ne (Get-ProjectAtlasSha256 $installerSkillPath)) {
                 return $false
             }
+        }
+        $guidancePath = Join-Path $PluginSourcePath 'hooks/agent-instructions.txt'
+        $installerGuidancePath = Join-Path $installerPluginRoot 'hooks/agent-instructions.txt'
+        if (-not (Test-Path -LiteralPath $guidancePath -PathType Leaf) `
+            -or -not (Test-Path -LiteralPath $installerGuidancePath -PathType Leaf) `
+            -or (Get-ProjectAtlasSha256 $guidancePath) -ne (Get-ProjectAtlasSha256 $installerGuidancePath)) {
+            return $false
         }
         return $true
     }
@@ -5088,7 +5210,7 @@ function Test-ProjectAtlasCodexPluginArtifacts {
         $cachePath = Join-Path $codexRoot ("plugins\cache\projectatlas\projectatlas\" + $ExpectedVersion)
         Assert-ProjectAtlasCodexDirectAncestry $cachePath "installed projectatlas plugin cache" $codexRoot
         foreach ($artifactRoot in @((Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin), $cachePath)) {
-            if ((Get-ProjectAtlasCodexPluginManifestVersion $artifactRoot) -ne $ExpectedVersion `
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $artifactRoot) -cne $ExpectedVersion `
                 -or -not (Test-ProjectAtlasCodexSkillArtifacts $artifactRoot)) {
                 return $false
             }
@@ -5190,7 +5312,7 @@ function Write-ProjectAtlasWorkflowPinReport {
                 if ($foundTag -notmatch '^v[0-9][A-Za-z0-9.+-]*$') {
                     continue
                 }
-                if ($foundTag -ne $releaseTag) {
+                if ($foundTag -cne $releaseTag) {
                     $relativePath = $file.FullName
                     if ($relativePath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
                         $relativePath = $relativePath.Substring($rootPath.Length).TrimStart('\', '/')
@@ -5512,6 +5634,11 @@ $generatedMcpConfigsReady = Test-ProjectAtlasGeneratedMcpConfigReadiness `
     ([string[]]@($mcpConfigPath, $claudeMcpConfigPath, $opencodeConfigPath)) `
     ([string[]]@($mcpConfigSha256, $claudeMcpConfigSha256, $opencodeConfigSha256))
 $verifiedRuntimeReady = Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion
+if ($codexPluginReady -and $codexRegistryReady -and $generatedMcpConfigsReady -and $verifiedRuntimeReady) {
+    Write-ProjectAtlasCodexReadinessReceipt `
+        $ProjectAtlasVersion $ProjectRoot $projectAtlas $mcpConfigPath $stableMirrorPath `
+        $dbPath $projectConfigPath $flatConfigPath
+}
 $stableMirrorReady = $stableMirrorSynchronized `
     -and (Test-ProjectAtlasRuntime $stableMirrorPath $ProjectAtlasVersion)
 $inheritedCommandReady = $verifiedRuntimeReady -and $inheritedCommandMatchesRuntime
