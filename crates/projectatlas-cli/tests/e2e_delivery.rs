@@ -16594,6 +16594,33 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             .args(["-c", "command -v sed"])
             .output()?;
         std::os::unix::fs::symlink(String::from_utf8(sed.stdout)?.trim(), jq_path.join("sed"))?;
+        for (case, mounts) in [
+            ("valid", r#"{"filesystems":[{"target":"/"}]}"#),
+            (
+                "mounted",
+                r#"{"filesystems":[{"target":"/"},{"target":"/tmp/cache/target"}]}"#,
+            ),
+            ("malformed", r#"{"filesystems":[{"source":"untrusted"}]}"#),
+            (
+                "multiple-documents",
+                "{\"filesystems\":[{\"target\":\"/\"}]} {\"filesystems\":[{\"target\":\"/\"}]}",
+            ),
+        ] {
+            let output = StdCommand::new("bash")
+                .arg(&mount_wrapper)
+                .arg(&jq_path)
+                .arg(if case == "valid" { "valid" } else { "invalid" })
+                .env("PROJECTATLAS_FAKE_MOUNTS", mounts)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "POSIX jq-only mount validation failed for {case}:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+        }
         let malformed_manifest = temp.path().join("malformed-plugin-source");
         fs::create_dir_all(malformed_manifest.join(CODEX_PLUGIN_MANIFEST_DIR))?;
         fs::write(

@@ -698,6 +698,44 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     {
         return Err(io::Error::other("disabled MCP identity was not reported").into());
     }
+    let mut foreign_receipt: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    let foreign_root = fixture.path().join("foreign-project");
+    fs::create_dir(&foreign_root)?;
+    foreign_receipt["project_root"] = json!(foreign_root);
+    fs::write(&receipt_path, serde_json::to_vec(&foreign_receipt)?)?;
+    let foreign_output = run_hook_raw(&repo, &path)?;
+    let foreign_identity_unavailable = foreign_output.lines().any(|line| {
+        if cfg!(windows) {
+            line.starts_with("Observed:") && line.contains("codex_mcp_enabled=unavailable")
+        } else {
+            line.starts_with("Observed codex_mcp:") && line.contains("enabled=unavailable")
+        }
+    });
+    if !foreign_output.contains("ProjectAtlas integration incomplete")
+        || !foreign_identity_unavailable
+    {
+        return Err(io::Error::other(format!(
+            "foreign-root receipt identity was reported as current: {foreign_output}"
+        ))
+        .into());
+    }
+    #[cfg(unix)]
+    {
+        write_receipt()?;
+        let backed_state = state_root.with_file_name("projectatlas-backup");
+        fs::rename(&state_root, &backed_state)?;
+        std::os::unix::fs::symlink(&backed_state, &state_root)?;
+        let linked_output = run_hook_raw(&repo, &path)?;
+        if !linked_output.contains("ProjectAtlas integration incomplete")
+            || !linked_output.lines().any(|line| {
+                line.starts_with("Observed codex_mcp:") && line.contains("enabled=unavailable")
+            })
+        {
+            return Err(io::Error::other("symlinked state child supplied MCP identity").into());
+        }
+        fs::remove_file(&state_root)?;
+        fs::rename(backed_state, &state_root)?;
+    }
     let mut malformed = registry.clone();
     malformed["transport"]["type"] = json!("STDIO");
     fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;

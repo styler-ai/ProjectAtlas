@@ -66,7 +66,8 @@ else
 fi
 receipt=${state_base:+$state_base/projectatlas/codex-readiness.json}
 codex_config=${CODEX_HOME:-${HOME:-}/.codex}/config.toml
-if [ -n "$receipt" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
+if [ -n "$receipt" ] && [ -d "$state_base/projectatlas" ] &&
+  [ ! -L "$state_base/projectatlas" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
   [ "$(wc -c < "$receipt")" -le 65536 ] && [ -f "$codex_config" ] &&
   [ "$(wc -c < "$codex_config")" -le 1048576 ]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -93,13 +94,15 @@ except (OSError, ValueError, TypeError, KeyError, AttributeError):
     elif command -v shasum >/dev/null 2>&1; then
       codex_hash=$(shasum -a 256 "$codex_config" | awk '{print $1}')
     fi
+    receipt_json=$(cat "$receipt")
     if [ -n "$codex_hash" ] &&
-      same_json_path "$(cat "$receipt")" '.[0].codex_config | strings' "$codex_config"; then
-      registry=$(jq -ces --arg hash "$codex_hash" --arg version "$expected" '
+      same_json_path "$receipt_json" '.[0].project_root | strings' "$project_root" &&
+      same_json_path "$receipt_json" '.[0].codex_config | strings' "$codex_config"; then
+      registry=$(printf '%s\n' "$receipt_json" | jq -ces --arg hash "$codex_hash" --arg version "$expected" '
         select(length == 1 and .[0].version == $version and
           .[0].codex_config_sha256 == $hash and (.[0].registry | type == "object")) |
         .[0].registry
-      ' "$receipt" 2>/dev/null || true)
+      ' 2>/dev/null || true)
     fi
   fi
 fi

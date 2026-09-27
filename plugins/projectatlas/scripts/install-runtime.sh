@@ -1573,7 +1573,8 @@ if not any(target == "/" or target == root or root.startswith(target + "/") for 
         fi
         return 1
       fi
-      mount_targets=$(printf '%s\n' "$mount_inventory" | jq -c '
+      mount_targets=$(printf '%s\n' "$mount_inventory" | jq -cs '
+          (if length != 1 then error("invalid findmnt stream") else .[0] end) |
           (if type != "object" or ((.filesystems? | type) != "array") then
              error("invalid findmnt inventory")
            elif (.filesystems | length) == 0
