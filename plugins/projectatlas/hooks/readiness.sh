@@ -5,6 +5,15 @@ direct_path=$(command -v projectatlas 2>/dev/null || true)
 case "$direct_path" in /*) ;; *) direct_path= ;; esac
 PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin
 export PATH
+safe_text() {
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$1" | python3 -c 'import sys; sys.stdout.write("".join(char if char.isprintable() else "?" for char in sys.stdin.read()))' 2>/dev/null || printf 'unavailable'
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s' "$1" | jq -Rrs 'gsub("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]"; "?")' 2>/dev/null || printf 'unavailable'
+  else
+    printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?'
+  fi
+}
 
 plugin_root=${PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
 manifest=$plugin_root/.codex-plugin/plugin.json
@@ -27,7 +36,7 @@ while :; do
   project_root=$(dirname -- "$project_root")
 done
 cat "$plugin_root/hooks/agent-instructions.txt"
-printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$skill"
+printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$(safe_text "$skill")"
 if [ ! -f "$skill" ]; then
   printf 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.\n'
   exit 0
@@ -242,7 +251,7 @@ if [ -n "$expected" ] && receipt_valid; then
     if (cd "$project_root" && "$@" >/dev/null 2>&1); then
       reason='installer readiness receipt or host files changed; rerun the installer'
       if receipt_valid; then
-        printf 'ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match %s for this project. Use the version-matched ProjectAtlas skill and repository instructions.\n' "$expected"
+        printf 'ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match %s for this project. Use the version-matched ProjectAtlas skill and repository instructions.\n' "$(safe_text "$expected")"
         exit 0
       fi
     fi
@@ -253,7 +262,7 @@ else
   reason='installer readiness receipt or host files changed; rerun the installer'
 fi
 printf 'ProjectAtlas integration incomplete: %s. Plugin installation alone does not update the native runtime or MCP registry.\n' "$reason"
-printf 'Expected: plugin_version=%s project_db=%s project_config=%s project_root=%s codex_mcp_enabled=true codex_mcp_transport=stdio\n' "$expected" "${db}" "${config:-unavailable}" "$project_root"
+printf 'Expected: plugin_version=%s project_db=%s project_config=%s project_root=%s codex_mcp_enabled=true codex_mcp_transport=stdio\n' "$(safe_text "$expected")" "$(safe_text "$db")" "$(safe_text "${config:-unavailable}")" "$(safe_text "$project_root")"
 show_identity() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c '
@@ -294,21 +303,29 @@ print("Observed %s: version=%s executable=%s db=%s config=%s enabled=%s transpor
     printf 'Observed %s: unavailable (no JSON validator)\n' "$1"
   fi
 }
-printf '%s\n' "$runtime" | show_identity direct_cli
+printf '%s\n' "$(safe_text "$(printf '%s\n' "$runtime" | show_identity direct_cli)")"
 if [ -z "$runtime" ]; then
-  printf 'Observed resolved_direct_cli_path: %s\n' "${direct_path:-unavailable}"
+  printf 'Observed resolved_direct_cli_path: %s\n' "$(safe_text "${direct_path:-unavailable}")"
 fi
-printf '%s\n' "$registry" | show_identity codex_mcp
-printf '%s\n' "$generated" | show_identity generated_mcp
+printf '%s\n' "$(safe_text "$(printf '%s\n' "$registry" | show_identity codex_mcp)")"
+printf '%s\n' "$(safe_text "$(printf '%s\n' "$generated" | show_identity generated_mcp)")"
 shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
 }
-printf 'Use the version-matched ProjectAtlas skill. Do not reset a database.\nRepair command:\nPROJECTATLAS_VERSION='
-shell_quote "v$expected"
-printf ' bash '
-shell_quote "$plugin_root/scripts/install-runtime.sh"
-printf ' '
-shell_quote "$project_root"
-printf '\nVerification commands:\nprojectatlas --format json runtime-info\ncodex mcp get projectatlas --json\n'
+printf 'Use the version-matched ProjectAtlas skill. Do not reset a database.\n'
+if [ "$(safe_text "$expected")" != "$expected" ] ||
+  [ "$(safe_text "$plugin_root")" != "$plugin_root" ] ||
+  [ "$(safe_text "$project_root")" != "$project_root" ]; then
+  printf 'Repair command unavailable: a path contains control characters; select the exact project root manually when invoking the version-matched installer.\n'
+else
+  printf 'Repair command:\nPROJECTATLAS_VERSION='
+  shell_quote "v$expected"
+  printf ' bash '
+  shell_quote "$plugin_root/scripts/install-runtime.sh"
+  printf ' '
+  shell_quote "$project_root"
+  printf '\n'
+fi
+printf 'Verification commands:\nprojectatlas --format json runtime-info\ncodex mcp get projectatlas --json\n'

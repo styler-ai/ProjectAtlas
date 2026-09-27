@@ -2,8 +2,13 @@
 $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $skill = Join-Path $pluginRoot 'skills/projectatlas/SKILL.md'
-$expected = (Get-Content -Raw -LiteralPath (Join-Path $pluginRoot '.codex-plugin/plugin.json') | ConvertFrom-Json).version
+$expected = (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $pluginRoot '.codex-plugin/plugin.json') | ConvertFrom-Json).version
 $reason = 'installer readiness receipt or host files changed; rerun the installer'
+function IdentityValue($value) {
+    if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return 'unavailable' }
+    if ($value -is [bool]) { return $value.ToString().ToLowerInvariant() }
+    return [regex]::Replace([string]$value, '[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', '?')
+}
 $startingRoot = (Get-Location).Path
 $projectRoot = $startingRoot
 $homeRoot = if ($env:USERPROFILE) { [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\') } else { $null }
@@ -22,7 +27,7 @@ while ($true) {
     $projectRoot = $parent
 }
 Get-Content -LiteralPath (Join-Path $pluginRoot 'hooks/agent-instructions.txt')
-Write-Output "Read the complete installed ProjectAtlas skill now: $skill"
+Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
 if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) {
     Write-Output 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.'
     exit 0
@@ -109,7 +114,7 @@ try {
         ($receiptFile.PSObject.Properties.Name -contains 'LinkType' -and $receiptFile.LinkType -eq 'HardLink')) {
         throw 'untrusted readiness state'
     }
-    $receipt = Get-Content -Raw -LiteralPath $receiptPath | ConvertFrom-Json
+    $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
     if ((Get-Item -LiteralPath $codexConfig).Length -gt 1048576 -or
         (Get-Item -LiteralPath $hostConfig).Length -gt 1048576) {
         throw 'oversized host config'
@@ -133,7 +138,7 @@ try {
         $reason = 'project database or generated host config unavailable'
         throw 'not ready'
     }
-    $generated = Get-Content -Raw -LiteralPath $hostConfig | ConvertFrom-Json
+    $generated = Get-Content -Raw -Encoding UTF8 -LiteralPath $hostConfig | ConvertFrom-Json
     if (& $bindingReady $registry $generated) {
         $runtime = & $directPath --format json runtime-info 2>$null | ConvertFrom-Json
     }
@@ -152,13 +157,13 @@ try {
                     throw 'not ready'
                 }
                 $reason = 'Codex MCP or generated config does not match this project/runtime'
-                $generated = Get-Content -Raw -LiteralPath $hostConfig | ConvertFrom-Json
+                $generated = Get-Content -Raw -Encoding UTF8 -LiteralPath $hostConfig | ConvertFrom-Json
                 if ($receipt.runtime_sha256 -ceq (FileSha256 $receipt.runtime) -and
                     $receipt.direct_cli_sha256 -ceq (FileSha256 $directPath) -and
                     $receipt.codex_config_sha256 -ceq (FileSha256 $codexConfig) -and
                     $receipt.generated_sha256 -ceq (FileSha256 $hostConfig) -and
                     (& $bindingReady $registry $generated)) {
-                    Write-Output "ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match $expected for this project. Use the version-matched ProjectAtlas skill and repository instructions."
+                    Write-Output ('ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match {0} for this project. Use the version-matched ProjectAtlas skill and repository instructions.' -f (IdentityValue $expected))
                     exit 0
                 }
     }
@@ -167,22 +172,24 @@ try {
 }
 
 Write-Output "ProjectAtlas integration incomplete: $reason. Plugin installation alone does not update the native runtime or MCP registry."
-function IdentityValue($value) {
-    if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) { return 'unavailable' }
-    if ($value -is [bool]) { return $value.ToString().ToLowerInvariant() }
-    return [string]$value
-}
 $registryArgs = @($registry.transport.args)
 $generatedArgs = @($generated.mcpServers.projectatlas.args)
-Write-Output ('Expected: plugin_version={0} project_db={1} project_config={2} project_root={3} codex_mcp_enabled=true codex_mcp_transport=stdio' -f $expected, $db, (IdentityValue $config), $projectRoot)
+Write-Output ('Expected: plugin_version={0} project_db={1} project_config={2} project_root={3} codex_mcp_enabled=true codex_mcp_transport=stdio' -f (IdentityValue $expected), (IdentityValue $db), (IdentityValue $config), (IdentityValue $projectRoot))
 Write-Output ('Observed: direct_cli_version={0} direct_cli_executable={1}; codex_mcp_version={2} codex_mcp_executable={3} codex_mcp_db={4} codex_mcp_config={5} codex_mcp_enabled={6} codex_mcp_transport={7}; generated_mcp_version={8} generated_mcp_executable={9} generated_mcp_db={10} generated_mcp_config={11} generated_mcp_cwd={12}' -f
     (IdentityValue $runtime.version), (IdentityValue $runtime.executable),
     (IdentityValue $registryArgs[1]), (IdentityValue $registry.transport.command), (IdentityValue $registryArgs[3]), (IdentityValue $registryArgs[5]), (IdentityValue $registry.enabled), (IdentityValue $registry.transport.type),
     (IdentityValue $generatedArgs[1]), (IdentityValue $generated.mcpServers.projectatlas.command), (IdentityValue $generatedArgs[3]), (IdentityValue $generatedArgs[5]), (IdentityValue $generated.mcpServers.projectatlas.cwd))
 Write-Output 'Use the version-matched ProjectAtlas skill. Do not reset a database.'
-Write-Output 'Repair command:'
 function Quote-PowerShellLiteral([string]$value) { return "'" + $value.Replace("'", "''") + "'" }
-Write-Output ('& {0} -ProjectRoot {1} -ProjectAtlasVersion {2}' -f (Quote-PowerShellLiteral (Join-Path $pluginRoot 'scripts/install-runtime.ps1')), (Quote-PowerShellLiteral $projectRoot), (Quote-PowerShellLiteral "v$expected"))
+$installerPath = Join-Path $pluginRoot 'scripts/install-runtime.ps1'
+if ((IdentityValue $installerPath) -cne $installerPath -or
+    (IdentityValue $projectRoot) -cne $projectRoot -or
+    (IdentityValue $expected) -cne $expected) {
+    Write-Output 'Repair command unavailable: a path contains control characters; select the exact project root manually when invoking the version-matched installer.'
+} else {
+    Write-Output 'Repair command:'
+    Write-Output ('& {0} -ProjectRoot {1} -ProjectAtlasVersion {2}' -f (Quote-PowerShellLiteral $installerPath), (Quote-PowerShellLiteral $projectRoot), (Quote-PowerShellLiteral "v$expected"))
+}
 Write-Output 'Verification commands:'
 Write-Output 'projectatlas --format json runtime-info'
 Write-Output 'codex mcp get projectatlas --json'
