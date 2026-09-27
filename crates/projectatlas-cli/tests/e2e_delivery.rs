@@ -21508,6 +21508,23 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         )
         .into());
     }
+    let short_cli = fs::read(
+        plugin_root
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_REFERENCES_DIR)
+            .join("short-cli.md"),
+    )?;
+    if short_cli.as_slice()
+        != include_bytes!(
+            "../../../plugins/projectatlas/skills/projectatlas/references/short-cli.md"
+        )
+    {
+        return Err(io::Error::other(
+            "installed ProjectAtlas short CLI guide differs from the release candidate",
+        )
+        .into());
+    }
     let skill = String::from_utf8(skill_bytes)?;
     let language_support = fs::read_to_string(
         plugin_root

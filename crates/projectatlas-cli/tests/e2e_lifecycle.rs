@@ -737,6 +737,35 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
         return Err(io::Error::other("restored plugin manifest stayed incomplete").into());
     }
+    let guidance_path = plugin_root.join("hooks/agent-instructions.txt");
+    let original_guidance = fs::read(&guidance_path)?;
+    for damaged_guidance in [
+        None,
+        Some(Vec::new()),
+        Some(b" \r\n".to_vec()),
+        Some(vec![b'x'; 65537]),
+    ] {
+        if let Some(contents) = damaged_guidance {
+            fs::write(&guidance_path, contents)?;
+        } else {
+            fs::remove_file(&guidance_path)?;
+        }
+        let output = run_hook_raw(&repo, &path)?;
+        if !output.contains(
+            "ProjectAtlas integration incomplete: bundled agent instructions are missing or invalid",
+        ) || !output.contains("reinstall the version-matched plugin before Atlas use")
+            || output.contains("ProjectAtlas integration ready")
+        {
+            return Err(io::Error::other(format!(
+                "damaged hook guidance did not fail closed: {output}"
+            ))
+            .into());
+        }
+    }
+    fs::write(&guidance_path, original_guidance)?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other("restored hook guidance stayed incomplete").into());
+    }
     if codex_marker.exists() {
         return Err(io::Error::other("readiness hook executed Codex from PATH").into());
     }

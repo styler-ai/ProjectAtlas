@@ -10,7 +10,7 @@ ProjectAtlas is designed to be read at agent startup so you can:
 - Keep structure clean as the repo grows.
 - Track token savings caused by the atlas-first workflow.
 
-ProjectAtlas is an atlas of the entire project, not a shortcut to full-file reads:
+ProjectAtlas is an atlas of the entire project, not a shortcut to full-file reads. For an exact local checkout, the installed `atlas` short CLI is the normal route (`atlas next <task>`, then summary/search/relations and an exact slice). `atlas` forwards to the same native runtime as `projectatlas`; the [shipped skill's short-command guide](../plugins/projectatlas/skills/projectatlas/references/short-cli.md) lists each command and when to call it. Use MCP for registered alias routing, compact session briefs/typed continuations, and cross-worktree federation:
 
 1. Bind the intended control project, then use a registered `worktree` alias or exact `project_path` on each root-scoped call; refresh only when that selected index may be stale.
 2. Call `atlas_session_brief` once with the task and compact output.
@@ -53,22 +53,22 @@ result text is TOON by default, so agents get compact structured payloads withou
 
 ```
 ## Startup
-0. If ProjectAtlas MCP tools are available, use `atlas_*` tools for normal ProjectAtlas command families before shelling out. Expected parity tools include `atlas_init`, `atlas_worktree_list`/`atlas_worktree_add`/`atlas_worktree_remove`, `atlas_config`, `atlas_root`/`atlas_root_set`, `atlas_ignore_list`/`atlas_ignore_init_gitignore`/`atlas_ignore_add`/`atlas_ignore_remove`, `atlas_lint`, `atlas_runtime_info`, `atlas_mcp_config`, `atlas_session_brief`, `atlas_task_status`/`atlas_task_cancel`, and `atlas_map`, plus the existing scan, overview, folder, file, summary, search, slice, health, purpose, token, settings, and watcher-status tools. Use the CLI for plugin install/update/release/CI workflows, MCP server startup/debugging, continuous `watch`, terminal TUI views, or when an MCP tool is unavailable.
+0. Read the installed ProjectAtlas skill at startup and after compaction. Prefer the version-matched `atlas` short CLI for ordinary commands in one exact checkout; consult its short-command guide for function and trigger. Use `atlas_*` MCP tools for registered alias routing, compact session briefs, typed continuations, or cross-worktree federation. Do not assume a plugin update changed the native runtime, Codex MCP binding, or a project database.
 0.1. When a GitHub issue has an OpenSpec change, use the concise v0.3.26 #305 shape: `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, exactly one `Implementation Tasks`, and exactly one canonical `Acceptance and Review Tasks` section. Mirror `openspec/changes/<id>/tasks.md` exactly in the implementation owner slice; existing architecture-review rows remain preserved, but new lists do not need to end with one. Implementation tasks are live progress: check each row immediately after its behavior and required task-level proof pass, and reopen it immediately when review finds the implementation partial, resetting all acceptance/review rows. Keep the five acceptance tasks in exact order, unchecked while implementation is incomplete and prefix-only afterward. Map each mitigation checkbox to owned implementation task IDs with `(Implementation tasks: 1.2, 3.4)` and check it exactly when all referenced tasks are checked. Every open issue also carries exactly one accepted `complexity:*` label; unmapped backlog issues receive no fabricated task fields. Already closed mapped issues retain their historical body as inert state without retroactive acceptance or body validation; reopening an old issue requires migration to the current two-list contract. Keep `openspec/issue-map.json` current, and run `.github/scripts/issue-checklists.py` before check-in, status updates, closure, or release. Do not add issue-level commit/SHA evidence, task receipts, rendered evidence comments, hosted links per checkbox, or per-task test IDs.
 1. Establish the control project root. Every checkout keeps its own `.projectatlas/projectatlas.db`; a registered worktree is addressed with its short alias without changing the agent's current directory.
 1.1. Pull-request IssueOps resolves exactly one referenced owner, checks its candidate task slice against live state, requires unrelated slices to match the accepted base, and fails closed on missing or ambiguous ownership/base; `main` and release checks remain global.
-2. For first-run setup, run `atlas_init` or `projectatlas init`. For an absent registered worktree, run `atlas_init` with its `worktree` alias so ProjectAtlas can hydrate a private candidate from a valid control atlas before exact reconciliation. Both routes create the target DB/config, run the initial index by default, write generated MCP configs, and return purpose and hydration/fallback state.
+2. For first-run setup in one exact checkout, run `atlas init` only when local state is absent. For an absent registered worktree, run `atlas_init` with its `worktree` alias so ProjectAtlas can hydrate a private candidate from a valid control atlas before exact reconciliation. Both routes create the target DB/config, run the initial index by default, write generated MCP configs, and return purpose and hydration/fallback state.
 2.1. When init returns an actionable purpose handoff and bounded isolated subagent execution is available, delegate that exact `low`-scope batch to a purpose curator at the lowest reliable reasoning and cost tier the host supports while the main task continues; otherwise process it in the main agent. Apply with the returned tokens through ProjectAtlas purpose APIs only.
-3. Refresh with `atlas_watch_once`, `atlas_scan`, `projectatlas watch --once`, or `projectatlas scan` only when the SQLite index may be stale after later edits.
+3. Refresh with `atlas watch --once` locally or `atlas_watch_once` for an MCP-routed worktree only when the index may be stale. Use a full `atlas scan` or `atlas_scan` only on typed guidance or an explicit rebuild.
 4. For task-directed MCP work, call `atlas_session_brief` once with `query`, the registered `worktree` alias or legacy `project_path` when needed, and `compact: true`; follow its typed next call directly. Never send both selectors.
 5. Use returned compact summaries and crisp connections for ordinary direct callers or dependencies. Use detailed relations only when resolution, completeness, ambiguity, omitted connections, or exact occurrences matter.
 6. Copy returned selectors and continuations into `atlas_slice`, `atlas_symbol_relations`, or the recommended next tool instead of guessing or repeating discovery.
-7. Fall back to `atlas_overview`, then `atlas_folders` and `atlas_files`, only when the brief is unavailable, has no actionable candidate, or broader repository structure is itself the task. The manual CLI equivalents remain `projectatlas overview`, `projectatlas folders <query>`, and `projectatlas files <query> --folder <path>`.
-8. Run `projectatlas outline <file>` or bounded `projectatlas search <pattern> --file-pattern <glob>` when selected-file context is insufficient.
-9. Run `atlas_slice`, `projectatlas slice <file> --start-line <n> --end-line <m>`, or `projectatlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; copy disambiguators from ProjectAtlas results.
-10. Run `atlas_health` or `projectatlas health-check --source-only --limit 50` when planning cleanup or refactors.
-11. Run `atlas_lint` or `projectatlas lint --report-untracked --purpose-level low`.
-12. Run `atlas_token_report` or `projectatlas token` when the user asks how many tokens ProjectAtlas saved.
+7. For local CLI navigation, start with `atlas next <task>`, then `atlas summary` and an exact slice. Use `atlas overview`, `atlas folders <query>`, and `atlas files <query> --folder <path>` for broader discovery. For MCP navigation, fall back to `atlas_overview`, `atlas_folders`, and `atlas_files` only when the brief has no actionable candidate or broader structure is the task.
+8. Run `atlas outline <file>` or bounded `atlas search <pattern> --file-pattern <glob>` when selected-file context is insufficient.
+9. Run `atlas slice <file> --start-line <n> --end-line <m>` or `atlas symbols slice <file> <symbol> --symbol-parent <parent> --symbol-kind <kind> --symbol-line <line>` for exact source; copy disambiguators from ProjectAtlas results. Use `atlas_slice` on the MCP route.
+10. Run `atlas health --source-only --limit 50` when planning cleanup or refactors; `atlas_health` is the MCP equivalent.
+11. Run `atlas lint --report-untracked --purpose-level low`; use `atlas_lint` for an MCP-routed worktree.
+12. Run `atlas token` when the user asks how many tokens ProjectAtlas saved; use `atlas_token_report` for an MCP-routed worktree.
 13. Only then run language-server lookups or broad file reads on selected files.
 
 Note: the non-source file list (`.projectatlas/projectatlas-nonsource-files.toon`) is agent-maintained input for
@@ -363,7 +363,7 @@ and the expected release `version` when a plugin manifest or `PROJECTATLAS_VERSI
 
 ## MCP Tool Sequence
 
-Prefer MCP tools when the harness exposes them. Use CLI fallbacks only when the matching MCP tool is unavailable or the command is a reviewed exception.
+Prefer the version-matched `atlas` CLI for one exact checkout. Use MCP when registered aliases, compact session briefs/typed continuations, or cross-worktree federation are needed. The `projectatlas` examples below use the same command arguments as the short `atlas` forwarder.
 
 - `atlas_worktree_list`, `atlas_worktree_add`, and `atlas_worktree_remove`: list existing structural worktrees, register one stable selector under a short alias, or final-sync and retire only that ProjectAtlas registration. They never manage Git lifecycle.
 - Per-call `worktree`: select `main` or one registered worktree for normal concurrent calls without changing directory or process state. `atlas_set_project_path` and per-call `project_path` remain compatibility routes for an exact unregistered repository.
@@ -402,7 +402,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 
 ## When To Call What
 
-| Situation | Preferred MCP tool | CLI fallback |
+| Situation | MCP route when needed | Equivalent CLI route (`atlas` preferred) |
 | --- | --- | --- |
 | List and register an existing Git worktree | `atlas_worktree_list`, then `atlas_worktree_add` with its stable selector and a short alias | No CLI lifecycle equivalent; Git creates/manages the worktree and MCP registers only ProjectAtlas state |
 | Route a registered worktree from the control checkout | Per-call `worktree` alias; use `main` for control | Run the CLI from the exact checkout when MCP is unavailable |
@@ -439,15 +439,15 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Corrupt or intentionally discarded local index | `atlas_reset_index` dry-run first | `projectatlas reset-index --dry-run`, then `projectatlas reset-index --apply` |
 | Migrating old `.purpose` files | `atlas_strip_legacy_purpose` dry-run first | `projectatlas strip-legacy-purpose --dry-run` |
 
-Default sequence for coding tasks:
+Default sequence for single-checkout coding tasks (use the MCP column above when routed-worktree behavior is needed):
 
 1. Bind the intended project and refresh if stale.
-2. Call one compact task-oriented session brief.
-3. Follow its returned summary, search, relation, health, or slice call.
+2. Call `atlas next <task>` once.
+3. Follow its ranked file/folder recommendation with `atlas summary`, search, or relations as needed.
 4. Continue from returned selectors without rediscovery.
 5. Read the smallest exact slice.
 6. Edit.
-7. Watch once or scan.
+7. Run `atlas watch --once` for changed files; scan only on typed full-refresh guidance.
 8. Run health/lint/tests.
 9. Report tokens only when requested.
 

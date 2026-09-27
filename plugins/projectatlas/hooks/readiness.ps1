@@ -42,7 +42,17 @@ while ($true) {
     if (-not $parent -or $parent -eq $projectRoot) { break }
     $projectRoot = $parent
 }
-Get-Content -LiteralPath (Join-Path $pluginRoot 'hooks/agent-instructions.txt')
+try {
+    $guidancePath = Join-Path $pluginRoot 'hooks/agent-instructions.txt'
+    $guidanceFile = Get-Item -LiteralPath $guidancePath -ErrorAction Stop
+    if ($guidanceFile.Length -eq 0 -or $guidanceFile.Length -gt 65536) { throw 'invalid guidance size' }
+    $guidance = Get-Content -Raw -Encoding UTF8 -LiteralPath $guidancePath -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($guidance)) { throw 'empty guidance' }
+} catch {
+    Write-Output 'ProjectAtlas integration incomplete: bundled agent instructions are missing or invalid; reinstall the version-matched plugin before Atlas use.'
+    exit 0
+}
+Write-Output $guidance.TrimEnd()
 Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
 if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) {
     Write-Output 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.'

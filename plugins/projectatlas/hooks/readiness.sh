@@ -67,7 +67,21 @@ while :; do
     [ -f "$project_root/projectatlas.toml" ]; } && break
   project_root=$(dirname -- "$project_root")
 done
-cat "$plugin_root/hooks/agent-instructions.txt"
+guidance_path=$plugin_root/hooks/agent-instructions.txt
+guidance_size=
+if [ -f "$guidance_path" ]; then
+  guidance_size=$(wc -c < "$guidance_path" 2>/dev/null || true)
+fi
+guidance=
+if [ -n "$guidance_size" ] && [ "$guidance_size" -gt 0 ] && [ "$guidance_size" -le 65536 ]; then
+  guidance=$(cat "$guidance_path" 2>/dev/null) || guidance=
+fi
+case "$guidance" in *[![:space:]]*) guidance_ready=true ;; *) guidance_ready=false ;; esac
+if [ "$guidance_ready" = false ]; then
+  printf 'ProjectAtlas integration incomplete: bundled agent instructions are missing or invalid; reinstall the version-matched plugin before Atlas use.\n'
+  exit 0
+fi
+printf '%s\n' "$guidance"
 printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$(safe_text "$skill")"
 if [ ! -f "$skill" ]; then
   printf 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.\n'
