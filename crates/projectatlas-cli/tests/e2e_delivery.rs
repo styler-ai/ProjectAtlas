@@ -172,6 +172,7 @@ const DOCS_WORKFLOW_FILE_NAME: &str = "04-docs.yml";
 const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled";
 
 const CODEX_CONFIG_DIR: &str = ".codex";
+const AGENT_INSTRUCTIONS_RELATIVE_PATH: &str = "hooks/agent-instructions.txt";
 
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 
@@ -6851,7 +6852,7 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         || receipt["registry"]["transport"]["command"] != json!(runtime)
         || receipt["agent_guidance_sha256"]
             != json!(sha256_hex(&fs::read(
-                plugin_source.join("hooks/agent-instructions.txt")
+                plugin_source.join(AGENT_INSTRUCTIONS_RELATIVE_PATH)
             )?))
         || receipt["skill_sha256"]
             != json!(sha256_hex(&fs::read(
@@ -13764,7 +13765,7 @@ fn write_fake_codex_projectatlas_integration(
         )?;
         fs::create_dir_all(root.join("hooks"))?;
         fs::write(
-            root.join("hooks/agent-instructions.txt"),
+            root.join(AGENT_INSTRUCTIONS_RELATIVE_PATH),
             include_bytes!("../../../plugins/projectatlas/hooks/agent-instructions.txt"),
         )?;
     }
@@ -14627,7 +14628,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         .join(PROJECTATLAS_SKILL_NAME)
         .join(SKILL_REFERENCES_DIR)
         .join(SHORT_CLI_FILE_NAME);
-    let cached_guidance = installed_cache.join("hooks/agent-instructions.txt");
+    let cached_guidance = installed_cache.join(AGENT_INSTRUCTIONS_RELATIVE_PATH);
     let fake_plugin_source_json =
         serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -14886,7 +14887,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         ))
         .into());
     }
-    let source_guidance = fake_plugin_source.join("hooks/agent-instructions.txt");
+    let source_guidance = fake_plugin_source.join(AGENT_INSTRUCTIONS_RELATIVE_PATH);
     fs::write(&source_guidance, b"stale hook guidance")?;
     let stale_guidance_output = run_plugin_installer_with_codex_fixture(
         &workspace_root,
@@ -21518,7 +21519,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         &["hooks", "SessionStart", "0", "hooks", "0", "commandWindows"],
         "\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"",
     )?;
-    let hook_asset = fs::read_to_string(plugin_root.join("hooks/agent-instructions.txt"))?;
+    let hook_asset = fs::read_to_string(plugin_root.join(AGENT_INSTRUCTIONS_RELATIVE_PATH))?;
     let posix_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.sh"))?;
     let windows_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.ps1"))?;
     if !hook_asset.contains("ProjectAtlas skill")

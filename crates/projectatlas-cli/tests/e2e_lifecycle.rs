@@ -126,6 +126,8 @@ const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
 const CODEX_FIXTURE_DIR_NAME: &str = ".codex";
+const HOOKS_DIR_NAME: &str = "hooks";
+const POSIX_READINESS_HOOK_FILE_NAME: &str = "readiness.sh";
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
@@ -204,7 +206,9 @@ fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn E
 fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<(), Box<dyn Error>> {
     let workspace = workspace_root()?;
     let plugin_root = workspace.join("plugins").join("projectatlas");
-    let hook_asset = plugin_root.join("hooks").join("agent-instructions.txt");
+    let hook_asset = plugin_root
+        .join(HOOKS_DIR_NAME)
+        .join("agent-instructions.txt");
     let shadow = tempfile::tempdir()?;
     #[cfg(windows)]
     fs::write(
@@ -237,7 +241,7 @@ fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<()
             .env("PLUGIN_ROOT", &plugin_root)
             .env("USERPROFILE", shadow.path())
             .env("LOCALAPPDATA", shadow.path().join("isolated-local"))
-            .env("CODEX_HOME", shadow.path().join("isolated-codex"))
+            .env("CODEX_HOME", shadow.path().join(CODEX_FIXTURE_DIR_NAME))
             .env("PATH", path);
         command.output()?
     };
@@ -247,7 +251,7 @@ fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<()
         .env("PLUGIN_ROOT", &plugin_root)
         .env("HOME", shadow.path())
         .env("XDG_STATE_HOME", shadow.path().join("isolated-state"))
-        .env("CODEX_HOME", shadow.path().join("isolated-codex"))
+        .env("CODEX_HOME", shadow.path().join(CODEX_FIXTURE_DIR_NAME))
         .env("PATH", path)
         .output()?;
     let stdout = String::from_utf8(output.stdout)?;
@@ -597,7 +601,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .output()?;
             #[cfg(not(windows))]
             let output = StdCommand::new("sh")
-                .arg(plugin_root.join("hooks/readiness.sh"))
+                .arg(
+                    plugin_root
+                        .join(HOOKS_DIR_NAME)
+                        .join(POSIX_READINESS_HOOK_FILE_NAME),
+                )
                 .current_dir(project_root)
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("CODEX_MCP_FIXTURE", &registry_path)
@@ -982,7 +990,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
                     .to_path_buf(),
             ])?;
-            let hook_path = plugin_root.join("hooks/readiness.sh");
+            let hook_path = plugin_root
+                .join(HOOKS_DIR_NAME)
+                .join(POSIX_READINESS_HOOK_FILE_NAME);
             let original_hook = fs::read_to_string(&hook_path)?;
             let isolated_hook = original_hook.replace(
                 "PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
