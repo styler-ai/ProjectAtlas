@@ -34,7 +34,7 @@ Packaged hook and installer fixtures own the causal #620 checks. Actual Codex ho
 ### Requirement: Packaged agent guidance routes the short CLI and MCP truthfully
 The packaged skill SHALL identify the installed `atlas` short command as the preferred route for ordinary operations in one exact checkout, describe every public CLI command family's function and trigger, and reserve MCP for registered alias routing, compact session briefs/typed continuations, and cross-worktree federation. The installer SHALL verify the hook instruction asset, main skill, language-support reference, and short-command guide in the source and cache and bind each digest into the readiness receipt. The trusted startup hook SHALL remind the agent to read the version-matched skill again after compaction, but SHALL NOT emit mutable hook guidance before validating its receipt digest. A missing, unreadable, or stale skill/guidance asset MUST be reported as integration incomplete; the hook cannot certify that a model internally read the skill.
 
-The plugin source, installed cache, and readiness hook SHALL require the manifest's skill route to select the shipped `./skills/` directory. On POSIX hosts, the hook's curated utility path SHALL include system-managed non-FHS locations needed by supported Linux installations without restoring arbitrary project-influenced PATH entries.
+The plugin source, installed cache, and readiness hook SHALL require the manifest's `projectatlas` name and skill route to select the shipped `./skills/` directory. On POSIX hosts, the hook's curated utility path SHALL include system-managed non-FHS locations needed by supported Linux installations without restoring arbitrary project-influenced PATH entries.
 
 #### Scenario: Startup or compaction with complete guidance
 - **WHEN** a trusted plugin hook runs at startup or after compaction with packaged guidance and a validated readiness receipt for the selected project
@@ -48,9 +48,9 @@ The plugin source, installed cache, and readiness hook SHALL require the manifes
 - **WHEN** a plugin source or cache lacks the shipped hook instructions, main skill, language-support reference, or short-command guide, or any of those assets changes after the installer recorded readiness
 - **THEN** the installer refuses to attest that plugin artifact or the hook reports integration incomplete until the matching asset is restored
 
-#### Scenario: Skill route or system utility path differs
-- **WHEN** a version-matched manifest redirects the skill directory, or a supported Linux host provides required utilities only through its system-managed non-FHS path
-- **THEN** the redirected manifest is incomplete, while the trusted non-FHS utilities can verify an otherwise matching installation without admitting project PATH shadows
+#### Scenario: Plugin identity, skill route, or system utility path differs
+- **WHEN** a version-matched manifest changes the plugin name or redirects the skill directory, or a supported Linux host provides required utilities only through its system-managed non-FHS path
+- **THEN** the mismatched manifest is incomplete, while the trusted non-FHS utilities can verify an otherwise matching installation without admitting project PATH shadows
 
 ### Requirement: Existing project databases are preserved during integration repair
 The version-matched installer MUST refuse incompatible schema or project binding rather than reset, downgrade, replace, or silently rebind another project's database.

@@ -12578,6 +12578,10 @@ Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":
 if (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2") {
     throw "Redirected plugin skill route was accepted."
 }
+Set-Content -LiteralPath $manifestPath -Value '{"name":"other","version":"0.4.2","skills":"./skills/"}'
+if (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2") {
+    throw "Wrong plugin manifest name was accepted."
+}
 Set-Content -LiteralPath $manifestPath -Value '[{"name":"projectatlas","version":"0.4.2"}]'
 if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" `
     -or (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2")) {
@@ -16821,15 +16825,28 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
         r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./other-skills/"}"#,
     )?;
     let redirected = run("route-invalid", valid_inventory)?;
-    if !invalid.status.success() || !valid.status.success() || !redirected.status.success() {
+    fs::write(
+        manifest_root
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        r#"{"name":"other","version":"0.5.0-rc2","skills":"./skills/"}"#,
+    )?;
+    let wrong_name = run("route-invalid", valid_inventory)?;
+    if !invalid.status.success()
+        || !valid.status.success()
+        || !redirected.status.success()
+        || !wrong_name.status.success()
+    {
         return Err(io::Error::other(format!(
-            "POSIX Python-only inventory did not reject malformed and accept valid state:\ninvalid={} {}\nvalid={} {}\nredirected={} {}",
+            "POSIX Python-only inventory did not reject malformed and accept valid state:\ninvalid={} {}\nvalid={} {}\nredirected={} {}\nwrong-name={} {}",
             String::from_utf8_lossy(&invalid.stdout),
             String::from_utf8_lossy(&invalid.stderr),
             String::from_utf8_lossy(&valid.stdout),
             String::from_utf8_lossy(&valid.stderr),
             String::from_utf8_lossy(&redirected.stdout),
-            String::from_utf8_lossy(&redirected.stderr)
+            String::from_utf8_lossy(&redirected.stderr),
+            String::from_utf8_lossy(&wrong_name.stdout),
+            String::from_utf8_lossy(&wrong_name.stderr)
         ))
         .into());
     }
@@ -16965,6 +16982,27 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
                 "POSIX jq-only reader accepted redirected skill route:\n{}\n{}",
                 String::from_utf8_lossy(&jq_redirected.stdout),
                 String::from_utf8_lossy(&jq_redirected.stderr)
+            ))
+            .into());
+        }
+        fs::write(
+            redirected_manifest
+                .join(CODEX_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"other","version":"0.5.0-rc2","skills":"./skills/"}"#,
+        )?;
+        let jq_wrong_name = StdCommand::new("bash")
+            .arg(&wrapper)
+            .arg(&jq_path)
+            .arg(&fake_codex)
+            .arg("route-invalid")
+            .arg(&redirected_manifest)
+            .output()?;
+        if !jq_wrong_name.status.success() {
+            return Err(io::Error::other(format!(
+                "POSIX jq-only reader accepted wrong plugin name:\n{}\n{}",
+                String::from_utf8_lossy(&jq_wrong_name.stdout),
+                String::from_utf8_lossy(&jq_wrong_name.stderr)
             ))
             .into());
         }

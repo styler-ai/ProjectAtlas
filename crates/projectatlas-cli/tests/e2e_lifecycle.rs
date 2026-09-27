@@ -755,6 +755,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     let redirected_skill_manifest = serde_json::to_vec(&json!({
         "name": "projectatlas", "version": version, "skills": "./other-skills/"
     }))?;
+    let wrong_name_manifest = serde_json::to_vec(&json!({
+        "name": "other", "version": version, "skills": "./skills/"
+    }))?;
     let linefeed_manifest = serde_json::to_vec(
         &json!({"name": "projectatlas", "version": format!("{version}\n"), "skills": "./skills/"}),
     )?;
@@ -766,6 +769,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         Some(truncated_manifest.as_bytes()),
         Some(array_manifest.as_bytes()),
         Some(redirected_skill_manifest.as_slice()),
+        Some(wrong_name_manifest.as_slice()),
         Some(linefeed_manifest.as_slice()),
         Some(oversized_manifest.as_slice()),
     ] {

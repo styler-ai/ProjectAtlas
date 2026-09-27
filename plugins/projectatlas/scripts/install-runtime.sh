@@ -2135,14 +2135,14 @@ try:
     with open(sys.argv[1], encoding="utf-8") as stream:
         data = json.load(stream)
     version = data["version"]
-    if (data.get("skills") == "./skills/" and isinstance(version, str) and
+    if (data.get("name") == "projectatlas" and data.get("skills") == "./skills/" and isinstance(version, str) and
         version and not any(char in version for char in "\r\n\0")):
         print(version)
 except (ValueError, TypeError, KeyError, OSError):
     pass
 ' "$manifest_path" 2>/dev/null || printf '%s\n' ""
   elif command -v jq >/dev/null 2>&1; then
-    jq -r -s 'if length == 1 and (.[0] | type == "object") and .[0].skills == "./skills/" and (.[0].version | type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null) then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
+    jq -r -s 'if length == 1 and (.[0] | type == "object") and .[0].name == "projectatlas" and .[0].skills == "./skills/" and (.[0].version | type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null) then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
   else
     printf '%s\n' ""
   fi
