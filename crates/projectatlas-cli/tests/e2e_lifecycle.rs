@@ -127,6 +127,7 @@ const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
 const CODEX_FIXTURE_DIR_NAME: &str = ".codex";
 const HOOKS_DIR_NAME: &str = "hooks";
+#[cfg(unix)]
 const POSIX_READINESS_HOOK_FILE_NAME: &str = "readiness.sh";
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
