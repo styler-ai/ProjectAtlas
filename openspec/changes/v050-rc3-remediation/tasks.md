@@ -7,7 +7,7 @@
 ## 2. Plugin and runtime readiness (#620)
 
 - [x] 2.1 Trace supported Codex marketplace, trusted hook, packaged installer, fresh-shell CLI resolution, generated config, and MCP registration paths; choose the smallest truthful readiness/repair route that the host actually supports.
-- [ ] 2.2 Implement and exercise older-runtime/registry, version-matched repair, wrong-project/newer-schema refusal, disabled-hook manual diagnostics, and stale-parent versus fresh-child states without automatic project mutation or database replacement; reserve live Codex trust/disable and running-host restart proof for #492 installed acceptance.
+- [x] 2.2 Implement and exercise older-runtime/registry, version-matched repair, wrong-project/newer-schema refusal, disabled-hook manual diagnostics, and stale-parent versus fresh-child states without automatic project mutation or database replacement; reserve live Codex trust/disable and running-host restart proof for #492 installed acceptance.
 - [ ] 2.3 Run the owning installer/plugin/host checks and independent review; reconcile documentation and architecture with the supported lifecycle and resolve every material finding.
 
 ## 3. DOCX font-specific symbol continuity (#624)
