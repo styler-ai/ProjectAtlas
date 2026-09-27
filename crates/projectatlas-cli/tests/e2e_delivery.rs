@@ -13999,8 +13999,11 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     #[cfg(windows)]
     let (registered_runtime, registered_db, registered_config) =
         (runtime.clone(), db.clone(), atlas_dir.join("config.toml"));
+    let current_registry_path = isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME);
+    let good_registry_path = current_registry_path
+        .with_file_name(format!("{FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME}.good"));
     fs::write(
-        isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME),
+        &current_registry_path,
         serde_json::to_vec(&json!({
             "name": "projectatlas",
             "enabled": true,
@@ -14016,6 +14019,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
             }
         }))?,
     )?;
+    fs::copy(&current_registry_path, &good_registry_path)?;
     let fake_codex_script = if cfg!(windows) {
         format!(
             "@echo off\r\necho %*>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nif \"%1\"==\"plugin\" if \"%2\"==\"marketplace\" if \"%3\"==\"list\" (\r\n  echo {{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"plugin\" if \"%2\"==\"list\" (\r\n  echo {plugin_list_json}\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"add\" (\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (\r\n  if exist \"%PROJECTATLAS_FAKE_CODEX_STATE%\" (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\"\r\n  ) else (\r\n    type \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE%\"\r\n  )\r\n  exit /b 0\r\n)\r\nexit /b 0\r\n"
@@ -14023,6 +14027,23 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
     } else {
         format!(
             "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"marketplace\" ] && [ \"${{3:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"plugin\" ] && [ \"${{2:-}}\" = \"list\" ]; then\n  printf '%s\\n' '{plugin_list_json}'\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"add\" ]; then\n  printf '%s\\n' current > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\n  exit 0\nfi\nif [ \"${{1:-}}\" = \"mcp\" ] && [ \"${{2:-}}\" = \"get\" ]; then\n  if [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ]; then\n    cat \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT\"\n  else\n    cat \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_STALE\"\n  fi\n  exit 0\nfi\nexit 0\n"
+        )
+    };
+    let fake_codex_script = if cfg!(windows) {
+        fake_codex_script.replace(
+            "  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"",
+            "  copy /y \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%.good\" \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\" >nul\r\n  echo current>\"%PROJECTATLAS_FAKE_CODEX_STATE%\"",
+        ).replace(
+            "if \"%1\"==\"mcp\" if \"%2\"==\"get\" (",
+            "if \"%1\"==\"mcp\" if \"%2\"==\"remove\" (\r\n  del /q \"%PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT%\" \"%PROJECTATLAS_FAKE_CODEX_STATE%\"\r\n  exit /b 0\r\n)\r\nif \"%1\"==\"mcp\" if \"%2\"==\"get\" (",
+        )
+    } else {
+        fake_codex_script.replace(
+            "  printf '%s\\n' current > \"$PROJECTATLAS_FAKE_CODEX_STATE\"",
+            "  cp \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT.good\" \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT\"\n  printf '%s\\n' current > \"$PROJECTATLAS_FAKE_CODEX_STATE\"",
+        ).replace(
+            "if [ \"${1:-}\" = \"mcp\" ] && [ \"${2:-}\" = \"get\" ]; then",
+            "if [ \"${1:-}\" = \"mcp\" ] && [ \"${2:-}\" = \"remove\" ]; then\n  rm -f -- \"$PROJECTATLAS_FAKE_CODEX_REGISTRY_CURRENT\" \"$PROJECTATLAS_FAKE_CODEX_STATE\"\n  exit 0\nfi\nif [ \"${1:-}\" = \"mcp\" ] && [ \"${2:-}\" = \"get\" ]; then",
         )
     };
     write_executable_script(&fake_codex, &fake_codex_script)?;
@@ -14426,6 +14447,41 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         {
             return Err(io::Error::other(format!(
                 "hook did not distinguish stale host PATH from repaired fresh child:\nstale={stale_host}\nfresh={fresh_host}"
+            ))
+            .into());
+        }
+        let mut disabled_registry = read_json_file(&current_registry_path)?;
+        disabled_registry["enabled"] = json!(false);
+        fs::write(
+            &current_registry_path,
+            serde_json::to_vec(&disabled_registry)?,
+        )?;
+        let prior_calls = fs::read_to_string(&fake_codex_log)?.lines().count();
+        let repaired = run_plugin_installer_with_codex_fixture(
+            &workspace_root,
+            &repo,
+            &runtime,
+            &stale_runtime_dir,
+            &isolated_home,
+        )?;
+        let repaired_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&repaired.stdout),
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+        let repair_calls = fs::read_to_string(&fake_codex_log)?
+            .lines()
+            .skip(prior_calls)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !repaired_text.contains("Codex MCP registry updated to ProjectAtlas runtime")
+            || !repair_calls.contains("mcp remove projectatlas")
+            || !repair_calls.contains("mcp add projectatlas --")
+            || !run_hook(runtime.parent().ok_or("runtime has no parent")?)?
+                .contains("ProjectAtlas integration ready")
+        {
+            return Err(io::Error::other(format!(
+                "disabled MCP entry was not repaired by the packaged installer:\n{repaired_text}\n{repair_calls}"
             ))
             .into());
         }

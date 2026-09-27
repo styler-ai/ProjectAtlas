@@ -2505,10 +2505,7 @@ update_codex_mcp_registry() {
   elif [ -f "$flat_config" ]; then
     expected_config=$flat_config
   fi
-  if [ -n "$existing" ] && printf '%s\n' "$existing" | grep -F "$projectatlas_bin" >/dev/null &&
-    printf '%s\n' "$existing" | grep -F "$runtime_version" >/dev/null &&
-    printf '%s\n' "$existing" | grep -F "$atlas_dir/projectatlas.db" >/dev/null &&
-    { [ -z "$expected_config" ] || printf '%s\n' "$existing" | grep -F "$expected_config" >/dev/null; }; then
+  if [ -n "$existing" ] && codex_mcp_registry_ready; then
     printf 'Codex MCP registry already points to ProjectAtlas %s for %s.\n' "$runtime_version" "$atlas_dir/projectatlas.db"
     return 0
   fi
