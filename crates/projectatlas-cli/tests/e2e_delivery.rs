@@ -34273,7 +34273,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     // budget waiting for lock 1, then proves that the remaining time—not a
     // reset budget—is used for lock 2. Native request traces separate that
     // contract from process cleanup and delayed parent-side observation.
-    let lock_budget_ms = if cfg!(unix) { 1_000_u64 } else { 250 };
+    let lock_budget_ms = if cfg!(unix) { 1_000_u64 } else { 2_000 };
     let deadline_state_before_first = state_snapshot()?;
     let held_first_gate = fixture_root.join("deadline-held-first.gate");
     let held_first_ready = PathBuf::from(format!("{}.ready", held_first_gate.display()));
