@@ -13989,6 +13989,16 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
             }
         }))?,
     )?;
+    // macOS temp paths can enter through /var while the installer records /private/var.
+    #[cfg(unix)]
+    let (registered_runtime, registered_db, registered_config) = (
+        fs::canonicalize(&runtime)?,
+        fs::canonicalize(&db)?,
+        fs::canonicalize(atlas_dir.join("config.toml"))?,
+    );
+    #[cfg(windows)]
+    let (registered_runtime, registered_db, registered_config) =
+        (runtime.clone(), db.clone(), atlas_dir.join("config.toml"));
     fs::write(
         isolated_home.join(FAKE_CODEX_REGISTRY_CURRENT_FILE_NAME),
         serde_json::to_vec(&json!({
@@ -13996,11 +14006,11 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
             "enabled": true,
             "transport": {
                 "type": "stdio",
-                "command": runtime,
+                "command": registered_runtime,
                 "args": [
                     "--require-version", env!("CARGO_PKG_VERSION"),
-                    "--db", db,
-                    "--config", atlas_dir.join("config.toml"),
+                    "--db", registered_db,
+                    "--config", registered_config,
                     "mcp"
                 ]
             }

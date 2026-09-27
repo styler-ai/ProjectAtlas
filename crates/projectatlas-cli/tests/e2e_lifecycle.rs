@@ -355,7 +355,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         )?;
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
     }
+    let runtime_sha256 = sha256_hex(&fs::read(runtime_command)?);
     let write_receipt = || -> Result<(), Box<dyn Error>> {
+        writeln!(io::stderr(), "readiness receipt: start")?;
         let registration: Value =
             serde_json::from_slice(&fs::read(&registry_path)?).unwrap_or(Value::Null);
         fs::write(&codex_config, serde_json::to_vec(&registration)?)?;
@@ -372,15 +374,16 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "version": version,
             "project_root": repo,
             "runtime": runtime_command,
-            "runtime_sha256": sha256_hex(&fs::read(runtime_command)?),
+            "runtime_sha256": runtime_sha256,
             "direct_cli": runtime_command,
-            "direct_cli_sha256": sha256_hex(&fs::read(runtime_command)?),
+            "direct_cli_sha256": runtime_sha256,
             "generated_sha256": sha256_hex(&fs::read(&host_config)?),
             "codex_config": codex_config,
             "codex_config_sha256": sha256_hex(&fs::read(&codex_config)?),
             "registry": projected
         });
         fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+        writeln!(io::stderr(), "readiness receipt: complete")?;
         Ok(())
     };
     let path = std::env::join_paths(
@@ -396,8 +399,16 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             &std::env::var_os("PATH").unwrap_or_default(),
         )),
     )?;
+    let hook_invocations = std::cell::Cell::new(0);
     let run_hook_raw =
         |project_root: &Path, process_path: &std::ffi::OsStr| -> Result<String, Box<dyn Error>> {
+            let invocation = hook_invocations.get() + 1;
+            hook_invocations.set(invocation);
+            writeln!(
+                io::stderr(),
+                "readiness hook invocation {invocation}: {}",
+                project_root.display()
+            )?;
             #[cfg(windows)]
             let output = StdCommand::new("powershell.exe")
                 .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -433,6 +444,10 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 ))
                 .into());
             }
+            writeln!(
+                io::stderr(),
+                "readiness hook invocation {invocation}: completed"
+            )?;
             Ok(String::from_utf8(output.stdout)?)
         };
     let run_hook =
