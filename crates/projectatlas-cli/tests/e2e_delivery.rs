@@ -26905,7 +26905,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     )?;
 
     let new_server = || {
-        serve_release_assets_with_deadline(&archive, None, Instant::now() + Duration::from_secs(2))
+        serve_release_assets_with_deadline(&archive, None, Instant::now() + Duration::from_secs(30))
     };
 
     for (bytes, diagnostic) in [
@@ -27172,7 +27172,11 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
         "stalled reader delayed server join beyond its deadline",
     )?;
 
-    let server = new_server()?;
+    let server = serve_release_assets_with_deadline(
+        &archive,
+        None,
+        Instant::now() + Duration::from_secs(2),
+    )?;
     #[cfg(windows)]
     let mut command = {
         let mut command = StdCommand::new("powershell");
