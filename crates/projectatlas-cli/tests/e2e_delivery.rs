@@ -469,6 +469,7 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const SKILL_REFERENCES_DIR: &str = "references";
 
 const LANGUAGE_SUPPORT_FILE_NAME: &str = "language-support.md";
+const SHORT_CLI_FILE_NAME: &str = "short-cli.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
@@ -13739,6 +13740,12 @@ fn write_fake_codex_projectatlas_integration(
                 "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
             ),
         )?;
+        fs::write(
+            references.join(SHORT_CLI_FILE_NAME),
+            include_bytes!(
+                "../../../plugins/projectatlas/skills/projectatlas/references/short-cli.md"
+            ),
+        )?;
     }
     Ok((marketplace_root, plugin_source, installed_cache))
 }
@@ -14594,6 +14601,11 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
         .join(PROJECTATLAS_SKILL_NAME)
         .join(SKILL_REFERENCES_DIR)
         .join(LANGUAGE_SUPPORT_FILE_NAME);
+    let cached_short_cli = installed_cache
+        .join(PROJECTATLAS_SKILL_DIR)
+        .join(PROJECTATLAS_SKILL_NAME)
+        .join(SKILL_REFERENCES_DIR)
+        .join(SHORT_CLI_FILE_NAME);
     let fake_plugin_source_json =
         serde_json::to_string(&fake_plugin_source.to_string_lossy().to_string())?;
     let fake_codex = fake_path.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
@@ -14705,6 +14717,14 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
             &cached_reference,
             include_bytes!(
                 "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+            )
+            .as_slice(),
+        ),
+        (
+            "cache",
+            &cached_short_cli,
+            include_bytes!(
+                "../../../plugins/projectatlas/skills/projectatlas/references/short-cli.md"
             )
             .as_slice(),
         ),

@@ -435,6 +435,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         "hooks/readiness.sh",
         "hooks/agent-instructions.txt",
         "skills/projectatlas/SKILL.md",
+        "skills/projectatlas/references/short-cli.md",
     ] {
         let destination = plugin_root.join(relative);
         fs::create_dir_all(destination.parent().ok_or("plugin asset has no parent")?)?;
@@ -540,6 +541,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "generated_sha256": sha256_hex(&fs::read(&host_config)?),
             "codex_config": codex_config,
             "codex_config_sha256": sha256_hex(&fs::read(&codex_config)?),
+            "short_cli_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/references/short-cli.md"))?),
             "registry": projected
         });
         fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
@@ -765,6 +767,28 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::write(&guidance_path, original_guidance)?;
     if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
         return Err(io::Error::other("restored hook guidance stayed incomplete").into());
+    }
+    let short_cli_path = plugin_root.join("skills/projectatlas/references/short-cli.md");
+    let original_short_cli = fs::read(&short_cli_path)?;
+    for damaged_guide in [None, Some(Vec::new()), Some(b"stale CLI guide".to_vec())] {
+        if let Some(contents) = damaged_guide {
+            fs::write(&short_cli_path, contents)?;
+        } else {
+            fs::remove_file(&short_cli_path)?;
+        }
+        let output = run_hook_raw(&repo, &path)?;
+        if !output.contains("ProjectAtlas integration incomplete")
+            || output.contains("ProjectAtlas integration ready")
+        {
+            return Err(io::Error::other(format!(
+                "missing or stale short CLI guide kept integration ready: {output}"
+            ))
+            .into());
+        }
+    }
+    fs::write(&short_cli_path, original_short_cli)?;
+    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration ready") {
+        return Err(io::Error::other("restored short CLI guide stayed incomplete").into());
     }
     if codex_marker.exists() {
         return Err(io::Error::other("readiness hook executed Codex from PATH").into());

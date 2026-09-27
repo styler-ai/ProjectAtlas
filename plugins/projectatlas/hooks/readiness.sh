@@ -18,6 +18,7 @@ safe_text() {
 plugin_root=${PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
 manifest=$plugin_root/.codex-plugin/plugin.json
 skill=$plugin_root/skills/projectatlas/SKILL.md
+short_cli=$plugin_root/skills/projectatlas/references/short-cli.md
 expected=
 manifest_reason='bundled plugin manifest is missing or invalid'
 manifest_repair='reinstall the version-matched ProjectAtlas plugin, then run its packaged installer for the selected project'
@@ -85,6 +86,15 @@ printf '%s\n' "$guidance"
 printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$(safe_text "$skill")"
 if [ ! -f "$skill" ]; then
   printf 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.\n'
+  exit 0
+fi
+short_cli_size=
+if [ -f "$short_cli" ]; then
+  short_cli_size=$(wc -c < "$short_cli" 2>/dev/null || true)
+fi
+if [ ! -r "$short_cli" ] || [ -z "$short_cli_size" ] ||
+  [ "$short_cli_size" -eq 0 ] || [ "$short_cli_size" -gt 65536 ]; then
+  printf 'ProjectAtlas integration incomplete: bundled short CLI guide is missing or invalid; reinstall the version-matched plugin before Atlas use.\n'
   exit 0
 fi
 
@@ -176,9 +186,9 @@ receipt_valid() {
     cursor=$(dirname -- "$cursor")
   done
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$receipt" "$host_config" "$expected" "$project_root" "$direct_path" "$db" "$config" "$codex_config" <<'PY'
+    python3 - "$receipt" "$host_config" "$expected" "$project_root" "$direct_path" "$db" "$config" "$codex_config" "$short_cli" <<'PY'
 import hashlib, json, os, sys
-receipt_path, generated_path, version, root, runtime, database, config, codex_config = sys.argv[1:]
+receipt_path, generated_path, version, root, runtime, database, config, codex_config, short_cli = sys.argv[1:]
 def same_path(actual, wanted):
     return isinstance(actual, str) and os.path.isabs(actual) and os.path.realpath(actual) == os.path.realpath(wanted)
 def digest(path):
@@ -210,6 +220,7 @@ try:
              receipt["direct_cli_sha256"] == receipt["runtime_sha256"] and
              receipt["generated_sha256"] == digest(generated_path) and
              receipt["codex_config_sha256"] == digest(codex_config) and
+             receipt["short_cli_sha256"] == digest(short_cli) and
              registry["name"] == "projectatlas" and registry["enabled"] is True and
              transport["type"] == "stdio" and same_path(transport["command"], runtime) and
              same_args(transport["args"]) and same_path(generated["command"], runtime) and
@@ -230,11 +241,13 @@ PY
     printf '%s\n' "$receipt_json" | jq -se --arg v "$expected" \
       --arg runtime_hash "$(hash_file "$direct_path")" \
       --arg generated_hash "$(hash_file "$host_config")" \
-      --arg codex_hash "$(hash_file "$codex_config")" '
+      --arg codex_hash "$(hash_file "$codex_config")" \
+      --arg short_cli_hash "$(hash_file "$short_cli")" '
       length == 1 and (.[0] |
         .version == $v and .runtime_sha256 == $runtime_hash and
         .direct_cli_sha256 == $runtime_hash and
         .generated_sha256 == $generated_hash and .codex_config_sha256 == $codex_hash and
+        .short_cli_sha256 == $short_cli_hash and
         .registry.name == "projectatlas" and .registry.enabled == true and
         .registry.transport.type == "stdio" and
         (.registry.transport.args | type) == "array")

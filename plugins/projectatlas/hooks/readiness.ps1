@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $skill = Join-Path $pluginRoot 'skills/projectatlas/SKILL.md'
+$shortCli = Join-Path $pluginRoot 'skills/projectatlas/references/short-cli.md'
 $expected = $null
 try {
     $manifestPath = Join-Path $pluginRoot '.codex-plugin/plugin.json'
@@ -56,6 +57,14 @@ Write-Output $guidance.TrimEnd()
 Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
 if (-not (Test-Path -LiteralPath $skill -PathType Leaf)) {
     Write-Output 'ProjectAtlas integration incomplete: bundled skill is missing; reinstall the version-matched plugin before Atlas use.'
+    exit 0
+}
+try {
+    $shortCliFile = Get-Item -LiteralPath $shortCli -ErrorAction Stop
+    if ($shortCliFile.Length -eq 0 -or $shortCliFile.Length -gt 65536) { throw 'invalid short CLI guide size' }
+    [void](Get-Content -Raw -Encoding UTF8 -LiteralPath $shortCli -ErrorAction Stop)
+} catch {
+    Write-Output 'ProjectAtlas integration incomplete: bundled short CLI guide is missing or invalid; reinstall the version-matched plugin before Atlas use.'
     exit 0
 }
 
@@ -158,7 +167,8 @@ try {
         $receipt.direct_cli_sha256 -cne $receipt.runtime_sha256 -or
         $receipt.runtime_sha256 -cne (FileSha256 $directPath) -or
         $receipt.codex_config_sha256 -cne (FileSha256 $codexConfig) -or
-        $receipt.generated_sha256 -cne (FileSha256 $hostConfig)) {
+        $receipt.generated_sha256 -cne (FileSha256 $hostConfig) -or
+        $receipt.short_cli_sha256 -cne (FileSha256 $shortCli)) {
         $reason = 'installer readiness receipt or host files changed; rerun the installer'
         throw 'not ready'
     }
@@ -192,6 +202,7 @@ try {
                     $receipt.direct_cli_sha256 -ceq (FileSha256 $directPath) -and
                     $receipt.codex_config_sha256 -ceq (FileSha256 $codexConfig) -and
                     $receipt.generated_sha256 -ceq (FileSha256 $hostConfig) -and
+                    $receipt.short_cli_sha256 -ceq (FileSha256 $shortCli) -and
                     (& $bindingReady $registry $generated)) {
                     Write-Output ('ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match {0} for this project. Use the version-matched ProjectAtlas skill and repository instructions.' -f (IdentityValue $expected))
                     exit 0

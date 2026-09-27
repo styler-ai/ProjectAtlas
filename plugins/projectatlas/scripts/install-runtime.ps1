@@ -5085,6 +5085,7 @@ function Write-ProjectAtlasCodexReadinessReceipt {
             generated_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $GeneratedConfig).Hash.ToLowerInvariant()
             codex_config = [IO.Path]::GetFullPath($codexConfig)
             codex_config_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant()
+            short_cli_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/references/short-cli.md')).Hash.ToLowerInvariant()
             registry = [ordered]@{
                 name = $registration.name
                 enabled = $registration.enabled
@@ -5140,7 +5141,7 @@ function Test-ProjectAtlasCodexSkillArtifacts {
     param([string]$PluginSourcePath)
     try {
         $installerPluginRoot = Split-Path -Parent $PSScriptRoot
-        foreach ($skillAsset in @("SKILL.md", "references\language-support.md")) {
+        foreach ($skillAsset in @("SKILL.md", "references\language-support.md", "references\short-cli.md")) {
             $skillPath = Join-Path $PluginSourcePath "skills\projectatlas\$skillAsset"
             $installerSkillPath = Join-Path $installerPluginRoot "skills\projectatlas\$skillAsset"
             if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf) `

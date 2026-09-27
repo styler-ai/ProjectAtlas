@@ -2163,7 +2163,7 @@ codex_projectatlas_plugin_artifact_ready() (
   artifact_root=$2
   [ -n "$artifact_root" ] || return 1
   codex_projectatlas_plugin_source_manifest_matches "$artifact_version" "$artifact_root" || return 1
-  for skill_asset in SKILL.md references/language-support.md; do
+  for skill_asset in SKILL.md references/language-support.md references/short-cli.md; do
     cmp -s "$plugin_root/skills/projectatlas/$skill_asset" "$artifact_root/skills/projectatlas/$skill_asset" || return 1
   done
 )
@@ -2579,6 +2579,7 @@ write_codex_readiness_receipt() {
   runtime_hash=$(archive_sha256 "$runtime_path") || return 0
   generated_hash=$(archive_sha256 "$mcp_config_path") || return 0
   codex_hash=$(archive_sha256 "$codex_path") || return 0
+  short_cli_hash=$(archive_sha256 "$plugin_root/skills/projectatlas/references/short-cli.md") || return 0
   version=$(expected_runtime_version)
   receipt=$state_root/codex-readiness.json
   temporary=$(mktemp "$state_root/.codex-readiness.XXXXXX") || return 0
@@ -2589,21 +2590,22 @@ keys = ("version", "project_root", "runtime", "runtime_sha256", "generated_sha25
 payload = dict(zip(keys, sys.argv[1:8]))
 payload["direct_cli"] = payload["runtime"]
 payload["direct_cli_sha256"] = payload["runtime_sha256"]
-row = json.loads(sys.argv[8])
+payload["short_cli_sha256"] = sys.argv[8]
+row = json.loads(sys.argv[9])
 transport = row["transport"]
 payload["registry"] = {"name": row["name"], "enabled": row["enabled"],
                        "transport": {"type": transport["type"], "command": transport["command"],
                                      "args": transport["args"]}}
 print(json.dumps(payload, separators=(",", ":")))
-' "$version" "$project_path" "$runtime_path" "$runtime_hash" "$generated_hash" "$codex_path" "$codex_hash" "$registration" >"$temporary" || {
+' "$version" "$project_path" "$runtime_path" "$runtime_hash" "$generated_hash" "$codex_path" "$codex_hash" "$short_cli_hash" "$registration" >"$temporary" || {
       rm -f -- "$temporary"
       return 0
     }
   elif command -v jq >/dev/null 2>&1; then
     jq -n --arg version "$version" --arg project_root "$project_path" --arg runtime "$runtime_path" \
       --arg runtime_sha256 "$runtime_hash" --arg generated_sha256 "$generated_hash" \
-      --arg codex_config "$codex_path" --arg codex_config_sha256 "$codex_hash" --argjson registry "$registration" \
-      '{version:$version,project_root:$project_root,runtime:$runtime,runtime_sha256:$runtime_sha256,direct_cli:$runtime,direct_cli_sha256:$runtime_sha256,generated_sha256:$generated_sha256,codex_config:$codex_config,codex_config_sha256:$codex_config_sha256,registry:{name:$registry.name,enabled:$registry.enabled,transport:{type:$registry.transport.type,command:$registry.transport.command,args:$registry.transport.args}}}' >"$temporary" || {
+      --arg codex_config "$codex_path" --arg codex_config_sha256 "$codex_hash" --arg short_cli_sha256 "$short_cli_hash" --argjson registry "$registration" \
+      '{version:$version,project_root:$project_root,runtime:$runtime,runtime_sha256:$runtime_sha256,direct_cli:$runtime,direct_cli_sha256:$runtime_sha256,generated_sha256:$generated_sha256,codex_config:$codex_config,codex_config_sha256:$codex_config_sha256,short_cli_sha256:$short_cli_sha256,registry:{name:$registry.name,enabled:$registry.enabled,transport:{type:$registry.transport.type,command:$registry.transport.command,args:$registry.transport.args}}}' >"$temporary" || {
       rm -f -- "$temporary"
       return 0
     }
