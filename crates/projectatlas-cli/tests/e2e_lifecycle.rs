@@ -362,18 +362,26 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
         }
         for (contents, expected) in [
             (
-                serde_json::to_vec(&json!({"name": "projectatlas", "version": version}))?,
+                serde_json::to_vec(
+                    &json!({"name": "projectatlas", "version": version, "skills": "./skills/"}),
+                )?,
                 version,
             ),
             (
                 serde_json::to_vec(
-                    &json!({"name": "projectatlas", "version": format!("{version}\n")}),
+                    &json!({"name": "projectatlas", "version": version, "skills": "./other-skills/"}),
+                )?,
+                "",
+            ),
+            (
+                serde_json::to_vec(
+                    &json!({"name": "projectatlas", "version": format!("{version}\n"), "skills": "./skills/"}),
                 )?,
                 "",
             ),
             (
                 serde_json::to_vec(&json!({
-                    "name": "projectatlas", "version": version, "padding": "x".repeat(65536)
+                    "name": "projectatlas", "version": version, "skills": "./skills/", "padding": "x".repeat(65536)
                 }))?,
                 "",
             ),
@@ -407,7 +415,9 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
     std::os::unix::fs::symlink(wc, wc_only.join(WC_TOOL))?;
     fs::write(
         &manifest,
-        serde_json::to_vec(&json!({"name": "projectatlas", "version": version}))?,
+        serde_json::to_vec(
+            &json!({"name": "projectatlas", "version": version, "skills": "./skills/"}),
+        )?,
     )?;
     let output = StdCommand::new("/bin/sh")
         .args([
@@ -738,15 +748,20 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     let original_manifest = fs::read(&plugin_manifest)?;
     let truncated_manifest = format!(r#"{{"name":"projectatlas","version":"{version}""#);
     let array_manifest = format!(r#"[{{"name":"projectatlas","version":"{version}"}}]"#);
-    let linefeed_manifest =
-        serde_json::to_vec(&json!({"name": "projectatlas", "version": format!("{version}\n")}))?;
+    let redirected_skill_manifest = serde_json::to_vec(&json!({
+        "name": "projectatlas", "version": version, "skills": "./other-skills/"
+    }))?;
+    let linefeed_manifest = serde_json::to_vec(
+        &json!({"name": "projectatlas", "version": format!("{version}\n"), "skills": "./skills/"}),
+    )?;
     let oversized_manifest = serde_json::to_vec(&json!({
-        "name": "projectatlas", "version": version, "padding": "x".repeat(65536)
+        "name": "projectatlas", "version": version, "skills": "./skills/", "padding": "x".repeat(65536)
     }))?;
     for damaged_manifest in [
         None,
         Some(truncated_manifest.as_bytes()),
         Some(array_manifest.as_bytes()),
+        Some(redirected_skill_manifest.as_slice()),
         Some(linefeed_manifest.as_slice()),
         Some(oversized_manifest.as_slice()),
     ] {
@@ -956,11 +971,16 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             ))
             .into());
         }
-        if StdCommand::new("jq").arg("--version").output().is_ok() {
+        let jq_available = StdCommand::new("jq").arg("--version").output().is_ok();
+        let python_available = StdCommand::new("python3").arg("--version").output().is_ok();
+        if jq_available || python_available {
+            let parser = if jq_available { "jq" } else { "python3" };
             let jq_only_bin = fixture.path().join("jq-only-bin");
+            let system_bin = fixture.path().join("nix-system-bin");
             fs::create_dir(&jq_only_bin)?;
+            fs::create_dir(&system_bin)?;
             for name in [
-                "sh", "jq", "sed", "head", "dirname", "cat", "wc", "awk", "tr",
+                "sh", parser, "sed", "head", "dirname", "cat", "wc", "awk", "tr",
             ] {
                 let source = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                     .map(|directory| directory.join(name))
@@ -968,7 +988,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     .ok_or_else(|| {
                         io::Error::other(format!("required POSIX tool {name} missing"))
                     })?;
-                std::os::unix::fs::symlink(fs::canonicalize(source)?, jq_only_bin.join(name))?;
+                let source = fs::canonicalize(source)?;
+                std::os::unix::fs::symlink(&source, jq_only_bin.join(name))?;
+                std::os::unix::fs::symlink(source, system_bin.join(name))?;
             }
             let checksum_name = ["sha256sum", "shasum"]
                 .into_iter()
@@ -983,8 +1005,12 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     .find(|candidate| candidate.is_file())
                     .ok_or("required POSIX checksum tool missing")?;
             std::os::unix::fs::symlink(
-                fs::canonicalize(checksum_source)?,
+                fs::canonicalize(&checksum_source)?,
                 jq_only_bin.join(checksum_name),
+            )?;
+            std::os::unix::fs::symlink(
+                fs::canonicalize(&checksum_source)?,
+                system_bin.join(checksum_name),
             )?;
             let jq_only_path = std::env::join_paths([
                 jq_only_bin,
@@ -998,76 +1024,109 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .join(HOOKS_DIR_NAME)
                 .join(POSIX_READINESS_HOOK_FILE_NAME);
             let original_hook = fs::read_to_string(&hook_path)?;
-            let isolated_hook = original_hook.replace(
-                "PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin",
-                "PATH=$PATH",
-            );
-            if isolated_hook == original_hook {
+            let curated_path =
+                "PATH=/run/current-system/sw/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin";
+            let system_hook =
+                original_hook.replace(curated_path, &format!("PATH={}", system_bin.display()));
+            if system_hook == original_hook {
                 return Err(io::Error::other("POSIX hook PATH seam was not found").into());
             }
-            fs::write(&hook_path, isolated_hook)?;
-            let jq_alias_output = run_hook(&repo, &jq_only_path)?;
-            if !jq_alias_output.contains("ProjectAtlas integration ready") {
+            fs::write(&hook_path, system_hook)?;
+            write_receipt()?;
+            let no_tool_path = std::env::join_paths([
+                fixture.path().join("bin"),
+                executable
+                    .parent()
+                    .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
+                    .to_path_buf(),
+            ])?;
+            let system_path_output = StdCommand::new("/bin/sh")
+                .arg(&hook_path)
+                .current_dir(&repo)
+                .env("HOME", fixture.path())
+                .env("XDG_STATE_HOME", fixture.path().join(".local/state"))
+                .env("CODEX_HOME", &codex_home)
+                .env("PATH", no_tool_path)
+                .output()?;
+            if !system_path_output.status.success()
+                || !String::from_utf8(system_path_output.stdout)?
+                    .contains("ProjectAtlas integration ready")
+            {
                 return Err(io::Error::other(format!(
-                    "jq-only host reported equivalent project paths stale: {jq_alias_output}"
+                    "curated non-FHS tool path did not verify installed integration: {}",
+                    String::from_utf8_lossy(&system_path_output.stderr)
                 ))
                 .into());
             }
-            for skill_asset in [
-                "hooks/agent-instructions.txt",
-                "skills/projectatlas/SKILL.md",
-                "skills/projectatlas/references/language-support.md",
-                "skills/projectatlas/references/short-cli.md",
-            ] {
-                let asset_path = plugin_root.join(skill_asset);
-                let original = fs::read(&asset_path)?;
-                fs::write(&asset_path, b"stale but nonempty skill asset")?;
-                let output = run_hook_raw(&repo, &jq_only_path)?;
-                if !output.contains("ProjectAtlas integration incomplete")
-                    || output.contains("ProjectAtlas integration ready")
-                    || (skill_asset == "hooks/agent-instructions.txt"
-                        && output.contains("stale but nonempty skill asset"))
-                {
+            if jq_available {
+                let isolated_hook = original_hook.replace(curated_path, "PATH=$PATH");
+                fs::write(&hook_path, isolated_hook)?;
+                let jq_alias_output = run_hook(&repo, &jq_only_path)?;
+                if !jq_alias_output.contains("ProjectAtlas integration ready") {
                     return Err(io::Error::other(format!(
-                        "jq-only host accepted stale {skill_asset}: {output}"
+                        "jq-only host reported equivalent project paths stale: {jq_alias_output}"
                     ))
                     .into());
                 }
-                fs::write(&asset_path, original)?;
-            }
-            if !run_hook_raw(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
-                return Err(
-                    io::Error::other("jq-only host stayed incomplete after guide repair").into(),
-                );
-            }
-            let mut multiple_values = b"null\n".to_vec();
-            multiple_values.extend(serde_json::to_vec(&alias_generated)?);
-            fs::write(&host_config, &multiple_values)?;
-            if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
-                return Err(
-                    io::Error::other("jq-only host accepted multi-value generated JSON").into(),
-                );
-            }
-            fs::write(&host_config, serde_json::to_vec(&alias_generated)?)?;
-            for suffix in ["\0", "\n"] {
-                let mut malformed = alias_registry.clone();
-                malformed["transport"]["args"][3] = json!(format!("{}{suffix}", alias_args[3]));
-                fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;
+                for skill_asset in [
+                    "hooks/agent-instructions.txt",
+                    "skills/projectatlas/SKILL.md",
+                    "skills/projectatlas/references/language-support.md",
+                    "skills/projectatlas/references/short-cli.md",
+                ] {
+                    let asset_path = plugin_root.join(skill_asset);
+                    let original = fs::read(&asset_path)?;
+                    fs::write(&asset_path, b"stale but nonempty skill asset")?;
+                    let output = run_hook_raw(&repo, &jq_only_path)?;
+                    if !output.contains("ProjectAtlas integration incomplete")
+                        || output.contains("ProjectAtlas integration ready")
+                        || (skill_asset == "hooks/agent-instructions.txt"
+                            && output.contains("stale but nonempty skill asset"))
+                    {
+                        return Err(io::Error::other(format!(
+                            "jq-only host accepted stale {skill_asset}: {output}"
+                        ))
+                        .into());
+                    }
+                    fs::write(&asset_path, original)?;
+                }
+                if !run_hook_raw(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                    return Err(io::Error::other(
+                        "jq-only host stayed incomplete after guide repair",
+                    )
+                    .into());
+                }
+                let mut multiple_values = b"null\n".to_vec();
+                multiple_values.extend(serde_json::to_vec(&alias_generated)?);
+                fs::write(&host_config, &multiple_values)?;
                 if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
-                    return Err(io::Error::other(format!(
-                        "jq-only host accepted a malformed database path with suffix {suffix:?}"
-                    ))
+                    return Err(io::Error::other(
+                        "jq-only host accepted multi-value generated JSON",
+                    )
                     .into());
                 }
-            }
-            fs::write(&registry_path, serde_json::to_vec(&alias_registry)?)?;
-            multiple_values.truncate(b"null\n".len());
-            multiple_values.extend(serde_json::to_vec(&alias_registry)?);
-            fs::write(&registry_path, &multiple_values)?;
-            if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
-                return Err(
-                    io::Error::other("jq-only host accepted multi-value registry JSON").into(),
-                );
+                fs::write(&host_config, serde_json::to_vec(&alias_generated)?)?;
+                for suffix in ["\0", "\n"] {
+                    let mut malformed = alias_registry.clone();
+                    malformed["transport"]["args"][3] = json!(format!("{}{suffix}", alias_args[3]));
+                    fs::write(&registry_path, serde_json::to_vec(&malformed)?)?;
+                    if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                        return Err(io::Error::other(format!(
+                            "jq-only host accepted a malformed database path with suffix {suffix:?}"
+                        ))
+                        .into());
+                    }
+                }
+                fs::write(&registry_path, serde_json::to_vec(&alias_registry)?)?;
+                multiple_values.truncate(b"null\n".len());
+                multiple_values.extend(serde_json::to_vec(&alias_registry)?);
+                fs::write(&registry_path, &multiple_values)?;
+                if run_hook(&repo, &jq_only_path)?.contains("ProjectAtlas integration ready") {
+                    return Err(io::Error::other(
+                        "jq-only host accepted multi-value registry JSON",
+                    )
+                    .into());
+                }
             }
             fs::write(&hook_path, original_hook)?;
         }

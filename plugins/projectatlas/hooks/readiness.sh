@@ -3,7 +3,7 @@
 set -u
 direct_path=$(command -v projectatlas 2>/dev/null || true)
 case "$direct_path" in /*) ;; *) direct_path= ;; esac
-PATH=/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin
+PATH=/run/current-system/sw/bin:/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin
 export PATH
 safe_text() {
   if command -v python3 >/dev/null 2>&1; then
@@ -35,6 +35,7 @@ try:
     with open(sys.argv[1], encoding="utf-8") as source:
         manifest = json.load(source)
     if (isinstance(manifest, dict) and manifest.get("name") == "projectatlas" and
+        manifest.get("skills") == "./skills/" and
         isinstance(manifest.get("version"), str) and manifest["version"] and
         all(char in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.+-"
             for char in manifest["version"])):
@@ -45,6 +46,7 @@ PY
 )
   elif command -v jq >/dev/null 2>&1; then
     expected=$(jq -sr 'if length == 1 and .[0].name == "projectatlas" and
+      .[0].skills == "./skills/" and
       (.[0].version | type) == "string" and (.[0].version | length) > 0 and
       (.[0].version | test("[^0-9A-Za-z.+-]") | not)
       then .[0].version else empty end' "$manifest" 2>/dev/null || true)

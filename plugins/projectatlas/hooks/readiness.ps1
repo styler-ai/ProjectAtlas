@@ -12,6 +12,7 @@ try {
         if ($manifestText -cmatch '^[ \t\r\n]*\{') {
             $manifest = $manifestText | ConvertFrom-Json
             if ($manifest -is [pscustomobject] -and $manifest.name -ceq 'projectatlas' -and
+                $manifest.skills -is [string] -and $manifest.skills -ceq './skills/' -and
                 $manifest.version -is [string] -and $manifest.version -and
                 $manifest.version -cnotmatch '[^0-9A-Za-z.+-]') {
                 $expected = $manifest.version

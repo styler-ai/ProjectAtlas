@@ -4630,7 +4630,8 @@ function Get-ProjectAtlasCodexPluginManifestVersion {
             return ""
         }
         $manifest = ConvertFrom-Json -InputObject $manifestText
-        if ((Test-ProjectAtlasJsonObject $manifest) -and $manifest.version -is [string]) {
+        if ((Test-ProjectAtlasJsonObject $manifest) -and $manifest.version -is [string] -and
+            $manifest.skills -is [string] -and $manifest.skills -ceq './skills/') {
             return $manifest.version
         }
     }

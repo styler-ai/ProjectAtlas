@@ -12574,9 +12574,13 @@ foreach ($payload in $invalidMarketplacePayloads) {
 $manifestDirectory = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE ".codex-plugin"
 New-Item -ItemType Directory -Force -Path $manifestDirectory | Out-Null
 $manifestPath = Join-Path $manifestDirectory "plugin.json"
-Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":"0.4.2"}'
+Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":"0.4.2","skills":"./skills/"}'
 if (-not (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2")) {
     throw "Exact object-root plugin source manifest was rejected."
+}
+Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":"0.4.2","skills":"./other-skills/"}'
+if (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2") {
+    throw "Redirected plugin skill route was accepted."
 }
 Set-Content -LiteralPath $manifestPath -Value '[{"name":"projectatlas","version":"0.4.2"}]'
 if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" `
@@ -12605,7 +12609,7 @@ $unreadableArtifactRoot = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "unreadable-a
 foreach ($pluginRoot in @($directoryArtifactRoot, $unreadableArtifactRoot)) {
     New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot ".codex-plugin") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $pluginRoot "skills\projectatlas") | Out-Null
-    Set-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") -Value '{"version":"0.4.2"}'
+    Set-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") -Value '{"name":"projectatlas","version":"0.4.2","skills":"./skills/"}'
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $directoryArtifactRoot "skills\projectatlas\SKILL.md") | Out-Null
 Set-Content -LiteralPath (Join-Path $unreadableArtifactRoot "skills\projectatlas\SKILL.md") -Value "fixture"
@@ -13848,7 +13852,9 @@ fn write_fake_codex_projectatlas_integration(
         )?;
         fs::write(
             root.join(CODEX_PLUGIN_MANIFEST_DIR).join("plugin.json"),
-            format!(r#"{{"name":"projectatlas","version":"{manifest_version}"}}"#),
+            format!(
+                r#"{{"name":"projectatlas","version":"{manifest_version}","skills":"./skills/"}}"#
+            ),
         )?;
         fs::write(
             root.join(PROJECTATLAS_SKILL_DIR)
@@ -14986,7 +14992,7 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
                 .join(CODEX_PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
         )? != format!(
-            r#"{{"name":"projectatlas","version":"{}"}}"#,
+            r#"{{"name":"projectatlas","version":"{}","skills":"./skills/"}}"#,
             env!("CARGO_PKG_VERSION")
         )
         .as_bytes()
@@ -14994,6 +15000,40 @@ fn plugin_update_leaves_current_codex_marketplace_untouched_and_repairs_stale_sk
     {
         return Err(io::Error::other(format!(
             "malformed cache manifest was accepted or refreshed the marketplace source:\n{malformed_manifest_output_text}\ncalls:\n{malformed_manifest_calls}"
+        ))
+        .into());
+    }
+    fs::write(
+        &installed_manifest,
+        format!(
+            r#"{{"name":"projectatlas","version":"{}","skills":"./other-skills/"}}"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    fs::write(&fake_codex_log, b"")?;
+    let redirected_manifest_output = run_plugin_installer_with_codex_fixture(
+        &workspace_root,
+        &repo,
+        &runtime,
+        &fake_path,
+        &isolated_home,
+    )?;
+    let redirected_manifest_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&redirected_manifest_output.stdout),
+        String::from_utf8_lossy(&redirected_manifest_output.stderr)
+    );
+    if !redirected_manifest_text.contains("Codex ProjectAtlas plugin skill artifact does not match")
+        || fs::read(&installed_manifest)?
+            != format!(
+                r#"{{"name":"projectatlas","version":"{}","skills":"./skills/"}}"#,
+                env!("CARGO_PKG_VERSION")
+            )
+            .as_bytes()
+        || fs::read_to_string(&fake_codex_log)?.contains("plugin marketplace upgrade projectatlas")
+    {
+        return Err(io::Error::other(format!(
+            "redirected cache skill route was accepted or repaired from the wrong source:\n{redirected_manifest_text}"
         ))
         .into());
     }
@@ -15068,7 +15108,7 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
         fake_plugin_source_json
     );
     let current_manifest_json = format!(
-        r#"{{"name":"projectatlas","version":"{}"}}"#,
+        r#"{{"name":"projectatlas","version":"{}","skills":"./skills/"}}"#,
         env!("CARGO_PKG_VERSION")
     );
     let fake_codex_script = if cfg!(windows) {
@@ -16751,13 +16791,13 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
         manifest_root
             .join(CODEX_PLUGIN_MANIFEST_DIR)
             .join("plugin.json"),
-        r#"{"version":"0.5.0-rc2"}"#,
+        r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./skills/"}"#,
     )?;
     let wrapper = temp.path().join("verify-no-jq.sh");
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nset -eu\n{}\n{}\n{}\nPATH=$1\ncodex_bin=$2\nif [ \"$3\" = invalid ]; then\n  if load_codex_projectatlas_plugin_inventory; then exit 17; fi\n  [ \"$codex_projectatlas_inventory_complete\" = false ]\nelif [ \"$3\" = jq-invalid ]; then\n  if codex_projectatlas_marketplace_source \"$PROJECTATLAS_FAKE_MARKETPLACES\"; then exit 18; fi\n  [ -z \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" ]\nelse\n  [ \"$(codex_projectatlas_marketplace_source '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}')\" = 'https://github.com/styler-ai/ProjectAtlas.git' ]\n  load_codex_projectatlas_plugin_inventory\n  [ \"$codex_projectatlas_inventory_complete\" = true ]\n  [ \"$codex_projectatlas_inventory_version\" = 0.5.0-rc2 ]\n  [ \"$codex_projectatlas_inventory_source_path\" = /tmp/projectatlas ]\n  [ \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" = 0.5.0-rc2 ]\nfi\n",
+            "#!/bin/sh\nset -eu\n{}\n{}\n{}\nPATH=$1\ncodex_bin=$2\nif [ \"$3\" = invalid ]; then\n  if load_codex_projectatlas_plugin_inventory; then exit 17; fi\n  [ \"$codex_projectatlas_inventory_complete\" = false ]\nelif [ \"$3\" = jq-invalid ]; then\n  if codex_projectatlas_marketplace_source \"$PROJECTATLAS_FAKE_MARKETPLACES\"; then exit 18; fi\n  [ -z \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" ]\nelif [ \"$3\" = route-invalid ]; then\n  [ -z \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" ]\nelse\n  [ \"$(codex_projectatlas_marketplace_source '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}')\" = 'https://github.com/styler-ai/ProjectAtlas.git' ]\n  load_codex_projectatlas_plugin_inventory\n  [ \"$codex_projectatlas_inventory_complete\" = true ]\n  [ \"$codex_projectatlas_inventory_version\" = 0.5.0-rc2 ]\n  [ \"$codex_projectatlas_inventory_source_path\" = /tmp/projectatlas ]\n  [ \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" = 0.5.0-rc2 ]\nfi\n",
             &installer_source[official_start..official_end],
             &installer_source[inventory_start..inventory_end],
             &installer_source[manifest_start..manifest_end]
@@ -16778,16 +16818,31 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
     };
     let invalid = run("invalid", invalid_inventory)?;
     let valid = run("valid", valid_inventory)?;
-    if !invalid.status.success() || !valid.status.success() {
+    fs::write(
+        manifest_root
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./other-skills/"}"#,
+    )?;
+    let redirected = run("route-invalid", valid_inventory)?;
+    if !invalid.status.success() || !valid.status.success() || !redirected.status.success() {
         return Err(io::Error::other(format!(
-            "POSIX Python-only inventory did not reject malformed and accept valid state:\ninvalid={} {}\nvalid={} {}",
+            "POSIX Python-only inventory did not reject malformed and accept valid state:\ninvalid={} {}\nvalid={} {}\nredirected={} {}",
             String::from_utf8_lossy(&invalid.stdout),
             String::from_utf8_lossy(&invalid.stderr),
             String::from_utf8_lossy(&valid.stdout),
-            String::from_utf8_lossy(&valid.stderr)
+            String::from_utf8_lossy(&valid.stderr),
+            String::from_utf8_lossy(&redirected.stdout),
+            String::from_utf8_lossy(&redirected.stderr)
         ))
         .into());
     }
+    fs::write(
+        manifest_root
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./skills/"}"#,
+    )?;
     let calls = fs::read_to_string(calls)?;
     if calls.lines().collect::<Vec<_>>() != ["plugin list --marketplace projectatlas --json"; 2]
         || calls.contains(" remove ")
@@ -16873,7 +16928,7 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             malformed_manifest
                 .join(CODEX_PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
-            r#"{"version":"0.5.0-rc2\n"}"#,
+            r#"{"name":"projectatlas","version":"0.5.0-rc2\n","skills":"./skills/"}"#,
         )?;
         let entry = r#"{"name":"projectatlas","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"}}"#;
         let jq_calls = temp.path().join("jq-calls.txt");
@@ -16891,6 +16946,29 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
                 "POSIX jq-only valid plugin state was refused:\n{}\n{}",
                 String::from_utf8_lossy(&jq_valid.stdout),
                 String::from_utf8_lossy(&jq_valid.stderr)
+            ))
+            .into());
+        }
+        let redirected_manifest = temp.path().join("redirected-plugin-source");
+        fs::create_dir_all(redirected_manifest.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+        fs::write(
+            redirected_manifest
+                .join(CODEX_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./other-skills/"}"#,
+        )?;
+        let jq_redirected = StdCommand::new("bash")
+            .arg(&wrapper)
+            .arg(&jq_path)
+            .arg(&fake_codex)
+            .arg("route-invalid")
+            .arg(&redirected_manifest)
+            .output()?;
+        if !jq_redirected.status.success() {
+            return Err(io::Error::other(format!(
+                "POSIX jq-only reader accepted redirected skill route:\n{}\n{}",
+                String::from_utf8_lossy(&jq_redirected.stdout),
+                String::from_utf8_lossy(&jq_redirected.stderr)
             ))
             .into());
         }
