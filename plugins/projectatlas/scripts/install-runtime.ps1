@@ -5048,7 +5048,10 @@ function Test-ProjectAtlasCodexMcpRegistryAbsent {
 }
 
 function Write-ProjectAtlasCodexReadinessReceipt {
-    param([string]$Version, [string]$Root, [string]$Runtime, [string]$GeneratedConfig, [string]$StableMirror)
+    param(
+        [string]$Version, [string]$Root, [string]$Runtime, [string]$GeneratedConfig,
+        [string]$StableMirror, [string]$DbPath, [string]$ProjectConfigPath, [string]$FlatConfigPath
+    )
     $codexConfig = Get-ProjectAtlasCodexConfigPath
     if (-not $codexConfig -or -not (Test-Path -LiteralPath $codexConfig -PathType Leaf)) {
         Write-Warning 'Codex readiness receipt skipped: global Codex config is unavailable.'
@@ -5060,9 +5063,12 @@ function Write-ProjectAtlasCodexReadinessReceipt {
             Write-Warning 'Codex readiness receipt skipped: host config exceeds the startup bound.'
             return
         }
+        $codexConfigHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant()
         $codexCommand = Resolve-ProjectAtlasCodexCommand 'Codex readiness receipt'
         $registration = Get-ProjectAtlasCodexMcpRegistryEntry $codexCommand
-        if (-not $registration) { return }
+        $expectedArguments = Get-ProjectAtlasMcpLaunchArguments $DbPath $ProjectConfigPath $FlatConfigPath $Version
+        if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $registration $Runtime $expectedArguments)) { return }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant() -cne $codexConfigHash) { return }
         $stateRoot = Get-ProjectAtlasAtlasForwarderStateRoot
         Assert-ProjectAtlasDirectPath $stateRoot 'Codex readiness state directory'
         [IO.Directory]::CreateDirectory($stateRoot) | Out-Null
@@ -5084,7 +5090,7 @@ function Write-ProjectAtlasCodexReadinessReceipt {
             direct_cli_sha256 = $runtimeHash
             generated_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $GeneratedConfig).Hash.ToLowerInvariant()
             codex_config = [IO.Path]::GetFullPath($codexConfig)
-            codex_config_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant()
+            codex_config_sha256 = $codexConfigHash
             agent_guidance_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'hooks/agent-instructions.txt')).Hash.ToLowerInvariant()
             skill_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/SKILL.md')).Hash.ToLowerInvariant()
             language_support_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'skills/projectatlas/references/language-support.md')).Hash.ToLowerInvariant()
@@ -5102,6 +5108,7 @@ function Write-ProjectAtlasCodexReadinessReceipt {
         $temporary = Join-Path $stateRoot ('.codex-readiness-' + [guid]::NewGuid().ToString('N') + '.tmp')
         try {
             [IO.File]::WriteAllText($temporary, $payload, [Text.UTF8Encoding]::new($false))
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $codexConfig).Hash.ToLowerInvariant() -cne $codexConfigHash) { return }
             Assert-ProjectAtlasDirectFilePath $receipt 'Codex readiness receipt'
             Move-Item -LiteralPath $temporary -Destination $receipt -Force
         }
@@ -5129,6 +5136,23 @@ function Test-ProjectAtlasCodexMcpRegistryEntry {
         -or -not ($Registration.transport.command -is [string]) `
         -or -not (Test-ProjectAtlasJsonStringArray $Registration.transport.args)) {
         return $false
+    }
+    foreach ($entry in @($Registration, $Registration.transport)) {
+        if (@($entry.PSObject.Properties.Match('env')).Count -gt 0 `
+            -and $null -ne $entry.env `
+            -and (-not (Test-ProjectAtlasJsonObject $entry.env) `
+                -or @($entry.env.PSObject.Properties).Count -ne 0)) {
+            return $false
+        }
+        if (@($entry.PSObject.Properties.Match('env_vars')).Count -gt 0 `
+            -and $null -ne $entry.env_vars `
+            -and (-not ($entry.env_vars -is [array]) -or @($entry.env_vars).Count -ne 0)) {
+            return $false
+        }
+        if (@($entry.PSObject.Properties.Match('cwd')).Count -gt 0 `
+            -and $null -ne $entry.cwd) {
+            return $false
+        }
     }
     $actualCommand = $Registration.transport.command
     if (-not [System.IO.Path]::IsPathRooted($actualCommand) `
@@ -5609,7 +5633,9 @@ $generatedMcpConfigsReady = Test-ProjectAtlasGeneratedMcpConfigReadiness `
     ([string[]]@($mcpConfigSha256, $claudeMcpConfigSha256, $opencodeConfigSha256))
 $verifiedRuntimeReady = Test-ProjectAtlasRuntime $projectAtlas $ProjectAtlasVersion
 if ($codexPluginReady -and $codexRegistryReady -and $generatedMcpConfigsReady -and $verifiedRuntimeReady) {
-    Write-ProjectAtlasCodexReadinessReceipt $ProjectAtlasVersion $ProjectRoot $projectAtlas $mcpConfigPath $stableMirrorPath
+    Write-ProjectAtlasCodexReadinessReceipt `
+        $ProjectAtlasVersion $ProjectRoot $projectAtlas $mcpConfigPath $stableMirrorPath `
+        $dbPath $projectConfigPath $flatConfigPath
 }
 $stableMirrorReady = $stableMirrorSynchronized `
     -and (Test-ProjectAtlasRuntime $stableMirrorPath $ProjectAtlasVersion)

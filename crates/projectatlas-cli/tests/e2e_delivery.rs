@@ -6791,7 +6791,7 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         "type": "stdio", "command": runtime,
         "args": ["--require-version", env!("CARGO_PKG_VERSION"), "--db", db,
                  "--config", config, "mcp"],
-        "env": {"DO_NOT_COPY_SECRET": "private-fixture-value"}
+        "env": null, "env_vars": [], "cwd": null
     }});
     let registry_path = home.join("current-registry.json");
     fs::write(&registry_path, serde_json::to_vec(&registry)?)?;
@@ -6805,7 +6805,7 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nif [ \"${1:-}\" = plugin ] && [ \"${2:-}\" = list ]; then cat \"$PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST\"; exit 0; fi\nif [ \"${1:-}\" = mcp ] && [ \"${2:-}\" = get ]; then\n  [ -f \"$PROJECTATLAS_FAKE_CODEX_STATE\" ] || exit 1\n  cat \"$PROJECTATLAS_FAKE_CODEX_REGISTRY\"\n  exit 0\nfi\nif [ \"${1:-}\" = mcp ] && [ \"${2:-}\" = list ]; then\n  if [ \"${PROJECTATLAS_FAKE_CODEX_INVALID_LIST:-}\" = 1 ]; then printf '%s\\n' '{}'; else printf '%s\\n' '[]'; fi\n  exit 0\nfi\nif [ \"${1:-}\" = mcp ] && [ \"${2:-}\" = add ]; then\n  printf added > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\n  exit 0\nfi\nexit 1\n"
     };
     write_executable_script(&fake_codex, script)?;
-    let run = |invalid_list: bool| -> Result<String, Box<dyn Error>> {
+    let run = |invalid_list: bool, skip_registry_update: bool| -> Result<String, Box<dyn Error>> {
         let mut command = projectatlas_plugin_installer_command_with_optional_path_and_home(
             &workspace_root()?,
             &repo,
@@ -6819,6 +6819,10 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
             .env("PROJECTATLAS_FAKE_CODEX_REGISTRY", &registry_path)
             .env("PROJECTATLAS_FAKE_CODEX_PLUGIN_LIST", &plugin_inventory)
             .env(
+                "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE",
+                if skip_registry_update { "1" } else { "0" },
+            )
+            .env(
                 "PROJECTATLAS_FAKE_CODEX_INVALID_LIST",
                 if invalid_list { "1" } else { "0" },
             );
@@ -6829,7 +6833,7 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
             String::from_utf8_lossy(&output.stderr)
         ))
     };
-    let added = run(false)?;
+    let added = run(false, false)?;
     let calls = fs::read_to_string(&log)?;
     if !state.exists()
         || !calls.contains("mcp list --json")
@@ -6918,10 +6922,42 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         ))
         .into());
     }
+    fs::remove_file(&receipt_path)?;
+    let prior_db = fs::read(&db)?;
+    for (field, override_value) in [
+        (
+            "env",
+            json!({"DO_NOT_COPY_SECRET": "private-fixture-value"}),
+        ),
+        ("env_vars", json!(["DO_NOT_COPY_SECRET"])),
+        ("cwd", json!("unexpected-directory")),
+    ] {
+        let mut injected = registry.clone();
+        injected["transport"][field] = override_value;
+        fs::write(&registry_path, serde_json::to_vec(&injected)?)?;
+        fs::write(&log, "")?;
+        let skip_registry_update = field == "env";
+        let rejected = run(false, skip_registry_update)?;
+        let calls = fs::read_to_string(&log)?;
+        if receipt_path.exists()
+            || calls.contains("mcp remove projectatlas") == skip_registry_update
+            || calls.contains("mcp add projectatlas")
+            || fs::read(&db)? != prior_db
+            || !rejected.contains(if skip_registry_update {
+                "Codex MCP registry update skipped"
+            } else {
+                "could not remove stale global projectatlas server"
+            })
+        {
+            return Err(io::Error::other(format!(
+                "{field} override was attested or changed project state: {rejected}\n{calls}"
+            ))
+            .into());
+        }
+    }
     fs::remove_file(&state)?;
     fs::write(&log, "")?;
-    let prior_db = fs::read(&db)?;
-    let ambiguous = run(true)?;
+    let ambiguous = run(true, false)?;
     let calls = fs::read_to_string(&log)?;
     if state.exists()
         || calls.contains("mcp add projectatlas")
@@ -13536,7 +13572,8 @@ foreach ($functionName in @(
         "Test-ProjectAtlasExactArguments",
         "Test-ProjectAtlasJsonObject",
         "Test-ProjectAtlasJsonStringArray",
-        "Test-ProjectAtlasCodexMcpRegistryEntry"
+        "Test-ProjectAtlasCodexMcpRegistryEntry",
+        "Write-ProjectAtlasCodexReadinessReceipt"
     )) {
     $match = [regex]::Match(
         $installerSource,
@@ -13565,6 +13602,41 @@ $exact = [pscustomobject]@{
 }
 if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $exact $runtime $arguments)) {
     throw "Exact structured registry entry was rejected."
+}
+foreach ($location in @("root", "transport")) {
+    $emptyEnvironment = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    $injectedEnvironment = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    if ($location -eq "root") {
+        $emptyEnvironment | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{})
+        $injectedEnvironment | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{ LD_PRELOAD = "fixture" })
+    } else {
+        $emptyEnvironment.transport | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{})
+        $injectedEnvironment.transport | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{ LD_PRELOAD = "fixture" })
+    }
+    if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $emptyEnvironment $runtime $arguments)) {
+        throw "Empty $location environment was rejected."
+    }
+    if (Test-ProjectAtlasCodexMcpRegistryEntry $injectedEnvironment $runtime $arguments) {
+        throw "Injected $location environment was accepted."
+    }
+}
+$defaultEnvironment = $exact | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$defaultEnvironment.transport | Add-Member -NotePropertyName env -NotePropertyValue $null
+$defaultEnvironment.transport | Add-Member -NotePropertyName env_vars -NotePropertyValue ([object[]]@())
+$defaultEnvironment.transport | Add-Member -NotePropertyName cwd -NotePropertyValue $null
+if (-not (Test-ProjectAtlasCodexMcpRegistryEntry $defaultEnvironment $runtime $arguments)) {
+    throw "Default Codex environment fields were rejected."
+}
+foreach ($field in @("env", "env_vars", "cwd")) {
+    $override = $defaultEnvironment | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    switch ($field) {
+        "env" { $override.transport.env = "malformed" }
+        "env_vars" { $override.transport.env_vars = [object[]]@("LD_PRELOAD") }
+        "cwd" { $override.transport.cwd = "unexpected-directory" }
+    }
+    if (Test-ProjectAtlasCodexMcpRegistryEntry $override $runtime $arguments) {
+        throw "$field override was accepted."
+    }
 }
 $singletonArrayRoot = [object[]]@($exact)
 if (Test-ProjectAtlasCodexMcpRegistryEntry $singletonArrayRoot $runtime $arguments) {
@@ -13647,6 +13719,44 @@ $extra.transport.args = @($arguments) + "--extra"
 if (Test-ProjectAtlasCodexMcpRegistryEntry $extra $runtime $arguments) {
     throw "Extra arguments were accepted."
 }
+$smallConfig = Join-Path ([IO.Path]::GetTempPath()) ("projectatlas-receipt-probe-" + [guid]::NewGuid().ToString('N'))
+[IO.File]::WriteAllText($smallConfig, 'fixture')
+try {
+    function Get-ProjectAtlasCodexConfigPath { return $smallConfig }
+    function Get-FileHash {
+        param([string]$Algorithm, [string]$LiteralPath)
+        return [pscustomobject]@{ Hash = [IO.File]::ReadAllText($LiteralPath) }
+    }
+    function Resolve-ProjectAtlasCodexCommand { return 'fixture-codex' }
+    function Get-ProjectAtlasCodexMcpRegistryEntry {
+        if ($script:mutateConfigOnRegistryRead) { [IO.File]::WriteAllText($smallConfig, 'changed') }
+        return $script:receiptRegistration
+    }
+    function Get-ProjectAtlasMcpLaunchArguments { return $arguments }
+    function Get-ProjectAtlasAtlasForwarderStateRoot {
+        $script:receiptStateReached = $true
+        throw 'receipt state reached'
+    }
+    $script:receiptRegistration = $injectedEnvironment
+    $script:receiptStateReached = $false
+    Write-ProjectAtlasCodexReadinessReceipt '0.4.1' 'C:\repo' $runtime $smallConfig $runtime 'C:\repo\.projectatlas\projectatlas.db' $smallConfig $smallConfig
+    if ($script:receiptStateReached) {
+        throw 'Receipt writer accepted environment-injected registration.'
+    }
+    $script:receiptRegistration = $exact
+    Write-ProjectAtlasCodexReadinessReceipt '0.4.1' 'C:\repo' $runtime $smallConfig $runtime 'C:\repo\.projectatlas\projectatlas.db' $smallConfig $smallConfig
+    if (-not $script:receiptStateReached) {
+        throw 'Receipt writer did not reach state for exact registration.'
+    }
+    $script:receiptStateReached = $false
+    $script:mutateConfigOnRegistryRead = $true
+    [IO.File]::WriteAllText($smallConfig, 'fixture')
+    Write-ProjectAtlasCodexReadinessReceipt '0.4.1' 'C:\repo' $runtime $smallConfig $runtime 'C:\repo\.projectatlas\projectatlas.db' $smallConfig $smallConfig
+    if ($script:receiptStateReached) {
+        throw 'Receipt writer accepted a registration read across a Codex config change.'
+    }
+}
+finally { [IO.File]::Delete($smallConfig) }
 Write-Output "exact_json_registry_contract_verified"
 "#,
     )?;

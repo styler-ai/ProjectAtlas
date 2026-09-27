@@ -2546,8 +2546,11 @@ try:
     transport = row["transport"]
     sys.exit(0 if row["name"] == "projectatlas" and row["enabled"] is True and
              transport["type"] == "stdio" and transport["command"] == runtime and
-             transport["args"] == args else 1)
-except (ValueError, TypeError, KeyError):
+             transport["args"] == args and
+             all(entry.get("env") in (None, {}) and
+                 entry.get("env_vars") in (None, []) and
+                 entry.get("cwd") is None for entry in (row, transport)) else 1)
+except (ValueError, TypeError, KeyError, AttributeError):
     sys.exit(1)
 ' "$projectatlas_bin" "$runtime_version" "$atlas_dir/projectatlas.db" "$expected_config"
   elif command -v jq >/dev/null 2>&1; then
@@ -2555,7 +2558,10 @@ except (ValueError, TypeError, KeyError):
       length == 1 and (.[0] | .name == "projectatlas" and .enabled == true and
         .transport.type == "stdio" and .transport.command == $command and
         .transport.args == (["--require-version", $version, "--db", $db] +
-          (if $config == "" then [] else ["--config", $config] end) + ["mcp"]))
+          (if $config == "" then [] else ["--config", $config] end) + ["mcp"]) and
+        ([., .transport] | all(.[];
+          (.env == null or .env == {}) and
+          (.env_vars == null or .env_vars == []) and .cwd == null)))
     ' >/dev/null
   else
     return 1
@@ -2563,14 +2569,16 @@ except (ValueError, TypeError, KeyError):
 }
 
 write_codex_readiness_receipt() {
-  codex_mcp_registry_ready || return 0
-  load_codex_projectatlas_plugin_inventory || return 0
-  [ "$codex_projectatlas_inventory_version" = "$(expected_runtime_version)" ] &&
-    codex_projectatlas_plugin_artifacts_ready "$codex_projectatlas_inventory_version" "$codex_projectatlas_inventory_source_path" || return 0
   codex_config=$(codex_config_path)
   [ -f "$codex_config" ] || return 0
   [ "$(wc -c < "$codex_config")" -le 1048576 ] &&
     [ "$(wc -c < "$mcp_config_path")" -le 1048576 ] || return 0
+  codex_hash=$(archive_sha256 "$codex_config") || return 0
+  codex_mcp_registry_ready || return 0
+  [ "$(archive_sha256 "$codex_config")" = "$codex_hash" ] || return 0
+  load_codex_projectatlas_plugin_inventory || return 0
+  [ "$codex_projectatlas_inventory_version" = "$(expected_runtime_version)" ] &&
+    codex_projectatlas_plugin_artifacts_ready "$codex_projectatlas_inventory_version" "$codex_projectatlas_inventory_source_path" || return 0
   state_root=$(atlas_forwarder_state_root) || return 0
   mkdir -p -- "$state_root" || return 0
   [ -d "$state_root" ] && [ ! -L "$state_root" ] || return 0
@@ -2579,7 +2587,6 @@ write_codex_readiness_receipt() {
   codex_path=$(canonical_file "$codex_config") || return 0
   runtime_hash=$(archive_sha256 "$runtime_path") || return 0
   generated_hash=$(archive_sha256 "$mcp_config_path") || return 0
-  codex_hash=$(archive_sha256 "$codex_path") || return 0
   agent_guidance_hash=$(archive_sha256 "$plugin_root/hooks/agent-instructions.txt") || return 0
   skill_hash=$(archive_sha256 "$plugin_root/skills/projectatlas/SKILL.md") || return 0
   language_support_hash=$(archive_sha256 "$plugin_root/skills/projectatlas/references/language-support.md") || return 0
@@ -2620,6 +2627,10 @@ print(json.dumps(payload, separators=(",", ":")))
       return 0
     }
   else
+    rm -f -- "$temporary"
+    return 0
+  fi
+  if [ "$(archive_sha256 "$codex_config")" != "$codex_hash" ]; then
     rm -f -- "$temporary"
     return 0
   fi
