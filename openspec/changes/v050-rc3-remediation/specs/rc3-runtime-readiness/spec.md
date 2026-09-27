@@ -48,8 +48,8 @@ The plugin source, installed cache, and readiness hook SHALL require the manifes
 - **WHEN** a plugin source or cache lacks the shipped hook instructions, main skill, language-support reference, or short-command guide, or any of those assets changes after the installer recorded readiness
 - **THEN** the installer refuses to attest that plugin artifact or the hook reports integration incomplete until the matching asset is restored
 
-#### Scenario: Plugin identity, skill route, or system utility path differs
-- **WHEN** a version-matched manifest changes the plugin name or redirects the skill directory, or a supported Linux host provides required utilities only through its system-managed non-FHS path
+#### Scenario: Plugin identity, skill route, version, or system utility path differs
+- **WHEN** a manifest changes the plugin name, redirects the skill directory, or differs from the expected version only by prerelease letter case, or a supported Linux host provides required utilities only through its system-managed non-FHS path
 - **THEN** the mismatched manifest is incomplete, while the trusted non-FHS utilities can verify an otherwise matching installation without admitting project PATH shadows
 
 ### Requirement: Existing project databases are preserved during integration repair

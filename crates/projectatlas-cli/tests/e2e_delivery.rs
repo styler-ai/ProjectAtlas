@@ -12587,6 +12587,31 @@ if ((Get-ProjectAtlasCodexPluginSourceManifestVersion $validPlugin) -eq "0.4.2" 
     -or (Test-ProjectAtlasCodexPluginSourceManifest $validPlugin "0.4.2")) {
     throw "Singleton-array plugin source manifest was accepted."
 }
+$prereleaseVersion = "0.4.2-rc2"
+$validPlugin.version = $prereleaseVersion
+$cacheManifestPath = Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "plugins\cache\projectatlas\projectatlas\$prereleaseVersion\.codex-plugin\plugin.json"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $cacheManifestPath) | Out-Null
+function Get-ProjectAtlasCodexConfigPath { return (Join-Path $env:PROJECTATLAS_PLUGIN_CACHE "config.toml") }
+$originalSkillArtifacts = (Get-Command Test-ProjectAtlasCodexSkillArtifacts).ScriptBlock
+function Test-ProjectAtlasCodexSkillArtifacts { return $true }
+function Convert-ProjectAtlasVersionTag { return "0.4.2-rc2" }
+function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
+function Get-ProjectAtlasCodexPlugin { return $validPlugin }
+Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":"0.4.2-rc2","skills":"./skills/"}'
+Set-Content -LiteralPath $cacheManifestPath -Value '{"name":"projectatlas","version":"0.4.2-rc2","skills":"./skills/"}'
+if (-not (Test-ProjectAtlasCodexPluginReady $prereleaseVersion)) {
+    throw "Matching prerelease source and cache manifests were rejected."
+}
+foreach ($changedManifest in @($manifestPath, $cacheManifestPath)) {
+    Set-Content -LiteralPath $changedManifest -Value '{"name":"projectatlas","version":"0.4.2-RC2","skills":"./skills/"}'
+    if (Test-ProjectAtlasCodexPluginReady $prereleaseVersion) {
+        throw "Case-mismatched plugin manifest was accepted as ready: $changedManifest"
+    }
+    Set-Content -LiteralPath $changedManifest -Value '{"name":"projectatlas","version":"0.4.2-rc2","skills":"./skills/"}'
+}
+$validPlugin.version = "0.4.2"
+Set-Content -LiteralPath $manifestPath -Value '{"name":"projectatlas","version":"0.4.2","skills":"./skills/"}'
+Set-Item -Path function:Test-ProjectAtlasCodexSkillArtifacts -Value $originalSkillArtifacts
 $script:pluginPayload = [pscustomobject]@{ installed = @($validPlugin); available = @() }
 function Convert-ProjectAtlasVersionTag { return "0.4.2" }
 function Resolve-ProjectAtlasCodexCommand { return "C:\Codex\codex.exe" }
@@ -15204,6 +15229,13 @@ fn assert_plugin_update_preserves_prior_integration_when_all_replacement_adds_fa
             true,
             CodexReplacementFailure::Command,
         )?;
+        if env!("CARGO_PKG_VERSION").contains("-rc") {
+            assert_failed_codex_replacement_preserves_prior_integration(
+                previous_ref,
+                true,
+                CodexReplacementFailure::InventoryVersionCase,
+            )?;
+        }
     }
     assert_failed_codex_replacement_preserves_prior_integration(
         "v0.0.1",
@@ -15259,6 +15291,7 @@ enum CodexReplacementFailure {
     Command,
     MarketplaceUpgrade,
     BlankSource,
+    InventoryVersionCase,
     Artifact {
         relative_path: &'static str,
         missing: bool,
@@ -15273,6 +15306,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
 ) -> Result<(), Box<dyn Error>> {
     const MARKETPLACE_UPGRADE_COMMAND: &str = "plugin marketplace upgrade projectatlas --json";
     const REPLACEMENT_READY_FILE_NAME: &str = "replacement-ready";
+    const REPLACEMENT_PAYLOAD_DIR: &str = "replacement-payload";
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
@@ -15342,13 +15376,31 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             ">\"%PROJECTATLAS_FAKE_CODEX_STATE%\" echo blank-source\r\nexit /b 0".to_string(),
             "printf '%s\\n' blank-source > \"$PROJECTATLAS_FAKE_CODEX_STATE\"\nexit 0".to_string(),
         ),
+        CodexReplacementFailure::InventoryVersionCase => {
+            let (payload, _, _) = write_fake_codex_projectatlas_integration(
+                &temp.path().join(REPLACEMENT_PAYLOAD_DIR),
+                env!("CARGO_PKG_VERSION"),
+                env!("CARGO_PKG_VERSION"),
+                include_str!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md"),
+            )?;
+            fs::write(payload.join(REPLACEMENT_READY_FILE_NAME), "ready\n")?;
+            let expected_cache =
+                fake_codex_projectatlas_installed_cache(&codex_dir, env!("CARGO_PKG_VERSION"));
+            replacement_payload = Some((payload, expected_cache.clone(), expected_cache));
+            replacement_plugin_json = stale_plugin_json
+                .replace("0.0.1", &env!("CARGO_PKG_VERSION").replace("-rc", "-RC"));
+            (
+                "if \"%~2\"==\"marketplace\" (\r\n  if exist \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\" rmdir /s /q \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\"\r\n  xcopy /e /i /y \"%PROJECTATLAS_REPLACEMENT_PAYLOAD%\" \"%PROJECTATLAS_FAKE_MARKETPLACE_ROOT%\" >nul\r\n  if errorlevel 1 exit /b 1\r\n  echo marketplace acquisition succeeded>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\n  exit /b 0\r\n)\r\nxcopy /e /i /y \"%PROJECTATLAS_FAKE_PLUGIN_ROOT%\" \"%PROJECTATLAS_FAKE_EXPECTED_PLUGIN_CACHE%\" >nul\r\nif errorlevel 1 exit /b 1\r\necho replacement command succeeded>>\"%PROJECTATLAS_FAKE_CODEX_LOG%\"\r\nexit /b 0".to_string(),
+                "if [ \"${2:-}\" = \"marketplace\" ]; then\n  rm -rf -- \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT\" || exit 1\n  mkdir -p -- \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT\" || exit 1\n  cp -R \"$PROJECTATLAS_REPLACEMENT_PAYLOAD/.\" \"$PROJECTATLAS_FAKE_MARKETPLACE_ROOT/\" || exit 1\n  printf '%s\\n' 'marketplace acquisition succeeded' >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\n  exit 0\nfi\nmkdir -p -- \"$PROJECTATLAS_FAKE_EXPECTED_PLUGIN_CACHE\" || exit 1\ncp -R \"$PROJECTATLAS_FAKE_PLUGIN_ROOT/.\" \"$PROJECTATLAS_FAKE_EXPECTED_PLUGIN_CACHE/\" || exit 1\nprintf '%s\\n' 'replacement command succeeded' >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nexit 0".to_string(),
+            )
+        }
         CodexReplacementFailure::Artifact {
             relative_path,
             missing,
             cached,
         } => {
             let (payload, source, _) = write_fake_codex_projectatlas_integration(
-                &temp.path().join("replacement-payload"),
+                &temp.path().join(REPLACEMENT_PAYLOAD_DIR),
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION"),
                 include_str!("../../../plugins/projectatlas/skills/projectatlas/SKILL.md"),
@@ -15396,7 +15448,8 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             ">\"%PROJECTATLAS_FAKE_CODEX_CONFIG%\" echo mutated=true\r\n>\"%PROJECTATLAS_FAKE_PLUGIN_SKILL%\" echo interrupted marketplace refresh\r\nexit /b 1",
             "printf '%s\\n' 'mutated=true' > \"$PROJECTATLAS_FAKE_CODEX_CONFIG\"\nprintf '%s\\n' 'interrupted marketplace refresh' > \"$PROJECTATLAS_FAKE_PLUGIN_SKILL\"\nexit 1",
         ),
-        CodexReplacementFailure::Artifact { .. } => {
+        CodexReplacementFailure::Artifact { .. }
+        | CodexReplacementFailure::InventoryVersionCase => {
             ("goto replacement_failure", posix_replacement.as_str())
         }
         CodexReplacementFailure::Command | CodexReplacementFailure::BlankSource => {
@@ -15547,6 +15600,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
             if matches!(
                 replacement_failure,
                 CodexReplacementFailure::Artifact { .. }
+                    | CodexReplacementFailure::InventoryVersionCase
             ) {
                 None
             } else {
@@ -15564,7 +15618,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     }
     if matches!(
         replacement_failure,
-        CodexReplacementFailure::Artifact { .. }
+        CodexReplacementFailure::Artifact { .. } | CodexReplacementFailure::InventoryVersionCase
     ) && (!fake_codex_calls
         .contains("plugin add projectatlas --marketplace projectatlas --json")
         || fake_codex_calls
@@ -15590,7 +15644,7 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
     }
     if matches!(
         replacement_failure,
-        CodexReplacementFailure::Artifact { .. }
+        CodexReplacementFailure::Artifact { .. } | CodexReplacementFailure::InventoryVersionCase
     ) && fake_codex_calls
         .lines()
         .filter(|call| *call == "marketplace acquisition succeeded")

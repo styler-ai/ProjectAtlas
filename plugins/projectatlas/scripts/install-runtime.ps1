@@ -4651,7 +4651,7 @@ function Test-ProjectAtlasCodexPluginSourceManifest {
     if ([string]::IsNullOrWhiteSpace($pluginSourcePath)) {
         return $false
     }
-    return (Get-ProjectAtlasCodexPluginSourceManifestVersion $ProjectAtlasPlugin) -eq $ExpectedVersion
+    return (Get-ProjectAtlasCodexPluginSourceManifestVersion $ProjectAtlasPlugin) -ceq $ExpectedVersion
 }
 
 function Confirm-ProjectAtlasCodexSkillArtifact {
@@ -4669,7 +4669,7 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
         Write-Warning "Codex ProjectAtlas plugin skill verification skipped: projectatlas plugin is not installed."
         return
     }
-    if ($projectAtlasPlugin.version -ne $runtimeVersion) {
+    if ($projectAtlasPlugin.version -cne $runtimeVersion) {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: installed projectatlas plugin version '$($projectAtlasPlugin.version)' does not match $runtimeVersion."
         return
     }
@@ -4689,7 +4689,7 @@ function Confirm-ProjectAtlasCodexSkillArtifact {
         return
     }
     $manifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
-    if ($manifestVersion -ne $runtimeVersion) {
+    if ($manifestVersion -cne $runtimeVersion) {
         Write-Warning "Codex ProjectAtlas plugin skill verification failed: manifest version '$manifestVersion' does not match $runtimeVersion."
         return
     }
@@ -4801,8 +4801,8 @@ function Update-ProjectAtlasCodexPlugin {
         $currentSourceManifestMatches = Test-ProjectAtlasCodexPluginSourceManifest $projectAtlasPlugin $runtimeVersion
         $currentSourceArtifactsReady = $currentSourceManifestMatches -and (Test-ProjectAtlasCodexSkillArtifacts (Get-ProjectAtlasCodexPluginSourcePath $projectAtlasPlugin))
         $currentPluginReady = Test-ProjectAtlasCodexPluginReady $ExpectedVersion
-        if ($previousRef -eq $releaseTag `
-            -and $currentPluginVersion -eq $runtimeVersion `
+        if ($previousRef -ceq $releaseTag `
+            -and $currentPluginVersion -ceq $runtimeVersion `
             -and $currentSourceManifestMatches `
             -and $currentPluginReady) {
             Write-Output "Codex ProjectAtlas plugin marketplace already points to $releaseTag."
@@ -4816,7 +4816,7 @@ function Update-ProjectAtlasCodexPlugin {
         }
         if (-not $currentPluginVersion) {
             $marketplacePluginSourcePath = Join-Path $stateSnapshot.MarketplaceRootPath "plugins\projectatlas"
-            if ((Get-ProjectAtlasCodexPluginManifestVersion $marketplacePluginSourcePath) -eq $runtimeVersion `
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $marketplacePluginSourcePath) -ceq $runtimeVersion `
                 -and (Test-ProjectAtlasCodexSkillArtifacts $marketplacePluginSourcePath)) {
                 $currentSourceArtifactsReady = $true
             }
@@ -4824,12 +4824,12 @@ function Update-ProjectAtlasCodexPlugin {
         $updateSucceeded = $false
         $restoreSucceeded = $false
         try {
-            if ($previousRef -eq $releaseTag) {
-            if ($currentPluginVersion -eq $runtimeVersion -and -not $currentSourceManifestMatches) {
+            if ($previousRef -ceq $releaseTag) {
+            if ($currentPluginVersion -ceq $runtimeVersion -and -not $currentSourceManifestMatches) {
                 $sourceManifestVersion = Get-ProjectAtlasCodexPluginSourceManifestVersion $projectAtlasPlugin
                 Write-Output "Codex ProjectAtlas plugin source manifest version '$sourceManifestVersion' does not match $runtimeVersion; refreshing official projectatlas plugin cache."
             }
-            elseif ($currentPluginVersion -eq $runtimeVersion -and -not $currentPluginReady) {
+            elseif ($currentPluginVersion -ceq $runtimeVersion -and -not $currentPluginReady) {
                 Write-Output "Codex ProjectAtlas plugin skill artifact does not match $runtimeVersion; repairing the installed plugin cache."
             }
             $refreshSucceeded = $currentSourceArtifactsReady
@@ -4853,7 +4853,7 @@ function Update-ProjectAtlasCodexPlugin {
                 return
             }
             $installedVersion = $installedInventory.Plugin.version
-            if ($installedVersion -ne $runtimeVersion) {
+            if ($installedVersion -cne $runtimeVersion) {
                 Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
                 return
             }
@@ -4910,7 +4910,7 @@ function Update-ProjectAtlasCodexPlugin {
             return
         }
         $installedVersion = $installedInventory.Plugin.version
-        if ($installedVersion -ne $runtimeVersion) {
+        if ($installedVersion -cne $runtimeVersion) {
             Write-Warning "Codex ProjectAtlas plugin update failed: installed projectatlas plugin version '$installedVersion' does not match $runtimeVersion."
             return
         }
@@ -5210,7 +5210,7 @@ function Test-ProjectAtlasCodexPluginArtifacts {
         $cachePath = Join-Path $codexRoot ("plugins\cache\projectatlas\projectatlas\" + $ExpectedVersion)
         Assert-ProjectAtlasCodexDirectAncestry $cachePath "installed projectatlas plugin cache" $codexRoot
         foreach ($artifactRoot in @((Get-ProjectAtlasCodexPluginSourcePath $ProjectAtlasPlugin), $cachePath)) {
-            if ((Get-ProjectAtlasCodexPluginManifestVersion $artifactRoot) -ne $ExpectedVersion `
+            if ((Get-ProjectAtlasCodexPluginManifestVersion $artifactRoot) -cne $ExpectedVersion `
                 -or -not (Test-ProjectAtlasCodexSkillArtifacts $artifactRoot)) {
                 return $false
             }
@@ -5312,7 +5312,7 @@ function Write-ProjectAtlasWorkflowPinReport {
                 if ($foundTag -notmatch '^v[0-9][A-Za-z0-9.+-]*$') {
                     continue
                 }
-                if ($foundTag -ne $releaseTag) {
+                if ($foundTag -cne $releaseTag) {
                     $relativePath = $file.FullName
                     if ($relativePath.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
                         $relativePath = $relativePath.Substring($rootPath.Length).TrimStart('\', '/')
