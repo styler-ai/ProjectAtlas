@@ -717,14 +717,17 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     let guidance = ready_output.starts_with(
         "Before any ProjectAtlas call, read the complete version-matched ProjectAtlas skill",
     );
-    let skill_path = ready_output.contains(&format!(
-        "Read the complete installed ProjectAtlas skill now: {}",
-        plugin_root
-            .join("skills")
-            .join("projectatlas")
-            .join("SKILL.md")
-            .display()
-    ));
+    let skill_path = ready_output
+        .lines()
+        .find_map(|line| line.strip_prefix("Read the complete installed ProjectAtlas skill now: "))
+        .is_some_and(|path| {
+            require_same_canonical_path(
+                path,
+                &plugin_root.join("skills/projectatlas/SKILL.md"),
+                "installed skill",
+            )
+            .is_ok()
+        });
     if !ready || !guidance || !skill_path {
         return Err(io::Error::other(format!(
             "matching installed layers were not ready (ready={ready} guidance={guidance} skill_path={skill_path}): {ready_output}"
