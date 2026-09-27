@@ -66,6 +66,43 @@ else
 fi
 receipt=${state_base:+$state_base/projectatlas/codex-readiness.json}
 codex_config=${CODEX_HOME:-${HOME:-}/.codex}/config.toml
+if [ -n "$receipt" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
+  [ "$(wc -c < "$receipt")" -le 65536 ] && [ -f "$codex_config" ] &&
+  [ "$(wc -c < "$codex_config")" -le 1048576 ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    registry=$(python3 -c '
+import hashlib, json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        receipt = json.load(source)
+    config_path, version, root = sys.argv[2:]
+    bound_config = receipt["codex_config"]
+    bound_root = receipt["project_root"]
+    if (isinstance(receipt.get("registry"), dict) and receipt["version"] == version and
+        isinstance(bound_config, str) and os.path.realpath(bound_config) == os.path.realpath(config_path) and
+        isinstance(bound_root, str) and os.path.realpath(bound_root) == os.path.realpath(root) and
+        receipt["codex_config_sha256"] == hashlib.sha256(open(config_path, "rb").read()).hexdigest()):
+        print(json.dumps(receipt["registry"]))
+except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    pass
+' "$receipt" "$codex_config" "$expected" "$project_root" 2>/dev/null)
+  elif command -v jq >/dev/null 2>&1; then
+    codex_hash=
+    if command -v sha256sum >/dev/null 2>&1; then
+      codex_hash=$(sha256sum "$codex_config" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+      codex_hash=$(shasum -a 256 "$codex_config" | awk '{print $1}')
+    fi
+    if [ -n "$codex_hash" ] &&
+      same_json_path "$(cat "$receipt")" '.[0].codex_config | strings' "$codex_config"; then
+      registry=$(jq -ces --arg hash "$codex_hash" --arg version "$expected" '
+        select(length == 1 and .[0].version == $version and
+          .[0].codex_config_sha256 == $hash and (.[0].registry | type == "object")) |
+        .[0].registry
+      ' "$receipt" 2>/dev/null || true)
+    fi
+  fi
+fi
 receipt_valid() {
   [ -n "$receipt" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
     [ -d "$state_base/projectatlas" ] && [ ! -L "$state_base/projectatlas" ] &&
@@ -193,9 +230,6 @@ except (ValueError, TypeError, KeyError):
   fi
 }
 if [ -n "$expected" ] && receipt_valid; then
-  if command -v python3 >/dev/null 2>&1; then
-    registry=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["registry"]))' "$receipt" 2>/dev/null || true)
-  fi
   runtime=$("$direct_path" --format json runtime-info 2>/dev/null || true)
   if runtime_info_ok; then
     reason='project database is incompatible or bound to another root'
@@ -240,7 +274,7 @@ try:
                   None, None, source.get("cwd"))
 except (ValueError, TypeError, KeyError, AttributeError):
     values = (None,) * 7
-values = [str(value).lower() if isinstance(value, bool) else value if isinstance(value, str) and value else "unavailable" for value in values]
+values = [str(value).lower() if isinstance(value, bool) else value if isinstance(value, str) and value and not any(ord(char) < 32 or 127 <= ord(char) < 160 for char in value) else "unavailable" for value in values]
 print("Observed %s: version=%s executable=%s db=%s config=%s enabled=%s transport=%s cwd=%s" % (label, *values))
 ' "$1" 2>/dev/null
   elif command -v jq >/dev/null 2>&1; then
@@ -251,7 +285,7 @@ print("Observed %s: version=%s executable=%s db=%s config=%s enabled=%s transpor
       else
         (if $label == "codex_mcp" then .transport else .mcpServers.projectatlas end) as $identity |
         "Observed \($label): version=\($identity.args[1] // "unavailable") executable=\($identity.command // "unavailable") db=\($identity.args[3] // "unavailable") config=\($identity.args[5] // "unavailable") enabled=\(if $label == "codex_mcp" then .enabled | tostring else "unavailable" end) transport=\(if $label == "codex_mcp" then .transport.type // "unavailable" else "unavailable" end) cwd=\(if $label == "generated_mcp" then $identity.cwd // "unavailable" else "unavailable" end)"
-      end
+      end | gsub("[[:cntrl:]]"; "?")
     ' 2>/dev/null || printf 'Observed %s: unavailable\n' "$1"
   else
     printf 'Observed %s: unavailable (no JSON validator)\n' "$1"

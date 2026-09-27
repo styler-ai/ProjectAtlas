@@ -16450,8 +16450,8 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
         .join("install-runtime.sh");
     let installer_source = fs::read_to_string(&installer)?;
     let official_start = installer_source
-        .find("official_projectatlas_marketplace_source() {")
-        .ok_or_else(|| io::Error::other("POSIX installer omitted official source validator"))?;
+        .find("codex_projectatlas_marketplace_source() {")
+        .ok_or_else(|| io::Error::other("POSIX installer omitted marketplace source reader"))?;
     let official_end = installer_source[official_start..]
         .find("\ncodex_config_path() {")
         .map(|offset| official_start + offset)
@@ -16463,41 +16463,87 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
         .find("\ncodex_projectatlas_plugin_version() {")
         .map(|offset| inventory_start + offset)
         .ok_or_else(|| io::Error::other("POSIX plugin inventory boundary drifted"))?;
+    let manifest_start = installer_source
+        .find("codex_projectatlas_plugin_source_manifest_version() {")
+        .ok_or_else(|| io::Error::other("POSIX plugin manifest reader missing"))?;
+    let manifest_end = installer_source[manifest_start..]
+        .find("\ncodex_projectatlas_plugin_source_manifest_matches() {")
+        .map(|offset| manifest_start + offset)
+        .ok_or_else(|| io::Error::other("POSIX plugin manifest reader boundary drifted"))?;
+    let mount_start = installer_source
+        .find("validate_codex_mounts() {")
+        .ok_or_else(|| io::Error::other("POSIX installer omitted mount validator"))?;
+    let mount_end = installer_source[mount_start..]
+        .find("\nvalidate_codex_projectatlas_snapshot_directory() {")
+        .map(|offset| mount_start + offset)
+        .ok_or_else(|| io::Error::other("POSIX mount validator boundary drifted"))?;
 
     let temp = tempfile::tempdir()?;
     let empty_path = temp.path().join("path-without-jq");
     fs::create_dir(&empty_path)?;
+    for executable in ["python3", "sed"] {
+        let resolved = StdCommand::new("sh")
+            .args(["-c", &format!("command -v {executable}")])
+            .output()?;
+        if !resolved.status.success() {
+            return Err(
+                io::Error::other(format!("{executable} is required for this fixture")).into(),
+            );
+        }
+        let target = String::from_utf8(resolved.stdout)?.trim().to_owned();
+        std::os::unix::fs::symlink(&target, empty_path.join(executable))?;
+    }
     let calls = temp.path().join("calls.txt");
     let fake_codex = temp.path().join(POSIX_CODEX_EXECUTABLE_FILE_NAME);
     write_executable_script(
         &fake_codex,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nprintf '%s\\n' '{\"installed\":[{\"pluginId\":\"projectatlas@projectatlas\",\"name\":\"projectatlas\",\"marketplaceName\":\"projectatlas\",\"version\":\"0.0.1\",\"installed\":true,\"enabled\":true},{\"pluginId\":\"other@other\",\"marketplaceSource\":{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"},\"source\":{\"path\":\"/tmp/projectatlas\"}}],\"available\":[]}'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PROJECTATLAS_FAKE_CODEX_LOG\"\nprintf '%s\\n' \"$PROJECTATLAS_FAKE_PLUGIN_JSON\"\n",
+    )?;
+    let manifest_root = temp.path().join("plugin-source");
+    fs::create_dir_all(manifest_root.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+    fs::write(
+        manifest_root
+            .join(CODEX_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json"),
+        r#"{"version":"0.5.0-rc2"}"#,
     )?;
     let wrapper = temp.path().join("verify-no-jq.sh");
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nset -eu\n{}\n{}\nPATH=$1\ncodex_bin=$2\nif load_codex_projectatlas_plugin_inventory; then\n  exit 17\nfi\n[ \"$codex_projectatlas_inventory_complete\" = false ]\n",
+            "#!/bin/sh\nset -eu\n{}\n{}\n{}\nPATH=$1\ncodex_bin=$2\nif [ \"$3\" = invalid ]; then\n  if load_codex_projectatlas_plugin_inventory; then exit 17; fi\n  [ \"$codex_projectatlas_inventory_complete\" = false ]\nelif [ \"$3\" = jq-invalid ]; then\n  if codex_projectatlas_marketplace_source \"$PROJECTATLAS_FAKE_MARKETPLACES\"; then exit 18; fi\n  [ -z \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" ]\nelse\n  [ \"$(codex_projectatlas_marketplace_source '{{\"marketplaces\":[{{\"name\":\"projectatlas\",\"marketplaceSource\":{{\"source\":\"https://github.com/styler-ai/ProjectAtlas.git\"}}}}]}}')\" = 'https://github.com/styler-ai/ProjectAtlas.git' ]\n  load_codex_projectatlas_plugin_inventory\n  [ \"$codex_projectatlas_inventory_complete\" = true ]\n  [ \"$codex_projectatlas_inventory_version\" = 0.5.0-rc2 ]\n  [ \"$codex_projectatlas_inventory_source_path\" = /tmp/projectatlas ]\n  [ \"$(codex_projectatlas_plugin_source_manifest_version \"$4\")\" = 0.5.0-rc2 ]\nfi\n",
             &installer_source[official_start..official_end],
-            &installer_source[inventory_start..inventory_end]
+            &installer_source[inventory_start..inventory_end],
+            &installer_source[manifest_start..manifest_end]
         ),
     )?;
-    let output = StdCommand::new("bash")
-        .arg(&wrapper)
-        .arg(&empty_path)
-        .arg(&fake_codex)
-        .env("PROJECTATLAS_FAKE_CODEX_LOG", &calls)
-        .output()?;
-    if !output.status.success() {
+    let invalid_inventory = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true},{"pluginId":"other@other","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"},"source":{"path":"/tmp/projectatlas"}}],"available":[]}"#;
+    let valid_inventory = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.5.0-rc2","installed":true,"enabled":true,"marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"},"source":{"path":"/tmp/projectatlas"}}],"available":[]}"#;
+    let run = |case: &str, inventory: &str| {
+        StdCommand::new("bash")
+            .arg(&wrapper)
+            .arg(&empty_path)
+            .arg(&fake_codex)
+            .arg(case)
+            .arg(&manifest_root)
+            .env("PROJECTATLAS_FAKE_PLUGIN_JSON", inventory)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &calls)
+            .output()
+    };
+    let invalid = run("invalid", invalid_inventory)?;
+    let valid = run("valid", valid_inventory)?;
+    if !invalid.status.success() || !valid.status.success() {
         return Err(io::Error::other(format!(
-            "POSIX no-jq inventory did not fail closed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            "POSIX Python-only inventory did not reject malformed and accept valid state:\ninvalid={} {}\nvalid={} {}",
+            String::from_utf8_lossy(&invalid.stdout),
+            String::from_utf8_lossy(&invalid.stderr),
+            String::from_utf8_lossy(&valid.stdout),
+            String::from_utf8_lossy(&valid.stderr)
         ))
         .into());
     }
     let calls = fs::read_to_string(calls)?;
-    if calls.trim() != "plugin list --marketplace projectatlas --json"
+    if calls.lines().collect::<Vec<_>>() != ["plugin list --marketplace projectatlas --json"; 2]
         || calls.contains(" remove ")
         || calls.contains(" add ")
     {
@@ -16505,6 +16551,117 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             "POSIX no-jq split-object inventory reached mutation or rollback:\n{calls}"
         ))
         .into());
+    }
+    let mount_wrapper = temp.path().join("verify-no-jq-mounts.sh");
+    fs::write(
+        &mount_wrapper,
+        format!(
+            "#!/bin/sh\nset -eu\n{}\nuname() {{ printf '%s\\n' Linux; }}\nfindmnt() {{ printf '%s\\n' \"$PROJECTATLAS_FAKE_MOUNTS\"; }}\nPATH=$1\nif [ \"$2\" = valid ]; then\n  validate_codex_mounts /tmp/cache/target snapshot /tmp/cache\nelse\n  if validate_codex_mounts /tmp/cache/target snapshot /tmp/cache; then exit 19; fi\nfi\n",
+            &installer_source[mount_start..mount_end]
+        ),
+    )?;
+    for (case, mounts) in [
+        ("valid", r#"{"filesystems":[{"target":"/"}]}"#),
+        (
+            "mounted",
+            r#"{"filesystems":[{"target":"/"},{"target":"/tmp/cache/target"}]}"#,
+        ),
+        ("malformed", r#"{"filesystems":[{"source":"untrusted"}]}"#),
+    ] {
+        let output = StdCommand::new("bash")
+            .arg(&mount_wrapper)
+            .arg(&empty_path)
+            .arg(case)
+            .env("PROJECTATLAS_FAKE_MOUNTS", mounts)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "POSIX Python-only mount validation failed for {case}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+    }
+    let jq = StdCommand::new("sh")
+        .args(["-c", "command -v jq"])
+        .output()?;
+    if jq.status.success() {
+        let jq_path = temp.path().join("path-without-python");
+        fs::create_dir(&jq_path)?;
+        std::os::unix::fs::symlink(String::from_utf8(jq.stdout)?.trim(), jq_path.join("jq"))?;
+        let sed = StdCommand::new("sh")
+            .args(["-c", "command -v sed"])
+            .output()?;
+        std::os::unix::fs::symlink(String::from_utf8(sed.stdout)?.trim(), jq_path.join("sed"))?;
+        let malformed_manifest = temp.path().join("malformed-plugin-source");
+        fs::create_dir_all(malformed_manifest.join(CODEX_PLUGIN_MANIFEST_DIR))?;
+        fs::write(
+            malformed_manifest
+                .join(CODEX_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"version":"0.5.0-rc2\n"}"#,
+        )?;
+        let entry = r#"{"name":"projectatlas","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"}}"#;
+        let jq_calls = temp.path().join("jq-calls.txt");
+        let jq_valid = StdCommand::new("bash")
+            .arg(&wrapper)
+            .arg(&jq_path)
+            .arg(&fake_codex)
+            .arg("valid")
+            .arg(&manifest_root)
+            .env("PROJECTATLAS_FAKE_PLUGIN_JSON", valid_inventory)
+            .env("PROJECTATLAS_FAKE_CODEX_LOG", &jq_calls)
+            .output()?;
+        if !jq_valid.status.success() {
+            return Err(io::Error::other(format!(
+                "POSIX jq-only valid plugin state was refused:\n{}\n{}",
+                String::from_utf8_lossy(&jq_valid.stdout),
+                String::from_utf8_lossy(&jq_valid.stderr)
+            ))
+            .into());
+        }
+        let nul_version = valid_inventory.replace("0.5.0-rc2", r"0.5.0-rc2\u0000");
+        for inventory in [nul_version, format!("{valid_inventory} {valid_inventory}")] {
+            let output = StdCommand::new("bash")
+                .arg(&wrapper)
+                .arg(&jq_path)
+                .arg(&fake_codex)
+                .arg("invalid")
+                .arg(&manifest_root)
+                .env("PROJECTATLAS_FAKE_PLUGIN_JSON", inventory)
+                .env("PROJECTATLAS_FAKE_CODEX_LOG", &jq_calls)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "POSIX jq-only inventory accepted NUL or multiple JSON documents:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+        }
+        for marketplaces in [
+            format!(r#"{{"marketplaces":[{entry},{entry}]}}"#),
+            format!(r#"{{"marketplaces":[{entry}]}} {{"marketplaces":[{entry}]}}"#),
+        ] {
+            let output = StdCommand::new("bash")
+                .arg(&wrapper)
+                .arg(&jq_path)
+                .arg(&fake_codex)
+                .arg("jq-invalid")
+                .arg(&malformed_manifest)
+                .env("PROJECTATLAS_FAKE_MARKETPLACES", marketplaces)
+                .output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "POSIX jq-only inventory accepted ambiguous marketplace or newline manifest:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+        }
     }
     Ok(())
 }

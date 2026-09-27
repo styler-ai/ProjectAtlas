@@ -1271,8 +1271,29 @@ resolve_codex_command() {
 
 codex_projectatlas_marketplace_source() {
   marketplaces=$1
-  command -v jq >/dev/null 2>&1 || return 1
-  printf '%s\n' "$marketplaces" | jq -r '.marketplaces[]? | select(.name == "projectatlas") | .marketplaceSource.source // empty' | head -n 1
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "$marketplaces" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)["marketplaces"]
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == "projectatlas"]
+    source = matches[0]["marketplaceSource"]["source"] if len(matches) == 1 else None
+    if not isinstance(source, str) or not source or any(char in source for char in "\r\n\0"):
+        sys.exit(1)
+    print(source)
+except (ValueError, TypeError, KeyError, IndexError):
+    sys.exit(1)
+'
+  elif command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$marketplaces" | jq -er -s '
+      select(length == 1) | .[0].marketplaces | select(type == "array") |
+      [.[] | select(.name == "projectatlas")] | select(length == 1) |
+      .[0].marketplaceSource.source |
+      select(type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null)
+    '
+  else
+    return 1
+  fi
 }
 
 official_projectatlas_marketplace_source() {
@@ -1511,7 +1532,8 @@ validate_codex_mounts() {
   mount_platform=$(uname -s 2>/dev/null || true)
   case "$mount_platform" in
     Linux)
-      if ! command -v findmnt >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+      if ! command -v findmnt >/dev/null 2>&1 ||
+        { ! command -v python3 >/dev/null 2>&1 && ! command -v jq >/dev/null 2>&1; }; then
         printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount ownership cannot be established.\n' "$mount_description" >&2
         return 1
       fi
@@ -1519,6 +1541,38 @@ validate_codex_mounts() {
         printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory cannot be read.\n' "$mount_description" >&2
         return 1
       }
+      if command -v python3 >/dev/null 2>&1; then
+        if printf '%s\n' "$mount_inventory" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)["filesystems"]
+    if not isinstance(rows, list) or not rows or not all(
+        isinstance(row, dict) and isinstance(row.get("target"), str) and row["target"].startswith("/")
+        for row in rows
+    ):
+        sys.exit(2)
+    targets = [row["target"] for row in rows]
+except (ValueError, TypeError, KeyError):
+    sys.exit(2)
+root, candidate = sys.argv[1:]
+if not any(target == "/" or target == root or root.startswith(target + "/") for target in targets) or any(
+    target.startswith(root + "/") and
+    (target == candidate or candidate.startswith(target + "/") or target.startswith(candidate + "/"))
+    for target in targets
+):
+    sys.exit(3)
+' "$mount_root" "$mount_candidate"; then
+          return 0
+        else
+          mount_status=$?
+        fi
+        if [ "$mount_status" -eq 2 ]; then
+          printf 'warning: Codex ProjectAtlas plugin update skipped: %s mount inventory is malformed.\n' "$mount_description" >&2
+        else
+          printf 'warning: Codex ProjectAtlas plugin update skipped: %s crosses or contains a mounted filesystem.\n' "$mount_description" >&2
+        fi
+        return 1
+      fi
       mount_targets=$(printf '%s\n' "$mount_inventory" | jq -c '
           (if type != "object" or ((.filesystems? | type) != "array") then
              error("invalid findmnt inventory")
@@ -1941,11 +1995,50 @@ load_codex_projectatlas_plugin_inventory() {
   codex_projectatlas_inventory_version=
   codex_projectatlas_inventory_source_path=
   plugins=$("$codex_bin" plugin list --marketplace projectatlas --json 2>/dev/null) || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  if ! printf '%s\n' "$plugins" | jq -e '
-      type == "object" and
-      (.installed | type == "array") and
-      all(.installed[]; type == "object")
+  [ "${#plugins}" -le 1048576 ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    projection=$(printf '%s\n' "$plugins" | python3 -c '
+import json, sys
+try:
+    root = json.load(sys.stdin)
+    rows = root["installed"]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        sys.exit(1)
+    matches = [row for row in rows if row.get("pluginId") == "projectatlas@projectatlas" or
+               (row.get("name") == "projectatlas" and row.get("marketplaceName") == "projectatlas")]
+    if not matches:
+        print("absent")
+        sys.exit(0)
+    if len(matches) != 1:
+        sys.exit(1)
+    row = matches[0]
+    source = row["marketplaceSource"]["source"]
+    path = row["source"]["path"]
+    version = row["version"]
+    if (row.get("pluginId") != "projectatlas@projectatlas" or
+        row.get("name") != "projectatlas" or row.get("marketplaceName") != "projectatlas" or
+        row.get("installed") is not True or row.get("enabled") is not True or
+        not all(isinstance(value, str) and value and not any(char in value for char in "\r\n\0")
+                for value in (version, path, source))):
+        sys.exit(1)
+    print("present\n" + version + "\n" + path + "\n" + source)
+except (ValueError, TypeError, KeyError, IndexError):
+    sys.exit(1)
+') || return 1
+    if [ "$projection" = absent ]; then
+      codex_projectatlas_inventory_complete=true
+      return 0
+    fi
+    [ "$(printf '%s\n' "$projection" | sed -n '1p')" = present ] || return 1
+    codex_projectatlas_inventory_version=$(printf '%s\n' "$projection" | sed -n '2p')
+    codex_projectatlas_inventory_source_path=$(printf '%s\n' "$projection" | sed -n '3p')
+    codex_projectatlas_inventory_marketplace_source=$(printf '%s\n' "$projection" | sed -n '4p')
+  elif command -v jq >/dev/null 2>&1; then
+    if ! printf '%s\n' "$plugins" | jq -e -s '
+      length == 1 and
+      (.[0] | type == "object") and
+      (.[0].installed | type == "array") and
+      all(.[0].installed[]; type == "object")
     ' >/dev/null 2>&1; then
       return 1
     fi
@@ -1960,6 +2053,7 @@ load_codex_projectatlas_plugin_inventory() {
     fi
     if [ "$projectatlas_inventory_count" -ne 1 ] ||
       ! printf '%s\n' "$plugins" | jq -e '
+        def clean: type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null;
         [
           .installed[] |
           select(.pluginId == "projectatlas@projectatlas" or
@@ -1968,13 +2062,13 @@ load_codex_projectatlas_plugin_inventory() {
         .pluginId == "projectatlas@projectatlas" and
         .name == "projectatlas" and
         .marketplaceName == "projectatlas" and
-        (.version | type == "string") and
+        (.version | clean) and
         .installed == true and
         .enabled == true and
         (.marketplaceSource | type == "object") and
-        (.marketplaceSource.source | type == "string" and length > 0) and
+        (.marketplaceSource.source | clean) and
         (.source | type == "object") and
-        (.source.path | type == "string" and length > 0)
+        (.source.path | clean)
       ' >/dev/null 2>&1; then
       return 1
     fi
@@ -1993,6 +2087,9 @@ load_codex_projectatlas_plugin_inventory() {
       select(.pluginId == "projectatlas@projectatlas" or
         (.name == "projectatlas" and .marketplaceName == "projectatlas"))
     ][0].marketplaceSource.source') || return 1
+  else
+    return 1
+  fi
   official_projectatlas_marketplace_source "$codex_projectatlas_inventory_marketplace_source" || return 1
   case "$codex_projectatlas_inventory_version" in
     [0-9A-Za-z]*) ;;
@@ -2030,11 +2127,23 @@ codex_projectatlas_plugin_source_manifest_version() {
     printf '%s\n' ""
     return 0
   fi
-  if ! command -v jq >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        data = json.load(stream)
+    version = data["version"]
+    if isinstance(version, str) and version and not any(char in version for char in "\r\n\0"):
+        print(version)
+except (ValueError, TypeError, KeyError, OSError):
+    pass
+' "$manifest_path" 2>/dev/null || printf '%s\n' ""
+  elif command -v jq >/dev/null 2>&1; then
+    jq -r -s 'if length == 1 and (.[0] | type == "object") and (.[0].version | type == "string" and length > 0 and index("\r") == null and index("\n") == null and index("\u0000") == null) then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
+  else
     printf '%s\n' ""
-    return 0
   fi
-  jq -r -s 'if length == 1 and (.[0] | type == "object") and (.[0].version | type == "string") then .[0].version else empty end' "$manifest_path" 2>/dev/null || printf '%s\n' ""
 }
 
 codex_projectatlas_plugin_source_manifest_matches() {
@@ -2174,7 +2283,7 @@ update_codex_plugin_locked() {
     return 0
   fi
   marketplace_source=$(codex_projectatlas_marketplace_source "$marketplaces") || {
-    printf '%s\n' "Codex ProjectAtlas plugin update skipped: Codex plugin inventory requires jq for trustworthy JSON validation."
+    printf '%s\n' "Codex ProjectAtlas plugin update skipped: could not validate Codex marketplace inventory with python3 or jq."
     return 0
   }
   if ! official_projectatlas_marketplace_source "$marketplace_source"; then
