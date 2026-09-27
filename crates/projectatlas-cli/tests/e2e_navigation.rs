@@ -10050,12 +10050,16 @@ fn require_json_contains_from_value(
 
 #[test]
 fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(), Box<dyn Error>> {
+    const SOURCE_DIR: &str = "src";
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("docx-symbol-publication");
     fs::create_dir_all(repo.join("docs"))?;
-    fs::create_dir_all(repo.join("src"))?;
+    fs::create_dir_all(repo.join(SOURCE_DIR))?;
     fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
-    fs::write(repo.join("src/lib.rs"), "pub fn still_indexed() {}\n")?;
+    fs::write(
+        repo.join(SOURCE_DIR).join("lib.rs"),
+        "pub fn still_indexed() {}\n",
+    )?;
     fs::write(
         repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n",
