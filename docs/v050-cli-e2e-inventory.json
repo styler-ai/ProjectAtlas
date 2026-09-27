@@ -6,7 +6,7 @@
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "7cfb95ff90fab9e905de781d953f895043f44d1c8b6df5278fa59026d58e111d",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "f17200d96abd7811f1667cfd297f16d8944bd7f469dfb81ab0caa98d8a73769e",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "7a5c3d8208fd163059b79bef1a4eeb3dddd1449ef663543af12750c2c1d89b5f",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "7520530a4cf3bdf3347e04c2bc417ae886f89cb7e0c631e2cf0cc02b762b4564",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 199,
+  "test_count": 200,
   "symbol_count": 433,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -31,6 +31,13 @@
   "tests": [
     {
       "name": "bounded_pdf_and_docx_reach_cli_and_mcp_navigation",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch",
       "owner": "e2e_navigation",
       "attributes": [
         "#[test]"
@@ -19545,6 +19552,10 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 470,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
