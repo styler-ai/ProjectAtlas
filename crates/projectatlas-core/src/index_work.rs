@@ -92,6 +92,8 @@ pub enum IndexWorkResource {
     Workers,
     /// Interpreter instructions admitted for one contained parser execution.
     ParserFuel,
+    /// Bytes inflated by repeated bounded parser reads after package admission.
+    ParserWorkBytes,
 }
 
 impl fmt::Display for IndexWorkResource {
@@ -108,6 +110,7 @@ impl fmt::Display for IndexWorkResource {
             Self::OutputBytes => "output_bytes",
             Self::Workers => "workers",
             Self::ParserFuel => "parser_fuel",
+            Self::ParserWorkBytes => "parser_work_bytes",
         })
     }
 }

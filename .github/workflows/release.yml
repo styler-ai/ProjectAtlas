@@ -285,7 +285,7 @@ jobs:
           case "${1:-}" in
             mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
               binary=e2e_delivery ;;
-            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
               binary=e2e_navigation ;;
             lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
               binary=e2e_maintenance ;;
@@ -416,6 +416,7 @@ jobs:
               "deep_qualified_*" { return "e2e_navigation.exe" }
               "partial_markdown_*" { return "e2e_navigation.exe" }
               "classified_document_*" { return "e2e_navigation.exe" }
+              "docx_symbols_*" { return "e2e_navigation.exe" }
               "installed_candidate_without_git_*" { return "e2e_navigation.exe" }
               "compiler_config_*" { return "e2e_navigation.exe" }
               "lint_formats_*" { return "e2e_maintenance.exe" }
@@ -757,6 +758,7 @@ jobs:
             mcp_stdio_serves_toon_tool_payloads \
             full_repository_intelligence_flow_indexes_database_and_commands \
             classified_document_navigation_agrees_across_cli_and_mcp \
+            docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch \
             holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp \
             token_cli_and_mcp_preserve_average_maximum_edge_accounting \
             posix_installer_accepts_symlinked_runtime_path
@@ -792,6 +794,7 @@ jobs:
             lint_formats_share_typed_cli_and_mcp_report \
             token_tui_cli_respects_selected_terminal_viewport \
             classified_document_navigation_agrees_across_cli_and_mcp \
+            docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch \
             conditional_purpose_review_cli_reconciles_source_before_apply \
             persistent_mcp_purpose_review_reconciles_source_before_apply \
             persistent_mcp_stdin_does_not_block_repository_startup_probes \
@@ -1018,6 +1021,7 @@ jobs:
             "lint_formats_share_typed_cli_and_mcp_report",
             "token_tui_cli_respects_selected_terminal_viewport",
             "classified_document_navigation_agrees_across_cli_and_mcp",
+            "docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch",
             "conditional_purpose_review_cli_reconciles_source_before_apply",
             "persistent_mcp_purpose_review_reconciles_source_before_apply",
             "persistent_mcp_stdin_does_not_block_repository_startup_probes",

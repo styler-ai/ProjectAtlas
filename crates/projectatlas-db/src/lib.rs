@@ -3164,6 +3164,7 @@ impl AtlasStore {
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1 AND (name LIKE ?2 OR signature LIKE ?2 OR documentation LIKE ?2)
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?3
                 ",
@@ -3175,6 +3176,7 @@ impl AtlasStore {
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?2
                 ",
@@ -3185,7 +3187,8 @@ impl AtlasStore {
                 SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
-                WHERE name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1
+                WHERE (name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1)
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?2
                 ",
@@ -3196,6 +3199,7 @@ impl AtlasStore {
                 SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
+                WHERE NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?1
                 ",
@@ -3480,6 +3484,7 @@ impl AtlasStore {
                    source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE name IN ({placeholders})
+              AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
             ORDER BY path, line_start, name
             "
         );
@@ -3555,6 +3560,7 @@ impl AtlasStore {
                    source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE path = ?1 AND name = ?2
+              AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
             ORDER BY line_start, line_end, kind, parent
             ",
             params![file, name],
@@ -4129,7 +4135,7 @@ impl AtlasStore {
     pub fn symbol_count(&self) -> DbResult<usize> {
         let count = self
             .connection
-            .query_row("SELECT COUNT(*) FROM symbols", [], |row| {
+            .query_row("SELECT COUNT(*) FROM symbols WHERE NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')", [], |row| {
                 row.get::<_, i64>(0)
             })?;
         Ok(i64_to_usize(count))
@@ -4156,7 +4162,7 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn symbol_count_for_path(&self, path: &str) -> DbResult<usize> {
         let count = self.connection.query_row(
-            "SELECT COUNT(*) FROM symbols WHERE path = ?1",
+            "SELECT COUNT(*) FROM symbols WHERE path = ?1 AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')",
             [path],
             |row| row.get::<_, i64>(0),
         )?;
@@ -4178,7 +4184,7 @@ impl AtlasStore {
             }
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql = format!(
-                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) GROUP BY path"
+                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage') GROUP BY path"
             );
             let mut statement = self.connection.prepare(&sql)?;
             let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
@@ -7854,7 +7860,8 @@ fn classified_symbols_sql(
     selection: ContentSelection,
     limit: usize,
 ) -> (String, Vec<Value>) {
-    let mut predicates = Vec::new();
+    // Internal document coverage metadata is retained for graph rebuilds, not symbol navigation.
+    let mut predicates = vec!["NOT (symbol.language IN ('docx', 'pdf') AND symbol.kind = 'unknown' AND symbol.name = 'document-text-coverage')".to_owned()];
     let mut bindings = Vec::new();
     if let Some(file) = file {
         bindings.push(Value::Text(file.to_string()));

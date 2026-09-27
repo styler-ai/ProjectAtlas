@@ -20,7 +20,8 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
-    MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    CodeSymbol, MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind,
+    SymbolRelation,
 };
 use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
@@ -30,10 +31,11 @@ use projectatlas_fs::RootScanPolicy;
 #[cfg(test)]
 use projectatlas_fs::ScanOptions;
 use projectatlas_symbols::{
-    ConfiguredModuleResolution, MAX_RESOLUTION_KEYS_PER_FACT, MarkdownFactCompleteness,
-    MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection, ResolutionProjectionContext,
-    ResolutionProjectionError, ResolutionProjectionFact, derive_resolution_keys_with_context,
-    extract_markdown_facts_controlled, parse_import_references,
+    ConfiguredModuleResolution, DOCUMENT_COVERAGE_SYMBOL, MAX_RESOLUTION_KEYS_PER_FACT,
+    MarkdownFactCompleteness, MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection,
+    ResolutionProjectionContext, ResolutionProjectionError, ResolutionProjectionFact,
+    derive_resolution_keys_with_context, extract_markdown_facts_controlled,
+    parse_import_references,
 };
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
@@ -2571,6 +2573,10 @@ fn build_entity_projection_with_config_limit(
         let qualified_parents = qualified_symbol_parents(graph)?;
         for (symbol, qualified_parent) in graph.symbols.iter().zip(qualified_parents) {
             control.check(IndexWorkStage::SymbolParsing)?;
+            if is_document_coverage_marker(graph, symbol) {
+                symbol_digests.push(None);
+                continue;
+            }
             let entity = match symbol.kind {
                 SymbolKind::Import | SymbolKind::Dependency | SymbolKind::Workspace => None,
                 SymbolKind::Package => Some(
@@ -5716,6 +5722,13 @@ fn relation_reference(relation: &SymbolRelation) -> String {
     nonempty_reference(value)
 }
 
+/// Keep document coverage metadata out of the user-facing entity graph.
+fn is_document_coverage_marker(graph: &SymbolGraph, symbol: &CodeSymbol) -> bool {
+    matches!(graph.language.as_deref(), Some("docx" | "pdf"))
+        && symbol.name == DOCUMENT_COVERAGE_SYMBOL
+        && symbol.kind == SymbolKind::Unknown
+}
+
 /// Project parser trust into one path-scoped coverage record.
 fn coverage_for_graph(
     graph: &SymbolGraph,
@@ -5729,17 +5742,40 @@ fn coverage_for_graph(
     let identity_omitted =
         identity_admission.rejected_facts_for_graph(&graph.path, derived_identity_admission)?;
     let parser_omitted = identity_admission.parser_rejection_for_graph(&graph.path);
+    let document_gaps = graph
+        .symbols
+        .iter()
+        .find(|symbol| is_document_coverage_marker(graph, symbol))
+        .map(|symbol| symbol.signature.as_str());
     let omitted = identity_omitted
         .checked_add(parser_omitted)
+        .and_then(|omitted| omitted.checked_add(u64::from(document_gaps.is_some())))
         .ok_or_else(|| CliError::InvalidInput("identity rejection count overflowed".to_string()))?;
     let identity_details_dropped = identity_admission.rejection_details_dropped_for(&graph.path)
         || derived_identity_admission.rejection_details_dropped_for(&graph.path);
     // Graph-scoped `rows` is the existing persisted coverage slot for the
     // publication-wide typed identity-detail ceiling. It is set only from
     // the admission fact that a distinct detail was actually evicted.
-    let reached_limit = (omitted > 0 && identity_details_dropped).then_some(GraphLimitKind::Rows);
-    let covered = if identity_omitted > 0 {
-        u64::try_from(graph.symbols.len().saturating_add(graph.relations.len())).unwrap_or(u64::MAX)
+    let reached_limit = if identity_details_dropped {
+        Some(GraphLimitKind::Rows)
+    } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:output_bytes")) {
+        Some(GraphLimitKind::OutputBytes)
+    } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:fact_count")) {
+        Some(GraphLimitKind::Rows)
+    } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:memory_bytes")) {
+        Some(GraphLimitKind::IntermediateBytes)
+    } else {
+        None
+    };
+    let covered = if identity_omitted > 0 || document_gaps.is_some() {
+        u64::try_from(
+            graph
+                .symbols
+                .len()
+                .saturating_sub(usize::from(document_gaps.is_some()))
+                .saturating_add(graph.relations.len()),
+        )
+        .unwrap_or(u64::MAX)
     } else {
         u64::try_from(graph.relations.len()).unwrap_or(u64::MAX)
     };
@@ -5749,6 +5785,10 @@ fn coverage_for_graph(
         } else {
             CoverageState::Failed
         };
+        let reason = document_gaps.map_or_else(
+            || PARTIAL_COVERAGE_REASON.to_owned(),
+            |gaps| format!("document_text_incomplete:{gaps}"),
+        );
         return CoverageRecord::new(
             scope,
             None,
@@ -5756,7 +5796,7 @@ fn coverage_for_graph(
             covered,
             omitted,
             generation,
-            Some(GraphIdentityText::new(PARTIAL_COVERAGE_REASON).map_err(invalid_graph_contract)?),
+            Some(GraphIdentityText::new(reason).map_err(invalid_graph_contract)?),
             reached_limit,
         )
         .map_err(invalid_graph_contract);
@@ -7772,6 +7812,48 @@ mod tests {
             &unrelated.reached_limit(),
             &None,
             "an unrelated path inherited another path's identity eviction",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_text_gap_survives_graph_coverage_projection() -> Result<(), Box<dyn Error>> {
+        let facts = projectatlas_symbols::DocumentFacts {
+            format: projectatlas_symbols::DocumentFormat::Docx,
+            text: String::new(),
+            facts: Vec::new(),
+            symbols: Vec::new(),
+            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
+                    projectatlas_symbols::DocumentLimit::OutputBytes,
+                )],
+            },
+            provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
+        };
+        let graph = facts.symbol_graph("docs/limited.docx", Some("docx"));
+        let coverage = super::coverage_for_graph(
+            &graph,
+            IndexGeneration::new(1),
+            &GraphIdentityAdmission::default(),
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Failed,
+            "empty document gap was lost",
+        )?;
+        require_eq(
+            &coverage.reached_limit(),
+            &Some(GraphLimitKind::OutputBytes),
+            "document output ceiling was lost",
+        )?;
+        require(
+            coverage.reason().is_some_and(|reason| {
+                reason
+                    .as_str()
+                    .contains("document_text_incomplete:resource_limit:output_bytes")
+            }),
+            "document-local reason was lost",
         )?;
         Ok(())
     }

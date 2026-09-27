@@ -6717,6 +6717,7 @@ fn document_parse_error_outcome(path: &str, error: DocumentExtractionError) -> S
             let resource = match limit {
                 DocumentLimit::FactCount => IndexWorkResource::SymbolRows,
                 DocumentLimit::ExecutionFuel => IndexWorkResource::ParserFuel,
+                DocumentLimit::ParserWorkBytes => IndexWorkResource::ParserWorkBytes,
                 DocumentLimit::OutputBytes => IndexWorkResource::OutputBytes,
                 DocumentLimit::EntryCount | DocumentLimit::NestingDepth => {
                     IndexWorkResource::Entries
@@ -6752,6 +6753,7 @@ fn document_navigation_error(path: &str, error: DocumentExtractionError) -> CliE
             let resource = match limit {
                 DocumentLimit::FactCount => IndexWorkResource::SymbolRows,
                 DocumentLimit::ExecutionFuel => IndexWorkResource::ParserFuel,
+                DocumentLimit::ParserWorkBytes => IndexWorkResource::ParserWorkBytes,
                 DocumentLimit::OutputBytes => IndexWorkResource::OutputBytes,
                 DocumentLimit::EntryCount | DocumentLimit::NestingDepth => {
                     IndexWorkResource::Entries
