@@ -112,7 +112,7 @@ if [ ! -f "$config" ]; then
   [ -f "$config" ] || config=
 fi
 same_json_path() {
-  actual=$(printf '%s\n' "$1" | jq -srj "$2" && printf '.') || return 1
+  actual=$(printf '%s\n' "$1" | jq -srj "($2) | select(test(\"[\\\\p{Cc}\\\\p{Cf}\\\\p{Zl}\\\\p{Zp}]\") | not)" && printf '.') || return 1
   actual=${actual%.}
   [ -n "$actual" ] && [ "$actual" -ef "$3" ]
 }
