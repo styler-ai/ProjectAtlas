@@ -2453,7 +2453,7 @@ impl DocxStoryReferences {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 /// Configured section page variant for a header or footer reference.
 enum DocxHeaderVariant {
     /// Ordinary pages.
@@ -3096,6 +3096,19 @@ fn parse_docx_part(
                                         .to_owned(),
                             }
                         })?;
+                        if section
+                            .links
+                            .iter()
+                            .any(|(existing_kind, _, existing_variant)| {
+                                *existing_kind == kind && *existing_variant == variant
+                            })
+                        {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX section has a duplicate header/footer variant"
+                                    .to_owned(),
+                            });
+                        }
                         section.links.push((kind, id, variant));
                     }
                     "subDoc" if deleted_depth.is_none() => {
@@ -3482,18 +3495,6 @@ fn parse_docx_part(
                         });
                     };
                     if text_carrier == Some(DocxTextCarrier::Rendered) {
-                        if event
-                            .as_ref()
-                            .chars()
-                            .any(|character| !character.is_whitespace())
-                        {
-                            mark_docx_cached_result(&mut paragraph.fields, &mut simple_fields);
-                            for context in &mut sdt_stack {
-                                if context.content_depth.is_some() {
-                                    context.content_nonempty = true;
-                                }
-                            }
-                        }
                         append_docx_run_text(run, event.as_ref(), output.len())?;
                     }
                 } else if !event
@@ -3524,18 +3525,6 @@ fn parse_docx_part(
                     });
                 };
                 if text_carrier == Some(DocxTextCarrier::Rendered) {
-                    if event
-                        .as_ref()
-                        .chars()
-                        .any(|character| !character.is_whitespace())
-                    {
-                        mark_docx_cached_result(&mut paragraph.fields, &mut simple_fields);
-                        for context in &mut sdt_stack {
-                            if context.content_depth.is_some() {
-                                context.content_nonempty = true;
-                            }
-                        }
-                    }
                     append_docx_run_text(run, event.as_ref(), output.len())?;
                 }
             }
@@ -3558,14 +3547,6 @@ fn parse_docx_part(
                 };
                 let text = decode_docx_reference(&reference)?;
                 if text_carrier == Some(DocxTextCarrier::Rendered) {
-                    if text.chars().any(|character| !character.is_whitespace()) {
-                        mark_docx_cached_result(&mut paragraph.fields, &mut simple_fields);
-                        for context in &mut sdt_stack {
-                            if context.content_depth.is_some() {
-                                context.content_nonempty = true;
-                            }
-                        }
-                    }
                     append_docx_run_text(run, &text, output.len())?;
                 }
             }
@@ -3689,6 +3670,19 @@ fn parse_docx_part(
                             let end = text_start + leading + trimmed.len();
                             run.text.truncate(end);
                             run.text.drain(text_start..text_start + leading);
+                        }
+                        if text_carrier == Some(DocxTextCarrier::Rendered)
+                            && paragraph
+                                .run
+                                .as_ref()
+                                .is_some_and(|run| run.text.len() > text_start)
+                        {
+                            mark_docx_cached_result(&mut paragraph.fields, &mut simple_fields);
+                            for context in &mut sdt_stack {
+                                if context.content_depth.is_some() {
+                                    context.content_nonempty = true;
+                                }
+                            }
                         }
                         text_carrier = None;
                     }
@@ -5950,6 +5944,11 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .expect("field instructions and deleted carriers are valid bounded XML");
         assert_eq!(parsed.text, "Page 7 Literal");
         assert_eq!(parsed.completeness, DocumentCompleteness::Complete);
+        let spaced_field = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>DATE</w:instrText><w:fldChar w:fldCharType="separate"/><w:t xml:space="preserve"> </w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let spaced = parse_docx(spaced_field, &control(), IndexWorkStage::TextIndex)
+            .expect("retained whitespace is a cached field result");
+        assert_eq!(spaced.text, " ");
+        assert_eq!(spaced.completeness, DocumentCompleteness::Complete);
         for field in [
             "<w:fldSimple w:instr=\"PAGE\"/>",
             "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>",
@@ -7031,6 +7030,16 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .expect("a false placeholder flag does not require a glossary relationship");
         assert_eq!(facts.text, "Cached");
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        let preserved_space = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:t xml:space="preserve"> </w:t></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#;
+        let facts = extract_document_text_controlled(
+            &docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, preserved_space)]),
+            "preserved-space.docx",
+            None,
+            &control(),
+        )
+        .expect("retained whitespace replaces a glossary placeholder");
+        assert_eq!(facts.text, " ");
+        assert_eq!(facts.completeness, DocumentCompleteness::Complete);
         for control_name in [
             "noBreakHyphen",
             "softHyphen",
@@ -7331,6 +7340,29 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             matches!(&facts.symbols[0].locator, DocumentLocator::Docx { part, .. } if part == "word/default.xml")
         );
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+    }
+
+    #[test]
+    fn docx_duplicate_section_story_variant_is_malformed() {
+        for kind in ["header", "footer"] {
+            for variant in ["default", "first", "even"] {
+                let main = format!(
+                    "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:sectPr><w:{kind}Reference w:type=\"{variant}\" r:id=\"a\"/><w:{kind}Reference w:type=\"{variant}\" r:id=\"b\"/></w:sectPr></w:body></w:document>"
+                );
+                assert!(
+                    matches!(
+                        extract_document_text_controlled(
+                            &docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, main.as_bytes())]),
+                            "duplicate-section-variant.docx",
+                            None,
+                            &control(),
+                        ),
+                        Err(DocumentExtractionError::Malformed { .. })
+                    ),
+                    "{kind} {variant}"
+                );
+            }
+        }
     }
 
     #[test]

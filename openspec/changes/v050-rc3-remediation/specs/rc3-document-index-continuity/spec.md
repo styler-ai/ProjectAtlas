@@ -21,6 +21,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a selected note, comment, or special separator ID appears twice in its story part
 - **THEN** the malformed package is refused without publishing duplicated text or symbols
 
+#### Scenario: Duplicate section story variant
+- **WHEN** one section declares more than one header or footer reference for the same page variant
+- **THEN** the malformed section is refused before non-rendered story content can be duplicated
+
 #### Scenario: Compatibility-wrapped document settings
 - **WHEN** supported markup compatibility selects document-wide settings that list a special note item
 - **THEN** the selected settings govern story loading; an unknown potentially selected branch produces incomplete story coverage rather than a false complete result
@@ -60,6 +64,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 #### Scenario: Visible controls replace a glossary placeholder
 - **WHEN** an SDT placeholder contains actual rendered run controls instead of literal text
 - **THEN** those controls count as content, and an absent glossary relationship does not cause false incomplete coverage or package refusal
+
+#### Scenario: Preserved whitespace replaces a glossary placeholder
+- **WHEN** an SDT retains a whitespace-only text leaf under `xml:space="preserve"`
+- **THEN** the retained text counts as content without selecting a missing glossary relationship
 
 #### Scenario: Opaque alternate XML content remains incomplete
 - **WHEN** a rendered run contains an alternate XML content part that this parser does not decode
