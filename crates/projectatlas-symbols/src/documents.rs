@@ -1388,8 +1388,16 @@ fn docx_settings(
                     format: DocumentFormat::Docx,
                     message: error.to_string(),
                 })?;
-        let wordprocessing = matches!(&namespace, ResolveResult::Bound(namespace)
-            if wordprocessing_namespace(namespace.as_ref()));
+        let wordprocessing = match &namespace {
+            ResolveResult::Bound(namespace) => wordprocessing_namespace(namespace.as_ref()),
+            ResolveResult::Unbound => false,
+            ResolveResult::Unknown(prefix) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: format!("DOCX XML contained an undeclared namespace prefix: {prefix}"),
+                });
+            }
+        };
         let compatibility = matches!(&namespace, ResolveResult::Bound(namespace)
             if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006");
         match event {
@@ -7476,6 +7484,19 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 gaps: vec![DocumentCoverageGap::ConditionalStory],
             }
         );
+        let undeclared_settings = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><x:evenAndOddHeaders/></w:settings>"#;
+        let malformed = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/first.xml", header),
+            ("word/even.xml", header),
+            ("word/settings.xml", undeclared_settings),
+        ]);
+        assert!(matches!(
+            extract_document_text_controlled(&malformed, "undeclared-settings.docx", None, &control()),
+            Err(DocumentExtractionError::Malformed { message, .. })
+                if message.contains("undeclared namespace prefix")
+        ));
     }
 
     #[test]
