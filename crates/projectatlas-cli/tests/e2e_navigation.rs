@@ -10515,6 +10515,25 @@ fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(
     })();
     complete_mcp_test_after_shutdown(limited_mcp, || session.shutdown())?;
     verify(11)?;
+    let before_deadline = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("DOCX publication missing before deadline"))?;
+    let before_deadline_coverage = probe_coverage()?;
+    write_probe(r#"<w:sym w:font="Symbol" w:char="F061"/>"#)?;
+    Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("index work deadline was reached"));
+    if AtlasStore::open_read_only(&database)?.index_publication()? != Some(before_deadline)
+        || probe_coverage()? != before_deadline_coverage
+    {
+        return Err(io::Error::other("DOCX deadline changed the last partial generation").into());
+    }
+    verify(11)?;
     fs::write(&probe, b"PK\x03\x04truncated-document")?;
     if run_watch_once(&repo, &database).is_ok()
         || !probe_coverage()?.is_some_and(|reason| reason.contains("resource_limit:fact_count"))
@@ -10524,11 +10543,33 @@ fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(
     write_probe(r#"<w:sym w:font="Symbol" w:char="F061"/>"#)?;
     run_watch_once(&repo, &database)?;
     let repaired_coverage = probe_coverage()?;
-    if repaired_coverage.as_deref().is_some_and(|reason| {
-        reason.contains("resource_limit:fact_count") || reason.contains("unevaluated_field")
-    }) {
+    if repaired_coverage.as_deref() != Some("parser does not prove complete relationship coverage")
+    {
         return Err(io::Error::other(format!(
-            "DOCX repair retained stale incomplete coverage: {repaired_coverage:?}"
+            "DOCX repair retained text-incomplete or unexpected coverage: {repaired_coverage:?}"
+        ))
+        .into());
+    }
+    let text_markers: i64 = Connection::open(&database)?.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE path = 'docs/probe.docx' AND name = 'document-text-coverage'",
+        [],
+        |row| row.get(0),
+    )?;
+    if text_markers != 0 {
+        return Err(io::Error::other("DOCX repair retained a text-coverage marker").into());
+    }
+    let repaired_symbols = AtlasStore::open(&database)?
+        .load_symbols(Some("docs/probe.docx"), None, 10)?
+        .into_iter()
+        .filter(|symbol| symbol.name.starts_with("document-symbol-"))
+        .collect::<Vec<_>>();
+    if repaired_symbols.len() != 1
+        || !repaired_symbols[0]
+            .signature
+            .contains("font=Some(\"Symbol\");code=F061")
+    {
+        return Err(io::Error::other(format!(
+            "DOCX repair did not publish the exact recovered symbol: {repaired_symbols:?}"
         ))
         .into());
     }
