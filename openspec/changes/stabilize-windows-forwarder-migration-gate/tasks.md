@@ -7,4 +7,4 @@
 - [x] 2.1 Trace process spawn, readiness, lock acquisition, observer deadlines, state mutations, cleanup, and both failing outputs; isolate product versus harness time.
 
 - [x] 2.2 Apply the minimal phase-correct test/harness fix with positive, negative, failure, and recovery assertions intact.
-- [x] 2.3 Run focused and mandatory affected tests, hosted Windows/Linux/macOS proof, independent review, OpenSpec, and IssueOps.
+- [ ] 2.3 Run focused and mandatory affected tests, hosted Windows/Linux/macOS proof, independent review, OpenSpec, and IssueOps.
