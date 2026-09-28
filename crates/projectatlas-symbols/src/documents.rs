@@ -3192,8 +3192,7 @@ fn parse_docx_part(
                         text_start = paragraph.run.as_ref().map_or(0, |run| run.text.len());
                         let ignored = deleted_depth.is_some()
                             || matches!(name.as_ref(), "delText" | "delInstrText")
-                            || (name.as_ref() == "instrText"
-                                && paragraph.fields.contains(&DocxFieldPhase::Instruction));
+                            || paragraph.fields.contains(&DocxFieldPhase::Instruction);
                         text_carrier = Some(if ignored {
                             DocxTextCarrier::Ignored
                         } else {
@@ -5944,7 +5943,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_field_carriers_retain_only_literal_and_cached_text() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE &amp; <![CDATA[ignored]]></w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText xml:space="preserve"> Literal</w:instrText></w:r><w:r><w:delInstrText>Deleted code</w:delInstrText><w:delText><![CDATA[Deleted text]]></w:delText></w:r></w:p></w:body></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE &amp; <![CDATA[ignored]]></w:instrText><w:t>NOT RENDERED</w:t></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText xml:space="preserve"> Literal</w:instrText></w:r><w:r><w:delInstrText>Deleted code</w:delInstrText><w:delText><![CDATA[Deleted text]]></w:delText></w:r></w:p></w:body></w:document>"#;
         let parsed = extract_document_text_controlled(
             &docx_archive(xml, CompressionMethod::Deflated),
             "fields.docx",

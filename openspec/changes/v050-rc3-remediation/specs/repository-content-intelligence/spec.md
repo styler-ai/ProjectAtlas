@@ -48,7 +48,7 @@
 - **AND** admitted text leaves honor inherited `xml:space`: default mode removes only leading and trailing XML whitespace after complete entity/CDATA decoding, preserve mode retains it, and invalid modes fail as malformed input; interior whitespace, nonbreaking spaces, and exact logical run spans remain intact
 - **AND** live ruby annotations return typed unsupported input rather than a malformed-input error; deleted ruby content remains excluded
 - **AND** alternate-format chunks return typed unsupported input rather than omitting referenced content
-- **AND** unsupported XML encodings, including UTF-16, return typed unsupported input without replacing the last complete publication
+- **AND** bounded UTF-16 LE/BE XML parts with or without a byte-order mark are normalized before parsing, while other unsupported XML encodings return typed unsupported input without replacing the last complete publication
 - **AND** foreign-namespace character data requiring unsupported semantic decoding returns typed unsupported input, while recognized Word text boxes remain supported through drawing wrappers
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; rendered font-coded symbols retain durable font/code/part/occurrence identity and produce Unicode only for verified mappings, with unknown mappings marked as incomplete text coverage
