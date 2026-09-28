@@ -34705,11 +34705,18 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     thread::sleep(Duration::from_millis(200));
     held_first.kill()?;
     terminate_plugin_installer_process_tree(&mut held_first)?;
-    let timed_first_output = wait_for_plugin_installer_output(
+    let timed_first_output = match wait_for_plugin_installer_output(
         timed_first,
         "deadline held-first contender",
         Duration::from_secs(35),
-    )?;
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(terminate_plugin_installer_process_tree(&mut held_second));
+            drop(held_second.wait());
+            return Err(error);
+        }
+    };
     // Reaping the interrupted owner also drains its descendants' output pipes;
     // that cleanup is independent of the contender's shared lock deadline.
     let held_first_output = held_first.child.wait_with_output()?;
