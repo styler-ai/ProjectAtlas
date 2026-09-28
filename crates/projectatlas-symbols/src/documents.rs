@@ -7724,23 +7724,37 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     fn docx_first_and_default_headers_need_pagination_coverage() {
         let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="default.xml"/><Relationship Id="f" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="first.xml"/></Relationships>"#;
         let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:hdr>"#;
-        for (title, first, symbols, conditional) in [
+        for (prior, title, first, symbols, conditional) in [
             (
+                "",
                 "<w:titlePg/>",
                 "<w:headerReference w:type=\"first\" r:id=\"f\"/>",
                 2,
                 true,
             ),
-            ("<w:titlePg/>", "", 1, true),
+            ("", "<w:titlePg/>", "", 1, true),
             (
+                "<w:p><w:pPr><w:sectPr><w:headerReference w:type=\"default\" r:id=\"d\"/></w:sectPr></w:pPr></w:p>",
+                "<w:titlePg/>",
+                "",
+                1,
+                true,
+            ),
+            (
+                "",
                 "<w:titlePg w:val=\"false\"/>",
                 "<w:headerReference w:type=\"first\" r:id=\"f\"/>",
                 1,
                 false,
             ),
         ] {
+            let default = if prior.is_empty() {
+                "<w:headerReference w:type=\"default\" r:id=\"d\"/>"
+            } else {
+                ""
+            };
             let main = format!(
-                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:sectPr><w:headerReference w:type=\"default\" r:id=\"d\"/>{first}{title}</w:sectPr></w:body></w:document>"
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body>{prior}<w:sectPr>{default}{first}{title}</w:sectPr></w:body></w:document>"
             );
             let archive = docx_archive_with_parts(&[
                 (DOCX_DOCUMENT_PART, main.as_bytes()),
