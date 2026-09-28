@@ -34337,12 +34337,13 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     }
     // Keep unique ready markers until fixture teardown: their Windows writer may
     // still be closing after the waiter observes the pathname. Only gates release children.
+    let migration_deadline = Instant::now() + Duration::from_secs(35);
     fs::remove_file(&discovery_a)?;
     fs::remove_file(&discovery_b)?;
     let output_a = match wait_for_plugin_installer_output(
         install_a,
         "opposite installer A",
-        Duration::from_secs(35),
+        migration_deadline.saturating_duration_since(Instant::now()),
     ) {
         Ok(output) => output,
         Err(error) => {
@@ -34354,7 +34355,7 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     let output_b = wait_for_plugin_installer_output(
         install_b,
         "opposite installer B",
-        Duration::from_secs(35),
+        migration_deadline.saturating_duration_since(Instant::now()),
     )?;
     require(
         output_a.status.success() && output_b.status.success(),
@@ -34888,6 +34889,11 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     }
     let mut timed_second = make_installer(&second_runtime, &first_then_second_path, None, None)?;
     timed_second.env("PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_TIMEOUT_MS", "250");
+    let timed_second_trace = fixture_root.join("deadline-held-second-lock-waits.txt");
+    timed_second.env(
+        "PROJECTATLAS_TEST_ATLAS_FORWARDER_LOCK_WAIT_TRACE",
+        &timed_second_trace,
+    );
     let timed_second = spawn_plugin_installer_process(&mut timed_second)?;
     let timed_second_output = match wait_for_plugin_installer_output(
         timed_second,
@@ -34916,14 +34922,31 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
         ),
     )?;
     let timed_second_error = String::from_utf8_lossy(&timed_second_output.stderr);
+    let timed_second_trace = fs::read_to_string(&timed_second_trace)?;
+    let budget_field = if cfg!(windows) { 4 } else { 2 };
+    let requested_budget = |lock: &str| {
+        timed_second_trace
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .find(|row| row.first() == Some(&"request") && row.get(1) == Some(&lock))
+            .and_then(|row| {
+                row.get(budget_field)
+                    .and_then(|budget| budget.parse::<u64>().ok())
+            })
+    };
+    let first_lock_budget = requested_budget(if cfg!(windows) { "0" } else { "8" });
+    let second_lock_budget = requested_budget(if cfg!(windows) { "1" } else { "7" });
     require(
         !timed_second_output.status.success()
             && (timed_second_error.contains("ProjectAtlas atlas forwarder lifecycle is busy")
                 || timed_second_error
-                    .contains("ProjectAtlas atlas forwarder lifecycle lock deadline expired")),
+                    .contains("ProjectAtlas atlas forwarder lifecycle lock deadline expired"))
+            && first_lock_budget.is_some_and(|budget| (1..=250).contains(&budget))
+            && second_lock_budget.is_some_and(|budget| (1..=250).contains(&budget)),
         format!(
-            "held-second contender did not fail closed at the bounded lock deadline (status={}):\n{}\n{}",
+            "held-second contender did not fail closed at the 250 ms second-lock budget (status={}, trace={}):\n{}\n{}",
             timed_second_output.status,
+            timed_second_trace,
             String::from_utf8_lossy(&timed_second_output.stdout),
             String::from_utf8_lossy(&timed_second_output.stderr)
         ),
