@@ -7895,6 +7895,83 @@ mod tests {
     }
 
     #[test]
+    fn document_coverage_marker_preserves_exact_entity_budget_and_report()
+    -> Result<(), Box<dyn Error>> {
+        let facts = projectatlas_symbols::DocumentFacts {
+            format: projectatlas_symbols::DocumentFormat::Docx,
+            text: "Hello".to_owned(),
+            facts: vec![projectatlas_symbols::DocumentFact {
+                text: "Hello".to_owned(),
+                locator: projectatlas_symbols::DocumentLocator::Docx {
+                    part: "word/document.xml".to_owned(),
+                    paragraph: 1,
+                    run: 1,
+                    text_start: 0,
+                    text_end: 5,
+                },
+                line_start: 1,
+                line_end: 1,
+            }],
+            symbols: Vec::new(),
+            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                gaps: vec![projectatlas_symbols::DocumentCoverageGap::UnexaminedStory],
+            },
+            provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
+        };
+        let graph = facts.symbol_graph("guide.docx", None);
+        let mut without_marker = graph.clone();
+        without_marker.symbols.pop();
+        let project = ProjectInstanceId::from_bytes([33; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let packages = PackageIndex::from_graphs(std::slice::from_ref(&graph))?;
+        let baseline = build_entity_projection_with_config_limit(
+            project,
+            generation,
+            &[],
+            std::slice::from_ref(&without_marker),
+            &packages,
+            &ConfiguredModuleResolution::default(),
+            None,
+            false,
+            &control,
+            super::super::MAX_PUBLICATION_STAGING_BYTES,
+        )?;
+        let with_marker = build_entity_projection_with_config_limit(
+            project,
+            generation,
+            &[],
+            std::slice::from_ref(&graph),
+            &packages,
+            &ConfiguredModuleResolution::default(),
+            None,
+            false,
+            &control,
+            baseline.peak_retained_bytes,
+        )?;
+        require_eq(
+            &with_marker.peak_retained_bytes,
+            &baseline.peak_retained_bytes,
+            "coverage marker charged the entity staging budget",
+        )?;
+        let mut stage = symbol_build_stage_for_graphs(vec![graph.clone()]);
+        super::admit_symbol_build_stage(&mut stage, &control)?;
+        require_eq(&stage.report.symbols, &1, "coverage marker inflated report")?;
+        let coverage = coverage_for_graph(
+            &graph,
+            generation,
+            &GraphIdentityAdmission::default(),
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Partial,
+            "coverage was lost",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn admission_merges_many_graphs_with_incremental_retained_bytes() -> Result<(), Box<dyn Error>>
     {
         const GRAPH_COUNT: usize = 1_000;
