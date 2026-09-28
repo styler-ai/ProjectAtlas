@@ -1538,14 +1538,23 @@ fn docx_settings(
                             format: DocumentFormat::Docx,
                             message: "DOCX special note setting is missing its id".to_owned(),
                         })?;
-                    match kind {
-                        DocxStoryKind::Footnotes => {
-                            settings.footnote_special_ids.insert(id);
-                        }
-                        DocxStoryKind::Endnotes => {
-                            settings.endnote_special_ids.insert(id);
-                        }
+                    let inserted = match kind {
+                        DocxStoryKind::Footnotes => settings.footnote_special_ids.insert(id),
+                        DocxStoryKind::Endnotes => settings.endnote_special_ids.insert(id),
                         _ => unreachable!(),
+                    };
+                    if inserted {
+                        let observed = settings
+                            .footnote_special_ids
+                            .len()
+                            .saturating_add(settings.endnote_special_ids.len());
+                        if observed > MAX_DOCUMENT_FACTS {
+                            return Err(DocumentExtractionError::ResourceLimit {
+                                limit: DocumentLimit::FactCount,
+                                observed,
+                                maximum: MAX_DOCUMENT_FACTS,
+                            });
+                        }
                     }
                 }
             }
@@ -2291,11 +2300,11 @@ fn append_docx_story(
 /// Decoded run text with Word text-leaf whitespace policy applied before publication.
 #[derive(Default)]
 struct RawDocxRun {
-    /// XML depth of this run, for direct run-property ownership.
+    /// Logical depth of this run, excluding selected compatibility wrappers.
     depth: usize,
     /// Direct run properties cannot follow already-consumed content.
     content_seen: bool,
-    /// XML depth of active direct run properties.
+    /// Logical depth of active direct run properties.
     properties_depth: Option<usize>,
     /// Direct run formatting excludes payload without discarding field transitions.
     hidden: bool,
@@ -2340,6 +2349,8 @@ struct DocxSimpleField {
     depth: usize,
     /// Whether a literal result was retained from the field's children.
     has_cached_text: bool,
+    /// A field inside enclosing code cannot render or require evaluation.
+    in_instruction: bool,
 }
 
 /// Mark only actual retained field-result content, never field instructions.
@@ -2723,6 +2734,7 @@ fn parse_docx_part(
     let mut inherited_first: [Option<String>; 2] = [None, None];
     let mut inherited_default = [false; 2];
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
+    let mut selected_branches: Vec<usize> = Vec::new();
     let mut ignorable_namespaces: Vec<String> = Vec::new();
     let mut skipped_branch_depth = None;
     let mut skipped_text_box = false;
@@ -3040,6 +3052,7 @@ fn parse_docx_part(
                     continue;
                 }
                 if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
+                    selected_branches.push(element_depth);
                     continue;
                 }
                 if alternatives
@@ -3114,8 +3127,9 @@ fn parse_docx_part(
                         }
                     }
                 }
+                let logical_depth = element_depth - 2 * selected_branches.len();
                 if wordprocessing && let Some(run) = paragraph.run.as_mut() {
-                    if element_depth == run.depth + 1 {
+                    if logical_depth == run.depth + 1 {
                         if name.as_ref() == "rPr" {
                             if run.content_seen {
                                 return Err(DocumentExtractionError::Malformed {
@@ -3123,19 +3137,19 @@ fn parse_docx_part(
                                     message: "DOCX run properties follow run content".to_owned(),
                                 });
                             }
-                            run.properties_depth = Some(element_depth);
+                            run.properties_depth = Some(logical_depth);
                         } else {
                             run.content_seen = true;
                         }
                     }
                     if name.as_ref() == "vanish"
-                        && run.properties_depth == element_depth.checked_sub(1)
+                        && run.properties_depth == logical_depth.checked_sub(1)
                         && deleted_depth.is_none()
                     {
                         run.hidden |= docx_on_off(&event, &reader)?;
                     }
                     if name.as_ref() == "specVanish"
-                        && run.properties_depth == element_depth.checked_sub(1)
+                        && run.properties_depth == logical_depth.checked_sub(1)
                         && deleted_depth.is_none()
                     {
                         run.spec_vanish |= docx_on_off(&event, &reader)?;
@@ -3164,6 +3178,7 @@ fn parse_docx_part(
                         simple_fields.push(DocxSimpleField {
                             depth: element_depth,
                             has_cached_text: false,
+                            in_instruction: paragraph.fields.contains(&DocxFieldPhase::Instruction),
                         });
                     }
                     "sdt" if deleted_depth.is_none() => sdt_stack.push(DocxSdtContext {
@@ -3328,7 +3343,7 @@ fn parse_docx_part(
                     "r" if paragraph.open && paragraph.run.is_none() => {
                         paragraph.run_number += 1;
                         paragraph.run = Some(RawDocxRun {
-                            depth: element_depth,
+                            depth: logical_depth,
                             ..RawDocxRun::default()
                         });
                     }
@@ -3385,6 +3400,7 @@ fn parse_docx_part(
                                     != Some(DocxFieldPhase::Result {
                                         has_cached_text: true,
                                     })
+                                    && !paragraph.fields.contains(&DocxFieldPhase::Instruction)
                                     && !gaps.contains(&DocumentCoverageGap::UnevaluatedField)
                                 {
                                     gaps.push(DocumentCoverageGap::UnevaluatedField);
@@ -3749,6 +3765,12 @@ fn parse_docx_part(
                         });
                     }
                 }
+                if compatibility
+                    && matches!(event.local_name().as_ref(), "Choice" | "Fallback")
+                    && selected_branches.last() == Some(&element_depth)
+                {
+                    selected_branches.pop();
+                }
                 let name = event.local_name();
                 if wordprocessing
                     && name.as_ref() == "fldSimple"
@@ -3757,6 +3779,7 @@ fn parse_docx_part(
                         .is_some_and(|field| field.depth == element_depth)
                     && let Some(field) = simple_fields.pop()
                     && !field.has_cached_text
+                    && !field.in_instruction
                     && !gaps.contains(&DocumentCoverageGap::UnevaluatedField)
                 {
                     gaps.push(DocumentCoverageGap::UnevaluatedField);
@@ -3773,7 +3796,10 @@ fn parse_docx_part(
                             message: "DOCX structured tag state is incomplete".to_owned(),
                         });
                     };
-                    if context.placeholder && (context.showing || !context.content_nonempty) {
+                    if !paragraph.fields.contains(&DocxFieldPhase::Instruction)
+                        && context.placeholder
+                        && (context.showing || !context.content_nonempty)
+                    {
                         references.glossary_placeholder = true;
                         if !gaps.contains(&DocumentCoverageGap::UnexaminedStory) {
                             gaps.push(DocumentCoverageGap::UnexaminedStory);
@@ -3786,7 +3812,7 @@ fn parse_docx_part(
                 if wordprocessing
                     && name.as_ref() == "rPr"
                     && let Some(run) = paragraph.run.as_mut()
-                    && run.properties_depth == Some(element_depth)
+                    && run.properties_depth == Some(element_depth - 2 * selected_branches.len())
                 {
                     run.properties_depth = None;
                     if run.spec_vanish
@@ -3929,6 +3955,7 @@ fn parse_docx_part(
         || paragraph.open
         || !text_boxes.is_empty()
         || !alternatives.is_empty()
+        || !selected_branches.is_empty()
         || skipped_branch_depth.is_some()
         || conditional_note_start.is_some()
         || deleted_depth.is_some()
@@ -6338,6 +6365,12 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect("text boxes inside field instructions do not publish code text");
         assert_eq!(nested.text, "Result");
         assert_eq!(nested.facts.len(), 1);
+        assert_eq!(nested.completeness, DocumentCompleteness::Complete);
+        let simple_in_instruction = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF</w:instrText></w:r><w:fldSimple w:instr="PAGE"/><w:r><w:fldChar w:fldCharType="separate"/><w:t>Result</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let simple = parse_docx(simple_in_instruction, &control(), IndexWorkStage::TextIndex)
+            .expect("simple fields inside an outer instruction cannot render");
+        assert_eq!(simple.text, "Result");
+        assert_eq!(simple.completeness, DocumentCompleteness::Complete);
         let symbol_field = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:sym w:font="Wingdings" w:char="F03A"/><w:fldChar w:fldCharType="separate"/><w:sym w:font="Symbol" w:char="F061"/><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         let symbol_field = parse_docx(symbol_field, &control(), IndexWorkStage::TextIndex)
             .expect("only the cached field result is rendered");
@@ -6564,6 +6597,23 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         ] {
             assert!(matches!(parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
                 Err(DocumentExtractionError::Malformed { .. })));
+        }
+    }
+
+    #[test]
+    fn docx_selected_compatibility_run_properties_hide_payload() {
+        for properties in [
+            "<mc:AlternateContent><mc:Choice Requires=\"w\"><w:rPr><w:vanish/></w:rPr></mc:Choice><mc:Fallback><w:rPr/></mc:Fallback></mc:AlternateContent>",
+            "<w:rPr><mc:AlternateContent><mc:Choice Requires=\"w\"><w:vanish/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:rPr>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><w:body><w:p><w:r>{properties}<w:t>Secret</w:t><w:sym w:font=\"Symbol\" w:char=\"F061\"/><w:footnoteReference w:id=\"1\"/></w:r><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"
+            );
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("selected compatibility formatting hides its run");
+            assert_eq!(facts.text, "Visible");
+            assert!(facts.symbols.is_empty());
+            assert_eq!(facts.completeness, DocumentCompleteness::Complete);
         }
     }
 
@@ -7553,6 +7603,55 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         assert!(
             matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
         );
+    }
+
+    #[test]
+    fn docx_glossary_placeholder_inside_field_instruction_is_not_rendered() {
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF</w:instrText></w:r><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent/></w:sdt><w:r><w:fldChar w:fldCharType="separate"/><w:t>Cached</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let facts = extract_document_text_controlled(
+            &docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, main)]),
+            "instruction-placeholder.docx",
+            None,
+            &control(),
+        )
+        .expect("non-rendered field instruction cannot require a glossary story");
+        assert_eq!(facts.text, "Cached");
+        assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+    }
+
+    #[test]
+    fn docx_special_note_settings_share_the_fact_ceiling() {
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="settings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
+        for count in [MAX_DOCUMENT_FACTS, MAX_DOCUMENT_FACTS + 1] {
+            let mut footnotes = String::new();
+            for id in 0..MAX_DOCUMENT_FACTS / 2 {
+                write!(footnotes, "<w:footnote w:id=\"{id}\"/>").expect("footnote fixture");
+            }
+            let mut endnotes = String::new();
+            for id in MAX_DOCUMENT_FACTS / 2..count {
+                write!(endnotes, "<w:endnote w:id=\"{id}\"/>").expect("endnote fixture");
+            }
+            let settings = format!(
+                "<w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:footnotePr>{footnotes}</w:footnotePr><w:endnotePr>{endnotes}</w:endnotePr></w:settings>"
+            );
+            let facts = extract_document_text_controlled(
+                &docx_archive_with_parts(&[
+                    (DOCX_DOCUMENT_PART, main),
+                    ("word/_rels/document.xml.rels", rels),
+                    ("word/settings.xml", settings.as_bytes()),
+                ]),
+                "special-notes.docx",
+                None,
+                &control(),
+            )
+            .expect("bounded settings keep verified main text");
+            assert_eq!(facts.text, "Visible");
+            assert_eq!(
+                matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::ResourceLimit(DocumentLimit::FactCount))),
+                count > MAX_DOCUMENT_FACTS
+            );
+        }
     }
 
     #[test]
