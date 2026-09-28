@@ -93,12 +93,12 @@ After #477 acceptance, #339 SHALL publish exactly one v0.5 PHP guidance profile 
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; rendered font-coded symbols retain font/code/part/occurrence identity, map verified Unicode, and mark unknown mappings as incomplete text coverage
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
-- **AND** live page-number and date blocks requiring evaluation retain typed file-local incomplete coverage; validated referenced footnote/endnote stories are read without fabricating evaluated marker text, while deleted, moved-from, and unselected blocks remain excluded
+- **AND** live page-number and date blocks requiring evaluation retain typed file-local incomplete coverage; validated referenced footnote/endnote stories are read, while visible reference markers retain typed `UnevaluatedField` coverage without fabricating evaluated marker text; deleted, moved-from, and unselected blocks remain excluded
 - **AND** deleted and moved-from revision containers suppress all text leaves, separators, and field-state changes while preserving source paragraph/run numbering
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
 - **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence
 - **AND** root `mc:Ignorable` declarations admit at most 64 distinct resolved namespace URIs and suppress unknown extension subtrees without suppressing understood Word content; aliases follow URI identity, while nested policies and nonempty `mc:ProcessContent` or `mc:MustUnderstand` return typed unsupported input before publication
-- **AND** bounded, validated relationships admit rendered headers, footers, referenced notes, comments, frames, and text boxes; default headers or footers under first-page or even-page selection without pagination proof retain typed conditional coverage, while unsafe or malformed targets fail closed
+- **AND** bounded, validated relationships admit rendered headers, footers, referenced notes, comments, frames, and text boxes; default headers or footers under first-page or even-page selection without pagination proof retain typed conditional coverage; safe referenced unsupported story types may remain unexamined only with explicit `UnexaminedStory` coverage, while unsafe or malformed targets fail closed
 
 #### Scenario: Explicit language overrides a document extension
 - **WHEN** an accepted language override selects another language for a `.pdf` or `.docx` path
