@@ -17,6 +17,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a footnote or endnote story is admitted and the document-wide note properties list a special separator or continuation item by ID
 - **THEN** its text and symbols are admitted once with exact note-part provenance; an unlisted special item is not treated as rendered, and pagination-dependent continuation content has conditional coverage
 
+#### Scenario: Compatibility-wrapped document settings
+- **WHEN** supported markup compatibility selects document-wide settings that list a special note item
+- **THEN** the selected settings govern story loading; an unknown potentially selected branch produces incomplete story coverage rather than a false complete result
+
 #### Scenario: Referenced story is not examined
 - **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
 - **THEN** it publishes typed incomplete story coverage without claiming that part is symbol-free or fetching external content

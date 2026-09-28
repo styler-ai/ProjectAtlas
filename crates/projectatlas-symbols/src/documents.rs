@@ -883,6 +883,9 @@ fn extract_docx(
             return Err(error);
         }
     };
+    if settings.unexamined_compatibility {
+        mark_docx_gap(&mut document, DocumentCoverageGap::UnexaminedStory);
+    }
     if settings.even_odd_headers && references.has_header_variant() {
         mark_docx_gap(&mut document, DocumentCoverageGap::ConditionalStory);
     }
@@ -1304,6 +1307,8 @@ struct DocxSettings {
     footnote_special_ids: HashSet<String>,
     /// Special endnote IDs loaded by the document.
     endnote_special_ids: HashSet<String>,
+    /// A compatibility branch in settings may select unexamined rendered stories.
+    unexamined_compatibility: bool,
 }
 
 /// Read validated document-wide settings once before linked-story extraction.
@@ -1352,6 +1357,9 @@ fn docx_settings(
     let mut seen_endnote_properties = false;
     let mut settings = DocxSettings::default();
     let mut note_kind = None;
+    let mut alternatives: Vec<DocxAlternative> = Vec::new();
+    let mut selected_branches: Vec<usize> = Vec::new();
+    let mut skipped_branch_depth = None;
     let mut event_index = 0usize;
     loop {
         check_parser_iteration(event_index, &mut || control.check(stage))?;
@@ -1363,19 +1371,88 @@ fn docx_settings(
                     format: DocumentFormat::Docx,
                     message: error.to_string(),
                 })?;
-        let wordprocessing = matches!(namespace, ResolveResult::Bound(namespace)
+        let wordprocessing = matches!(&namespace, ResolveResult::Bound(namespace)
             if wordprocessing_namespace(namespace.as_ref()));
+        let compatibility = matches!(&namespace, ResolveResult::Bound(namespace)
+            if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006");
         match event {
             Event::Start(event) => {
-                if depth == 0 {
-                    if seen_root || !wordprocessing || event.local_name().as_ref() != "settings" {
-                        return Err(DocumentExtractionError::Malformed {
+                depth += 1;
+                if depth > MAX_DOCX_XML_DEPTH {
+                    return Err(DocumentExtractionError::ResourceLimit {
+                        limit: DocumentLimit::NestingDepth,
+                        observed: depth,
+                        maximum: MAX_DOCX_XML_DEPTH,
+                    });
+                }
+                if skipped_branch_depth.is_some() {
+                    continue;
+                }
+                let name = event.local_name();
+                if depth == 1 && (seen_root || !wordprocessing || name.as_ref() != "settings") {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX settings have an invalid root".to_owned(),
+                    });
+                }
+                if compatibility && matches!(name.as_ref(), "Choice" | "Fallback") {
+                    let alternative = alternatives
+                        .last_mut()
+                        .filter(|item| item.depth + 1 == depth && !item.fallback_seen)
+                        .ok_or_else(|| DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
-                            message: "DOCX settings have an invalid root".to_owned(),
-                        });
+                            message: "DOCX settings compatibility branch has invalid placement"
+                                .to_owned(),
+                        })?;
+                    let supported = if name.as_ref() == "Choice" {
+                        alternative.choice_seen = true;
+                        docx_choice_supported(&reader, &event, control, stage)?
+                    } else {
+                        if !alternative.choice_seen {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX settings compatibility fallback requires a choice"
+                                    .to_owned(),
+                            });
+                        }
+                        alternative.fallback_seen = true;
+                        true
+                    };
+                    if !supported && alternative.selection == DocxAlternativeSelection::Unselected {
+                        settings.unexamined_compatibility = true;
+                        alternative.selection = DocxAlternativeSelection::Uncertain;
                     }
+                    if alternative.selection == DocxAlternativeSelection::Unselected && supported {
+                        alternative.selection = DocxAlternativeSelection::Selected;
+                        selected_branches.push(depth);
+                    } else {
+                        skipped_branch_depth = Some(depth);
+                    }
+                    continue;
+                }
+                if alternatives
+                    .last()
+                    .is_some_and(|item| item.depth + 1 == depth)
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX settings alternatives must contain choices or fallback"
+                            .to_owned(),
+                    });
+                }
+                if compatibility && name.as_ref() == "AlternateContent" {
+                    alternatives.push(DocxAlternative {
+                        depth,
+                        selection: DocxAlternativeSelection::Unselected,
+                        choice_seen: false,
+                        fallback_seen: false,
+                    });
+                    continue;
+                }
+                let logical_parent = depth - 1 - 2 * selected_branches.len();
+                if logical_parent == 0 {
                     seen_root = true;
-                } else if depth == 1
+                } else if logical_parent == 1
                     && wordprocessing
                     && event.local_name().as_ref() == "evenAndOddHeaders"
                 {
@@ -1387,7 +1464,7 @@ fn docx_settings(
                     }
                     seen_switch = true;
                     settings.even_odd_headers = docx_on_off(&event, &reader)?;
-                } else if depth == 1 && wordprocessing {
+                } else if logical_parent == 1 && wordprocessing {
                     note_kind = match event.local_name().as_ref() {
                         "footnotePr" if !seen_footnote_properties => {
                             seen_footnote_properties = true;
@@ -1406,7 +1483,7 @@ fn docx_settings(
                         }
                         _ => None,
                     };
-                } else if depth == 2
+                } else if logical_parent == 2
                     && wordprocessing
                     && let Some(kind) = note_kind
                     && event.local_name().as_ref()
@@ -1431,23 +1508,42 @@ fn docx_settings(
                         _ => unreachable!(),
                     }
                 }
-                depth += 1;
-                if depth > MAX_DOCX_XML_DEPTH {
-                    return Err(DocumentExtractionError::ResourceLimit {
-                        limit: DocumentLimit::NestingDepth,
-                        observed: depth,
-                        maximum: MAX_DOCX_XML_DEPTH,
-                    });
-                }
             }
-            Event::End(_) => {
+            Event::End(event) => {
                 if depth == 0 {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "DOCX settings have an unmatched closing element".to_owned(),
                     });
                 }
-                if depth == 2 {
+                if let Some(skipped) = skipped_branch_depth {
+                    if depth == skipped {
+                        skipped_branch_depth = None;
+                    }
+                    depth -= 1;
+                    continue;
+                }
+                if compatibility
+                    && event.local_name().as_ref() == "AlternateContent"
+                    && alternatives
+                        .pop()
+                        .is_none_or(|item| item.depth != depth || !item.choice_seen)
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX settings alternatives require a choice".to_owned(),
+                    });
+                }
+                if compatibility
+                    && matches!(event.local_name().as_ref(), "Choice" | "Fallback")
+                    && selected_branches.last() == Some(&depth)
+                {
+                    selected_branches.pop();
+                }
+                if wordprocessing
+                    && depth - 2 * selected_branches.len() == 2
+                    && matches!(event.local_name().as_ref(), "footnotePr" | "endnotePr")
+                {
                     note_kind = None;
                 }
                 depth -= 1;
@@ -1462,7 +1558,12 @@ fn docx_settings(
             _ => {}
         }
     }
-    if !seen_root || depth != 0 {
+    if !seen_root
+        || depth != 0
+        || !alternatives.is_empty()
+        || !selected_branches.is_empty()
+        || skipped_branch_depth.is_some()
+    {
         return Err(DocumentExtractionError::Malformed {
             format: DocumentFormat::Docx,
             message: "DOCX settings ended before the root closed".to_owned(),
@@ -2156,6 +2257,60 @@ fn wordprocessing_namespace(namespace: &str) -> bool {
     )
 }
 
+/// Resolve the namespace prefixes required by a Markup Compatibility choice.
+fn docx_choice_supported(
+    reader: &NsReader<&[u8]>,
+    event: &BytesStart<'_>,
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<bool, DocumentExtractionError> {
+    let requires = event
+        .try_get_attribute("Requires")
+        .map_err(|error| DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: error.to_string(),
+        })?
+        .ok_or_else(|| DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: "DOCX compatibility choice requires namespace prefixes".to_owned(),
+        })?;
+    let requires = quick_xml::escape::unescape(&requires.value).map_err(|error| {
+        DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: error.to_string(),
+        }
+    })?;
+    if requires.split_whitespace().next().is_none() {
+        return Err(DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: "DOCX compatibility choice requires namespace prefixes".to_owned(),
+        });
+    }
+    let mut supported = true;
+    for (index, prefix) in requires.split_whitespace().enumerate() {
+        check_parser_iteration(index, &mut || control.check(stage))?;
+        if prefix.contains(':') {
+            return Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: format!("DOCX compatibility choice has invalid prefix {prefix}"),
+            });
+        }
+        let qualified = format!("{prefix}:choice");
+        let (namespace, _) = reader.resolver().resolve_element(QName(&qualified));
+        match namespace {
+            ResolveResult::Bound(namespace) if wordprocessing_namespace(namespace.as_ref()) => {}
+            ResolveResult::Bound(_) => supported = false,
+            ResolveResult::Unbound | ResolveResult::Unknown(_) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: format!("DOCX compatibility choice has undeclared prefix {prefix}"),
+                });
+            }
+        }
+    }
+    Ok(supported)
+}
+
 /// Selection state for one bounded Markup Compatibility alternative.
 struct DocxAlternative {
     /// XML depth of the enclosing `AlternateContent` element.
@@ -2606,45 +2761,7 @@ fn parse_docx_part(
                         })?;
                     let supported = if name.as_ref() == "Choice" {
                         alternative.choice_seen = true;
-                        let requires = event
-                            .try_get_attribute("Requires")
-                            .map_err(|error| DocumentExtractionError::Malformed {
-                                format: DocumentFormat::Docx,
-                                message: error.to_string(),
-                            })?
-                            .ok_or_else(|| DocumentExtractionError::Malformed {
-                                format: DocumentFormat::Docx,
-                                message: "DOCX compatibility choice requires namespace prefixes"
-                                    .to_owned(),
-                            })?;
-                        let requires =
-                            quick_xml::escape::unescape(&requires.value).map_err(|error| {
-                                DocumentExtractionError::Malformed {
-                                    format: DocumentFormat::Docx,
-                                    message: error.to_string(),
-                                }
-                            })?;
-                        if requires.split_whitespace().next().is_none() {
-                            return Err(DocumentExtractionError::Malformed {
-                                format: DocumentFormat::Docx,
-                                message: "DOCX compatibility choice requires namespace prefixes"
-                                    .to_owned(),
-                            });
-                        }
-                        let mut supported = true;
-                        for (index, prefix) in requires.split_whitespace().enumerate() {
-                            check_parser_iteration(index, &mut || control.check(stage))?;
-                            let qualified = format!("{prefix}:choice");
-                            let (namespace, _) =
-                                reader.resolver().resolve_element(QName(&qualified));
-                            if !matches!(namespace, ResolveResult::Bound(namespace)
-                                if wordprocessing_namespace(namespace.as_ref()))
-                            {
-                                supported = false;
-                                break;
-                            }
-                        }
-                        supported
+                        docx_choice_supported(&reader, &event, control, stage)?
                     } else {
                         if !alternative.choice_seen {
                             return Err(DocumentExtractionError::Malformed {
@@ -6458,6 +6575,93 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             assert_eq!(unlisted.symbols.iter().filter(|symbol| {
                 matches!(&symbol.locator, DocumentLocator::Docx { part: found, .. } if found == part)
             }).count(), 1, "unlisted note separator was emitted from {part}");
+        }
+        let compatible = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="w"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr></mc:Choice><mc:Fallback/></mc:AlternateContent></w:settings>"#;
+        let compatible = extract_document_text_controlled(
+            &archive(compatible),
+            "compatible-settings.docx",
+            None,
+            &control(),
+        )
+        .expect("selected compatibility settings load their special note");
+        assert_eq!(compatible.symbols.len(), 9);
+        assert!(
+            !matches!(compatible.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
+        let nested = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="w"><mc:AlternateContent><mc:Choice Requires="w"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr></mc:Choice><mc:Fallback/></mc:AlternateContent></mc:Choice><mc:Fallback/></mc:AlternateContent></w:settings>"#;
+        let nested = extract_document_text_controlled(
+            &archive(nested),
+            "nested-settings.docx",
+            None,
+            &control(),
+        )
+        .expect("nested selected settings load their special note");
+        assert_eq!(nested.symbols.len(), 9);
+        assert!(
+            !matches!(nested.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
+        let uncertain = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><mc:AlternateContent><mc:Choice Requires="future"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr></mc:Choice><mc:Fallback/></mc:AlternateContent></w:settings>"#;
+        let uncertain = extract_document_text_controlled(
+            &archive(uncertain),
+            "uncertain-settings.docx",
+            None,
+            &control(),
+        )
+        .expect("unknown compatibility settings remain file-local incomplete");
+        assert!(
+            matches!(uncertain.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
+        let nested_uncertain = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><mc:AlternateContent><mc:Choice Requires="w"><mc:AlternateContent><mc:Choice Requires="future"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr></mc:Choice><mc:Fallback/></mc:AlternateContent></mc:Choice><mc:Fallback/></mc:AlternateContent></w:settings>"#;
+        let nested_uncertain = extract_document_text_controlled(
+            &archive(nested_uncertain),
+            "nested-uncertain-settings.docx",
+            None,
+            &control(),
+        )
+        .expect("nested unknown branch remains incomplete");
+        assert!(
+            matches!(nested_uncertain.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
+        let undeclared = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="missing"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr></mc:Choice><mc:Fallback/></mc:AlternateContent></w:settings>"#;
+        assert!(matches!(
+            extract_document_text_controlled(
+                &archive(undeclared),
+                "undeclared-settings.docx",
+                None,
+                &control()
+            ),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let invalid_token = std::str::from_utf8(undeclared)
+            .expect("UTF-8 settings fixture")
+            .replace("Requires=\"missing\"", "Requires=\"w:future\"");
+        assert!(matches!(
+            extract_document_text_controlled(
+                &archive(invalid_token.as_bytes()),
+                "invalid-prefix-settings.docx",
+                None,
+                &control()
+            ),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let mixed = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><mc:AlternateContent><mc:Choice Requires="future missing"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr></mc:Choice><mc:Fallback/></mc:AlternateContent></w:settings>"#;
+        for xml in [
+            std::str::from_utf8(mixed)
+                .expect("UTF-8 settings fixture")
+                .to_owned(),
+            std::str::from_utf8(mixed)
+                .expect("UTF-8 settings fixture")
+                .replace("future missing", "missing future"),
+        ] {
+            assert!(matches!(
+                extract_document_text_controlled(
+                    &archive(xml.as_bytes()),
+                    "mixed-prefixes.docx",
+                    None,
+                    &control()
+                ),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
         }
         for property in ["footnotePr", "endnotePr"] {
             let closing = format!("</w:{property}>");
