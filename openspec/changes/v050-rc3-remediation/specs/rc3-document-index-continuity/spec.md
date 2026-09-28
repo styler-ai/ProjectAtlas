@@ -93,8 +93,12 @@ A scan SHALL publish a navigable generation only when all accepted source facts 
 - **THEN** the published generation exposes verified source and an explicit document-level incomplete result through CLI and MCP navigation
 
 #### Scenario: Coverage metadata does not consume symbol budgets
-- **WHEN** bounded impact analysis reads real symbols from a document with incomplete text coverage
-- **THEN** the internal coverage marker remains queryable as coverage but does not consume symbol row or byte limits or hide a later real symbol
+- **WHEN** a document with incomplete text coverage is published or bounded impact analysis reads its real symbols
+- **THEN** the internal coverage marker remains queryable as coverage but does not consume navigable symbol row or byte limits, inflate reported symbol counts, or hide a later real symbol
+
+#### Scenario: Document language is inferred or mixed case
+- **WHEN** an admitted DOCX or PDF is projected with no language hint or a mixed-case hint
+- **THEN** its graph and symbols use the admitted format's canonical language so incomplete coverage remains typed and the marker never becomes a navigable symbol
 
 #### Scenario: Repair and incremental retry
 - **WHEN** the document is replaced with a supported valid version after an incomplete publication

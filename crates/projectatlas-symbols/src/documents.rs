@@ -273,15 +273,17 @@ pub struct DocumentFacts {
 
 impl DocumentFacts {
     /// Project exact document facts into the existing sparse symbol graph.
+    /// The admitted format, not a caller's optional language hint, owns the graph language.
     #[must_use]
-    pub fn symbol_graph(&self, path: &str, language: Option<&str>) -> SymbolGraph {
+    pub fn symbol_graph(&self, path: &str, _language: Option<&str>) -> SymbolGraph {
+        let language = Some(self.format.language().to_owned());
         let mut symbols: Vec<CodeSymbol> = self
             .facts
             .iter()
             .enumerate()
             .map(|(index, fact)| CodeSymbol {
                 path: path.to_owned(),
-                language: language.map(str::to_owned),
+                language: language.clone(),
                 name: format!("document-block-{}", index + 1),
                 kind: SymbolKind::Value,
                 signature: fact.locator.to_string(),
@@ -307,7 +309,7 @@ impl DocumentFacts {
                 .map_or_else(|| "missing".to_owned(), |code| format!("{code:04X}"));
             CodeSymbol {
                 path: path.to_owned(),
-                language: language.map(str::to_owned),
+                language: language.clone(),
                 name: format!("document-symbol-{}", index + 1),
                 kind: SymbolKind::Value,
                 signature: format!("{};font={:?};code={code}", symbol.locator, symbol.font),
@@ -327,7 +329,7 @@ impl DocumentFacts {
         if let DocumentCompleteness::Partial { gaps } = &self.completeness {
             symbols.push(CodeSymbol {
                 path: path.to_owned(),
-                language: language.map(str::to_owned),
+                language: language.clone(),
                 name: DOCUMENT_COVERAGE_SYMBOL.to_owned(),
                 kind: SymbolKind::Unknown,
                 signature: gaps
@@ -347,7 +349,7 @@ impl DocumentFacts {
         }
         SymbolGraph {
             path: path.to_owned(),
-            language: language.map(str::to_owned),
+            language,
             parser: ParserKind::Structural,
             symbols,
             relations: Vec::new(),
@@ -6619,6 +6621,17 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             }
         );
         let graph = facts.symbol_graph("symbol.docx", None);
+        assert_eq!(graph.language.as_deref(), Some("docx"));
+        assert!(
+            graph
+                .symbols
+                .iter()
+                .all(|symbol| symbol.language.as_deref() == Some("docx"))
+        );
+        assert_eq!(
+            facts.symbol_graph("symbol.docx", Some("DOCX")).language,
+            graph.language
+        );
         assert!(graph.symbols.iter().any(|symbol| {
             symbol
                 .signature

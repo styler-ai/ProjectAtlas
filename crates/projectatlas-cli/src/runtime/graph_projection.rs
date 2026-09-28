@@ -2568,7 +2568,7 @@ fn build_entity_projection_with_config_limit(
         let mut symbol_digests = Vec::with_capacity(graph.symbols.len());
         entity_bytes = entity_bytes.saturating_add(
             STAGED_GRAPH_ROW_BYTES
-                .saturating_mul(u64::try_from(graph.symbols.len()).unwrap_or(u64::MAX)),
+                .saturating_mul(u64::try_from(navigable_symbol_count(graph)).unwrap_or(u64::MAX)),
         );
         let qualified_parents = qualified_symbol_parents(graph)?;
         for (symbol, qualified_parent) in graph.symbols.iter().zip(qualified_parents) {
@@ -5723,10 +5723,18 @@ fn relation_reference(relation: &SymbolRelation) -> String {
 }
 
 /// Keep document coverage metadata out of the user-facing entity graph.
-fn is_document_coverage_marker(graph: &SymbolGraph, symbol: &CodeSymbol) -> bool {
+pub(super) fn is_document_coverage_marker(graph: &SymbolGraph, symbol: &CodeSymbol) -> bool {
     matches!(graph.language.as_deref(), Some("docx" | "pdf"))
         && symbol.name == DOCUMENT_COVERAGE_SYMBOL
         && symbol.kind == SymbolKind::Unknown
+}
+
+pub(super) fn navigable_symbol_count(graph: &SymbolGraph) -> usize {
+    graph
+        .symbols
+        .iter()
+        .filter(|symbol| !is_document_coverage_marker(graph, symbol))
+        .count()
 }
 
 /// Project parser trust into one path-scoped coverage record.
@@ -6299,7 +6307,7 @@ pub(super) fn admit_symbol_build_stage(
             continue;
         };
         symbols = symbols
-            .checked_add(parsed.graph.symbols.len())
+            .checked_add(navigable_symbol_count(&parsed.graph))
             .ok_or_else(|| {
                 CliError::InvalidInput("admitted symbol report count overflowed".to_string())
             })?;
@@ -7846,29 +7854,41 @@ mod tests {
                 },
                 provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
             };
-            let graph = facts.symbol_graph("docs/limited.docx", Some("docx"));
-            let coverage = super::coverage_for_graph(
-                &graph,
-                IndexGeneration::new(1),
-                &GraphIdentityAdmission::default(),
-                &GraphIdentityAdmission::default(),
-            )?;
-            require_eq(
-                &coverage.state(),
-                &CoverageState::Failed,
-                "empty document gap was lost",
-            )?;
-            require_eq(
-                &coverage.reached_limit(),
-                &Some(reached),
-                "document ceiling was lost",
-            )?;
-            require(
-                coverage
-                    .reason()
-                    .is_some_and(|value| value.as_str().contains(reason)),
-                "document-local reason was lost",
-            )?;
+            for language in [None, Some("DOCX")] {
+                let graph = facts.symbol_graph("docs/limited.docx", language);
+                require_eq(
+                    &graph.language.as_deref(),
+                    &Some("docx"),
+                    "canonical language",
+                )?;
+                require_eq(
+                    &super::navigable_symbol_count(&graph),
+                    &0,
+                    "coverage marker was counted",
+                )?;
+                let coverage = super::coverage_for_graph(
+                    &graph,
+                    IndexGeneration::new(1),
+                    &GraphIdentityAdmission::default(),
+                    &GraphIdentityAdmission::default(),
+                )?;
+                require_eq(
+                    &coverage.state(),
+                    &CoverageState::Failed,
+                    "empty document gap was lost",
+                )?;
+                require_eq(
+                    &coverage.reached_limit(),
+                    &Some(reached),
+                    "document ceiling was lost",
+                )?;
+                require(
+                    coverage
+                        .reason()
+                        .is_some_and(|value| value.as_str().contains(reason)),
+                    "document-local reason was lost",
+                )?;
+            }
         }
         Ok(())
     }
