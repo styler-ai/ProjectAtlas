@@ -5729,6 +5729,7 @@ pub(super) fn is_document_coverage_marker(graph: &SymbolGraph, symbol: &CodeSymb
         && symbol.kind == SymbolKind::Unknown
 }
 
+/// Count only symbols exposed by navigation and charged to publication budgets.
 pub(super) fn navigable_symbol_count(graph: &SymbolGraph) -> usize {
     graph
         .symbols
