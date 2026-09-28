@@ -53,6 +53,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** the same symbol is inside deleted or otherwise non-rendered content
 - **THEN** it does not degrade the rendered document's coverage
 
+#### Scenario: Field-instruction references are not rendered
+- **WHEN** note or comment references appear in a complex field's instruction region before the cached-result separator
+- **THEN** their stories are not followed and their markers do not enter rendered text or coverage
+
 #### Scenario: PDF exhausts parser fuel
 - **WHEN** a PDF beside ordinary source consumes its finite Wasmi execution-fuel budget during text indexing
 - **THEN** the published generation retains verified source, identifies that PDF with durable file-local incomplete coverage and a typed execution-fuel limit, and retains cancellation and other resource ceilings

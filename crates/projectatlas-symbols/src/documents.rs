@@ -3091,6 +3091,7 @@ fn parse_docx_part(
                                 &mut output,
                                 &mut output_line,
                                 &mut facts,
+                                symbols.len(),
                             )?;
                         }
                         text_boxes.push((std::mem::take(&mut paragraph), output.len()));
@@ -3182,7 +3183,8 @@ fn parse_docx_part(
                     | "lastRenderedPageBreak"
                     | "noBreakHyphen"
                     | "softHyphen"
-                        if deleted_depth.is_none() =>
+                        if deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         if let Some(run) = paragraph.run.as_mut() {
                             mark_docx_cached_result(&mut paragraph.fields, &mut simple_fields);
@@ -3200,7 +3202,9 @@ fn parse_docx_part(
                     }
                     "pgNum" | "dayShort" | "dayLong" | "monthShort" | "monthLong" | "yearShort"
                     | "yearLong"
-                        if paragraph.run.is_some() && deleted_depth.is_none() =>
+                        if paragraph.run.is_some()
+                            && deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(run, "\u{fffc}", output.len())?;
@@ -3210,7 +3214,9 @@ fn parse_docx_part(
                         }
                     }
                     "footnoteReference" | "endnoteReference" | "commentReference"
-                        if paragraph.run.is_some() && deleted_depth.is_none() =>
+                        if paragraph.run.is_some()
+                            && deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         let kind = match name.as_ref() {
                             "footnoteReference" => DocxStoryKind::Footnotes,
@@ -3230,7 +3236,10 @@ fn parse_docx_part(
                             gaps.push(DocumentCoverageGap::UnevaluatedField);
                         }
                     }
-                    "commentRangeStart" | "commentRangeEnd" if deleted_depth.is_none() => {
+                    "commentRangeStart" | "commentRangeEnd"
+                        if deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
+                    {
                         let id = docx_attribute(&event, &reader, "id", wordprocessing_namespace)?
                             .ok_or_else(|| DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
@@ -3599,6 +3608,7 @@ fn parse_docx_part(
                                 &mut output,
                                 &mut output_line,
                                 &mut facts,
+                                symbols.len(),
                             )?;
                         }
                     }
@@ -3722,14 +3732,16 @@ fn publish_docx_run_fragment(
     output: &mut String,
     output_line: &mut usize,
     facts: &mut Vec<DocumentFact>,
+    symbol_count: usize,
 ) -> Result<(), DocumentExtractionError> {
     if run.text.is_empty() {
         return Ok(());
     }
-    if facts.len() >= MAX_DOCUMENT_FACTS {
+    let observed = facts.len().saturating_add(symbol_count).saturating_add(1);
+    if observed > MAX_DOCUMENT_FACTS {
         return Err(DocumentExtractionError::ResourceLimit {
             limit: DocumentLimit::FactCount,
-            observed: facts.len() + 1,
+            observed,
             maximum: MAX_DOCUMENT_FACTS,
         });
     }
@@ -5889,6 +5901,26 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         assert_eq!(symbol_field.text, "α");
         assert_eq!(symbol_field.symbols.len(), 1);
         assert_eq!(symbol_field.completeness, DocumentCompleteness::Complete);
+        let instruction_refs = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>FIELD</w:instrText><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/><w:commentReference w:id="4"/><w:commentRangeStart w:id="4"/><w:commentRangeEnd w:id="4"/><w:pgNum/><w:tab/><w:fldChar w:fldCharType="separate"/><w:t>Visible</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let mut references = DocxStoryReferences::default();
+        let instruction_refs = parse_docx_part(
+            instruction_refs,
+            DOCX_DOCUMENT_PART,
+            "document",
+            None,
+            None,
+            &mut references,
+            &control(),
+            IndexWorkStage::TextIndex,
+        )
+        .expect("field instructions cannot publish referenced stories or dynamic text");
+        assert_eq!(instruction_refs.text, "Visible");
+        assert!(instruction_refs.symbols.is_empty());
+        assert!(references.items.is_empty());
+        assert_eq!(
+            instruction_refs.completeness,
+            DocumentCompleteness::Complete
+        );
         let text = std::str::from_utf8(xml).expect("UTF-8 fixture");
         for invalid in [
             text.replace("PAGE &amp; <![CDATA[ignored]]>", "<w:t>nested</w:t>"),
@@ -7156,20 +7188,35 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_post_admission_fact_limit_is_local_incomplete_coverage() {
-        let xml = format!(
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r>{}</w:r></w:p></w:body></w:document>",
-            "<w:sym w:font=\"Wingdings\" w:char=\"F03A\"/>".repeat(MAX_DOCUMENT_FACTS + 1),
-        );
-        let archive = docx_archive(xml.as_bytes(), CompressionMethod::Deflated);
-        let facts = extract_document_text_controlled(&archive, "limited.docx", None, &control())
-            .expect("safe post-admission fact ceiling is file-local");
-        assert!(facts.symbols.is_empty());
-        assert_eq!(
-            facts.completeness,
-            DocumentCompleteness::Partial {
-                gaps: vec![DocumentCoverageGap::ResourceLimit(DocumentLimit::FactCount)],
+        for count in [
+            MAX_DOCUMENT_FACTS - 1,
+            MAX_DOCUMENT_FACTS,
+            MAX_DOCUMENT_FACTS + 1,
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r>{}</w:r></w:p></w:body></w:document>",
+                "<w:sym w:font=\"Wingdings\" w:char=\"F03A\"/>".repeat(count),
+            );
+            let archive = docx_archive(xml.as_bytes(), CompressionMethod::Deflated);
+            let facts =
+                extract_document_text_controlled(&archive, "limited.docx", None, &control())
+                    .expect("safe post-admission fact ceiling is file-local");
+            if count < MAX_DOCUMENT_FACTS {
+                assert_eq!(facts.symbols.len(), count);
+                assert_eq!(facts.facts.len(), 1);
+                assert!(
+                    !matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::ResourceLimit(DocumentLimit::FactCount)))
+                );
+            } else {
+                assert!(facts.symbols.is_empty());
+                assert_eq!(
+                    facts.completeness,
+                    DocumentCompleteness::Partial {
+                        gaps: vec![DocumentCoverageGap::ResourceLimit(DocumentLimit::FactCount)],
+                    }
+                );
             }
-        );
+        }
     }
 
     #[test]
