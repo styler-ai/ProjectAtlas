@@ -132,6 +132,8 @@ pub enum DocumentCoverageGap {
     UnexaminedStory,
     /// A configured story may not appear without pagination evidence.
     ConditionalStory,
+    /// Style inheritance or renderer policy may change which runs are visible.
+    UnresolvedVisibility,
     /// Parsing stopped at an accepted post-admission resource ceiling.
     ResourceLimit(DocumentLimit),
 }
@@ -145,6 +147,7 @@ impl DocumentCoverageGap {
             Self::UnevaluatedField => "unevaluated_field",
             Self::UnexaminedStory => "unexamined_story",
             Self::ConditionalStory => "conditional_story",
+            Self::UnresolvedVisibility => "unresolved_visibility",
             Self::ResourceLimit(DocumentLimit::OutputBytes) => "resource_limit:output_bytes",
             Self::ResourceLimit(DocumentLimit::FactCount) => "resource_limit:fact_count",
             Self::ResourceLimit(DocumentLimit::MemoryBytes) => "resource_limit:memory_bytes",
@@ -906,6 +909,12 @@ fn extract_docx(
     } else {
         None
     };
+    if main_relationships
+        .as_ref()
+        .is_some_and(|relationships| relationships.values().any(|(kind, _, _)| kind == "styles"))
+    {
+        mark_docx_gap(&mut document, DocumentCoverageGap::UnresolvedVisibility);
+    }
     // Drain linked stories first so their note/comment IDs are batched before item-part inflation.
     let mut selected: BTreeMap<(u8, String), (DocxStoryKind, HashSet<String>)> = BTreeMap::new();
     if let Err(error) = queue_docx_story_references(
@@ -1400,6 +1409,12 @@ fn docx_settings(
         };
         let compatibility = matches!(&namespace, ResolveResult::Bound(namespace)
             if namespace.as_ref() == "http://schemas.openxmlformats.org/markup-compatibility/2006");
+        if matches!(event, Event::Decl(_)) && event_index != 1 {
+            return Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: "DOCX XML declaration must be the first XML event".to_owned(),
+            });
+        }
         match event {
             Event::Start(event) => {
                 depth += 1;
@@ -1692,6 +1707,7 @@ fn decode_docx_xml(
         None
     };
     let Some((little_endian, bom_bytes)) = encoding else {
+        validate_docx_xml_encoding(&xml, None)?;
         return Ok(xml);
     };
     let (chunks, remainder) = xml[bom_bytes..].as_chunks::<2>();
@@ -1744,7 +1760,57 @@ fn decode_docx_xml(
         check_parser_iteration(index, &mut || control.check(stage))?;
         decoded.push(character?);
     }
-    Ok(decoded.into_bytes())
+    let decoded = decoded.into_bytes();
+    validate_docx_xml_encoding(&decoded, Some(little_endian))?;
+    Ok(decoded)
+}
+
+/// Check the original byte encoding before every package XML reader sees normalized text.
+fn validate_docx_xml_encoding(
+    xml: &[u8],
+    utf16_little_endian: Option<bool>,
+) -> Result<(), DocumentExtractionError> {
+    let mut reader = NsReader::from_reader(xml.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(xml));
+    let Event::Decl(declaration) =
+        reader
+            .read_event()
+            .map_err(|error| DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: error.to_string(),
+            })?
+    else {
+        return Ok(());
+    };
+    let Some(encoding) = declaration.encoding() else {
+        return Ok(());
+    };
+    let encoding = encoding.map_err(|error| DocumentExtractionError::Malformed {
+        format: DocumentFormat::Docx,
+        message: error.to_string(),
+    })?;
+    let encoding = encoding.as_ref();
+    let utf8 = encoding.eq_ignore_ascii_case("UTF-8");
+    let ascii = encoding.eq_ignore_ascii_case("US-ASCII");
+    let utf16 = encoding.eq_ignore_ascii_case("UTF-16");
+    let utf16_le = encoding.eq_ignore_ascii_case("UTF-16LE");
+    let utf16_be = encoding.eq_ignore_ascii_case("UTF-16BE");
+    if !(utf8 || ascii || utf16 || utf16_le || utf16_be) {
+        return Err(DocumentExtractionError::UnsupportedDocxInput {
+            message: "DOCX XML encoding is not supported; UTF-8 or UTF-16 is required".to_owned(),
+        });
+    }
+    let matches_bytes = match utf16_little_endian {
+        None => utf8 || (ascii && xml.is_ascii()),
+        Some(true) => utf16 || utf16_le,
+        Some(false) => utf16 || utf16_be,
+    };
+    if !matches_bytes {
+        return Err(DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: "DOCX XML encoding declaration does not match its bytes".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Extract package content-type overrides and extension defaults.
@@ -1863,7 +1929,14 @@ fn parse_docx_content_types(
                 }
             }
             Event::Text(text) if text.as_ref().chars().all(char::is_whitespace) => {}
-            Event::Decl(_) | Event::Comment(_) => {}
+            Event::Decl(_) if events == 1 => {}
+            Event::Decl(_) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML declaration must be the first XML event".to_owned(),
+                });
+            }
+            Event::Comment(_) => {}
             Event::Eof => break,
             _ => {
                 return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -2021,7 +2094,14 @@ fn parse_docx_relationships(
                 }
             }
             Event::Text(text) if text.as_ref().chars().all(char::is_whitespace) => {}
-            Event::Decl(_) | Event::Comment(_) => {}
+            Event::Decl(_) if events == 1 => {}
+            Event::Decl(_) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML declaration must be the first XML event".to_owned(),
+                });
+            }
+            Event::Comment(_) => {}
             Event::Eof => break,
             _ => {
                 return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -2211,6 +2291,16 @@ fn append_docx_story(
 /// Decoded run text with Word text-leaf whitespace policy applied before publication.
 #[derive(Default)]
 struct RawDocxRun {
+    /// XML depth of this run, for direct run-property ownership.
+    depth: usize,
+    /// Direct run properties cannot follow already-consumed content.
+    content_seen: bool,
+    /// XML depth of active direct run properties.
+    properties_depth: Option<usize>,
+    /// Direct run formatting excludes payload without discarding field transitions.
+    hidden: bool,
+    /// Renderer-specific hiding needs a coverage gap unless direct vanish resolves it.
+    spec_vanish: bool,
     /// Decoded logical run text.
     text: String,
     /// Decoded run bytes already emitted before a nested text container.
@@ -2665,6 +2755,12 @@ fn parse_docx_part(
                 });
             }
         };
+        if matches!(event, Event::Decl(_)) && event_index != 1 {
+            return Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: "DOCX XML declaration must be the first XML event".to_owned(),
+            });
+        }
         if foreign_depth.is_some() && text_carrier.is_none() {
             let has_text = match &event {
                 Event::Text(text) => Some(text.as_ref().chars().any(|c| !c.is_ascii_whitespace())),
@@ -2724,6 +2820,13 @@ fn parse_docx_part(
                 }
                 if skipped_branch_depth.is_some() {
                     continue;
+                }
+                if wordprocessing
+                    && deleted_depth.is_none()
+                    && matches!(name.as_ref(), "rStyle" | "pStyle")
+                    && !gaps.contains(&DocumentCoverageGap::UnresolvedVisibility)
+                {
+                    gaps.push(DocumentCoverageGap::UnresolvedVisibility);
                 }
                 let ignorable = !wordprocessing
                     && !compatibility
@@ -2964,7 +3067,7 @@ fn parse_docx_part(
                         ("sdtContent", DocxSdtTag::Sdt) => DocxSdtTag::Content,
                         _ => DocxSdtTag::Other,
                     };
-                    if paragraph.run.is_some()
+                    if paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                         && !paragraph.fields.contains(&DocxFieldPhase::Instruction)
                         && matches!(
                             name.as_ref(),
@@ -3005,6 +3108,33 @@ fn parse_docx_part(
                                 context.content_nonempty = true;
                             }
                         }
+                    }
+                }
+                if wordprocessing && let Some(run) = paragraph.run.as_mut() {
+                    if element_depth == run.depth + 1 {
+                        if name.as_ref() == "rPr" {
+                            if run.content_seen {
+                                return Err(DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: "DOCX run properties follow run content".to_owned(),
+                                });
+                            }
+                            run.properties_depth = Some(element_depth);
+                        } else {
+                            run.content_seen = true;
+                        }
+                    }
+                    if name.as_ref() == "vanish"
+                        && run.properties_depth == element_depth.checked_sub(1)
+                        && deleted_depth.is_none()
+                    {
+                        run.hidden |= docx_on_off(&event, &reader)?;
+                    }
+                    if name.as_ref() == "specVanish"
+                        && run.properties_depth == element_depth.checked_sub(1)
+                        && deleted_depth.is_none()
+                    {
+                        run.spec_vanish |= docx_on_off(&event, &reader)?;
                     }
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
@@ -3186,11 +3316,15 @@ fn parse_docx_part(
                     }
                     "r" if paragraph.open && paragraph.run.is_none() => {
                         paragraph.run_number += 1;
-                        paragraph.run = Some(RawDocxRun::default());
+                        paragraph.run = Some(RawDocxRun {
+                            depth: element_depth,
+                            ..RawDocxRun::default()
+                        });
                     }
                     "t" | "instrText" | "delText" | "delInstrText" if paragraph.run.is_some() => {
                         text_start = paragraph.run.as_ref().map_or(0, |run| run.text.len());
                         let ignored = deleted_depth.is_some()
+                            || paragraph.run.as_ref().is_some_and(|run| run.hidden)
                             || matches!(name.as_ref(), "delText" | "delInstrText")
                             || paragraph.fields.contains(&DocxFieldPhase::Instruction);
                         text_carrier = Some(if ignored {
@@ -3262,6 +3396,7 @@ fn parse_docx_part(
                     | "noBreakHyphen"
                     | "softHyphen"
                         if deleted_depth.is_none()
+                            && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         if let Some(run) = paragraph.run.as_mut() {
@@ -3282,6 +3417,7 @@ fn parse_docx_part(
                     | "yearLong"
                         if paragraph.run.is_some()
                             && deleted_depth.is_none()
+                            && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         if let Some(run) = paragraph.run.as_mut() {
@@ -3294,6 +3430,7 @@ fn parse_docx_part(
                     "contentPart"
                         if paragraph.run.is_some()
                             && deleted_depth.is_none()
+                            && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         let id =
@@ -3310,6 +3447,7 @@ fn parse_docx_part(
                     "footnoteRef" | "endnoteRef" | "annotationRef"
                         if paragraph.run.is_some()
                             && deleted_depth.is_none()
+                            && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         if (name.as_ref() == "footnoteRef" && root_name != "footnotes")
@@ -3332,6 +3470,7 @@ fn parse_docx_part(
                     "footnoteReference" | "endnoteReference" | "commentReference"
                         if paragraph.run.is_some()
                             && deleted_depth.is_none()
+                            && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         let kind = match name.as_ref() {
@@ -3354,6 +3493,7 @@ fn parse_docx_part(
                     }
                     "commentRangeStart" | "commentRangeEnd"
                         if deleted_depth.is_none()
+                            && !paragraph.run.as_ref().is_some_and(|run| run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         let id = docx_attribute(&event, &reader, "id", wordprocessing_namespace)?
@@ -3366,6 +3506,7 @@ fn parse_docx_part(
                     "sym"
                         if paragraph.run.is_some()
                             && deleted_depth.is_none()
+                            && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
                         let mut font = None;
@@ -3631,6 +3772,19 @@ fn parse_docx_part(
                     deleted_depth = None;
                 }
                 if wordprocessing
+                    && name.as_ref() == "rPr"
+                    && let Some(run) = paragraph.run.as_mut()
+                    && run.properties_depth == Some(element_depth)
+                {
+                    run.properties_depth = None;
+                    if run.spec_vanish
+                        && !run.hidden
+                        && !gaps.contains(&DocumentCoverageGap::UnresolvedVisibility)
+                    {
+                        gaps.push(DocumentCoverageGap::UnresolvedVisibility);
+                    }
+                }
+                if wordprocessing
                     && name.as_ref() == "sectPr"
                     && header_section
                         .as_ref()
@@ -3743,27 +3897,6 @@ fn parse_docx_part(
                 element_depth -= 1;
                 if element_depth == 0 {
                     root_closed = true;
-                }
-            }
-            Event::Decl(declaration) => {
-                if let Some(encoding) = declaration.encoding() {
-                    let encoding =
-                        encoding.map_err(|error| DocumentExtractionError::Malformed {
-                            format: DocumentFormat::Docx,
-                            message: error.to_string(),
-                        })?;
-                    if !encoding.eq_ignore_ascii_case("UTF-8")
-                        && !encoding.eq_ignore_ascii_case("US-ASCII")
-                        && !encoding.eq_ignore_ascii_case("UTF-16")
-                        && !encoding.eq_ignore_ascii_case("UTF-16LE")
-                        && !encoding.eq_ignore_ascii_case("UTF-16BE")
-                    {
-                        return Err(DocumentExtractionError::UnsupportedDocxInput {
-                            message:
-                                "DOCX XML encoding is not supported; UTF-8 or UTF-16 is required"
-                                    .to_owned(),
-                        });
-                    }
                 }
             }
             Event::Eof => break,
@@ -5803,6 +5936,173 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_xml_declarations_must_match_story_and_package_bytes() {
+        let story = r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>"#;
+        assert!(matches!(
+            parse_docx(story.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        for (little_endian, wrong_encoding) in
+            [(true, "UTF-16BE"), (false, "UTF-16LE"), (true, "UTF-8")]
+        {
+            let mut encoded = vec![];
+            for unit in story.replace("UTF-16", wrong_encoding).encode_utf16() {
+                encoded.extend_from_slice(&if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            assert!(matches!(
+                parse_docx(&encoded, &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>"#;
+        let manifest = br#"<?xml version="1.0" encoding="ISO-8859-1"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+        let archive = docx_archive_with_parts(&[
+            ("[Content_Types].xml", manifest),
+            (DOCX_DOCUMENT_PART, main),
+        ]);
+        assert!(matches!(
+            extract_document_text_controlled(&archive, "metadata.docx", None, &control()),
+            Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+        ));
+        let root_rels = br#"<?xml version="1.0" encoding="UTF-16"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+        let archive =
+            docx_archive_with_parts(&[("_rels/.rels", root_rels), (DOCX_DOCUMENT_PART, main)]);
+        assert!(matches!(
+            extract_document_text_controlled(&archive, "metadata.docx", None, &control()),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let late_story = format!(" <!--before-->{story}");
+        assert!(matches!(
+            parse_docx(late_story.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let late_manifest = format!(" <!--before-->{}", String::from_utf8_lossy(manifest));
+        let archive = docx_archive_with_parts(&[
+            ("[Content_Types].xml", late_manifest.as_bytes()),
+            (DOCX_DOCUMENT_PART, main),
+        ]);
+        assert!(
+            extract_document_text_controlled(&archive, "metadata.docx", None, &control()).is_err()
+        );
+        let settings_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="settings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
+        let late_settings = br#" <!--before--><?xml version="1.0" encoding="UTF-16"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", settings_rels),
+            ("word/settings.xml", late_settings),
+        ]);
+        assert!(matches!(
+            extract_document_text_controlled(&archive, "settings.docx", None, &control()),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn docx_direct_hidden_runs_do_not_emit_text_symbols_or_references() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Secret</w:t><w:sym w:font="Wingdings" w:char="F03A"/><w:footnoteReference w:id="1"/></w:r><w:r><w:rPr><w:vanish w:val="false"/></w:rPr><w:sym w:font="Symbol" w:char="F061"/></w:r><w:r><w:rPr><w:webHidden/></w:rPr><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"#;
+        let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
+            .expect("directly hidden runs do not contribute rendered payload");
+        assert_eq!(facts.text, "αVisible");
+        assert_eq!(facts.symbols.len(), 1);
+        assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        assert!(matches!(
+            &facts.symbols[0].locator,
+            DocumentLocator::Docx { run: 2, .. }
+        ));
+        let invalid = String::from_utf8_lossy(xml).replace("w:val=\"false\"", "w:val=\"maybe\"");
+        assert!(matches!(
+            parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        for (value, visible) in [
+            ("", false),
+            (" w:val=\"true\"", false),
+            (" w:val=\"1\"", false),
+            (" w:val=\"on\"", false),
+            (" w:val=\"false\"", true),
+            (" w:val=\"0\"", true),
+            (" w:val=\"off\"", true),
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:rPr><w:vanish{value}/></w:rPr><w:t>Text</w:t></w:r></w:p></w:body></w:document>"
+            );
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("valid on/off run visibility");
+            assert_eq!(facts.text == "Text", visible, "{value}");
+        }
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="note" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>"#;
+        let notes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote></w:footnotes>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, xml),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/footnotes.xml", notes),
+        ]);
+        let facts =
+            extract_document_text_controlled(&archive, "hidden-note.docx", None, &control())
+                .expect("a hidden note reference does not reach the note story");
+        assert_eq!(facts.text, "αVisible");
+        assert_eq!(facts.symbols.len(), 1);
+        assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+    }
+
+    #[test]
+    fn docx_hidden_field_markers_keep_cached_result_state() {
+        let template = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:instrText>PAGE</w:instrText><w:t>INSTRUCTION</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>CACHE<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        for (cached, expected, partial) in [("<w:r><w:t>7</w:t></w:r>", "7", false), ("", "", true)]
+        {
+            let xml = template.replace("CACHE", cached);
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("hidden field markers preserve field structure");
+            assert_eq!(facts.text, expected);
+            assert_eq!(
+                matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnevaluatedField)),
+                partial
+            );
+        }
+    }
+
+    #[test]
+    fn docx_style_dependent_visibility_is_partial() {
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:rStyle w:val="Secret"/></w:rPr><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:body></w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
+        let styles = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="character" w:styleId="Secret"><w:rPr><w:vanish/></w:rPr></w:style></w:styles>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/styles.xml", styles),
+        ]);
+        let facts = extract_document_text_controlled(&archive, "styled.docx", None, &control())
+            .expect("unresolved style visibility is not a package error");
+        assert!(
+            matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnresolvedVisibility))
+        );
+    }
+
+    #[test]
+    fn docx_spec_vanish_without_direct_vanish_is_renderer_dependent() {
+        for (properties, text, partial) in [
+            ("<w:specVanish/>", "Text", true),
+            ("<w:specVanish/><w:vanish/>", "", false),
+            ("<w:vanish/><w:specVanish/>", "", false),
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:rPr>{properties}</w:rPr><w:t>Text</w:t></w:r></w:p></w:body></w:document>"
+            );
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("specVanish is not a package error");
+            assert_eq!(facts.text, text);
+            assert_eq!(
+                matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnresolvedVisibility)),
+                partial
+            );
+        }
+    }
+
+    #[test]
     fn docx_foreign_text_is_unsupported_without_hiding_word_text_boxes() {
         let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><m:oMath><m:r><m:t>CONTENT</m:t></m:r></m:oMath></w:p></w:body></w:document>"#;
         for content in ["x", "<![CDATA[x]]>", "&#120;"] {
@@ -7060,6 +7360,23 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .expect("retained whitespace replaces a glossary placeholder");
         assert_eq!(facts.text, " ");
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        let hidden_only = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#;
+        let facts = extract_document_text_controlled(
+            &docx_archive_with_parts(&[
+                ("[Content_Types].xml", manifest),
+                (DOCX_DOCUMENT_PART, hidden_only),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/glossary/document.xml", glossary),
+            ]),
+            "hidden-placeholder.docx",
+            None,
+            &control(),
+        )
+        .expect("hidden content does not satisfy a visible glossary placeholder");
+        assert!(facts.symbols.is_empty());
+        assert!(
+            matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory) && !gaps.contains(&DocumentCoverageGap::UnknownSymbolMapping))
+        );
         for control_name in [
             "noBreakHyphen",
             "softHyphen",

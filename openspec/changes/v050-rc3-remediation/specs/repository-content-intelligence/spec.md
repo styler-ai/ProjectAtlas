@@ -48,11 +48,12 @@
 - **AND** admitted text leaves honor inherited `xml:space`: default mode removes only leading and trailing XML whitespace after complete entity/CDATA decoding, preserve mode retains it, and invalid modes fail as malformed input; interior whitespace, nonbreaking spaces, and exact logical run spans remain intact
 - **AND** live ruby annotations return typed unsupported input rather than a malformed-input error; deleted ruby content remains excluded
 - **AND** alternate-format chunks return typed unsupported input rather than omitting referenced content
-- **AND** bounded UTF-16 LE/BE XML parts with or without a byte-order mark are normalized before parsing, while other unsupported XML encodings return typed unsupported input without replacing the last complete publication
+- **AND** bounded UTF-16 LE/BE XML parts are normalized before parsing, including unambiguous BOM-less parts as an explicit compatibility tolerance; declared encodings must match the source bytes, while unsupported encodings return typed unsupported input and mismatches return malformed input without replacing the last complete publication
 - **AND** foreign-namespace character data requiring unsupported semantic decoding returns typed unsupported input, while recognized Word text boxes remain supported through drawing wrappers
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; rendered font-coded symbols retain durable font/code/part/occurrence identity and produce Unicode only for verified mappings, with unknown mappings marked as incomplete text coverage
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
+- **AND** directly `w:vanish`-hidden run payload is excluded from normal rendered text, symbols, and story references without losing field-state transitions; unresolved style-inherited visibility or standalone `w:specVanish` renderer differences are reported as typed file-local incomplete coverage rather than complete rendered text
 - **AND** live page-number and date blocks requiring evaluation remain unresolved with typed file-local incomplete text coverage; footnote/endnote references admit their validated in-package note stories without fabricating evaluated marker text; deleted, moved-from, and unselected blocks remain excluded
 - **AND** deleted and moved-from revision containers suppress all text leaves, separators, and field-state changes while preserving source paragraph/run numbering
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
@@ -89,7 +90,7 @@ PDF/DOCX extracted text, locators, provenance, coverage, and any document/source
 - **THEN** no new schema or index is added
 
 #### Scenario: Accepted document-local incomplete coverage
-- **WHEN** a safely admitted document has an accepted parser output/fact/memory/work or PDF-fuel limit, an unresolved DOCX symbol mapping or live page-number/date field requiring evaluation, or a safe referenced unsupported story type outside the named supported set
+- **WHEN** a safely admitted document has an accepted parser output/fact/memory/work or PDF-fuel limit, an unresolved DOCX symbol mapping or visibility difference, or live page-number/date field requiring evaluation, or a safe referenced unsupported story type outside the named supported set
 - **THEN** the new generation may publish only with verified source and durable, queryable file-specific incomplete coverage; it MUST NOT advertise omitted document evidence as complete
 
 #### Scenario: Publication or replacement fails
