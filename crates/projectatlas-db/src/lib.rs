@@ -3318,6 +3318,7 @@ impl AtlasStore {
                         + COALESCE(length(CAST(documentation AS BLOB)), 0)
                 FROM symbols
                 WHERE path IN ({placeholders})
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?{limit_parameter}
                 "
@@ -14376,6 +14377,67 @@ mod tests {
         if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
             return Err(io::Error::other(format!(
                 "metadata count corruption returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_symbol_batch_omits_document_coverage_before_limits() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("docs/partial.docx", "hash-docx")])?;
+        let mut symbol = batch_test_symbol("docs/partial.docx", "document-symbol-1", 2, 0);
+        symbol.language = Some("docx".to_owned());
+        symbol.kind = SymbolKind::Value;
+        symbol.parser = ParserKind::Structural;
+        let mut coverage = batch_test_symbol("docs/partial.docx", "document-text-coverage", 1, 0);
+        coverage.language = Some("docx".to_owned());
+        coverage.kind = SymbolKind::Unknown;
+        coverage.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "docs/partial.docx".to_owned(),
+            language: Some("docx".to_owned()),
+            parser: ParserKind::Structural,
+            symbols: vec![coverage, symbol],
+            relations: Vec::new(),
+        })?;
+        let result = store.load_symbols_for_paths_bounded(
+            &["docs/partial.docx".to_owned()],
+            SymbolBatchReadBudget::new(1, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(&result.rows.len(), &1, "only the real document symbol")?;
+        require_eq(
+            &result.rows[0].name.as_str(),
+            &"document-symbol-1",
+            "visible row",
+        )?;
+        require_eq(
+            &result.reached_limit,
+            &None,
+            "coverage does not consume row budget",
+        )?;
+        let exact_bytes = store.load_symbols_for_paths_bounded(
+            &["docs/partial.docx".to_owned()],
+            SymbolBatchReadBudget::new(1, 1, result.work.decoded_bytes)?,
+            None,
+        )?;
+        require_eq(&exact_bytes.rows.len(), &1, "exact real-symbol byte budget")?;
+        require_eq(
+            &exact_bytes.reached_limit,
+            &None,
+            "coverage does not consume byte budget",
+        )?;
+        let plan = store
+            .connection
+            .prepare("EXPLAIN QUERY PLAN SELECT path FROM symbols WHERE path IN ('docs/partial.docx') AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')")?
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        if !plan.contains("idx_symbols_path") {
+            return Err(io::Error::other(format!(
+                "bounded document symbols missed the path index: {plan}"
             ))
             .into());
         }

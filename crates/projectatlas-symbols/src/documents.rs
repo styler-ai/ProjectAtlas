@@ -1146,6 +1146,7 @@ fn queue_docx_story_references(
 ) -> Result<(), DocumentExtractionError> {
     let has_story_links = !references.linked_parts.is_empty()
         || !references.imported_parts.is_empty()
+        || !references.content_parts.is_empty()
         || (even_odd_headers && !references.even_parts.is_empty());
     if !has_story_links && references.items.is_empty() && !references.glossary_placeholder {
         return Ok(());
@@ -1227,6 +1228,20 @@ fn queue_docx_story_references(
         if !matches!(kind.as_str(), "aFChunk" | "afChunk") || *external {
             return Err(DocumentExtractionError::InvalidDocxPackage {
                 message: format!("DOCX import relationship {id} has an unsafe or wrong type"),
+            });
+        }
+        resolve_docx_story_target(target, origin_part, names)?;
+    }
+    for id in &references.content_parts {
+        let (kind, target, external) =
+            relationships
+                .get(id)
+                .ok_or_else(|| DocumentExtractionError::InvalidDocxPackage {
+                    message: format!("referenced DOCX content part relationship {id} is missing"),
+                })?;
+        if kind != "customXml" || *external {
+            return Err(DocumentExtractionError::InvalidDocxPackage {
+                message: format!("DOCX content part relationship {id} is unsafe or wrong type"),
             });
         }
         resolve_docx_story_target(target, origin_part, names)?;
@@ -2408,6 +2423,8 @@ struct DocxStoryReferences {
     even_parts: Vec<(DocxStoryKind, String)>,
     /// Imported-content anchors validated without decoding their target.
     imported_parts: Vec<String>,
+    /// Alternate XML content anchors validated without decoding their target.
+    content_parts: Vec<String>,
     /// Numbered note/comment items whose marker is rendered in this part.
     items: Vec<(DocxStoryKind, String)>,
     /// A rendered structured-document placeholder names glossary content we do not parse.
@@ -2421,6 +2438,7 @@ impl DocxStoryReferences {
             .len()
             .saturating_add(self.even_parts.len())
             .saturating_add(self.imported_parts.len())
+            .saturating_add(self.content_parts.len())
             .saturating_add(self.items.len())
             .saturating_add(usize::from(self.glossary_placeholder))
     }
@@ -2736,10 +2754,16 @@ fn parse_docx_part(
                             skipped_branch_depth = Some(element_depth);
                             continue;
                         }
-                        if selected {
-                            seen_ids.insert(id);
-                        } else if special {
-                            seen_special_ids.insert(id);
+                        let first_occurrence = if selected {
+                            seen_ids.insert(id)
+                        } else {
+                            seen_special_ids.insert(id)
+                        };
+                        if !first_occurrence {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX selected story item ID is duplicated".to_owned(),
+                            });
                         }
                         if matches!(
                             note_type.as_deref(),
@@ -2930,7 +2954,39 @@ fn parse_docx_part(
                         ("sdtContent", DocxSdtTag::Sdt) => DocxSdtTag::Content,
                         _ => DocxSdtTag::Other,
                     };
-                    if matches!(name.as_ref(), "sym" | "drawing" | "pict" | "br" | "tab") {
+                    if paragraph.run.is_some()
+                        && !paragraph.fields.contains(&DocxFieldPhase::Instruction)
+                        && matches!(
+                            name.as_ref(),
+                            "sym"
+                                | "drawing"
+                                | "pict"
+                                | "object"
+                                | "annotationRef"
+                                | "contentPart"
+                                | "tab"
+                                | "ptab"
+                                | "br"
+                                | "cr"
+                                | "lastRenderedPageBreak"
+                                | "noBreakHyphen"
+                                | "softHyphen"
+                                | "pgNum"
+                                | "dayShort"
+                                | "dayLong"
+                                | "monthShort"
+                                | "monthLong"
+                                | "yearShort"
+                                | "yearLong"
+                                | "footnoteReference"
+                                | "endnoteReference"
+                                | "commentReference"
+                                | "footnoteRef"
+                                | "endnoteRef"
+                                | "separator"
+                                | "continuationSeparator"
+                        )
+                    {
                         for context in &mut sdt_stack {
                             if context
                                 .content_depth
@@ -3206,6 +3262,44 @@ fn parse_docx_part(
                             && deleted_depth.is_none()
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
+                        if let Some(run) = paragraph.run.as_mut() {
+                            append_docx_run_text(run, "\u{fffc}", output.len())?;
+                        }
+                        if !gaps.contains(&DocumentCoverageGap::UnevaluatedField) {
+                            gaps.push(DocumentCoverageGap::UnevaluatedField);
+                        }
+                    }
+                    "contentPart"
+                        if paragraph.run.is_some()
+                            && deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
+                    {
+                        let id =
+                            docx_attribute(&event, &reader, "id", office_relationship_namespace)?
+                                .ok_or_else(|| DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX content part is missing r:id".to_owned(),
+                            })?;
+                        references.content_parts.push(id);
+                        if !gaps.contains(&DocumentCoverageGap::UnexaminedStory) {
+                            gaps.push(DocumentCoverageGap::UnexaminedStory);
+                        }
+                    }
+                    "footnoteRef" | "endnoteRef" | "annotationRef"
+                        if paragraph.run.is_some()
+                            && deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
+                    {
+                        if (name.as_ref() == "footnoteRef" && root_name != "footnotes")
+                            || (name.as_ref() == "endnoteRef" && root_name != "endnotes")
+                            || (name.as_ref() == "annotationRef" && root_name != "comments")
+                        {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX story reference mark is outside its story"
+                                    .to_owned(),
+                            });
+                        }
                         if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(run, "\u{fffc}", output.len())?;
                         }
@@ -6251,7 +6345,42 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect("non-text continuation marker does not hide a symbol");
             assert_eq!(no_text.symbols.len(), 1);
             assert_eq!(no_text.completeness, DocumentCompleteness::Complete);
+            for (id, item_type, special) in [("2", "", false), ("0", " w:type=\"separator\"", true)]
+            {
+                let duplicate = format!(
+                    "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:{item} w:id=\"{id}\"{item_type}><w:p><w:r><w:t>First</w:t></w:r></w:p></w:{item}><w:{item} w:id=\"{id}\"{item_type}><w:p><w:r><w:t>Second</w:t></w:r></w:p></w:{item}></w:{root}>"
+                );
+                let selected_ids = HashSet::from(["2".to_owned()]);
+                let special_ids = HashSet::from(["0".to_owned()]);
+                assert!(matches!(
+                    parse_docx_part(
+                        duplicate.as_bytes(),
+                        "word/notes.xml",
+                        root,
+                        Some(&selected_ids),
+                        special.then_some(&special_ids),
+                        &mut DocxStoryReferences::default(),
+                        &control(),
+                        IndexWorkStage::TextIndex,
+                    ),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ));
+            }
         }
+        let comments = br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:p><w:r><w:t>First</w:t></w:r></w:p></w:comment><w:comment w:id="4"><w:p><w:r><w:t>Second</w:t></w:r></w:p></w:comment></w:comments>"#;
+        assert!(matches!(
+            parse_docx_part(
+                comments,
+                "word/comments.xml",
+                "comments",
+                Some(&HashSet::from(["4".to_owned()])),
+                None,
+                &mut DocxStoryReferences::default(),
+                &control(),
+                IndexWorkStage::TextIndex,
+            ),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
     }
 
     #[test]
@@ -6902,6 +7031,124 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .expect("a false placeholder flag does not require a glossary relationship");
         assert_eq!(facts.text, "Cached");
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        for control_name in [
+            "noBreakHyphen",
+            "softHyphen",
+            "cr",
+            "ptab",
+            "lastRenderedPageBreak",
+            "pgNum",
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:{control_name}/></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"
+            );
+            let facts = extract_document_text_controlled(
+                &docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, main.as_bytes())]),
+                "visible-control.docx",
+                None,
+                &control(),
+            )
+            .expect("visible controls do not load an unrendered glossary placeholder");
+            assert!(!facts.text.is_empty(), "{control_name}");
+            assert!(
+                !matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory)),
+                "{control_name}"
+            );
+        }
+        for content in [
+            "<w:object xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\"><v:shape/><o:OLEObject/></w:object>",
+            "<w:object><w:control/></w:object>",
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r>{content}</w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"
+            );
+            let facts = extract_document_text_controlled(
+                &docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, main.as_bytes())]),
+                "embedded-control.docx",
+                None,
+                &control(),
+            )
+            .expect("rendered objects do not load an unrendered glossary placeholder");
+            assert!(
+                !matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory)),
+                "{content}"
+            );
+        }
+        let content_part = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:contentPart r:id="xml"/></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#;
+        let content_part_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>"#;
+        let content_part_manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+        let facts = extract_document_text_controlled(
+            &docx_archive_with_parts(&[
+                ("[Content_Types].xml", content_part_manifest),
+                (DOCX_DOCUMENT_PART, content_part),
+                ("word/_rels/document.xml.rels", content_part_rels),
+                ("customXml/item1.xml", b"<equation>opaque</equation>"),
+            ]),
+            "alternate-xml-control.docx",
+            None,
+            &control(),
+        )
+        .expect("unsupported content part does not trigger glossary lookup");
+        assert!(
+            matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
+        for relationship in [
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#.as_slice(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="https://example.invalid/item.xml" TargetMode="External"/></Relationships>"#,
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="../customXml/item1.xml"/></Relationships>"#,
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../../../outside.xml"/></Relationships>"#,
+        ] {
+            assert!(matches!(
+                extract_document_text_controlled(
+                    &docx_archive_with_parts(&[
+                        ("[Content_Types].xml", content_part_manifest),
+                        (DOCX_DOCUMENT_PART, content_part),
+                        ("word/_rels/document.xml.rels", relationship),
+                        ("customXml/item1.xml", b"<equation>opaque</equation>"),
+                    ]),
+                    "invalid-content-part.docx",
+                    None,
+                    &control(),
+                ),
+                Err(DocumentExtractionError::InvalidDocxPackage { .. })
+            ));
+        }
+        let no_id = std::str::from_utf8(content_part)
+            .expect("fixture is UTF-8")
+            .replace(" r:id=\"xml\"", "");
+        assert!(matches!(
+            extract_document_text_controlled(
+                &docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, no_id.as_bytes())]),
+                "missing-content-part-id.docx",
+                None,
+                &control(),
+            ),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let note_manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/><Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>"#;
+        let note_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="f" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="e" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="c" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#;
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/><w:commentReference w:id="4"/></w:r></w:p></w:body></w:document>"#;
+        let footnotes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="2"><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:footnoteRef/></w:r></w:p></w:sdtContent></w:sdt></w:footnote></w:footnotes>"#;
+        let endnotes = br#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="3"><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:endnoteRef/></w:r></w:p></w:sdtContent></w:sdt></w:endnote></w:endnotes>"#;
+        let comments = br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:annotationRef/></w:r></w:p></w:sdtContent></w:sdt></w:comment></w:comments>"#;
+        let facts = extract_document_text_controlled(
+            &docx_archive_with_parts(&[
+                ("[Content_Types].xml", note_manifest),
+                (DOCX_DOCUMENT_PART, main),
+                ("word/_rels/document.xml.rels", note_rels),
+                ("word/footnotes.xml", footnotes),
+                ("word/endnotes.xml", endnotes),
+                ("word/comments.xml", comments),
+            ]),
+            "story-reference-mark.docx",
+            None,
+            &control(),
+        )
+        .expect("story reference marks replace placeholders without a glossary relationship");
+        assert_eq!(facts.text.chars().filter(|ch| *ch == '\u{fffc}').count(), 6);
+        assert!(
+            matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnevaluatedField) && !gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
         let header_manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/glossary/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml"/></Types>"#;
         let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference r:id="h"/></w:sectPr></w:body></w:document>"#;
         let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:hdr>"#;

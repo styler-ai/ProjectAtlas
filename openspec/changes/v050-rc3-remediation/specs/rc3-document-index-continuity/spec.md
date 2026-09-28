@@ -17,6 +17,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a footnote or endnote story is admitted and the document-wide note properties list a special separator or continuation item by ID
 - **THEN** its text and symbols are admitted once with exact note-part provenance; an unlisted special item is not treated as rendered, and pagination-dependent continuation content has conditional coverage
 
+#### Scenario: Duplicate selected story ID
+- **WHEN** a selected note, comment, or special separator ID appears twice in its story part
+- **THEN** the malformed package is refused without publishing duplicated text or symbols
+
 #### Scenario: Compatibility-wrapped document settings
 - **WHEN** supported markup compatibility selects document-wide settings that list a special note item
 - **THEN** the selected settings govern story loading; an unknown potentially selected branch produces incomplete story coverage rather than a false complete result
@@ -53,6 +57,14 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** the same symbol is inside deleted or otherwise non-rendered content
 - **THEN** it does not degrade the rendered document's coverage
 
+#### Scenario: Visible controls replace a glossary placeholder
+- **WHEN** an SDT placeholder contains actual rendered run controls instead of literal text
+- **THEN** those controls count as content, and an absent glossary relationship does not cause false incomplete coverage or package refusal
+
+#### Scenario: Opaque alternate XML content remains incomplete
+- **WHEN** a rendered run contains an alternate XML content part that this parser does not decode
+- **THEN** the glossary placeholder is not selected, and document coverage is explicitly incomplete without reading the target part
+
 #### Scenario: Field-instruction references are not rendered
 - **WHEN** note or comment references appear in a complex field's instruction region before the cached-result separator
 - **THEN** their stories are not followed and their markers do not enter rendered text or coverage
@@ -71,6 +83,10 @@ A scan SHALL publish a navigable generation only when all accepted source facts 
 #### Scenario: Initial scan with one unsupported document
 - **WHEN** a repository contains ordinary source plus one document with an accepted unsupported/limit outcome
 - **THEN** the published generation exposes verified source and an explicit document-level incomplete result through CLI and MCP navigation
+
+#### Scenario: Coverage metadata does not consume symbol budgets
+- **WHEN** bounded impact analysis reads real symbols from a document with incomplete text coverage
+- **THEN** the internal coverage marker remains queryable as coverage but does not consume symbol row or byte limits or hide a later real symbol
 
 #### Scenario: Repair and incremental retry
 - **WHEN** the document is replaced with a supported valid version after an incomplete publication
