@@ -13,6 +13,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a safely admitted DOCX references rendered headers, footers, footnotes, endnotes, comments, frames, or nested text boxes containing `w:sym` within retained parser bounds
 - **THEN** every such symbol is admitted with exact story-part provenance; an incomplete-coverage fallback does not satisfy this supported-story case
 
+#### Scenario: Special note separator symbols
+- **WHEN** a footnote or endnote story is admitted and the document-wide note properties list a special separator or continuation item by ID
+- **THEN** its text and symbols are admitted once with exact note-part provenance; an unlisted special item is not treated as rendered, and pagination-dependent continuation content has conditional coverage
+
 #### Scenario: Referenced story is not examined
 - **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
 - **THEN** it publishes typed incomplete story coverage without claiming that part is symbol-free or fetching external content

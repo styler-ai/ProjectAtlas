@@ -5756,13 +5756,17 @@ fn coverage_for_graph(
     // Graph-scoped `rows` is the existing persisted coverage slot for the
     // publication-wide typed identity-detail ceiling. It is set only from
     // the admission fact that a distinct detail was actually evicted.
+    // Graph limits group parser work with intermediate bytes; the reason retains its exact subtype.
     let reached_limit = if identity_details_dropped {
         Some(GraphLimitKind::Rows)
     } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:output_bytes")) {
         Some(GraphLimitKind::OutputBytes)
     } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:fact_count")) {
         Some(GraphLimitKind::Rows)
-    } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:memory_bytes")) {
+    } else if document_gaps.is_some_and(|gaps| {
+        gaps.contains("resource_limit:memory_bytes")
+            || gaps.contains("resource_limit:parser_work_bytes")
+    }) {
         Some(GraphLimitKind::IntermediateBytes)
     } else {
         None
@@ -7818,43 +7822,54 @@ mod tests {
 
     #[test]
     fn document_text_gap_survives_graph_coverage_projection() -> Result<(), Box<dyn Error>> {
-        let facts = projectatlas_symbols::DocumentFacts {
-            format: projectatlas_symbols::DocumentFormat::Docx,
-            text: String::new(),
-            facts: Vec::new(),
-            symbols: Vec::new(),
-            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
-                gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
-                    projectatlas_symbols::DocumentLimit::OutputBytes,
-                )],
-            },
-            provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
-        };
-        let graph = facts.symbol_graph("docs/limited.docx", Some("docx"));
-        let coverage = super::coverage_for_graph(
-            &graph,
-            IndexGeneration::new(1),
-            &GraphIdentityAdmission::default(),
-            &GraphIdentityAdmission::default(),
-        )?;
-        require_eq(
-            &coverage.state(),
-            &CoverageState::Failed,
-            "empty document gap was lost",
-        )?;
-        require_eq(
-            &coverage.reached_limit(),
-            &Some(GraphLimitKind::OutputBytes),
-            "document output ceiling was lost",
-        )?;
-        require(
-            coverage.reason().is_some_and(|reason| {
-                reason
-                    .as_str()
-                    .contains("document_text_incomplete:resource_limit:output_bytes")
-            }),
-            "document-local reason was lost",
-        )?;
+        for (limit, reached, reason) in [
+            (
+                projectatlas_symbols::DocumentLimit::OutputBytes,
+                GraphLimitKind::OutputBytes,
+                "resource_limit:output_bytes",
+            ),
+            (
+                projectatlas_symbols::DocumentLimit::ParserWorkBytes,
+                GraphLimitKind::IntermediateBytes,
+                "resource_limit:parser_work_bytes",
+            ),
+        ] {
+            let facts = projectatlas_symbols::DocumentFacts {
+                format: projectatlas_symbols::DocumentFormat::Docx,
+                text: String::new(),
+                facts: Vec::new(),
+                symbols: Vec::new(),
+                completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                    gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
+                        limit,
+                    )],
+                },
+                provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
+            };
+            let graph = facts.symbol_graph("docs/limited.docx", Some("docx"));
+            let coverage = super::coverage_for_graph(
+                &graph,
+                IndexGeneration::new(1),
+                &GraphIdentityAdmission::default(),
+                &GraphIdentityAdmission::default(),
+            )?;
+            require_eq(
+                &coverage.state(),
+                &CoverageState::Failed,
+                "empty document gap was lost",
+            )?;
+            require_eq(
+                &coverage.reached_limit(),
+                &Some(reached),
+                "document ceiling was lost",
+            )?;
+            require(
+                coverage
+                    .reason()
+                    .is_some_and(|value| value.as_str().contains(reason)),
+                "document-local reason was lost",
+            )?;
+        }
         Ok(())
     }
 
