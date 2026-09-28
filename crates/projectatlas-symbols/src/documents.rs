@@ -2724,6 +2724,7 @@ fn parse_docx_part(
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
     let mut ignorable_namespaces: Vec<String> = Vec::new();
     let mut skipped_branch_depth = None;
+    let mut skipped_text_box = false;
     let mut conditional_note_start = None;
     let mut deleted_depth = None;
     let mut foreign_depth = None;
@@ -2814,7 +2815,9 @@ fn parse_docx_part(
                 // Source-part ordinal stays stable when different note IDs are parsed later.
                 if wordprocessing
                     && name.as_ref() == "p"
-                    && (selected_ids.is_some() || skipped_branch_depth.is_none())
+                    && (selected_ids.is_some()
+                        || skipped_branch_depth.is_none()
+                        || skipped_text_box)
                 {
                     paragraph_number += 1;
                 }
@@ -3291,6 +3294,13 @@ fn parse_docx_part(
                         deleted_depth = Some(element_depth);
                     }
                     "txbxContent" => {
+                        if paragraph.run.as_ref().is_some_and(|run| run.hidden)
+                            || paragraph.fields.contains(&DocxFieldPhase::Instruction)
+                        {
+                            skipped_branch_depth = Some(element_depth);
+                            skipped_text_box = true;
+                            continue;
+                        }
                         if let Some(run) = paragraph.run.as_mut() {
                             publish_docx_run_fragment(
                                 run,
@@ -3720,6 +3730,7 @@ fn parse_docx_part(
                 if let Some(depth) = skipped_branch_depth {
                     if element_depth == depth {
                         skipped_branch_depth = None;
+                        skipped_text_box = false;
                     }
                     sdt_tags[element_depth] = DocxSdtTag::Other;
                     element_depth -= 1;
@@ -6050,6 +6061,27 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_hidden_outer_run_does_not_publish_nested_text_box() {
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:drawing><w:txbxContent><w:p><w:r><w:t>Hidden</w:t><w:sym w:font="Wingdings" w:char="F03A"/><w:footnoteReference w:id="1"/></w:r></w:p></w:txbxContent></w:drawing></w:r><w:r><w:t>Visible</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p></w:body></w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="note" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>"#;
+        let notes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote></w:footnotes>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/footnotes.xml", notes),
+        ]);
+        let facts = extract_document_text_controlled(&archive, "hidden-box.docx", None, &control())
+            .expect("a hidden outer run hides its text box and note references");
+        assert_eq!(facts.text, "Visible\nFollowing");
+        assert!(facts.symbols.is_empty());
+        assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        assert!(matches!(
+            &facts.facts[1].locator,
+            DocumentLocator::Docx { paragraph: 3, .. }
+        ));
+    }
+
+    #[test]
     fn docx_hidden_field_markers_keep_cached_result_state() {
         let template = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:instrText>PAGE</w:instrText><w:t>INSTRUCTION</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>CACHE<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         for (cached, expected, partial) in [("<w:r><w:t>7</w:t></w:r>", "7", false), ("", "", true)]
@@ -6294,9 +6326,9 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         }
         let nested = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>OUTER</w:instrText><w:drawing><w:txbxContent><w:p><w:r><w:instrText>Box</w:instrText></w:r></w:p></w:txbxContent></w:drawing><w:fldChar w:fldCharType="begin"/><w:instrText>INNER</w:instrText><w:fldChar w:fldCharType="separate"/><w:instrText>Outer code remains ignored</w:instrText><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="separate"/><w:t>Result</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         let nested = parse_docx(nested, &control(), IndexWorkStage::TextIndex)
-            .expect("nested fields and text boxes keep independent state");
-        assert_eq!(nested.text, "Box\nResult");
-        assert_eq!(nested.facts.len(), 2);
+            .expect("text boxes inside field instructions do not publish code text");
+        assert_eq!(nested.text, "Result");
+        assert_eq!(nested.facts.len(), 1);
         let symbol_field = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:sym w:font="Wingdings" w:char="F03A"/><w:fldChar w:fldCharType="separate"/><w:sym w:font="Symbol" w:char="F061"/><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         let symbol_field = parse_docx(symbol_field, &control(), IndexWorkStage::TextIndex)
             .expect("only the cached field result is rendered");
