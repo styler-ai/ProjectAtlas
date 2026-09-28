@@ -4415,7 +4415,7 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn max_symbol_end_line_for_path(&self, path: &str) -> DbResult<usize> {
         let line = self.connection.query_row(
-            "SELECT COALESCE(MAX(line_end), 0) FROM symbols WHERE path = ?1",
+            "SELECT COALESCE(MAX(line_end), 0) FROM symbols WHERE path = ?1 AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')",
             [path],
             |row| row.get::<_, i64>(0),
         )?;
@@ -14428,6 +14428,28 @@ mod tests {
             &exact_bytes.reached_limit,
             &None,
             "coverage does not consume byte budget",
+        )?;
+        require_eq(
+            &store.max_symbol_end_line_for_path("docs/partial.docx")?,
+            &3,
+            "coverage marker does not affect the maximum real line",
+        )?;
+        let mut coverage_only =
+            batch_test_symbol("docs/partial.docx", "document-text-coverage", 1, 0);
+        coverage_only.language = Some("docx".to_owned());
+        coverage_only.kind = SymbolKind::Unknown;
+        coverage_only.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "docs/partial.docx".to_owned(),
+            language: Some("docx".to_owned()),
+            parser: ParserKind::Structural,
+            symbols: vec![coverage_only],
+            relations: Vec::new(),
+        })?;
+        require_eq(
+            &store.max_symbol_end_line_for_path("docs/partial.docx")?,
+            &0,
+            "coverage-only documents have no inferred rendered lines",
         )?;
         let plan = store
             .connection

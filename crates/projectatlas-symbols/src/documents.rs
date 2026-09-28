@@ -2721,6 +2721,7 @@ fn parse_docx_part(
     let mut simple_fields: Vec<DocxSimpleField> = Vec::new();
     let mut header_section: Option<DocxHeaderSection> = None;
     let mut inherited_first: [Option<String>; 2] = [None, None];
+    let mut inherited_default = [false; 2];
     let mut alternatives: Vec<DocxAlternative> = Vec::new();
     let mut ignorable_namespaces: Vec<String> = Vec::new();
     let mut skipped_branch_depth = None;
@@ -3808,16 +3809,24 @@ fn parse_docx_part(
                         });
                     };
                     for (kind, id, variant) in section.links {
+                        let index = usize::from(kind == DocxStoryKind::Footer);
                         match variant {
-                            DocxHeaderVariant::Default => references.linked_parts.push((kind, id)),
+                            DocxHeaderVariant::Default => {
+                                inherited_default[index] = true;
+                                references.linked_parts.push((kind, id));
+                            }
                             DocxHeaderVariant::First => {
-                                inherited_first[usize::from(kind == DocxStoryKind::Footer)] =
-                                    Some(id);
+                                inherited_first[index] = Some(id);
                             }
                             DocxHeaderVariant::Even => references.even_parts.push((kind, id)),
                         }
                     }
                     if section.title_page {
+                        if inherited_default.contains(&true)
+                            && !gaps.contains(&DocumentCoverageGap::ConditionalStory)
+                        {
+                            gaps.push(DocumentCoverageGap::ConditionalStory);
+                        }
                         for (index, id) in inherited_first.iter().enumerate() {
                             if let Some(id) = id {
                                 let kind = if index == 0 {
@@ -7709,6 +7718,45 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             matches!(&facts.symbols[0].locator, DocumentLocator::Docx { part, .. } if part == "word/default.xml")
         );
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+    }
+
+    #[test]
+    fn docx_first_and_default_headers_need_pagination_coverage() {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="default.xml"/><Relationship Id="f" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="first.xml"/></Relationships>"#;
+        let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:hdr>"#;
+        for (title, first, symbols, conditional) in [
+            (
+                "<w:titlePg/>",
+                "<w:headerReference w:type=\"first\" r:id=\"f\"/>",
+                2,
+                true,
+            ),
+            ("<w:titlePg/>", "", 1, true),
+            (
+                "<w:titlePg w:val=\"false\"/>",
+                "<w:headerReference w:type=\"first\" r:id=\"f\"/>",
+                1,
+                false,
+            ),
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:sectPr><w:headerReference w:type=\"default\" r:id=\"d\"/>{first}{title}</w:sectPr></w:body></w:document>"
+            );
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/default.xml", header),
+                ("word/first.xml", header),
+            ]);
+            let facts =
+                extract_document_text_controlled(&archive, "headers.docx", None, &control())
+                    .expect("reachable header variants are valid");
+            assert_eq!(facts.symbols.len(), symbols);
+            assert_eq!(
+                matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::ConditionalStory)),
+                conditional
+            );
+        }
     }
 
     #[test]

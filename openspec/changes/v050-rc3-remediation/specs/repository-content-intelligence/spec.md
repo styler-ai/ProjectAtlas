@@ -47,7 +47,7 @@
 - **THEN** ProjectAtlas publishes bounded text with exact part, paragraph, run, and text-span locator plus parser/version provenance for validated package-reachable rendered stories
 - **AND** admitted text leaves honor inherited `xml:space`: default mode removes only leading and trailing XML whitespace after complete entity/CDATA decoding, preserve mode retains it, and invalid modes fail as malformed input; interior whitespace, nonbreaking spaces, and exact logical run spans remain intact
 - **AND** live ruby annotations return typed unsupported input rather than a malformed-input error; deleted ruby content remains excluded
-- **AND** alternate-format chunks return typed unsupported input rather than omitting referenced content
+- **AND** safely referenced alternate-format chunks retain verified surrounding text with typed file-local unexamined-story coverage; missing, external, or unsafe import relationships fail closed rather than silently omitting referenced content
 - **AND** bounded UTF-16 LE/BE XML parts are normalized before parsing, including unambiguous BOM-less parts as an explicit compatibility tolerance; declared encodings must match the source bytes, while unsupported encodings return typed unsupported input and mismatches return malformed input without replacing the last complete publication
 - **AND** foreign-namespace character data requiring unsupported semantic decoding returns typed unsupported input, while recognized Word text boxes remain supported through drawing wrappers
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
@@ -59,7 +59,7 @@
 - **AND** field nesting is bounded independently of XML depth and isolated within each text container
 - **AND** Markup Compatibility alternatives emit only the first choice requiring understood WordprocessingML namespaces, or its fallback; unselected branches cannot change extraction context or duplicate evidence
 - **AND** root `mc:Ignorable` declarations admit at most 64 distinct resolved namespace URIs and suppress unknown extension subtrees without suppressing understood Word content; aliases follow URI identity, while nested policies and nonempty `mc:ProcessContent` or `mc:MustUnderstand` return typed unsupported input before publication
-- **AND** bounded, validated relationships admit every rendered header, footer, footnote, endnote, referenced comment, frame, and text box within retained parser bounds; only safe referenced unsupported story types outside that supported set may remain unexamined with explicit incomplete coverage, while unsafe or malformed relationship targets fail closed
+- **AND** bounded, validated relationships admit every rendered header, footer, footnote, endnote, referenced comment, frame, and text box within retained parser bounds; default headers or footers under first-page or even-page selection without pagination proof retain typed conditional coverage; only safe referenced unsupported story types outside that supported set may remain unexamined with explicit incomplete coverage, while unsafe or malformed relationship targets fail closed
 
 #### Scenario: Explicit language overrides a document extension
 - **WHEN** an accepted language override selects another language for a `.pdf` or `.docx` path
