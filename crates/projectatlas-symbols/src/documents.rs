@@ -2947,7 +2947,8 @@ fn parse_docx_part(
                             note_type.as_deref(),
                             Some("continuationSeparator" | "continuationNotice")
                         ) {
-                            conditional_note_start = Some((facts.len(), symbols.len()));
+                            conditional_note_start =
+                                Some((facts.len(), symbols.len(), references.count()));
                         }
                     }
                 }
@@ -4097,8 +4098,11 @@ fn parse_docx_part(
                     _ => {}
                 }
                 if element_depth == 2
-                    && let Some((fact_count, symbol_count)) = conditional_note_start.take()
-                    && (facts.len() > fact_count || symbols.len() > symbol_count)
+                    && let Some((fact_count, symbol_count, reference_count)) =
+                        conditional_note_start.take()
+                    && (facts.len() > fact_count
+                        || symbols.len() > symbol_count
+                        || references.count() > reference_count)
                     && !gaps.contains(&DocumentCoverageGap::ConditionalStory)
                 {
                     gaps.push(DocumentCoverageGap::ConditionalStory);
@@ -6937,6 +6941,31 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect("non-text continuation marker does not hide a symbol");
             assert_eq!(no_text.symbols.len(), 1);
             assert_eq!(no_text.completeness, DocumentCompleteness::Complete);
+            let conditional_comment = format!(
+                "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:{item} w:id=\"1\" w:type=\"continuationSeparator\"><w:p><w:commentRangeStart w:id=\"4\"/></w:p></w:{item}><w:{item} w:id=\"2\"><w:p><w:r><w:t>Normal</w:t></w:r></w:p></w:{item}></w:{root}>"
+            );
+            let mut references = DocxStoryReferences::default();
+            let conditional_comment = parse_docx_part(
+                conditional_comment.as_bytes(),
+                "word/notes.xml",
+                root,
+                Some(&HashSet::from(["2".to_owned()])),
+                Some(&HashSet::from(["1".to_owned()])),
+                &mut references,
+                &control(),
+                IndexWorkStage::TextIndex,
+            )
+            .expect("comment reference in a continuation item remains conditional");
+            assert_eq!(conditional_comment.text, "Normal");
+            assert_eq!(
+                references.items,
+                vec![(DocxStoryKind::Comments, "4".to_owned())]
+            );
+            assert!(matches!(
+                conditional_comment.completeness,
+                DocumentCompleteness::Partial { ref gaps }
+                    if gaps.contains(&DocumentCoverageGap::ConditionalStory)
+            ));
             for (id, item_type, special) in [("2", "", false), ("0", " w:type=\"separator\"", true)]
             {
                 let duplicate = format!(
