@@ -3467,7 +3467,10 @@ fn parse_docx_part(
                         }
                         section.links.push((kind, id, variant));
                     }
-                    "subDoc" if deleted_depth.is_none() => {
+                    "subDoc"
+                        if deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
+                    {
                         let id =
                             docx_attribute(&event, &reader, "id", office_relationship_namespace)?
                                 .ok_or_else(|| DocumentExtractionError::Malformed {
@@ -3481,7 +3484,10 @@ fn parse_docx_part(
                             gaps.push(DocumentCoverageGap::UnexaminedStory);
                         }
                     }
-                    "altChunk" if deleted_depth.is_none() => {
+                    "altChunk"
+                        if deleted_depth.is_none()
+                            && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
+                    {
                         let id =
                             docx_attribute(&event, &reader, "id", office_relationship_namespace)?
                                 .ok_or_else(|| DocumentExtractionError::Malformed {
@@ -6191,6 +6197,23 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     .text,
                 "Prefix"
             );
+        }
+    }
+
+    #[test]
+    fn docx_story_anchors_in_field_instructions_do_not_select_parts() {
+        for anchor in [
+            r#"<w:altChunk r:id="missing"/>"#,
+            r#"<w:p><w:subDoc r:id="missing"/></w:p>"#,
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF</w:instrText></w:r></w:p>{anchor}<w:p><w:r><w:fldChar w:fldCharType="separate"/><w:t>Result</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#
+            );
+            let bytes = docx_archive(xml.as_bytes(), CompressionMethod::Deflated);
+            let result = extract_document_text_controlled(&bytes, "field.docx", None, &control())
+                .expect("non-rendered instruction anchor needs no relationship");
+            assert_eq!(result.text, "Result");
+            assert_eq!(result.completeness, DocumentCompleteness::Complete);
         }
     }
 

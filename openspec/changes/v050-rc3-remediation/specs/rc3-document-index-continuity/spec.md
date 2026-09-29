@@ -68,6 +68,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a safely admitted DOCX contains a live page-number or date field whose value requires evaluation and has no admitted literal cached result
 - **THEN** surrounding literal text remains indexed and the field has durable file-local incomplete text coverage, without fabricated field text or a whole-document completeness claim
 
+#### Scenario: Story anchor inside a field instruction
+- **WHEN** a complex-field instruction contains an alternate-format import or subdocument anchor before its result separator, including across paragraphs
+- **THEN** the non-rendered anchor selects no relationship or incomplete story coverage, while a literal cached result remains available
+
 #### Scenario: Symbol extraction reaches a retained limit
 - **WHEN** a safely admitted DOCX exceeds a retained parser output, fact, memory, or repeated-decompression-work ceiling before all rendered story parts are processed
 - **THEN** the document publishes a typed file-local incomplete-coverage record and no unexamined symbol is claimed as retained
