@@ -3130,8 +3130,14 @@ fn parse_docx_part(
                         foreign_opaque_depth = Some(element_depth);
                     }
                 }
+                let mut parent_depth = element_depth - 1;
+                for &branch_depth in selected_branches.iter().rev() {
+                    if branch_depth == parent_depth {
+                        parent_depth -= 2;
+                    }
+                }
                 if wordprocessing && deleted_depth.is_none() {
-                    sdt_tags[element_depth] = match (name.as_ref(), sdt_tags[element_depth - 1]) {
+                    sdt_tags[element_depth] = match (name.as_ref(), sdt_tags[parent_depth]) {
                         ("sdt", _) => DocxSdtTag::Sdt,
                         ("sdtPr", DocxSdtTag::Sdt) => DocxSdtTag::Properties,
                         ("placeholder", DocxSdtTag::Properties) => DocxSdtTag::Placeholder,
@@ -3327,7 +3333,7 @@ fn parse_docx_part(
                         content_depth: None,
                         content_nonempty: false,
                     }),
-                    "docPart" if sdt_tags[element_depth - 1] == DocxSdtTag::Placeholder => {
+                    "docPart" if sdt_tags[parent_depth] == DocxSdtTag::Placeholder => {
                         let name =
                             docx_attribute(&event, &reader, "val", wordprocessing_namespace)?
                                 .ok_or_else(|| DocumentExtractionError::Malformed {
@@ -3344,7 +3350,7 @@ fn parse_docx_part(
                             context.placeholder = true;
                         }
                     }
-                    "showingPlcHdr" if sdt_tags[element_depth - 1] == DocxSdtTag::Properties => {
+                    "showingPlcHdr" if sdt_tags[parent_depth] == DocxSdtTag::Properties => {
                         if let Some(context) = sdt_stack.last_mut() {
                             context.showing = docx_on_off(&event, &reader)?;
                         }
@@ -7708,9 +7714,25 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 "<w:sdt><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder><w:showingPlcHdr/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Cached</w:t></w:r></w:p></w:sdtContent></w:sdt>",
                 true,
             ),
+            (
+                "<w:sdt><mc:AlternateContent><mc:Choice Requires=\"w\"><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder><w:showingPlcHdr/></w:sdtPr></mc:Choice><mc:Fallback/></mc:AlternateContent><w:sdtContent><w:p><w:r><w:t>Cached</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+                true,
+            ),
+            (
+                "<w:sdt><w:sdtPr><w:placeholder><mc:AlternateContent><mc:Choice Requires=\"w\"><w:docPart w:val=\"Hint\"/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:placeholder><w:showingPlcHdr/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Cached</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+                true,
+            ),
+            (
+                "<w:sdt><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder><mc:AlternateContent><mc:Choice Requires=\"w\"><w:showingPlcHdr/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Cached</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+                true,
+            ),
+            (
+                "<w:sdt><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder></w:sdtPr><mc:AlternateContent><mc:Choice Requires=\"w\"><w:sdtContent><w:p><w:r><w:t>Cached</w:t></w:r></w:p></w:sdtContent></mc:Choice><mc:Fallback/></mc:AlternateContent></w:sdt>",
+                false,
+            ),
         ] {
             let main = format!(
-                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{content}</w:body></w:document>"
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><w:body>{content}</w:body></w:document>"
             );
             let archive = docx_archive_with_parts(&[
                 ("[Content_Types].xml", manifest),
