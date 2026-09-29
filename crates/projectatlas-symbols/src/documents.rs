@@ -2324,6 +2324,8 @@ struct RawDocxRun {
     content_seen: bool,
     /// Logical depth of active direct run properties.
     properties_depth: Option<usize>,
+    /// XML depth of the drawing, picture, or object owning a text box.
+    drawing_depth: Option<usize>,
     /// Direct run formatting excludes payload without discarding field transitions.
     hidden: bool,
     /// Renderer-specific hiding needs a coverage gap unless direct vanish resolves it.
@@ -2597,8 +2599,10 @@ enum DocxHeaderVariant {
 struct DocxHeaderSection {
     /// XML depth of the current section-properties element.
     depth: usize,
+    /// Depth excluding selected compatibility wrappers, for direct children.
+    logical_depth: usize,
     /// Whether its first-page stories are displayed.
-    title_page: bool,
+    title_page: Option<bool>,
     /// Explicit links and their page variants.
     links: Vec<(DocxStoryKind, String, DocxHeaderVariant)>,
 }
@@ -3178,6 +3182,71 @@ fn parse_docx_part(
                     }
                 }
                 let logical_depth = element_depth - 2 * selected_branches.len();
+                if wordprocessing
+                    && matches!(
+                        name.as_ref(),
+                        "t" | "instrText"
+                            | "delText"
+                            | "delInstrText"
+                            | "fldChar"
+                            | "sym"
+                            | "drawing"
+                            | "pict"
+                            | "object"
+                            | "contentPart"
+                            | "tab"
+                            | "ptab"
+                            | "br"
+                            | "cr"
+                            | "lastRenderedPageBreak"
+                            | "noBreakHyphen"
+                            | "softHyphen"
+                            | "pgNum"
+                            | "dayShort"
+                            | "dayLong"
+                            | "monthShort"
+                            | "monthLong"
+                            | "yearShort"
+                            | "yearLong"
+                            | "footnoteReference"
+                            | "endnoteReference"
+                            | "commentReference"
+                            | "footnoteRef"
+                            | "endnoteRef"
+                            | "annotationRef"
+                            | "separator"
+                            | "continuationSeparator"
+                    )
+                    && paragraph
+                        .run
+                        .as_ref()
+                        .is_some_and(|run| logical_depth != run.depth + 1)
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX run content is not a direct child of its run".to_owned(),
+                    });
+                }
+                if wordprocessing
+                    && paragraph.run.is_some()
+                    && matches!(name.as_ref(), "sectPr" | "altChunk" | "subDoc")
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX non-run content appeared inside a run".to_owned(),
+                    });
+                }
+                if wordprocessing
+                    && matches!(name.as_ref(), "commentRangeStart" | "commentRangeEnd")
+                    && paragraph.run.as_ref().is_some_and(|run| !run.hidden)
+                    && deleted_depth.is_none()
+                    && !paragraph.fields.contains(&DocxFieldPhase::Instruction)
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX comment range appeared inside a rendered run".to_owned(),
+                    });
+                }
                 if wordprocessing && let Some(run) = paragraph.run.as_mut() {
                     if logical_depth == run.depth + 1 {
                         if name.as_ref() == "rPr" {
@@ -3190,6 +3259,9 @@ fn parse_docx_part(
                             run.properties_depth = Some(logical_depth);
                         } else {
                             run.content_seen = true;
+                            if matches!(name.as_ref(), "drawing" | "pict" | "object") {
+                                run.drawing_depth = Some(element_depth);
+                            }
                         }
                     }
                     if name.as_ref() == "vanish"
@@ -3215,13 +3287,30 @@ fn parse_docx_part(
                         }
                         header_section = Some(DocxHeaderSection {
                             depth: element_depth,
-                            title_page: false,
+                            logical_depth,
+                            title_page: None,
                             links: Vec::new(),
                         });
                     }
                     "titlePg" if deleted_depth.is_none() => {
-                        if let Some(section) = header_section.as_mut() {
-                            section.title_page = docx_on_off(&event, &reader)?;
+                        let section = header_section
+                            .as_mut()
+                            .filter(|section| logical_depth == section.logical_depth + 1)
+                            .ok_or_else(|| DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX title-page setting is outside section properties"
+                                    .to_owned(),
+                            })?;
+                        if section
+                            .title_page
+                            .replace(docx_on_off(&event, &reader)?)
+                            .is_some()
+                        {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX section has duplicate title-page settings"
+                                    .to_owned(),
+                            });
                         }
                     }
                     "fldSimple" if deleted_depth.is_none() => {
@@ -3297,14 +3386,15 @@ fn parse_docx_part(
                                 });
                             }
                         };
-                        let section = header_section.as_mut().ok_or_else(|| {
-                            DocumentExtractionError::Malformed {
+                        let section = header_section
+                            .as_mut()
+                            .filter(|section| logical_depth == section.logical_depth + 1)
+                            .ok_or_else(|| DocumentExtractionError::Malformed {
                                 format: DocumentFormat::Docx,
                                 message:
-                                    "DOCX header/footer reference is outside section properties"
+                                    "DOCX header/footer reference is not a direct section child"
                                         .to_owned(),
-                            }
-                        })?;
+                            })?;
                         if section
                             .links
                             .iter()
@@ -3360,6 +3450,14 @@ fn parse_docx_part(
                         deleted_depth = Some(element_depth);
                     }
                     "txbxContent" => {
+                        if !paragraph.run.as_ref().is_some_and(|run| {
+                            run.drawing_depth.is_some() && run.properties_depth.is_none()
+                        }) {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX text box has no rendered drawing owner".to_owned(),
+                            });
+                        }
                         if paragraph.run.as_ref().is_some_and(|run| run.hidden)
                             || paragraph.fields.contains(&DocxFieldPhase::Instruction)
                         {
@@ -3876,6 +3974,13 @@ fn parse_docx_part(
                     }
                 }
                 if wordprocessing
+                    && matches!(name.as_ref(), "drawing" | "pict" | "object")
+                    && let Some(run) = paragraph.run.as_mut()
+                    && run.drawing_depth == Some(element_depth)
+                {
+                    run.drawing_depth = None;
+                }
+                if wordprocessing
                     && name.as_ref() == "sectPr"
                     && header_section
                         .as_ref()
@@ -3900,7 +4005,7 @@ fn parse_docx_part(
                             DocxHeaderVariant::Even => references.even_parts.push((kind, id)),
                         }
                     }
-                    if section.title_page {
+                    if section.title_page.unwrap_or(false) {
                         if inherited_default.contains(&true)
                             && !gaps.contains(&DocumentCoverageGap::ConditionalStory)
                         {
@@ -6700,9 +6805,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_unknown_compatibility_choice_never_claims_complete_symbol_coverage() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><mc:AlternateContent><mc:Choice Requires="wps"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:sym w:font="Symbol" w:char="F062"/></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><mc:AlternateContent><mc:Choice Requires="wps"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></mc:Choice><mc:Choice Requires="w"><w:p><w:r><w:sym w:font="Symbol" w:char="F063"/></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:sym w:font="Symbol" w:char="F062"/></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>"#;
         let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
             .expect("fallback remains bounded evidence");
+        assert!(facts.text.is_empty());
         assert!(facts.symbols.is_empty());
         assert!(
             matches!(facts.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
@@ -7117,6 +7223,119 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .contains("font=Some(\"Wingdings\");code=F03A")
                 && symbol.signature.contains("docx:part=word/document.xml")
         }));
+    }
+
+    #[test]
+    fn docx_run_payload_requires_logical_direct_child() {
+        for payload in [
+            "<w:rPr><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:rPr>",
+            "<w:rPr><w:t>Secret</w:t></w:rPr>",
+            "<w:wrapper><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:wrapper>",
+            "<w:rPr><w:tab/></w:rPr>",
+            "<w:rPr><w:footnoteReference w:id=\"1\"/></w:rPr>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r>{payload}</w:r></w:p></w:body></w:document>"
+            );
+            assert!(matches!(
+                parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { message, .. })
+                    if message.contains("not a direct child")
+            ));
+        }
+        let selected = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><w:r><mc:AlternateContent><mc:Choice Requires="w"><w:sym w:font="Symbol" w:char="F061"/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:r></w:p></w:body></w:document>"#;
+        let facts = parse_docx(selected, &control(), IndexWorkStage::TextIndex)
+            .expect("selected compatibility branch preserves direct run payload");
+        assert_eq!(facts.text, "α");
+        assert_eq!(facts.symbols.len(), 1);
+        assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+    }
+
+    #[test]
+    fn docx_run_metadata_cannot_publish_text_box_or_story_symbols() {
+        for payload in [
+            "<w:txbxContent><w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:txbxContent>",
+            "<w:rPr><w:txbxContent><w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:txbxContent></w:rPr>",
+            "<w:rPr><a:graphic><a:graphicData><w:txbxContent><w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:txbxContent></a:graphicData></a:graphic></w:rPr>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><w:body><w:p><w:r>{payload}</w:r></w:p></w:body></w:document>"
+            );
+            assert!(matches!(
+                parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { message, .. })
+                    if message.contains("no rendered drawing owner")
+            ));
+        }
+        let comments = br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:comment></w:comments>"#;
+        let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:hdr>"#;
+        for (payload, kind, target, part, story) in [
+            (
+                "<w:commentRangeStart w:id=\"4\"/>",
+                "comments",
+                "comments.xml",
+                "word/comments.xml",
+                comments.as_slice(),
+            ),
+            (
+                "<w:rPr><w:commentRangeStart w:id=\"4\"/></w:rPr>",
+                "comments",
+                "comments.xml",
+                "word/comments.xml",
+                comments.as_slice(),
+            ),
+            (
+                "<w:rPr><w:sectPr><w:headerReference r:id=\"header\"/></w:sectPr></w:rPr>",
+                "header",
+                "header.xml",
+                "word/header.xml",
+                header.as_slice(),
+            ),
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:p><w:r>{payload}</w:r></w:p></w:body></w:document>"
+            );
+            let rels = format!(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"header\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}\" Target=\"{target}\"/></Relationships>"
+            );
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
+                ("word/_rels/document.xml.rels", rels.as_bytes()),
+                (part, story),
+            ]);
+            assert!(matches!(
+                extract_document_text_controlled(&archive, "metadata.docx", None, &control()),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/></Relationships>"#;
+        for nested in [
+            "<w:r><w:headerReference r:id=\"header\"/></w:r>",
+            "<w:wrapper><w:headerReference r:id=\"header\"/></w:wrapper>",
+            "<w:r><w:titlePg/></w:r>",
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:p><w:pPr><w:sectPr>{nested}</w:sectPr></w:pPr></w:p></w:body></w:document>"
+            );
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/header.xml", header),
+            ]);
+            assert!(matches!(
+                extract_document_text_controlled(&archive, "section.docx", None, &control()),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        let selected = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:sectPr><mc:AlternateContent><mc:Choice Requires="w"><w:headerReference r:id="header"/><w:titlePg w:val="false"/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:sectPr></w:body></w:document>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, selected),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/header.xml", header),
+        ]);
+        let facts = extract_document_text_controlled(&archive, "section.docx", None, &control())
+            .expect("selected section metadata remains direct after compatibility wrappers");
+        assert_eq!(facts.symbols.len(), 1);
     }
 
     #[test]
@@ -8006,6 +8225,21 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect("later title page inherits prior first header");
         assert_eq!(facts.symbols.len(), 1);
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        let conflicting = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference w:type="first" r:id="prior"/><w:titlePg w:val="false"/><w:titlePg w:val="true"/></w:sectPr></w:body></w:document>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, conflicting),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/prior.xml", header),
+        ]);
+        assert!(matches!(
+            extract_document_text_controlled(
+                &archive,
+                "duplicate-title-page.docx",
+                None,
+                &control()
+            ),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
     }
 
     #[test]
