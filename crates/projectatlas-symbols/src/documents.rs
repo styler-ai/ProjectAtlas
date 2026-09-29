@@ -3745,6 +3745,12 @@ fn parse_docx_part(
                                 })?;
                             match local.as_ref() {
                                 "font" => {
+                                    if font.is_some() {
+                                        return Err(DocumentExtractionError::Malformed {
+                                            format: DocumentFormat::Docx,
+                                            message: "DOCX font attribute is duplicated".to_owned(),
+                                        });
+                                    }
                                     if value.len() > MAX_DOCX_FONT_NAME_BYTES {
                                         return Err(DocumentExtractionError::ResourceLimit {
                                             limit: DocumentLimit::MemoryBytes,
@@ -3755,6 +3761,12 @@ fn parse_docx_part(
                                     font = Some(value.into_owned());
                                 }
                                 "char" => {
+                                    if code.is_some() {
+                                        return Err(DocumentExtractionError::Malformed {
+                                            format: DocumentFormat::Docx,
+                                            message: "DOCX char attribute is duplicated".to_owned(),
+                                        });
+                                    }
                                     if value.len() != 4
                                         || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
                                     {
@@ -7499,6 +7511,41 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 }
             );
         }
+    }
+
+    #[test]
+    fn docx_symbol_identity_rejects_namespace_equivalent_duplicates() {
+        for attributes in [
+            "w:font=\"Symbol\" x:font=\"Wingdings\" w:char=\"F061\"",
+            "x:font=\"Wingdings\" w:font=\"Symbol\" w:char=\"F061\"",
+            "w:font=\"Symbol\" w:char=\"F061\" x:char=\"F062\"",
+            "w:font=\"Symbol\" x:char=\"F062\" w:char=\"F061\"",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:sym {attributes}/></w:r></w:p></w:body></w:document>"
+            );
+            assert!(matches!(
+                extract_document_text_controlled(
+                    &docx_archive(xml.as_bytes(), CompressionMethod::Deflated),
+                    "symbol.docx",
+                    None,
+                    &control(),
+                ),
+                Err(DocumentExtractionError::Malformed { message, .. })
+                    if message.contains("attribute is duplicated")
+            ));
+        }
+        let aliased = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:sym x:font="Symbol" x:char="F061"/></w:r></w:p></w:body></w:document>"#;
+        let facts = extract_document_text_controlled(
+            &docx_archive(aliased, CompressionMethod::Deflated),
+            "symbol.docx",
+            None,
+            &control(),
+        )
+        .expect("namespace alias remains valid");
+        assert_eq!(facts.symbols[0].font.as_deref(), Some("Symbol"));
+        assert_eq!(facts.symbols[0].code, Some(0xF061));
+        assert_eq!(facts.symbols[0].unicode, Some('α'));
     }
 
     #[test]

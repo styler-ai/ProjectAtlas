@@ -16,6 +16,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a rendered `w:sym` omits `w:font`, `w:char`, or both
 - **THEN** its occurrence and supplied attributes remain queryable, omitted attributes remain absent rather than invented, and Unicode-text coverage is incomplete without rejecting the otherwise valid package
 
+#### Scenario: Symbol identity attribute is duplicated
+- **WHEN** a `w:sym` supplies duplicate font or character attributes by different prefixes bound to the same WordprocessingML namespace
+- **THEN** the malformed document is rejected without publishing an order-dependent symbol identity
+
 #### Scenario: Rendered symbols outside the main body
 - **WHEN** a safely admitted DOCX references rendered headers, footers, footnotes, endnotes, comments, frames, or nested text boxes containing `w:sym` within retained parser bounds
 - **THEN** every such symbol is admitted with exact story-part provenance; an incomplete-coverage fallback does not satisfy this supported-story case
