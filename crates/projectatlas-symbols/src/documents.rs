@@ -7386,6 +7386,49 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_symbols_with_absent_identity_remain_partial() {
+        for (attributes, font, code) in [
+            ("w:char=\"F03A\"", None, Some(0xF03A)),
+            ("w:font=\"Wingdings\"", Some("Wingdings"), None),
+            ("", None, None),
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t><w:sym {attributes}/><w:t>After</w:t></w:r></w:p></w:body></w:document>"
+            );
+            let facts = extract_document_text_controlled(
+                &docx_archive(xml.as_bytes(), CompressionMethod::Deflated),
+                "symbol.docx",
+                None,
+                &control(),
+            )
+            .expect("omitted symbol attributes are valid but unresolved");
+            assert!(facts.text.contains("Before\u{fffc}After"));
+            assert_eq!(facts.symbols.len(), 1);
+            assert_eq!(facts.symbols[0].font.as_deref(), font);
+            assert_eq!(facts.symbols[0].code, code);
+            assert_eq!(facts.symbols[0].unicode, None);
+            let symbol = facts
+                .symbol_graph("symbol.docx", None)
+                .symbols
+                .into_iter()
+                .find(|symbol| symbol.name == "document-symbol-1")
+                .expect("symbol remains queryable");
+            let code = code.map_or_else(|| "missing".to_owned(), |code| format!("{code:04X}"));
+            assert!(
+                symbol
+                    .signature
+                    .contains(&format!("font={font:?};code={code}"))
+            );
+            assert_eq!(
+                facts.completeness,
+                DocumentCompleteness::Partial {
+                    gaps: vec![DocumentCoverageGap::UnknownSymbolMapping],
+                }
+            );
+        }
+    }
+
+    #[test]
     fn docx_run_payload_requires_logical_direct_child() {
         for payload in [
             "<w:rPr><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:rPr>",
