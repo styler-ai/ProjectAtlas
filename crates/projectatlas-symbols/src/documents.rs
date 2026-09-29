@@ -2082,7 +2082,15 @@ fn parse_docx_relationships(
                             message: error.to_string(),
                         }
                     })?;
-                    let external = match target_mode.as_ref().map(|value| value.value.as_ref()) {
+                    let target_mode = target_mode
+                        .as_ref()
+                        .map(|value| quick_xml::escape::unescape(&value.value))
+                        .transpose()
+                        .map_err(|error| DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: error.to_string(),
+                        })?;
+                    let external = match target_mode.as_deref() {
                         None | Some("Internal") => false,
                         Some("External") => true,
                         Some(_) => {
@@ -7707,9 +7715,21 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     fn docx_story_relationships_refuse_external_escape_missing_and_wrong_type() {
         let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Keep old publication</w:t></w:r></w:p><w:sectPr><w:headerReference r:id="h"/></w:sectPr></w:body></w:document>"#;
         let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:hdr>"#;
+        let escaped_external = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="https://example.invalid/a" TargetMode="Ext&#x65;rnal"/></Relationships>"#;
+        let parsed =
+            parse_docx_relationships(escaped_external, &control(), IndexWorkStage::TextIndex)
+                .expect("escaped TargetMode retains external classification");
+        assert_eq!(
+            parsed.get("h").map(|(_, _, external)| *external),
+            Some(true)
+        );
         for (relationship, include_header) in [
             (
                 r#"Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="https://example.invalid/a" TargetMode="External""#,
+                true,
+            ),
+            (
+                r#"Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="https://example.invalid/a" TargetMode="Ext&#x65;rnal""#,
                 true,
             ),
             (
@@ -7726,6 +7746,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ),
             (
                 r#"Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml" TargetMode="Unexpected""#,
+                true,
+            ),
+            (
+                r#"Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml" TargetMode="Unexp&#x65;cted""#,
                 true,
             ),
             (
@@ -7762,7 +7786,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     fn docx_safe_percent_encoded_story_target_retains_symbols() {
         let manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header%20one.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#;
         let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference r:id="h"/></w:sectPr></w:body></w:document>"#;
-        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header%20one.xml"/></Relationships>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header%20one.xml" TargetMode="Int&#x65;rnal"/></Relationships>"#;
         let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:hdr>"#;
         let archive = docx_archive_with_parts(&[
             ("[Content_Types].xml", manifest),
