@@ -2928,7 +2928,7 @@ fn parse_docx_part(
                     && !compatibility
                     && matches!(&namespace, ResolveResult::Bound(namespace)
                         if ignorable_namespaces.iter().any(|ignored| ignored == namespace.as_ref()));
-                if element_depth == 2
+                if element_depth == 2 + 2 * selected_branches.len()
                     && let Some(selected_ids) = selected_ids
                     && matches!(root_name, "footnotes" | "endnotes" | "comments")
                 {
@@ -4131,7 +4131,9 @@ fn parse_docx_part(
                     "p" => paragraph.open = false,
                     _ => {}
                 }
-                if element_depth == 2
+                if wordprocessing
+                    && matches!(name.as_ref(), "footnote" | "endnote")
+                    && element_depth == 2 + 2 * selected_branches.len()
                     && let Some((fact_count, symbol_count, reference_count)) =
                         conditional_note_start.take()
                     && (facts.len() > fact_count
@@ -7026,6 +7028,57 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 canonical_docx_story_id(raw),
                 Err(DocumentExtractionError::Malformed { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn docx_compatibility_wrapped_story_items_follow_selected_ids() {
+        for (root, item) in [
+            ("footnotes", "footnote"),
+            ("endnotes", "endnote"),
+            ("comments", "comment"),
+        ] {
+            let xml = format!(
+                "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:AlternateContent><mc:Choice Requires=\"w\"><w:{item} w:id=\"1\"><w:p><w:r><w:t>Wrapped</w:t></w:r></w:p></w:{item}></mc:Choice><mc:Fallback><w:{item} w:id=\"1\"><w:p><w:r><w:t>Unselected</w:t></w:r></w:p></w:{item}></mc:Fallback></mc:AlternateContent><w:{item} w:id=\"2\"><w:p><w:r><w:t>Ordinary</w:t></w:r></w:p></w:{item}></w:{root}>"
+            );
+            let parse = |id: &str| {
+                parse_docx_part(
+                    xml.as_bytes(),
+                    "word/story.xml",
+                    root,
+                    Some(&HashSet::from([id.to_owned()])),
+                    None,
+                    &mut DocxStoryReferences::default(),
+                    &control(),
+                    IndexWorkStage::TextIndex,
+                )
+            };
+            let selected = parse("1").expect("wrapped selected story item is found");
+            assert_eq!(selected.text, "Wrapped", "{root}");
+            let ordinary = parse("2").expect("unreferenced wrapped item is skipped");
+            assert_eq!(ordinary.text, "Ordinary", "{root}");
+        }
+    }
+
+    #[test]
+    fn docx_wrapped_continuation_note_does_not_claim_later_text() {
+        for (root, item) in [("footnotes", "footnote"), ("endnotes", "endnote")] {
+            let xml = format!(
+                "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:AlternateContent><mc:Choice Requires=\"w\"><w:{item} w:id=\"1\" w:type=\"continuationSeparator\"><w:p/></w:{item}><w:{item} w:id=\"2\"><w:p><w:r><w:t>Normal</w:t></w:r></w:p></w:{item}></mc:Choice><mc:Fallback/></mc:AlternateContent></w:{root}>"
+            );
+            let facts = parse_docx_part(
+                xml.as_bytes(),
+                "word/notes.xml",
+                root,
+                Some(&HashSet::from(["2".to_owned()])),
+                Some(&HashSet::from(["1".to_owned()])),
+                &mut DocxStoryReferences::default(),
+                &control(),
+                IndexWorkStage::TextIndex,
+            )
+            .expect("empty continuation note cannot taint a later note");
+            assert_eq!(facts.text, "Normal");
+            assert_eq!(facts.completeness, DocumentCompleteness::Complete);
         }
     }
 

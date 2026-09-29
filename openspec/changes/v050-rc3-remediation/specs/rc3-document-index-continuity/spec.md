@@ -36,6 +36,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** supported markup compatibility selects document-wide settings that list a special note item
 - **THEN** the selected settings govern story loading; an unknown potentially selected branch produces incomplete story coverage rather than a false complete result
 
+#### Scenario: Compatibility-wrapped story item
+- **WHEN** a selected markup-compatibility branch wraps a footnote, endnote, or comment item
+- **THEN** story IDs are selected at their logical depth, unreferenced items remain excluded, and conditional continuation-note coverage is scoped to that note rather than later items
+
 #### Scenario: Referenced story is not examined
 - **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
 - **THEN** it publishes typed incomplete story coverage without claiming that part is symbol-free or fetching external content
