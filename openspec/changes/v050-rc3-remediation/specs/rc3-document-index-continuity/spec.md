@@ -53,8 +53,12 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **THEN** extraction fails closed without reading outside the package or publishing a new generation
 
 #### Scenario: Undeclared attribute prefix in package metadata or suppressed history
-- **WHEN** a content-type root or record, relationship element, or non-rendered section-revision element contains an attribute with an undeclared namespace prefix
+- **WHEN** a content-type root or record, relationship element, non-rendered section-revision element, or skipped compatibility branch in a story or settings part contains an attribute with an undeclared namespace prefix
 - **THEN** the malformed DOCX is rejected before publication, even when the attribute does not select rendered content
+
+#### Scenario: BOM-less UTF-16 XML with leading whitespace
+- **WHEN** an unambiguous BOM-less UTF-16 LE or BE DOCX XML part without an XML declaration starts with XML whitespace before its root
+- **THEN** the bytes are decoded as an explicit compatibility tolerance and the resulting XML is validated like the same part without leading whitespace
 
 #### Scenario: Verified symbol mapping
 - **WHEN** a rendered `w:sym` has a verified mapping for its font and code
