@@ -1556,6 +1556,7 @@ fn docx_settings(
                             format: DocumentFormat::Docx,
                             message: "DOCX special note setting is missing its id".to_owned(),
                         })?;
+                    let id = canonical_docx_story_id(&id)?;
                     let inserted = match kind {
                         DocxStoryKind::Footnotes => settings.footnote_special_ids.insert(id),
                         DocxStoryKind::Endnotes => settings.endnote_special_ids.insert(id),
@@ -2695,6 +2696,30 @@ fn docx_attribute(
     Ok(found)
 }
 
+/// Match bounded Word story IDs by their XML Schema integer value, not spelling.
+fn canonical_docx_story_id(id: &str) -> Result<String, DocumentExtractionError> {
+    let id = id.trim_matches([' ', '\t', '\r', '\n']);
+    let (negative, digits) = match id.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, id.strip_prefix('+').unwrap_or(id)),
+    };
+    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err(DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: "DOCX story item ID is not a decimal integer".to_owned(),
+        });
+    }
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Ok("0".to_owned());
+    }
+    Ok(if negative {
+        format!("-{digits}")
+    } else {
+        digits.to_owned()
+    })
+}
+
 /// Read a `WordprocessingML` on/off element, whose absent value means true.
 fn docx_on_off(
     event: &BytesStart<'_>,
@@ -2912,6 +2937,7 @@ fn parse_docx_part(
                             format: DocumentFormat::Docx,
                             message: "DOCX story item is missing its id".to_owned(),
                         })?;
+                        let id = canonical_docx_story_id(&id)?;
                         let note_type = if matches!(root_name, "footnotes" | "endnotes") {
                             docx_attribute(&event, &reader, "type", wordprocessing_namespace)?
                         } else {
@@ -3665,6 +3691,7 @@ fn parse_docx_part(
                             format: DocumentFormat::Docx,
                             message: "DOCX note/comment reference is missing w:id".to_owned(),
                         })?;
+                        let id = canonical_docx_story_id(&id)?;
                         references.items.push((kind, id));
                         if let Some(run) = paragraph.run.as_mut() {
                             append_docx_run_text(run, "\u{fffc}", output.len())?;
@@ -3683,6 +3710,7 @@ fn parse_docx_part(
                             format: DocumentFormat::Docx,
                             message: "DOCX comment range is missing w:id".to_owned(),
                         })?;
+                        let id = canonical_docx_story_id(&id)?;
                         references.items.push((DocxStoryKind::Comments, id));
                     }
                     "sym"
@@ -6885,6 +6913,72 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_story_ids_match_decimal_value_and_reject_numeric_duplicates() {
+        for (kind, reference, root, item) in [
+            ("footnotes", "footnoteReference", "footnotes", "footnote"),
+            ("endnotes", "endnoteReference", "endnotes", "endnote"),
+            ("comments", "commentReference", "comments", "comment"),
+        ] {
+            let marker = if kind == "comments" {
+                "<w:commentRangeStart w:id=\"01\"/><w:r><w:commentReference w:id=\"+01\"/></w:r>"
+                    .to_owned()
+            } else {
+                format!("<w:r><w:{reference} w:id=\"+01\"/></w:r>")
+            };
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p>{marker}</w:p></w:body></w:document>"
+            );
+            let rels = format!(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"story\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}\" Target=\"{kind}.xml\"/></Relationships>"
+            );
+            let story = format!(
+                "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:{item} w:id=\"1\"><w:p><w:r><w:t>Matched</w:t></w:r></w:p></w:{item}></w:{root}>"
+            );
+            let part = format!("word/{kind}.xml");
+            let package = |story: &str| {
+                docx_archive_with_parts(&[
+                    (DOCX_DOCUMENT_PART, main.as_bytes()),
+                    ("word/_rels/document.xml.rels", rels.as_bytes()),
+                    (&part, story.as_bytes()),
+                ])
+            };
+            let facts = extract_document_text_controlled(
+                &package(&story),
+                "numeric-ids.docx",
+                None,
+                &control(),
+            )
+            .expect("decimal-equivalent story reference resolves");
+            assert!(facts.text.contains("Matched"), "missing {kind} item");
+            let duplicate = story.replace(
+                &format!("</w:{root}>"),
+                &format!("<w:{item} w:id=\"001\"/></w:{root}>"),
+            );
+            assert!(matches!(
+                extract_document_text_controlled(
+                    &package(&duplicate),
+                    "duplicate-ids.docx",
+                    None,
+                    &control(),
+                ),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        for (raw, canonical) in [("+0001", "1"), ("-00", "0"), (" -001 ", "-1")] {
+            assert_eq!(
+                canonical_docx_story_id(raw).expect("valid XML decimal story ID"),
+                canonical
+            );
+        }
+        for raw in ["", "+", "1.0", "1e0", "1 0"] {
+            assert!(matches!(
+                canonical_docx_story_id(raw),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn docx_note_special_items_are_included_once_and_conditional_items_are_partial() {
         for (root, item) in [("footnotes", "footnote"), ("endnotes", "endnote")] {
             let xml = format!(
@@ -7418,7 +7512,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let footnotes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="0" w:type="separator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:footnote><w:footnote w:id="1" w:type="continuationSeparator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:r><w:t>Footnote</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote><w:footnote w:id="99"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote></w:footnotes>"#;
         let endnotes = br#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="0" w:type="separator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:endnote><w:endnote w:id="3"><w:p><w:r><w:t>Endnote</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:endnote></w:endnotes>"#;
         let comments = br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:p><w:r><w:t>Comment</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:comment></w:comments>"#;
-        let settings = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnotePr><w:footnote w:id="0"/><w:footnote w:id="1"/></w:footnotePr><w:endnotePr><w:endnote w:id="0"/></w:endnotePr></w:settings>"#;
+        let settings = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnotePr><w:footnote w:id="+00"/><w:footnote w:id="01"/></w:footnotePr><w:endnotePr><w:endnote w:id="0"/></w:endnotePr></w:settings>"#;
         let glossary = br#"<w:glossaryDocument xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docParts><w:docPart><w:docPartBody><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:docPartBody></w:docPart></w:docParts></w:glossaryDocument>"#;
         let archive = |settings: &[u8]| {
             docx_archive_with_parts(&[
