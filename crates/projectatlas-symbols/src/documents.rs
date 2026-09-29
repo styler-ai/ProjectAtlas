@@ -891,7 +891,7 @@ fn extract_docx(
     if settings.unexamined_compatibility {
         mark_docx_gap(&mut document, DocumentCoverageGap::UnexaminedStory);
     }
-    if settings.even_odd_headers && references.has_header_variant() {
+    if settings.even_odd_headers && references.has_parity_variant() {
         mark_docx_gap(&mut document, DocumentCoverageGap::ConditionalStory);
     }
     let mut total_references = references.count();
@@ -1028,7 +1028,7 @@ fn extract_docx(
             );
             break;
         }
-        if settings.even_odd_headers && child_references.has_header_variant() {
+        if settings.even_odd_headers && child_references.has_parity_variant() {
             mark_docx_gap(&mut document, DocumentCoverageGap::ConditionalStory);
         }
         if let Err(error) = queue_docx_story_references(
@@ -2551,6 +2551,8 @@ impl DocxStoryKind {
 struct DocxStoryReferences {
     /// Explicit `r:id` references to related parts.
     linked_parts: Vec<(DocxStoryKind, String)>,
+    /// A default header or footer may render differently on odd and even pages.
+    has_default_header_footer: bool,
     /// Even-page stories are active only when the document setting enables them.
     even_parts: Vec<(DocxStoryKind, String)>,
     /// Imported-content anchors validated without decoding their target.
@@ -2575,13 +2577,9 @@ impl DocxStoryReferences {
             .saturating_add(usize::from(self.glossary_placeholder))
     }
 
-    /// A configured header/footer variant may depend on page parity.
-    fn has_header_variant(&self) -> bool {
-        !self.even_parts.is_empty()
-            || self
-                .linked_parts
-                .iter()
-                .any(|(kind, _)| matches!(kind, DocxStoryKind::Header | DocxStoryKind::Footer))
+    /// First-page-only stories do not depend on page parity.
+    fn has_parity_variant(&self) -> bool {
+        self.has_default_header_footer || !self.even_parts.is_empty()
     }
 }
 
@@ -3510,7 +3508,11 @@ fn parse_docx_part(
                                 symbols.len(),
                             )?;
                         }
-                        text_boxes.push((std::mem::take(&mut paragraph), output.len()));
+                        text_boxes.push((
+                            std::mem::take(&mut paragraph),
+                            output.len(),
+                            facts.len(),
+                        ));
                     }
                     "p" if !paragraph.open => {
                         paragraph.open = true;
@@ -3542,22 +3544,12 @@ fn parse_docx_part(
                     }
                     "fldChar" if paragraph.run.is_some() && deleted_depth.is_some() => {}
                     "fldChar" if paragraph.run.is_some() => {
-                        let mut field_type = None;
-                        for attribute in event.attributes() {
-                            let attribute =
-                                attribute.map_err(|error| DocumentExtractionError::Malformed {
-                                    format: DocumentFormat::Docx,
-                                    message: error.to_string(),
-                                })?;
-                            let (namespace, local) =
-                                reader.resolver().resolve_attribute(attribute.key);
-                            if local.as_ref() == "fldCharType"
-                                && matches!(namespace, ResolveResult::Bound(namespace)
-                                    if wordprocessing_namespace(namespace.as_ref()))
-                            {
-                                field_type = Some(attribute.value.into_owned());
-                            }
-                        }
+                        let field_type = docx_attribute(
+                            &event,
+                            &reader,
+                            "fldCharType",
+                            wordprocessing_namespace,
+                        )?;
                         match field_type.as_deref() {
                             Some("begin") => {
                                 if paragraph.fields.len() >= MAX_DOCX_XML_DEPTH {
@@ -4032,6 +4024,7 @@ fn parse_docx_part(
                         match variant {
                             DocxHeaderVariant::Default => {
                                 inherited_default[index] = true;
+                                references.has_default_header_footer = true;
                                 references.linked_parts.push((kind, id));
                             }
                             DocxHeaderVariant::First => {
@@ -4110,12 +4103,16 @@ fn parse_docx_part(
                                     .to_owned(),
                             });
                         }
-                        let Some((outer, previous_bytes)) = text_boxes.pop() else {
+                        let Some((mut outer, previous_bytes, previous_facts)) = text_boxes.pop()
+                        else {
                             return Err(DocumentExtractionError::Malformed {
                                 format: DocumentFormat::Docx,
                                 message: "DOCX text box had no matching container".to_owned(),
                             });
                         };
+                        if facts.len() > previous_facts {
+                            mark_docx_cached_result(&mut outer.fields, &mut simple_fields);
+                        }
                         paragraph = outer;
                         if output.len() > previous_bytes && !output.ends_with('\n') {
                             push_output_byte(&mut output, b'\n')?;
@@ -6545,6 +6542,11 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .expect("field instructions and deleted carriers are valid bounded XML");
         assert_eq!(parsed.text, "Page 7 Literal");
         assert_eq!(parsed.completeness, DocumentCompleteness::Complete);
+        let escaped_markers = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="b&#x65;gin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separ&#x61;te"/><w:t>7</w:t><w:fldChar w:fldCharType="e&#x6e;d"/></w:r></w:p></w:body></w:document>"#;
+        let escaped = parse_docx(escaped_markers, &control(), IndexWorkStage::TextIndex)
+            .expect("field marker values may contain XML character references");
+        assert_eq!(escaped.text, "7");
+        assert_eq!(escaped.completeness, DocumentCompleteness::Complete);
         let spaced_field = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>DATE</w:instrText><w:fldChar w:fldCharType="separate"/><w:t xml:space="preserve"> </w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         let spaced = parse_docx(spaced_field, &control(), IndexWorkStage::TextIndex)
             .expect("retained whitespace is a cached field result");
@@ -6643,6 +6645,27 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn docx_field_result_in_text_box_is_cached_only_when_content_is_retained() {
+        for (content, retained) in [
+            ("<w:t>7</w:t>", true),
+            ("<w:sym w:font=\"Symbol\" w:char=\"F061\"/>", true),
+            ("", false),
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:drawing><w:txbxContent><w:p><w:r>{content}</w:r></w:p></w:txbxContent></w:drawing><w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:body></w:document>"
+            );
+            let parsed = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("a text box can contain a field's cached result");
+            assert_eq!(
+                parsed.completeness == DocumentCompleteness::Complete,
+                retained,
+                "{content}"
+            );
+            assert_eq!(parsed.facts.is_empty(), !retained, "{content}");
+        }
     }
 
     #[test]
@@ -8449,6 +8472,47 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         assert_eq!(facts.symbols.len(), 2);
         assert_eq!(
             facts.completeness,
+            DocumentCompleteness::Partial {
+                gaps: vec![DocumentCoverageGap::ConditionalStory],
+            }
+        );
+        let first_only = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference w:type="first" r:id="f"/><w:titlePg/></w:sectPr></w:body></w:document>"#;
+        let first_only_archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, first_only),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/first.xml", header),
+            ("word/even.xml", header),
+            ("word/settings.xml", settings),
+        ]);
+        let first_only_facts = extract_document_text_controlled(
+            &first_only_archive,
+            "first-only.docx",
+            None,
+            &control(),
+        )
+        .expect("first-page header does not depend on page parity");
+        assert_eq!(first_only_facts.symbols.len(), 1);
+        assert_eq!(
+            first_only_facts.completeness,
+            DocumentCompleteness::Complete
+        );
+        let default_only = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference w:type="default" r:id="f"/></w:sectPr></w:body></w:document>"#;
+        let default_only_archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, default_only),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/first.xml", header),
+            ("word/settings.xml", settings),
+        ]);
+        let default_only_facts = extract_document_text_controlled(
+            &default_only_archive,
+            "default-only.docx",
+            None,
+            &control(),
+        )
+        .expect("default header remains parity-dependent");
+        assert_eq!(default_only_facts.symbols.len(), 1);
+        assert_eq!(
+            default_only_facts.completeness,
             DocumentCompleteness::Partial {
                 gaps: vec![DocumentCoverageGap::ConditionalStory],
             }
