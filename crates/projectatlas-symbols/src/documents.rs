@@ -2741,6 +2741,7 @@ fn parse_docx_part(
     let mut conditional_note_start = None;
     let mut deleted_depth = None;
     let mut foreign_depth = None;
+    let mut foreign_opaque_depth = None;
     let mut element_depth = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
@@ -2769,6 +2770,16 @@ fn parse_docx_part(
                 });
             }
         };
+        let recognized_drawing = matches!(&namespace, ResolveResult::Bound(namespace)
+            if matches!(namespace.as_ref(),
+                "http://schemas.openxmlformats.org/drawingml/2006/main"
+                    | "http://purl.oclc.org/ooxml/drawingml/main"
+                    | "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+                    | "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"
+                    | "http://schemas.openxmlformats.org/drawingml/2006/picture"
+                    | "http://purl.oclc.org/ooxml/drawingml/picture"
+                    | "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                    | "urn:schemas-microsoft-com:vml"));
         if matches!(event, Event::Decl(_)) && event_index != 1 {
             return Err(DocumentExtractionError::Malformed {
                 format: DocumentFormat::Docx,
@@ -2836,6 +2847,16 @@ fn parse_docx_part(
                 }
                 if skipped_branch_depth.is_some() {
                     continue;
+                }
+                if wordprocessing
+                    && (foreign_opaque_depth.is_some()
+                        || (foreign_depth.is_some()
+                            && text_boxes.is_empty()
+                            && name.as_ref() != "txbxContent"))
+                {
+                    return Err(DocumentExtractionError::UnsupportedDocxInput {
+                        message: "Word content inside an opaque foreign wrapper cannot be verified as rendered".to_owned(),
+                    });
                 }
                 if wordprocessing
                     && deleted_depth.is_none()
@@ -3073,8 +3094,13 @@ fn parse_docx_part(
                     });
                     continue;
                 }
-                if !wordprocessing && !compatibility && foreign_depth.is_none() {
-                    foreign_depth = Some(element_depth);
+                if !wordprocessing && !compatibility {
+                    if foreign_depth.is_none() {
+                        foreign_depth = Some(element_depth);
+                    }
+                    if !recognized_drawing && foreign_opaque_depth.is_none() {
+                        foreign_opaque_depth = Some(element_depth);
+                    }
                 }
                 if wordprocessing && deleted_depth.is_none() {
                     sdt_tags[element_depth] = match (name.as_ref(), sdt_tags[element_depth - 1]) {
@@ -3741,6 +3767,9 @@ fn parse_docx_part(
                         message: "DOCX XML contained an unmatched closing element".to_owned(),
                     });
                 }
+                if foreign_opaque_depth == Some(element_depth) {
+                    foreign_opaque_depth = None;
+                }
                 if foreign_depth == Some(element_depth) {
                     foreign_depth = None;
                 }
@@ -3960,6 +3989,7 @@ fn parse_docx_part(
         || conditional_note_start.is_some()
         || deleted_depth.is_some()
         || foreign_depth.is_some()
+        || foreign_opaque_depth.is_some()
         || paragraph.run.is_some()
         || text_carrier.is_some()
         || !paragraph.fields.is_empty()
@@ -6199,13 +6229,40 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             )
             .is_ok()
         );
-        let drawing = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body><w:p><w:r><w:drawing><a:graphic><a:graphicData><w:txbxContent><w:p><w:r><w:t>Box</w:t></w:r></w:p></w:txbxContent></a:graphicData></a:graphic></w:drawing></w:r></w:p></w:body></w:document>"#;
-        assert_eq!(
-            parse_docx(drawing, &control(), IndexWorkStage::TextIndex)
-                .expect("Word text inside opaque drawing wrappers")
-                .text,
-            "Box\n"
-        );
+        for content in [
+            "<w:sym w:font=\"Symbol\" w:char=\"F061\"/>",
+            "<w:t>Secret</w:t>",
+            "<w:txbxContent><w:p><w:r><w:t>Secret</w:t></w:r></w:p></w:txbxContent>",
+        ] {
+            let opaque = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:x=\"urn:opaque\"><w:body><w:p><w:r><x:opaque>{content}</x:opaque></w:r></w:p></w:body></w:document>"
+            );
+            assert!(matches!(
+                parse_docx(opaque.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+            ));
+        }
+        for (word, drawing, inline) in [
+            (
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "http://schemas.openxmlformats.org/drawingml/2006/main",
+                "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+            ),
+            (
+                "http://purl.oclc.org/ooxml/wordprocessingml/main",
+                "http://purl.oclc.org/ooxml/drawingml/main",
+                "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
+            ),
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"{word}\" xmlns:a=\"{drawing}\" xmlns:wp=\"{inline}\"><w:body><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData><w:txbxContent><w:p><w:r><w:t>Box</w:t><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:txbxContent></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"
+            );
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("Word text inside recognized drawing wrappers");
+            assert_eq!(facts.text, "Boxα\n");
+            assert_eq!(facts.symbols.len(), 1);
+            assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+        }
     }
 
     #[test]
@@ -6486,12 +6543,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ),
             xml.replace("mc:Ignorable=\"future\"", "Ignorable=\"future\""),
         ] {
-            assert_eq!(
-                parse_docx(source.as_bytes(), &control(), IndexWorkStage::TextIndex)
-                    .expect("unlisted wrappers retain existing behavior")
-                    .text,
-                "Ignored\nVisible"
-            );
+            assert!(matches!(
+                parse_docx(source.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::UnsupportedDocxInput { .. })
+            ));
         }
         for source in [
             xml.replace(
@@ -6536,17 +6591,19 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     .expect("namespace declaration");
                 write!(prefixes, "n{index} ").expect("namespace prefix");
             }
-            let source = xml.replace(
-                "mc:Ignorable=\"future\"",
-                &format!("{declarations} mc:Ignorable=\"{prefixes}\""),
-            );
+            let source = xml
+                .replace(
+                    "<future:wrapper><w:p><w:r><w:t>Ignored</w:t></w:r></w:p></future:wrapper>",
+                    "",
+                )
+                .replace(
+                    "mc:Ignorable=\"future\"",
+                    &format!("{declarations} mc:Ignorable=\"{prefixes}\""),
+                );
             let bytes = docx_archive(source.as_bytes(), CompressionMethod::Deflated);
             let result = extract_document_text_controlled(&bytes, "guide.docx", None, &control());
             if count == MAX_DOCX_IGNORABLE_NAMESPACES {
-                assert_eq!(
-                    result.expect("bounded distinct namespaces").text,
-                    "Ignored\nVisible"
-                );
+                assert_eq!(result.expect("bounded distinct namespaces").text, "Visible");
             } else {
                 assert!(matches!(
                     result,

@@ -49,7 +49,7 @@
 - **AND** live ruby annotations return typed unsupported input rather than a malformed-input error; deleted ruby content remains excluded
 - **AND** safely referenced alternate-format chunks retain verified surrounding text with typed file-local unexamined-story coverage; missing, external, or unsafe import relationships fail closed rather than silently omitting referenced content
 - **AND** bounded UTF-16 LE/BE XML parts are normalized before parsing, including unambiguous BOM-less parts as an explicit compatibility tolerance; declared encodings must match the source bytes, while unsupported encodings return typed unsupported input and mismatches return malformed input without replacing the last complete publication
-- **AND** foreign-namespace character data requiring unsupported semantic decoding returns typed unsupported input, while recognized Word text boxes remain supported through drawing wrappers
+- **AND** foreign-namespace character data or Word child content under an opaque foreign wrapper returns typed unsupported input rather than fabricated rendered evidence, while recognized Word text boxes remain supported through validated drawing wrappers
 - **AND** nested text boxes preserve document order and resume outer runs with exact fragment offsets
 - **AND** explicit hyphens, tabs, and saved page breaks retain their text/separator characters and exact UTF-8 spans; rendered font-coded symbols retain durable font/code/part/occurrence identity and produce Unicode only for verified mappings, with unknown mappings marked as incomplete text coverage
 - **AND** field instructions and deleted text are validated without execution or publication, while cached field results and instruction text outside field-code regions remain literal text
