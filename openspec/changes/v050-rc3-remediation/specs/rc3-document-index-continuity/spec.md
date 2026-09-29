@@ -72,6 +72,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a complex-field instruction contains an alternate-format import or subdocument anchor before its result separator, including across paragraphs
 - **THEN** the non-rendered anchor selects no relationship or incomplete story coverage, while a literal cached result remains available
 
+#### Scenario: Comment range in non-rendered properties
+- **WHEN** a comment range marker appears inside paragraph or other property metadata rather than a supported content parent
+- **THEN** the malformed story is rejected before its comment can be selected; a marker under a supported content parent is tolerated but selects no comment story without a rendered comment reference
+
 #### Scenario: Symbol extraction reaches a retained limit
 - **WHEN** a safely admitted DOCX exceeds a retained parser output, fact, memory, or repeated-decompression-work ceiling before all rendered story parts are processed
 - **THEN** the document publishes a typed file-local incomplete-coverage record and no unexamined symbol is claimed as retained

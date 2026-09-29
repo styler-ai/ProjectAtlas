@@ -2799,6 +2799,7 @@ fn parse_docx_part(
     let mut text_start = 0;
     let mut preserve_space = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut sdt_tags = [DocxSdtTag::Other; MAX_DOCX_XML_DEPTH + 1];
+    let mut comment_range_parents = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut sdt_stack: Vec<DocxSdtContext> = Vec::new();
     let mut simple_fields: Vec<DocxSimpleField> = Vec::new();
     let mut header_section: Option<DocxHeaderSection> = None;
@@ -3186,6 +3187,34 @@ fn parse_docx_part(
                         parent_depth -= 2;
                     }
                 }
+                // Comment anchors belong to content, never property metadata.
+                comment_range_parents[element_depth] = wordprocessing
+                    && matches!(
+                        name.as_ref(),
+                        "bdo"
+                            | "body"
+                            | "comment"
+                            | "customXml"
+                            | "dir"
+                            | "docPartBody"
+                            | "endnote"
+                            | "fldSimple"
+                            | "footnote"
+                            | "ftr"
+                            | "hdr"
+                            | "hyperlink"
+                            | "ins"
+                            | "moveTo"
+                            | "p"
+                            | "rt"
+                            | "rubyBase"
+                            | "sdt"
+                            | "sdtContent"
+                            | "tbl"
+                            | "tc"
+                            | "tr"
+                            | "txbxContent"
+                    );
                 if wordprocessing && deleted_depth.is_none() {
                     sdt_tags[element_depth] = match (name.as_ref(), sdt_tags[parent_depth]) {
                         ("sdt", _) => DocxSdtTag::Sdt,
@@ -3729,13 +3758,20 @@ fn parse_docx_part(
                             && !paragraph.run.as_ref().is_some_and(|run| run.hidden)
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
+                        if !comment_range_parents[parent_depth] {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX comment range is outside rendered content"
+                                    .to_owned(),
+                            });
+                        }
                         let id = docx_attribute(&event, &reader, "id", wordprocessing_namespace)?
                             .ok_or_else(|| DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
                             message: "DOCX comment range is missing w:id".to_owned(),
                         })?;
-                        let id = canonical_docx_story_id(&id)?;
-                        references.items.push((DocxStoryKind::Comments, id));
+                        // The range is only an anchor; commentReference selects the story.
+                        canonical_docx_story_id(&id)?;
                     }
                     "sym"
                         if paragraph.run.is_some()
@@ -6218,6 +6254,66 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_comment_ranges_require_content_parents_and_references() {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="comments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>"#;
+        let comments = br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:p><w:r><w:t>CommentFour</w:t><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:comment><w:comment w:id="5"><w:p><w:r><w:t>CommentFive</w:t><w:sym w:font="Symbol" w:char="F062"/></w:r></w:p></w:comment></w:comments>"#;
+        for valid in [
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:commentRangeStart w:id="4"/><w:r><w:t>Visible</w:t></w:r><w:commentRangeEnd w:id="4"/></w:p></w:body></w:document>"#,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><mc:AlternateContent><mc:Choice Requires="w"><w:commentRangeStart w:id="4"/></mc:Choice><mc:Fallback/></mc:AlternateContent><w:r><w:t>Visible</w:t></w:r><w:commentRangeEnd w:id="4"/></w:p></w:body></w:document>"#,
+        ] {
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, valid.as_bytes()),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/comments.xml", comments),
+            ]);
+            let rendered =
+                extract_document_text_controlled(&archive, "content.docx", None, &control())
+                    .expect("an unreferenced content-level range is ignored");
+            assert_eq!(rendered.text, "Visible");
+            assert!(rendered.symbols.is_empty());
+            assert_eq!(rendered.completeness, DocumentCompleteness::Complete);
+            for (reference_id, selected, excluded, code) in [
+                (4, "CommentFour", "CommentFive", 0xF061),
+                (5, "CommentFive", "CommentFour", 0xF062),
+            ] {
+                let referenced = valid.replace(
+                    "<w:commentRangeEnd w:id=\"4\"/>",
+                    &format!(
+                        "<w:commentRangeEnd w:id=\"4\"/><w:r><w:commentReference w:id=\"{reference_id}\"/></w:r>"
+                    ),
+                );
+                let archive = docx_archive_with_parts(&[
+                    (DOCX_DOCUMENT_PART, referenced.as_bytes()),
+                    ("word/_rels/document.xml.rels", rels),
+                    ("word/comments.xml", comments),
+                ]);
+                let rendered =
+                    extract_document_text_controlled(&archive, "content.docx", None, &control())
+                        .expect("only the rendered reference selects its comment story");
+                assert!(rendered.text.contains(selected));
+                assert!(!rendered.text.contains(excluded));
+                assert_eq!(rendered.symbols.len(), 1);
+                assert_eq!(rendered.symbols[0].code, Some(code));
+            }
+        }
+        for marker in ["commentRangeStart", "commentRangeEnd"] {
+            let main = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:{marker} w:id="4"/></w:pPr><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"#
+            );
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/comments.xml", comments),
+            ]);
+            assert!(matches!(
+                extract_document_text_controlled(&archive, "metadata.docx", None, &control()),
+                Err(DocumentExtractionError::Malformed { message, .. })
+                    if message.contains("comment range")
+            ));
+        }
+    }
+
+    #[test]
     fn docx_utf16_xml_is_decoded_before_wordprocessing_parsing() {
         let xml = r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p></w:body></w:document>"#;
         for little_endian in [true, false] {
@@ -7230,7 +7326,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             assert_eq!(no_text.symbols.len(), 1);
             assert_eq!(no_text.completeness, DocumentCompleteness::Complete);
             let conditional_comment = format!(
-                "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:{item} w:id=\"1\" w:type=\"continuationSeparator\"><w:p><w:commentRangeStart w:id=\"4\"/></w:p></w:{item}><w:{item} w:id=\"2\"><w:p><w:r><w:t>Normal</w:t></w:r></w:p></w:{item}></w:{root}>"
+                "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:{item} w:id=\"1\" w:type=\"continuationSeparator\"><w:p><w:r><w:commentReference w:id=\"4\"/></w:r></w:p></w:{item}><w:{item} w:id=\"2\"><w:p><w:r><w:t>Normal</w:t></w:r></w:p></w:{item}></w:{root}>"
             );
             let mut references = DocxStoryReferences::default();
             let conditional_comment = parse_docx_part(
@@ -7244,7 +7340,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 IndexWorkStage::TextIndex,
             )
             .expect("comment reference in a continuation item remains conditional");
-            assert_eq!(conditional_comment.text, "Normal");
+            assert_eq!(conditional_comment.text, "\u{fffc}\nNormal");
             assert_eq!(
                 references.items,
                 vec![(DocxStoryKind::Comments, "4".to_owned())]
