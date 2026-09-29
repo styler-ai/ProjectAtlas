@@ -2049,6 +2049,24 @@ fn parse_docx_relationships(
                         message: "DOCX relationships have an invalid XML structure".to_owned(),
                     });
                 }
+                for (index, attribute) in event.attributes().enumerate() {
+                    check_parser_iteration(index, &mut || control.check(stage))?;
+                    let attribute =
+                        attribute.map_err(|error| DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: error.to_string(),
+                        })?;
+                    if let (ResolveResult::Unknown(prefix), _) =
+                        reader.resolver().resolve_attribute(attribute.key)
+                    {
+                        return Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: format!(
+                                "DOCX XML attribute has an undeclared namespace prefix: {prefix}"
+                            ),
+                        });
+                    }
+                }
                 if depth == 2 {
                     if result.len() == MAX_DOCX_METADATA_RECORDS {
                         return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -3028,10 +3046,10 @@ fn parse_docx_part(
                         continue;
                     }
                 }
-                if deleted_depth.is_none()
-                    && !(wordprocessing
-                        && matches!(name.as_ref(), "del" | "moveFrom" | "sectPrChange"))
                 {
+                    let suppressed = deleted_depth.is_some()
+                        || (wordprocessing
+                            && matches!(name.as_ref(), "del" | "moveFrom" | "sectPrChange"));
                     for (index, attribute) in event.attributes().enumerate() {
                         check_parser_iteration(index, &mut || control.check(stage))?;
                         let attribute =
@@ -3048,6 +3066,9 @@ fn parse_docx_part(
                                     "DOCX XML attribute has an undeclared namespace prefix: {prefix}"
                                 ),
                             });
+                        }
+                        if suppressed {
+                            continue;
                         }
                         if attribute_name.as_ref() == "space"
                             && matches!(&attribute_namespace, ResolveResult::Bound(namespace)
@@ -7946,6 +7967,19 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_relationships_reject_undeclared_attribute_prefixes() {
+        for xml in [
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" x:extra="1"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml" x:extra="1"/></Relationships>"#,
+        ] {
+            assert!(matches!(
+                parse_docx_relationships(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn docx_safe_percent_encoded_story_target_retains_symbols() {
         let manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header%20one.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#;
         let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference r:id="h"/></w:sectPr></w:body></w:document>"#;
@@ -8583,6 +8617,23 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect("tracked old section must not replace current header");
         assert_eq!(facts.symbols.len(), 1);
         assert_eq!(facts.completeness, DocumentCompleteness::Complete);
+    }
+
+    #[test]
+    fn docx_historical_section_properties_validate_suppressed_attributes() {
+        for history in [
+            r#"<w:sectPrChange x:extra="1"><w:sectPr/></w:sectPrChange>"#,
+            r#"<w:sectPrChange><w:sectPr x:extra="1"/></w:sectPrChange>"#,
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:sectPr>{history}</w:sectPr></w:body></w:document>"
+            );
+            let archive = docx_archive_with_parts(&[(DOCX_DOCUMENT_PART, main.as_bytes())]);
+            assert!(matches!(
+                extract_document_text_controlled(&archive, "revision.docx", None, &control()),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
     }
 
     #[test]

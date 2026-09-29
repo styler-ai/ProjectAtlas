@@ -52,6 +52,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a story relationship has an external or escaping target, a missing target, or a wrong-type part
 - **THEN** extraction fails closed without reading outside the package or publishing a new generation
 
+#### Scenario: Undeclared attribute prefix in package metadata or suppressed history
+- **WHEN** a relationship element or a non-rendered section-revision element contains an attribute with an undeclared namespace prefix
+- **THEN** the malformed DOCX is rejected before publication, even when the attribute does not select rendered content
+
 #### Scenario: Verified symbol mapping
 - **WHEN** a rendered `w:sym` has a verified mapping for its font and code
 - **THEN** its Unicode text and exact symbol provenance are indexed without an unsupported-symbol error
