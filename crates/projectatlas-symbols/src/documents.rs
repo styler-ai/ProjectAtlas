@@ -3177,38 +3177,39 @@ fn parse_docx_part(
                         ("sdtContent", DocxSdtTag::Sdt) => DocxSdtTag::Content,
                         _ => DocxSdtTag::Other,
                     };
-                    if paragraph.run.as_ref().is_some_and(|run| !run.hidden)
-                        && !paragraph.fields.contains(&DocxFieldPhase::Instruction)
-                        && matches!(
-                            name.as_ref(),
-                            "sym"
-                                | "drawing"
-                                | "pict"
-                                | "object"
-                                | "annotationRef"
-                                | "contentPart"
-                                | "tab"
-                                | "ptab"
-                                | "br"
-                                | "cr"
-                                | "lastRenderedPageBreak"
-                                | "noBreakHyphen"
-                                | "softHyphen"
-                                | "pgNum"
-                                | "dayShort"
-                                | "dayLong"
-                                | "monthShort"
-                                | "monthLong"
-                                | "yearShort"
-                                | "yearLong"
-                                | "footnoteReference"
-                                | "endnoteReference"
-                                | "commentReference"
-                                | "footnoteRef"
-                                | "endnoteRef"
-                                | "separator"
-                                | "continuationSeparator"
-                        )
+                    if !paragraph.fields.contains(&DocxFieldPhase::Instruction)
+                        && (matches!(name.as_ref(), "altChunk" | "subDoc")
+                            || (paragraph.run.as_ref().is_some_and(|run| !run.hidden)
+                                && matches!(
+                                    name.as_ref(),
+                                    "sym"
+                                        | "drawing"
+                                        | "pict"
+                                        | "object"
+                                        | "annotationRef"
+                                        | "contentPart"
+                                        | "tab"
+                                        | "ptab"
+                                        | "br"
+                                        | "cr"
+                                        | "lastRenderedPageBreak"
+                                        | "noBreakHyphen"
+                                        | "softHyphen"
+                                        | "pgNum"
+                                        | "dayShort"
+                                        | "dayLong"
+                                        | "monthShort"
+                                        | "monthLong"
+                                        | "yearShort"
+                                        | "yearLong"
+                                        | "footnoteReference"
+                                        | "endnoteReference"
+                                        | "commentReference"
+                                        | "footnoteRef"
+                                        | "endnoteRef"
+                                        | "separator"
+                                        | "continuationSeparator"
+                                )))
                     {
                         for context in &mut sdt_stack {
                             if context
@@ -6077,14 +6078,32 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             }
         );
         let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="html" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk" Target="import.html"/></Relationships>"#;
+        let manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="html" ContentType="text/html"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+        let imported = b"<!doctype html><html><body><p>Imported</p></body></html>";
         let archive = docx_archive_with_parts(&[
+            ("[Content_Types].xml", manifest),
             (DOCX_DOCUMENT_PART, xml.as_bytes()),
             ("word/_rels/document.xml.rels", rels),
-            ("word/import.html", b"<p>Imported</p>"),
+            ("word/import.html", imported),
         ]);
         let packaged = extract_document_text_controlled(&archive, "import.docx", None, &control())
             .expect("safe imported part is local incomplete coverage");
         assert_eq!(packaged.completeness, direct.completeness);
+        let sdt = xml.replace(
+            "<w:altChunk r:id=\"html\"/>",
+            "<w:sdt><w:sdtPr><w:placeholder><w:docPart w:val=\"Hint\"/></w:placeholder><w:showingPlcHdr w:val=\"false\"/></w:sdtPr><w:sdtContent><w:tbl><w:tr><w:tc><w:altChunk r:id=\"html\"/></w:tc></w:tr></w:tbl></w:sdtContent></w:sdt>",
+        );
+        let sdt_archive = docx_archive_with_parts(&[
+            ("[Content_Types].xml", manifest),
+            (DOCX_DOCUMENT_PART, sdt.as_bytes()),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/import.html", imported),
+        ]);
+        let sdt_facts =
+            extract_document_text_controlled(&sdt_archive, "import.docx", None, &control())
+                .expect("actual alternate-format content must not load a glossary placeholder");
+        assert_eq!(sdt_facts.text, "Prefix");
+        assert_eq!(sdt_facts.completeness, direct.completeness);
         let rels = std::str::from_utf8(rels).expect("ASCII fixture");
         for broken in [
             rels.replace("relationships/aFChunk", "relationships/header"),
@@ -6095,9 +6114,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ),
         ] {
             let archive = docx_archive_with_parts(&[
+                ("[Content_Types].xml", manifest),
                 (DOCX_DOCUMENT_PART, xml.as_bytes()),
                 ("word/_rels/document.xml.rels", broken.as_bytes()),
-                ("word/import.html", b"<p>Imported</p>"),
+                ("word/import.html", imported),
             ]);
             assert!(matches!(
                 extract_document_text_controlled(&archive, "broken.docx", None, &control()),
@@ -7906,6 +7926,25 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 gaps: vec![DocumentCoverageGap::UnexaminedStory],
             }
         );
+        let sdt_main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sdt><w:sdtPr><w:placeholder><w:docPart w:val="Hint"/></w:placeholder></w:sdtPr><w:sdtContent><w:p><w:subDoc r:id="child"/></w:p></w:sdtContent></w:sdt></w:body></w:document>"#;
+        let mut references = DocxStoryReferences::default();
+        let sdt = parse_docx_part(
+            sdt_main,
+            DOCX_DOCUMENT_PART,
+            "document",
+            None,
+            None,
+            &mut references,
+            &control(),
+            IndexWorkStage::TextIndex,
+        )
+        .expect("subdocument anchor is actual SDT content");
+        assert_eq!(
+            references.linked_parts,
+            vec![(DocxStoryKind::Subdocument, "child".to_owned())]
+        );
+        assert!(!references.glossary_placeholder);
+        assert_eq!(sdt.completeness, facts.completeness);
     }
 
     #[test]

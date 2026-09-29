@@ -76,9 +76,13 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** an SDT retains a whitespace-only text leaf under `xml:space="preserve"`
 - **THEN** the retained text counts as content without selecting a missing glossary relationship
 
-#### Scenario: Opaque alternate XML content remains incomplete
-- **WHEN** a rendered run contains an alternate XML content part that this parser does not decode
+#### Scenario: Opaque content part remains incomplete
+- **WHEN** a rendered run contains a `w:contentPart` alternate XML part that this parser does not decode
 - **THEN** the glossary placeholder is not selected, and document coverage is explicitly incomplete without reading the target part
+
+#### Scenario: Alternate-format chunk replaces a glossary placeholder
+- **WHEN** a non-displayed glossary placeholder has actual SDT content containing a safely referenced alternate-format chunk in a table cell
+- **THEN** the chunk counts as SDT content, its reference and incomplete story coverage remain retained, and no unrelated glossary relationship is required
 
 #### Scenario: Field-instruction references are not rendered
 - **WHEN** note or comment references appear in a complex field's instruction region before the cached-result separator
