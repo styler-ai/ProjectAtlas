@@ -1428,6 +1428,24 @@ fn docx_settings(
                 if skipped_branch_depth.is_some() {
                     continue;
                 }
+                for (index, attribute) in event.attributes().enumerate() {
+                    check_parser_iteration(index, &mut || control.check(stage))?;
+                    let attribute =
+                        attribute.map_err(|error| DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: error.to_string(),
+                        })?;
+                    if let (ResolveResult::Unknown(prefix), _) =
+                        reader.resolver().resolve_attribute(attribute.key)
+                    {
+                        return Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: format!(
+                                "DOCX XML attribute has an undeclared namespace prefix: {prefix}"
+                            ),
+                        });
+                    }
+                }
                 let name = event.local_name();
                 if depth == 1 && (seen_root || !wordprocessing || name.as_ref() != "settings") {
                     return Err(DocumentExtractionError::Malformed {
@@ -2638,6 +2656,12 @@ fn docx_attribute(
             message: error.to_string(),
         })?;
         let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+        if let ResolveResult::Unknown(prefix) = &namespace {
+            return Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: format!("DOCX XML attribute has an undeclared namespace prefix: {prefix}"),
+            });
+        }
         if local.as_ref() == local_name
             && matches!(namespace, ResolveResult::Bound(namespace)
                 if namespace_matches(namespace.as_ref()))
@@ -8063,6 +8087,23 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             Err(DocumentExtractionError::Malformed { message, .. })
                 if message.contains("undeclared namespace prefix")
         ));
+        for settings in [
+            br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:evenAndOddHeaders x:val="false"/></w:settings>"#.as_slice(),
+            br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" x:ignored="true"><w:evenAndOddHeaders/></w:settings>"#.as_slice(),
+        ] {
+            let malformed = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/first.xml", header),
+                ("word/even.xml", header),
+                ("word/settings.xml", settings),
+            ]);
+            assert!(matches!(
+                extract_document_text_controlled(&malformed, "undeclared-settings.docx", None, &control()),
+                Err(DocumentExtractionError::Malformed { message, .. })
+                    if message.contains("undeclared namespace prefix")
+            ));
+        }
     }
 
     #[test]
