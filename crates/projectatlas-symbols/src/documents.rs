@@ -1886,6 +1886,24 @@ fn parse_docx_content_types(
                         message: "DOCX content types have an invalid XML structure".to_owned(),
                     });
                 }
+                for (index, attribute) in event.attributes().enumerate() {
+                    check_parser_iteration(index, &mut || control.check(stage))?;
+                    let attribute =
+                        attribute.map_err(|error| DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: error.to_string(),
+                        })?;
+                    if let (ResolveResult::Unknown(prefix), _) =
+                        reader.resolver().resolve_attribute(attribute.key)
+                    {
+                        return Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: format!(
+                                "DOCX XML attribute has an undeclared namespace prefix: {prefix}"
+                            ),
+                        });
+                    }
+                }
                 if depth == 2 {
                     if types.overrides.len() + types.defaults.len() == MAX_DOCX_METADATA_RECORDS {
                         return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -8403,6 +8421,47 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             extract_document_text_controlled(&archive(&wrong), "defaults.docx", None, &control()),
             Err(DocumentExtractionError::InvalidDocxPackage { .. })
         ));
+    }
+
+    #[test]
+    fn docx_content_types_reject_undeclared_attribute_prefixes() {
+        let content_type =
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+        let rels = r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#;
+        let records = [
+            format!(
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" x:extra=\"1\">{rels}<Override PartName=\"/word/document.xml\" ContentType=\"{content_type}\"/></Types>"
+            ),
+            format!(
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">{rels}<Override PartName=\"/word/document.xml\" ContentType=\"{content_type}\" x:extra=\"1\"/></Types>"
+            ),
+            format!(
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">{rels}<Default Extension=\"xml\" ContentType=\"{content_type}\" x:extra=\"1\"/></Types>"
+            ),
+        ];
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Keep old publication</w:t></w:r></w:p></w:body></w:document>"#;
+        let valid = records[2].replace(" x:extra=\"1\"", "");
+        let archive = docx_archive_with_parts(&[
+            ("[Content_Types].xml", valid.as_bytes()),
+            (DOCX_DOCUMENT_PART, main),
+        ]);
+        assert_eq!(
+            extract_document_text_controlled(&archive, "valid-types.docx", None, &control())
+                .expect("valid content-type metadata retains rendered text")
+                .text,
+            "Keep old publication"
+        );
+        for manifest in records {
+            let archive = docx_archive_with_parts(&[
+                ("[Content_Types].xml", manifest.as_bytes()),
+                (DOCX_DOCUMENT_PART, main),
+            ]);
+            assert!(matches!(
+                extract_document_text_controlled(&archive, "invalid-types.docx", None, &control()),
+                Err(DocumentExtractionError::Malformed { message, .. })
+                    if message.contains("undeclared namespace prefix")
+            ));
+        }
     }
 
     #[test]
