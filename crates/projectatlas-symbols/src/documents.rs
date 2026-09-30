@@ -2608,10 +2608,15 @@ struct DocxHeaderSection {
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 enum DocxSectionAncestor {
     #[default]
+    /// No section-bearing structural role.
     Other,
+    /// Root document element.
     Document,
+    /// Main document body directly under the root.
     Body,
+    /// Paragraph within the main document body.
     Paragraph,
+    /// Properties directly under that paragraph.
     ParagraphProperties,
 }
 
@@ -3223,9 +3228,7 @@ fn parse_docx_part(
                         parent_depth -= 2;
                     }
                 }
-                section_ancestors[element_depth] = if !wordprocessing {
-                    DocxSectionAncestor::Other
-                } else {
+                section_ancestors[element_depth] = if wordprocessing {
                     match (name.as_ref(), section_ancestors[parent_depth]) {
                         ("document", _) if element_depth == 1 => DocxSectionAncestor::Document,
                         ("body", DocxSectionAncestor::Document) => DocxSectionAncestor::Body,
@@ -3237,6 +3240,8 @@ fn parse_docx_part(
                         }
                         _ => DocxSectionAncestor::Other,
                     }
+                } else {
+                    DocxSectionAncestor::Other
                 };
                 inside_main_body[element_depth] = if wordprocessing && name.as_ref() == "body" {
                     section_ancestors[element_depth] == DocxSectionAncestor::Body
