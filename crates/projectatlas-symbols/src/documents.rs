@@ -2620,6 +2620,26 @@ enum DocxSectionAncestor {
     ParagraphProperties,
 }
 
+/// Rendered block-content ancestry for paragraph admission.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum DocxBlockAncestor {
+    #[default]
+    /// Metadata or any unsupported block path.
+    Other,
+    /// A container that may directly hold paragraphs.
+    Content,
+    /// A table awaiting rows.
+    Table,
+    /// A row awaiting cells.
+    Row,
+    /// A block structured-document tag awaiting its content.
+    SdtContent,
+    /// A row structured-document tag awaiting its content.
+    SdtTable,
+    /// A cell structured-document tag awaiting its content.
+    SdtRow,
+}
+
 /// Parent tags needed to distinguish rendered placeholders from `docPartObj` metadata.
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 enum DocxSdtTag {
@@ -2827,6 +2847,9 @@ fn parse_docx_part(
     let mut section_ancestors = [DocxSectionAncestor::Other; MAX_DOCX_XML_DEPTH + 1];
     let mut inside_main_body = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut comment_range_parents = [false; MAX_DOCX_XML_DEPTH + 1];
+    let mut block_ancestors = [DocxBlockAncestor::Other; MAX_DOCX_XML_DEPTH + 1];
+    let mut rendered_run_ancestry = [false; MAX_DOCX_XML_DEPTH + 1];
+    let mut direct_run_parents = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut sdt_stack: Vec<DocxSdtContext> = Vec::new();
     let mut simple_fields: Vec<DocxSimpleField> = Vec::new();
     let mut header_section: Option<DocxHeaderSection> = None;
@@ -3263,6 +3286,68 @@ fn parse_docx_part(
                     inside_main_body[parent_depth]
                         || section_ancestors[element_depth] == DocxSectionAncestor::Body
                 };
+                block_ancestors[element_depth] = if wordprocessing {
+                    match (name.as_ref(), block_ancestors[parent_depth]) {
+                        ("hdr" | "ftr", _) if element_depth == 1 && name.as_ref() == root_name => {
+                            DocxBlockAncestor::Content
+                        }
+                        ("body", _)
+                            if section_ancestors[element_depth] == DocxSectionAncestor::Body =>
+                        {
+                            DocxBlockAncestor::Content
+                        }
+                        ("footnote" | "endnote" | "comment", _)
+                            if parent_depth == 1
+                                && matches!(
+                                    (root_name, name.as_ref()),
+                                    ("footnotes", "footnote")
+                                        | ("endnotes", "endnote")
+                                        | ("comments", "comment")
+                                ) =>
+                        {
+                            DocxBlockAncestor::Content
+                        }
+                        ("tbl", DocxBlockAncestor::Content)
+                        | ("sdtContent", DocxBlockAncestor::SdtTable)
+                        | ("customXml", DocxBlockAncestor::Table) => DocxBlockAncestor::Table,
+                        ("tr", DocxBlockAncestor::Table)
+                        | ("sdtContent", DocxBlockAncestor::SdtRow)
+                        | ("customXml", DocxBlockAncestor::Row) => DocxBlockAncestor::Row,
+                        ("sdt", DocxBlockAncestor::Content) => DocxBlockAncestor::SdtContent,
+                        ("sdt", DocxBlockAncestor::Table) => DocxBlockAncestor::SdtTable,
+                        ("sdt", DocxBlockAncestor::Row) => DocxBlockAncestor::SdtRow,
+                        ("txbxContent", _)
+                        | ("tc", DocxBlockAncestor::Row)
+                        | ("sdtContent", DocxBlockAncestor::SdtContent)
+                        | (
+                            "customXml" | "ins" | "moveTo" | "del" | "moveFrom",
+                            DocxBlockAncestor::Content,
+                        ) => DocxBlockAncestor::Content,
+                        _ => DocxBlockAncestor::Other,
+                    }
+                } else {
+                    DocxBlockAncestor::Other
+                };
+                rendered_run_ancestry[element_depth] = wordprocessing
+                    && (name.as_ref() == "p"
+                        || (rendered_run_ancestry[parent_depth]
+                            && matches!(
+                                name.as_ref(),
+                                "sdt"
+                                    | "sdtContent"
+                                    | "hyperlink"
+                                    | "fldSimple"
+                                    | "customXml"
+                                    | "smartTag"
+                                    | "ins"
+                                    | "moveTo"
+                                    | "del"
+                                    | "moveFrom"
+                                    | "bdo"
+                                    | "dir"
+                            )));
+                direct_run_parents[element_depth] =
+                    rendered_run_ancestry[element_depth] && name.as_ref() != "sdt";
                 // Comment anchors belong to content, never property metadata.
                 comment_range_parents[element_depth] = wordprocessing
                     && matches!(
@@ -3664,6 +3749,13 @@ fn parse_docx_part(
                         ));
                     }
                     "p" if !paragraph.open => {
+                        if block_ancestors[parent_depth] != DocxBlockAncestor::Content {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX paragraph is outside rendered block content"
+                                    .to_owned(),
+                            });
+                        }
                         paragraph.open = true;
                         paragraph.number = paragraph_number;
                         paragraph.run_number = 0;
@@ -3673,6 +3765,13 @@ fn parse_docx_part(
                         }
                     }
                     "r" if paragraph.open && paragraph.run.is_none() => {
+                        if !direct_run_parents[parent_depth] {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX run is outside rendered paragraph content"
+                                    .to_owned(),
+                            });
+                        }
                         paragraph.run_number += 1;
                         paragraph.run = Some(RawDocxRun {
                             depth: logical_depth,
@@ -4049,11 +4148,17 @@ fn parse_docx_part(
                 }
             }
             Event::GeneralRef(reference) => {
+                let text = decode_docx_reference(&reference)?;
                 if skipped_branch_depth.is_some() {
-                    decode_docx_reference(&reference)?;
                     continue;
                 }
                 if text_carrier.is_none() {
+                    if text
+                        .chars()
+                        .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n'))
+                    {
+                        continue;
+                    }
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "entity appeared outside a text run".to_owned(),
@@ -4065,7 +4170,6 @@ fn parse_docx_part(
                         message: "entity appeared outside a run".to_owned(),
                     });
                 };
-                let text = decode_docx_reference(&reference)?;
                 if text_carrier == Some(DocxTextCarrier::Rendered) {
                     append_docx_run_text(run, &text, output.len())?;
                 }
@@ -9135,6 +9239,60 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 extract_document_text_controlled(&archive, "valid-section.docx", None, &control())
                     .expect("selected compatibility wrapper preserves valid section ancestry");
             assert_eq!(facts.symbols.len(), 1, "{valid}");
+        }
+    }
+
+    #[test]
+    fn docx_run_payload_requires_rendered_paragraph_ancestry() {
+        for invalid in [
+            "<w:pPr><w:r><w:t>Injected</w:t></w:r></w:pPr>",
+            "<w:pPr><w:hyperlink><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:hyperlink></w:pPr>",
+            "<w:pPr><w:p><w:r><w:t>Injected</w:t></w:r></w:p></w:pPr>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p>{invalid}</w:p></w:body></w:document>"
+            );
+            assert!(
+                matches!(
+                    parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{invalid}"
+            );
+        }
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtPr><w:p><w:r><w:t>Injected</w:t></w:r></w:p></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Content</w:t></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#;
+        assert!(matches!(
+            parse_docx(xml, &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:hyperlink><w:r><w:t>Linked</w:t></w:r></w:hyperlink><w:sdt><w:sdtContent><w:r><w:t>Content</w:t></w:r></w:sdtContent></w:sdt></w:p></w:body></w:document>"#;
+        let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
+            .expect("supported paragraph-content containers retain runs");
+        assert_eq!(facts.text, "LinkedContent");
+    }
+
+    #[test]
+    fn docx_character_reference_whitespace_between_elements_is_accepted() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>First</w:t></w:r></w:p>&#xA;&#x20;<w:p><w:r><w:t>Second</w:t></w:r></w:p></w:body></w:document>"#;
+        let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
+            .expect("XML character-reference whitespace is structural whitespace");
+        assert_eq!(facts.text, "First\nSecond");
+    }
+
+    #[test]
+    fn docx_table_block_wrappers_preserve_cell_paragraphs() {
+        for table in [
+            "<w:tbl><w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt></w:tbl>",
+            "<w:tbl><w:customXml><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:customXml></w:tbl>",
+            "<w:tbl><w:tr><w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:tbl>",
+            "<w:tbl><w:tr><w:customXml><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:customXml></w:tr></w:tbl>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{table}</w:body></w:document>"
+            );
+            let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("table-level wrappers retain rendered cell text");
+            assert_eq!(facts.text, "Cell", "{table}");
         }
     }
 
