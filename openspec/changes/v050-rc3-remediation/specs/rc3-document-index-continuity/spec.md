@@ -44,6 +44,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a selected markup-compatibility branch wraps a footnote, endnote, or comment item
 - **THEN** story IDs are selected at their logical depth, unreferenced items remain excluded, and conditional continuation-note coverage is scoped to that note rather than later items
 
+#### Scenario: Malformed note or comment item structure
+- **WHEN** a footnote, endnote, or comment story root contains a direct WordprocessingML child other than its item type, including inside a selected compatibility branch, or any note/comment item appears nested or outside its matching collection root
+- **THEN** extraction rejects the malformed story before its text or symbols can enter a new publication
+
 #### Scenario: Referenced story is not examined
 - **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
 - **THEN** it publishes typed incomplete story coverage without claiming that part is symbol-free or fetching external content

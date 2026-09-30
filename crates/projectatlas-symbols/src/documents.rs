@@ -2951,6 +2951,20 @@ fn parse_docx_part(
                     && !compatibility
                     && matches!(&namespace, ResolveResult::Bound(namespace)
                         if ignorable_namespaces.iter().any(|ignored| ignored == namespace.as_ref()));
+                if wordprocessing
+                    && matches!(name.as_ref(), "footnote" | "endnote" | "comment")
+                    && (!matches!(
+                        (root_name, name.as_ref()),
+                        ("footnotes", "footnote")
+                            | ("endnotes", "endnote")
+                            | ("comments", "comment")
+                    ) || element_depth != 2 + 2 * selected_branches.len())
+                {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX story item is outside its collection root".to_owned(),
+                    });
+                }
                 if element_depth == 2 + 2 * selected_branches.len()
                     && let Some(selected_ids) = selected_ids
                     && matches!(root_name, "footnotes" | "endnotes" | "comments")
@@ -2960,7 +2974,13 @@ fn parse_docx_part(
                         "endnotes" => "endnote",
                         _ => "comment",
                     };
-                    if wordprocessing && name.as_ref() == expected {
+                    if wordprocessing && name.as_ref() != expected {
+                        return Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: "DOCX story root contains a non-item child".to_owned(),
+                        });
+                    }
+                    if wordprocessing {
                         let id = docx_attribute(&event, &reader, "id", wordprocessing_namespace)?
                             .ok_or_else(|| DocumentExtractionError::Malformed {
                             format: DocumentFormat::Docx,
@@ -7324,6 +7344,88 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             assert_eq!(selected.text, "Wrapped", "{root}");
             let ordinary = parse("2").expect("unreferenced wrapped item is skipped");
             assert_eq!(ordinary.text, "Ordinary", "{root}");
+        }
+    }
+
+    #[test]
+    fn docx_story_roots_reject_non_item_content() {
+        for (root, item) in [
+            ("footnotes", "footnote"),
+            ("endnotes", "endnote"),
+            ("comments", "comment"),
+        ] {
+            for wrapped in [false, true] {
+                let rogue = "<w:p><w:r><w:t>Rogue</w:t><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p>";
+                let rogue = if wrapped {
+                    format!(
+                        "<mc:AlternateContent><mc:Choice Requires=\"w\">{rogue}</mc:Choice><mc:Fallback/></mc:AlternateContent>"
+                    )
+                } else {
+                    rogue.to_owned()
+                };
+                let xml = format!(
+                    "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\">{rogue}<w:{item} w:id=\"1\"><w:p><w:r><w:t>Selected</w:t></w:r></w:p></w:{item}></w:{root}>"
+                );
+                assert!(
+                    matches!(
+                        parse_docx_part(
+                            xml.as_bytes(),
+                            "word/story.xml",
+                            root,
+                            Some(&HashSet::from(["1".to_owned()])),
+                            None,
+                            &mut DocxStoryReferences::default(),
+                            &control(),
+                            IndexWorkStage::TextIndex,
+                        ),
+                        Err(DocumentExtractionError::Malformed { .. })
+                    ),
+                    "{root}, wrapped={wrapped}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn docx_story_items_reject_nested_items() {
+        for (root, item) in [
+            ("footnotes", "footnote"),
+            ("endnotes", "endnote"),
+            ("comments", "comment"),
+        ] {
+            for nested in ["footnote", "endnote", "comment"] {
+                let xml = format!(
+                    "<w:{root} xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:{item} w:id=\"1\"><w:{nested} w:id=\"2\"><w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:{nested}></w:{item}></w:{root}>"
+                );
+                assert!(
+                    matches!(
+                        parse_docx_part(
+                            xml.as_bytes(),
+                            "word/story.xml",
+                            root,
+                            Some(&HashSet::from(["1".to_owned()])),
+                            None,
+                            &mut DocxStoryReferences::default(),
+                            &control(),
+                            IndexWorkStage::TextIndex,
+                        ),
+                        Err(DocumentExtractionError::Malformed { .. })
+                    ),
+                    "{root}/{nested}"
+                );
+            }
+        }
+        for item in ["footnote", "endnote", "comment"] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:{item} w:id=\"1\"><w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:{item}></w:body></w:document>"
+            );
+            assert!(
+                matches!(
+                    parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "document/{item}"
+            );
         }
     }
 
