@@ -1425,7 +1425,7 @@ fn docx_settings(
                         maximum: MAX_DOCX_XML_DEPTH,
                     });
                 }
-                validate_docx_attribute_namespaces(&event, &reader, control, stage)?;
+                validate_docx_attributes(&event, &reader, control, stage)?;
                 if skipped_branch_depth.is_some() {
                     continue;
                 }
@@ -1604,6 +1604,9 @@ fn docx_settings(
                     format: DocumentFormat::Docx,
                     message: "DOCX settings DOCTYPE is unsupported".to_owned(),
                 });
+            }
+            Event::GeneralRef(reference) => {
+                decode_docx_reference(&reference)?;
             }
             Event::Eof => break,
             _ => {}
@@ -1871,7 +1874,7 @@ fn parse_docx_content_types(
                         message: "DOCX content types have an invalid XML structure".to_owned(),
                     });
                 }
-                validate_docx_attribute_namespaces(&event, &reader, control, stage)?;
+                validate_docx_attributes(&event, &reader, control, stage)?;
                 if depth == 2 {
                     if types.overrides.len() + types.defaults.len() == MAX_DOCX_METADATA_RECORDS {
                         return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -2035,7 +2038,7 @@ fn parse_docx_relationships(
                         message: "DOCX relationships have an invalid XML structure".to_owned(),
                     });
                 }
-                validate_docx_attribute_namespaces(&event, &reader, control, stage)?;
+                validate_docx_attributes(&event, &reader, control, stage)?;
                 if depth == 2 {
                     if result.len() == MAX_DOCX_METADATA_RECORDS {
                         return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -2640,8 +2643,8 @@ fn office_relationship_namespace(namespace: &str) -> bool {
     )
 }
 
-/// Validate XML namespace syntax even for semantically ignored elements.
-fn validate_docx_attribute_namespaces(
+/// Validate XML attribute names and entity references even when semantically ignored.
+fn validate_docx_attributes(
     event: &BytesStart<'_>,
     reader: &NsReader<&[u8]>,
     control: &IndexWorkControl,
@@ -2661,6 +2664,12 @@ fn validate_docx_attribute_namespaces(
                 message: format!("DOCX XML attribute has an undeclared namespace prefix: {prefix}"),
             });
         }
+        let _value = quick_xml::escape::unescape(&attribute.value).map_err(|error| {
+            DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: error.to_string(),
+            }
+        })?;
     }
     Ok(())
 }
@@ -2918,7 +2927,7 @@ fn parse_docx_part(
                     paragraph_number += 1;
                 }
                 if skipped_branch_depth.is_some() {
-                    validate_docx_attribute_namespaces(&event, &reader, control, stage)?;
+                    validate_docx_attributes(&event, &reader, control, stage)?;
                     continue;
                 }
                 if wordprocessing
@@ -2975,6 +2984,7 @@ fn parse_docx_part(
                                 Some("separator" | "continuationSeparator" | "continuationNotice")
                             );
                         if !selected && !special {
+                            validate_docx_attributes(&event, &reader, control, stage)?;
                             skipped_branch_depth = Some(element_depth);
                             continue;
                         }
@@ -3038,7 +3048,7 @@ fn parse_docx_part(
                     if alternative.selection == DocxAlternativeSelection::Unselected && supported {
                         alternative.selection = DocxAlternativeSelection::Selected;
                     } else {
-                        validate_docx_attribute_namespaces(&event, &reader, control, stage)?;
+                        validate_docx_attributes(&event, &reader, control, stage)?;
                         skipped_branch_depth = Some(element_depth);
                         continue;
                     }
@@ -3064,6 +3074,13 @@ fn parse_docx_part(
                                 ),
                             });
                         }
+                        let value =
+                            quick_xml::escape::unescape(&attribute.value).map_err(|error| {
+                                DocumentExtractionError::Malformed {
+                                    format: DocumentFormat::Docx,
+                                    message: error.to_string(),
+                                }
+                            })?;
                         if suppressed {
                             continue;
                         }
@@ -3071,13 +3088,6 @@ fn parse_docx_part(
                             && matches!(&attribute_namespace, ResolveResult::Bound(namespace)
                                 if namespace.as_ref() == "http://www.w3.org/XML/1998/namespace")
                         {
-                            let value =
-                                quick_xml::escape::unescape(&attribute.value).map_err(|error| {
-                                    DocumentExtractionError::Malformed {
-                                        format: DocumentFormat::Docx,
-                                        message: error.to_string(),
-                                    }
-                                })?;
                             preserve_space[element_depth] = match value.as_ref() {
                                 "default" => false,
                                 "preserve" => true,
@@ -3099,13 +3109,6 @@ fn parse_docx_part(
                         {
                             continue;
                         }
-                        let value =
-                            quick_xml::escape::unescape(&attribute.value).map_err(|error| {
-                                DocumentExtractionError::Malformed {
-                                    format: DocumentFormat::Docx,
-                                    message: error.to_string(),
-                                }
-                            })?;
                         if value.split_whitespace().next().is_none() {
                             continue;
                         }
@@ -7061,6 +7064,84 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     if message.contains("undeclared namespace prefix")
             ));
         }
+    }
+
+    #[test]
+    fn docx_ignored_xml_rejects_invalid_entities() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><mc:AlternateContent><mc:Choice Requires="w"><w:p><w:r><w:t>Selected</w:t></w:r></w:p></mc:Choice><mc:Fallback><w:p><w:r><w:t>Ignored</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent></w:body></w:document>"#;
+        let escaped = xml.replace("<w:body>", "<w:body w:extra=\"A&amp;B\">");
+        assert_eq!(
+            parse_docx(escaped.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .expect("defined entity in an ignored attribute is valid")
+                .text,
+            "Selected"
+        );
+        for malformed in [
+            xml.replace("<w:body>", "<w:body w:extra=\"&undefined;\">"),
+            xml.replace("<w:body>", "<w:body w:extra=\"&#0;\">"),
+            xml.replace("<mc:Fallback>", "<mc:Fallback w:extra=\"&undefined;\">"),
+            xml.replace("<w:t>Ignored", "<w:t w:extra=\"&undefined;\">Ignored"),
+        ] {
+            assert!(matches!(
+                parse_docx(malformed.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="settings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
+        let settings = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:extra="&undefined;"/></w:settings>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/settings.xml", settings),
+        ]);
+        assert!(matches!(
+            extract_document_text_controlled(&archive, "settings.docx", None, &control()),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let settings = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat>&undefined;</w:compat></w:settings>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/settings.xml", settings),
+        ]);
+        assert!(matches!(
+            extract_document_text_controlled(&archive, "settings.docx", None, &control()),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+        let valid_settings = br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat>&amp;</w:compat></w:settings>"#;
+        let archive = docx_archive_with_parts(&[
+            (DOCX_DOCUMENT_PART, main),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/settings.xml", valid_settings),
+        ]);
+        extract_document_text_controlled(&archive, "settings.docx", None, &control())
+            .expect("predefined entity in ignored settings text is valid");
+        let relationships = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" extra="&undefined;"/>"#;
+        assert!(matches!(
+            parse_docx_relationships(relationships, &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { message, .. }) if message.contains("undefined")
+        ));
+        let content_types = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" extra="&undefined;"/>"#;
+        assert!(matches!(
+            parse_docx_content_types(content_types, &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { message, .. }) if message.contains("undefined")
+        ));
+        let notes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Selected</w:t></w:r></w:p></w:footnote><w:footnote w:id="2" w:extra="&undefined;"/></w:footnotes>"#;
+        let selected = HashSet::from(["1".to_owned()]);
+        assert!(matches!(
+            parse_docx_part(
+                notes,
+                "word/footnotes.xml",
+                "footnotes",
+                Some(&selected),
+                None,
+                &mut DocxStoryReferences::default(),
+                &control(),
+                IndexWorkStage::TextIndex,
+            ),
+            Err(DocumentExtractionError::Malformed { message, .. }) if message.contains("undefined")
+        ));
     }
 
     #[test]

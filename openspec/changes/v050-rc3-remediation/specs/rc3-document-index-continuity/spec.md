@@ -56,6 +56,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a content-type root or record, relationship element, non-rendered section-revision element, or skipped compatibility branch in a story or settings part contains an attribute with an undeclared namespace prefix
 - **THEN** the malformed DOCX is rejected before publication, even when the attribute does not select rendered content
 
+#### Scenario: Invalid entity in ignored XML
+- **WHEN** a story, settings, content-type, or relationship attribute contains an undefined or invalid XML entity, including an attribute in an unselected compatibility branch, or ignored settings text contains one
+- **THEN** the malformed DOCX is rejected before publication rather than treating ignored content as well-formed
+
 #### Scenario: BOM-less UTF-16 XML with leading whitespace
 - **WHEN** an unambiguous BOM-less UTF-16 LE or BE DOCX XML part without an XML declaration starts with XML whitespace before its root
 - **THEN** the bytes are decoded as an explicit compatibility tolerance and the resulting XML is validated like the same part without leading whitespace
