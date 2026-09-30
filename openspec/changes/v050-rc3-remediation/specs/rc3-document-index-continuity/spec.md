@@ -48,6 +48,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a footnote, endnote, or comment story root contains a direct WordprocessingML child other than its item type, including inside a selected compatibility branch, or any note/comment item appears nested or outside its matching collection root
 - **THEN** extraction rejects the malformed story before its text or symbols can enter a new publication
 
+#### Scenario: Section properties outside the main document structure
+- **WHEN** section properties and header/footer references appear outside the main document's body or a paragraph-properties child of a paragraph within that body, including in a separate text-box story, accounting for selected compatibility wrappers
+- **THEN** extraction rejects the malformed section before its header or footer story can enter a new publication
+
 #### Scenario: Referenced story is not examined
 - **WHEN** a valid DOCX references an in-package subdocument, glossary, or other rendered story type that the bounded extractor cannot examine
 - **THEN** it publishes typed incomplete story coverage without claiming that part is symbol-free or fetching external content

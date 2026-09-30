@@ -2604,6 +2604,17 @@ struct DocxHeaderSection {
     links: Vec<(DocxStoryKind, String, DocxHeaderVariant)>,
 }
 
+/// Logical ancestors that may own section properties after compatibility selection.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum DocxSectionAncestor {
+    #[default]
+    Other,
+    Document,
+    Body,
+    Paragraph,
+    ParagraphProperties,
+}
+
 /// Parent tags needed to distinguish rendered placeholders from `docPartObj` metadata.
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 enum DocxSdtTag {
@@ -2808,6 +2819,8 @@ fn parse_docx_part(
     let mut text_start = 0;
     let mut preserve_space = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut sdt_tags = [DocxSdtTag::Other; MAX_DOCX_XML_DEPTH + 1];
+    let mut section_ancestors = [DocxSectionAncestor::Other; MAX_DOCX_XML_DEPTH + 1];
+    let mut inside_main_body = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut comment_range_parents = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut sdt_stack: Vec<DocxSdtContext> = Vec::new();
     let mut simple_fields: Vec<DocxSimpleField> = Vec::new();
@@ -3210,6 +3223,41 @@ fn parse_docx_part(
                         parent_depth -= 2;
                     }
                 }
+                section_ancestors[element_depth] = if !wordprocessing {
+                    DocxSectionAncestor::Other
+                } else {
+                    match (name.as_ref(), section_ancestors[parent_depth]) {
+                        ("document", _) if element_depth == 1 => DocxSectionAncestor::Document,
+                        ("body", DocxSectionAncestor::Document) => DocxSectionAncestor::Body,
+                        ("p", _) if inside_main_body[parent_depth] => {
+                            DocxSectionAncestor::Paragraph
+                        }
+                        ("pPr", DocxSectionAncestor::Paragraph) => {
+                            DocxSectionAncestor::ParagraphProperties
+                        }
+                        _ => DocxSectionAncestor::Other,
+                    }
+                };
+                inside_main_body[element_depth] = if wordprocessing && name.as_ref() == "body" {
+                    section_ancestors[element_depth] == DocxSectionAncestor::Body
+                } else if wordprocessing
+                    && matches!(
+                        name.as_ref(),
+                        "document"
+                            | "hdr"
+                            | "ftr"
+                            | "footnotes"
+                            | "endnotes"
+                            | "comments"
+                            | "docPartBody"
+                            | "txbxContent"
+                    )
+                {
+                    false
+                } else {
+                    inside_main_body[parent_depth]
+                        || section_ancestors[element_depth] == DocxSectionAncestor::Body
+                };
                 // Comment anchors belong to content, never property metadata.
                 comment_range_parents[element_depth] = wordprocessing
                     && matches!(
@@ -3388,6 +3436,18 @@ fn parse_docx_part(
                 }
                 match if wordprocessing { name.as_ref() } else { "" } {
                     "sectPr" if deleted_depth.is_none() => {
+                        if root_name != "document"
+                            || !matches!(
+                                section_ancestors[parent_depth],
+                                DocxSectionAncestor::Body
+                                    | DocxSectionAncestor::ParagraphProperties
+                            )
+                        {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX section properties have invalid ancestry".to_owned(),
+                            });
+                        }
                         if header_section.is_some() {
                             return Err(DocumentExtractionError::Malformed {
                                 format: DocumentFormat::Docx,
@@ -8999,6 +9059,77 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                     "{kind} {variant}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn docx_section_properties_require_document_ancestry() {
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/></Relationships>"#;
+        let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:hdr>"#;
+        for (invalid, in_body) in [
+            (
+                "<w:p><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></w:p>",
+                true,
+            ),
+            (
+                "<w:wrapper><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></w:wrapper>",
+                true,
+            ),
+            (
+                "<w:pPr><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></w:pPr>",
+                true,
+            ),
+            (
+                "<w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:pPr><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></w:pPr></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>",
+                true,
+            ),
+            (
+                "<w:p><w:pPr><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></w:pPr></w:p>",
+                false,
+            ),
+        ] {
+            let content = if in_body {
+                format!("<w:body>{invalid}</w:body>")
+            } else {
+                invalid.to_owned()
+            };
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">{content}</w:document>"
+            );
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/header.xml", header),
+            ]);
+            assert!(
+                matches!(
+                    extract_document_text_controlled(
+                        &archive,
+                        "invalid-section.docx",
+                        None,
+                        &control()
+                    ),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{invalid}"
+            );
+        }
+        for valid in [
+            "<mc:AlternateContent><mc:Choice Requires=\"w\"><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></mc:Choice><mc:Fallback/></mc:AlternateContent>",
+            "<w:p><mc:AlternateContent><mc:Choice Requires=\"w\"><w:pPr><w:sectPr><w:headerReference r:id=\"h\"/></w:sectPr></w:pPr></mc:Choice><mc:Fallback/></mc:AlternateContent></w:p>",
+        ] {
+            let main = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><w:body>{valid}</w:body></w:document>"
+            );
+            let archive = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/header.xml", header),
+            ]);
+            let facts =
+                extract_document_text_controlled(&archive, "valid-section.docx", None, &control())
+                    .expect("selected compatibility wrapper preserves valid section ancestry");
+            assert_eq!(facts.symbols.len(), 1, "{valid}");
         }
     }
 
