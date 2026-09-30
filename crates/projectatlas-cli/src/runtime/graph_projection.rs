@@ -20,7 +20,8 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
-    MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
+    CodeSymbol, MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind,
+    SymbolRelation,
 };
 use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
@@ -30,10 +31,11 @@ use projectatlas_fs::RootScanPolicy;
 #[cfg(test)]
 use projectatlas_fs::ScanOptions;
 use projectatlas_symbols::{
-    ConfiguredModuleResolution, MAX_RESOLUTION_KEYS_PER_FACT, MarkdownFactCompleteness,
-    MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection, ResolutionProjectionContext,
-    ResolutionProjectionError, ResolutionProjectionFact, derive_resolution_keys_with_context,
-    extract_markdown_facts_controlled, parse_import_references,
+    ConfiguredModuleResolution, DOCUMENT_COVERAGE_SYMBOL, MAX_RESOLUTION_KEYS_PER_FACT,
+    MarkdownFactCompleteness, MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection,
+    ResolutionProjectionContext, ResolutionProjectionError, ResolutionProjectionFact,
+    derive_resolution_keys_with_context, extract_markdown_facts_controlled,
+    parse_import_references,
 };
 use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
@@ -2566,11 +2568,15 @@ fn build_entity_projection_with_config_limit(
         let mut symbol_digests = Vec::with_capacity(graph.symbols.len());
         entity_bytes = entity_bytes.saturating_add(
             STAGED_GRAPH_ROW_BYTES
-                .saturating_mul(u64::try_from(graph.symbols.len()).unwrap_or(u64::MAX)),
+                .saturating_mul(u64::try_from(navigable_symbol_count(graph)).unwrap_or(u64::MAX)),
         );
         let qualified_parents = qualified_symbol_parents(graph)?;
         for (symbol, qualified_parent) in graph.symbols.iter().zip(qualified_parents) {
             control.check(IndexWorkStage::SymbolParsing)?;
+            if is_document_coverage_marker(graph, symbol) {
+                symbol_digests.push(None);
+                continue;
+            }
             let entity = match symbol.kind {
                 SymbolKind::Import | SymbolKind::Dependency | SymbolKind::Workspace => None,
                 SymbolKind::Package => Some(
@@ -5716,6 +5722,22 @@ fn relation_reference(relation: &SymbolRelation) -> String {
     nonempty_reference(value)
 }
 
+/// Keep document coverage metadata out of the user-facing entity graph.
+pub(super) fn is_document_coverage_marker(graph: &SymbolGraph, symbol: &CodeSymbol) -> bool {
+    matches!(graph.language.as_deref(), Some("docx" | "pdf"))
+        && symbol.name == DOCUMENT_COVERAGE_SYMBOL
+        && symbol.kind == SymbolKind::Unknown
+}
+
+/// Count only symbols exposed by navigation and charged to publication budgets.
+pub(super) fn navigable_symbol_count(graph: &SymbolGraph) -> usize {
+    graph
+        .symbols
+        .iter()
+        .filter(|symbol| !is_document_coverage_marker(graph, symbol))
+        .count()
+}
+
 /// Project parser trust into one path-scoped coverage record.
 fn coverage_for_graph(
     graph: &SymbolGraph,
@@ -5729,17 +5751,44 @@ fn coverage_for_graph(
     let identity_omitted =
         identity_admission.rejected_facts_for_graph(&graph.path, derived_identity_admission)?;
     let parser_omitted = identity_admission.parser_rejection_for_graph(&graph.path);
+    let document_gaps = graph
+        .symbols
+        .iter()
+        .find(|symbol| is_document_coverage_marker(graph, symbol))
+        .map(|symbol| symbol.signature.as_str());
     let omitted = identity_omitted
         .checked_add(parser_omitted)
+        .and_then(|omitted| omitted.checked_add(u64::from(document_gaps.is_some())))
         .ok_or_else(|| CliError::InvalidInput("identity rejection count overflowed".to_string()))?;
     let identity_details_dropped = identity_admission.rejection_details_dropped_for(&graph.path)
         || derived_identity_admission.rejection_details_dropped_for(&graph.path);
     // Graph-scoped `rows` is the existing persisted coverage slot for the
     // publication-wide typed identity-detail ceiling. It is set only from
     // the admission fact that a distinct detail was actually evicted.
-    let reached_limit = (omitted > 0 && identity_details_dropped).then_some(GraphLimitKind::Rows);
-    let covered = if identity_omitted > 0 {
-        u64::try_from(graph.symbols.len().saturating_add(graph.relations.len())).unwrap_or(u64::MAX)
+    // Graph limits group parser work with intermediate bytes; the reason retains its exact subtype.
+    let reached_limit = if identity_details_dropped {
+        Some(GraphLimitKind::Rows)
+    } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:output_bytes")) {
+        Some(GraphLimitKind::OutputBytes)
+    } else if document_gaps.is_some_and(|gaps| gaps.contains("resource_limit:fact_count")) {
+        Some(GraphLimitKind::Rows)
+    } else if document_gaps.is_some_and(|gaps| {
+        gaps.contains("resource_limit:memory_bytes")
+            || gaps.contains("resource_limit:parser_work_bytes")
+    }) {
+        Some(GraphLimitKind::IntermediateBytes)
+    } else {
+        None
+    };
+    let covered = if identity_omitted > 0 || document_gaps.is_some() {
+        u64::try_from(
+            graph
+                .symbols
+                .len()
+                .saturating_sub(usize::from(document_gaps.is_some()))
+                .saturating_add(graph.relations.len()),
+        )
+        .unwrap_or(u64::MAX)
     } else {
         u64::try_from(graph.relations.len()).unwrap_or(u64::MAX)
     };
@@ -5749,6 +5798,10 @@ fn coverage_for_graph(
         } else {
             CoverageState::Failed
         };
+        let reason = document_gaps.map_or_else(
+            || PARTIAL_COVERAGE_REASON.to_owned(),
+            |gaps| format!("document_text_incomplete:{gaps}"),
+        );
         return CoverageRecord::new(
             scope,
             None,
@@ -5756,7 +5809,7 @@ fn coverage_for_graph(
             covered,
             omitted,
             generation,
-            Some(GraphIdentityText::new(PARTIAL_COVERAGE_REASON).map_err(invalid_graph_contract)?),
+            Some(GraphIdentityText::new(reason).map_err(invalid_graph_contract)?),
             reached_limit,
         )
         .map_err(invalid_graph_contract);
@@ -6255,7 +6308,7 @@ pub(super) fn admit_symbol_build_stage(
             continue;
         };
         symbols = symbols
-            .checked_add(parsed.graph.symbols.len())
+            .checked_add(navigable_symbol_count(&parsed.graph))
             .ok_or_else(|| {
                 CliError::InvalidInput("admitted symbol report count overflowed".to_string())
             })?;
@@ -7772,6 +7825,148 @@ mod tests {
             &unrelated.reached_limit(),
             &None,
             "an unrelated path inherited another path's identity eviction",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_text_gap_survives_graph_coverage_projection() -> Result<(), Box<dyn Error>> {
+        for (limit, reached, reason) in [
+            (
+                projectatlas_symbols::DocumentLimit::OutputBytes,
+                GraphLimitKind::OutputBytes,
+                "resource_limit:output_bytes",
+            ),
+            (
+                projectatlas_symbols::DocumentLimit::ParserWorkBytes,
+                GraphLimitKind::IntermediateBytes,
+                "resource_limit:parser_work_bytes",
+            ),
+        ] {
+            let facts = projectatlas_symbols::DocumentFacts {
+                format: projectatlas_symbols::DocumentFormat::Docx,
+                text: String::new(),
+                facts: Vec::new(),
+                symbols: Vec::new(),
+                completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                    gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
+                        limit,
+                    )],
+                },
+                provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
+            };
+            for language in [None, Some("DOCX")] {
+                let graph = facts.symbol_graph("docs/limited.docx", language);
+                require_eq(
+                    &graph.language.as_deref(),
+                    &Some("docx"),
+                    "canonical language",
+                )?;
+                require_eq(
+                    &super::navigable_symbol_count(&graph),
+                    &0,
+                    "coverage marker was counted",
+                )?;
+                let coverage = super::coverage_for_graph(
+                    &graph,
+                    IndexGeneration::new(1),
+                    &GraphIdentityAdmission::default(),
+                    &GraphIdentityAdmission::default(),
+                )?;
+                require_eq(
+                    &coverage.state(),
+                    &CoverageState::Failed,
+                    "empty document gap was lost",
+                )?;
+                require_eq(
+                    &coverage.reached_limit(),
+                    &Some(reached),
+                    "document ceiling was lost",
+                )?;
+                require(
+                    coverage
+                        .reason()
+                        .is_some_and(|value| value.as_str().contains(reason)),
+                    "document-local reason was lost",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn document_coverage_marker_preserves_exact_entity_budget_and_report()
+    -> Result<(), Box<dyn Error>> {
+        let facts = projectatlas_symbols::DocumentFacts {
+            format: projectatlas_symbols::DocumentFormat::Docx,
+            text: "Hello".to_owned(),
+            facts: vec![projectatlas_symbols::DocumentFact {
+                text: "Hello".to_owned(),
+                locator: projectatlas_symbols::DocumentLocator::Docx {
+                    part: "word/document.xml".to_owned(),
+                    paragraph: 1,
+                    run: 1,
+                    text_start: 0,
+                    text_end: 5,
+                },
+                line_start: 1,
+                line_end: 1,
+            }],
+            symbols: Vec::new(),
+            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                gaps: vec![projectatlas_symbols::DocumentCoverageGap::UnexaminedStory],
+            },
+            provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
+        };
+        let graph = facts.symbol_graph("guide.docx", None);
+        let mut without_marker = graph.clone();
+        without_marker.symbols.pop();
+        let project = ProjectInstanceId::from_bytes([33; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let packages = PackageIndex::from_graphs(std::slice::from_ref(&graph))?;
+        let baseline = build_entity_projection_with_config_limit(
+            project,
+            generation,
+            &[],
+            std::slice::from_ref(&without_marker),
+            &packages,
+            &ConfiguredModuleResolution::default(),
+            None,
+            false,
+            &control,
+            super::super::MAX_PUBLICATION_STAGING_BYTES,
+        )?;
+        let with_marker = build_entity_projection_with_config_limit(
+            project,
+            generation,
+            &[],
+            std::slice::from_ref(&graph),
+            &packages,
+            &ConfiguredModuleResolution::default(),
+            None,
+            false,
+            &control,
+            baseline.peak_retained_bytes,
+        )?;
+        require_eq(
+            &with_marker.peak_retained_bytes,
+            &baseline.peak_retained_bytes,
+            "coverage marker charged the entity staging budget",
+        )?;
+        let mut stage = symbol_build_stage_for_graphs(vec![graph.clone()]);
+        super::admit_symbol_build_stage(&mut stage, &control)?;
+        require_eq(&stage.report.symbols, &1, "coverage marker inflated report")?;
+        let coverage = coverage_for_graph(
+            &graph,
+            generation,
+            &GraphIdentityAdmission::default(),
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Partial,
+            "coverage was lost",
         )?;
         Ok(())
     }

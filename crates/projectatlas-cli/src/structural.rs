@@ -81,15 +81,30 @@ pub(crate) fn document_summary_from_facts(facts: &projectatlas_symbols::Document
         .take(LABEL_LIMIT + 1)
         .collect::<String>();
     let excerpt = prefix.trim_end();
+    let incomplete = matches!(
+        facts.completeness,
+        projectatlas_symbols::DocumentCompleteness::Partial { .. }
+    );
     if excerpt.is_empty() {
-        format!("{} document with no extracted text.", facts.format)
+        if incomplete {
+            format!("{} document with incomplete text coverage.", facts.format)
+        } else {
+            format!("{} document with no extracted text.", facts.format)
+        }
     } else {
         let excerpt = if excerpt.chars().count() > LABEL_LIMIT {
             truncate_chars(excerpt, LABEL_LIMIT)
         } else {
             excerpt.to_owned()
         };
-        format!("{} document text: {excerpt}", facts.format)
+        if incomplete {
+            format!(
+                "{} document text (incomplete coverage): {excerpt}",
+                facts.format
+            )
+        } else {
+            format!("{} document text: {excerpt}", facts.format)
+        }
     }
 }
 
@@ -841,6 +856,7 @@ mod tests {
             format: DocumentFormat::Docx,
             text: "\"#\"\n\t#".to_owned(),
             facts: Vec::new(),
+            symbols: Vec::new(),
             completeness: DocumentCompleteness::Complete,
             provenance: DocumentParserProvenance::QuickXml,
         };
@@ -857,6 +873,18 @@ mod tests {
         assert_eq!(
             super::document_summary_from_facts(&facts),
             "docx document with no extracted text."
+        );
+        facts.completeness = DocumentCompleteness::Partial {
+            gaps: vec![projectatlas_symbols::DocumentCoverageGap::UnknownSymbolMapping],
+        };
+        assert_eq!(
+            super::document_summary_from_facts(&facts),
+            "docx document with incomplete text coverage."
+        );
+        facts.text = "Before After".to_owned();
+        assert_eq!(
+            super::document_summary_from_facts(&facts),
+            "docx document text (incomplete coverage): Before After"
         );
     }
 

@@ -3164,6 +3164,7 @@ impl AtlasStore {
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1 AND (name LIKE ?2 OR signature LIKE ?2 OR documentation LIKE ?2)
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?3
                 ",
@@ -3175,6 +3176,7 @@ impl AtlasStore {
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?2
                 ",
@@ -3185,7 +3187,8 @@ impl AtlasStore {
                 SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
-                WHERE name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1
+                WHERE (name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1)
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?2
                 ",
@@ -3196,6 +3199,7 @@ impl AtlasStore {
                 SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
                        source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
+                WHERE NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?1
                 ",
@@ -3314,6 +3318,7 @@ impl AtlasStore {
                         + COALESCE(length(CAST(documentation AS BLOB)), 0)
                 FROM symbols
                 WHERE path IN ({placeholders})
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?{limit_parameter}
                 "
@@ -3480,6 +3485,7 @@ impl AtlasStore {
                    source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE name IN ({placeholders})
+              AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
             ORDER BY path, line_start, name
             "
         );
@@ -3555,6 +3561,7 @@ impl AtlasStore {
                    source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE path = ?1 AND name = ?2
+              AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
             ORDER BY line_start, line_end, kind, parent
             ",
             params![file, name],
@@ -4129,7 +4136,7 @@ impl AtlasStore {
     pub fn symbol_count(&self) -> DbResult<usize> {
         let count = self
             .connection
-            .query_row("SELECT COUNT(*) FROM symbols", [], |row| {
+            .query_row("SELECT COUNT(*) FROM symbols WHERE NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')", [], |row| {
                 row.get::<_, i64>(0)
             })?;
         Ok(i64_to_usize(count))
@@ -4156,7 +4163,7 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn symbol_count_for_path(&self, path: &str) -> DbResult<usize> {
         let count = self.connection.query_row(
-            "SELECT COUNT(*) FROM symbols WHERE path = ?1",
+            "SELECT COUNT(*) FROM symbols WHERE path = ?1 AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')",
             [path],
             |row| row.get::<_, i64>(0),
         )?;
@@ -4178,7 +4185,7 @@ impl AtlasStore {
             }
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql = format!(
-                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) GROUP BY path"
+                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage') GROUP BY path"
             );
             let mut statement = self.connection.prepare(&sql)?;
             let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
@@ -4408,7 +4415,7 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn max_symbol_end_line_for_path(&self, path: &str) -> DbResult<usize> {
         let line = self.connection.query_row(
-            "SELECT COALESCE(MAX(line_end), 0) FROM symbols WHERE path = ?1",
+            "SELECT COALESCE(MAX(line_end), 0) FROM symbols WHERE path = ?1 AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')",
             [path],
             |row| row.get::<_, i64>(0),
         )?;
@@ -7854,7 +7861,8 @@ fn classified_symbols_sql(
     selection: ContentSelection,
     limit: usize,
 ) -> (String, Vec<Value>) {
-    let mut predicates = Vec::new();
+    // Internal document coverage metadata is retained for graph rebuilds, not symbol navigation.
+    let mut predicates = vec!["NOT (symbol.language IN ('docx', 'pdf') AND symbol.kind = 'unknown' AND symbol.name = 'document-text-coverage')".to_owned()];
     let mut bindings = Vec::new();
     if let Some(file) = file {
         bindings.push(Value::Text(file.to_string()));
@@ -14369,6 +14377,89 @@ mod tests {
         if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
             return Err(io::Error::other(format!(
                 "metadata count corruption returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_symbol_batch_omits_document_coverage_before_limits() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("docs/partial.docx", "hash-docx")])?;
+        let mut symbol = batch_test_symbol("docs/partial.docx", "document-symbol-1", 2, 0);
+        symbol.language = Some("docx".to_owned());
+        symbol.kind = SymbolKind::Value;
+        symbol.parser = ParserKind::Structural;
+        let mut coverage = batch_test_symbol("docs/partial.docx", "document-text-coverage", 1, 0);
+        coverage.language = Some("docx".to_owned());
+        coverage.kind = SymbolKind::Unknown;
+        coverage.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "docs/partial.docx".to_owned(),
+            language: Some("docx".to_owned()),
+            parser: ParserKind::Structural,
+            symbols: vec![coverage, symbol],
+            relations: Vec::new(),
+        })?;
+        let result = store.load_symbols_for_paths_bounded(
+            &["docs/partial.docx".to_owned()],
+            SymbolBatchReadBudget::new(1, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(&result.rows.len(), &1, "only the real document symbol")?;
+        require_eq(
+            &result.rows[0].name.as_str(),
+            &"document-symbol-1",
+            "visible row",
+        )?;
+        require_eq(
+            &result.reached_limit,
+            &None,
+            "coverage does not consume row budget",
+        )?;
+        let exact_bytes = store.load_symbols_for_paths_bounded(
+            &["docs/partial.docx".to_owned()],
+            SymbolBatchReadBudget::new(1, 1, result.work.decoded_bytes)?,
+            None,
+        )?;
+        require_eq(&exact_bytes.rows.len(), &1, "exact real-symbol byte budget")?;
+        require_eq(
+            &exact_bytes.reached_limit,
+            &None,
+            "coverage does not consume byte budget",
+        )?;
+        require_eq(
+            &store.max_symbol_end_line_for_path("docs/partial.docx")?,
+            &3,
+            "coverage marker does not affect the maximum real line",
+        )?;
+        let mut coverage_only =
+            batch_test_symbol("docs/partial.docx", "document-text-coverage", 1, 0);
+        coverage_only.language = Some("docx".to_owned());
+        coverage_only.kind = SymbolKind::Unknown;
+        coverage_only.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "docs/partial.docx".to_owned(),
+            language: Some("docx".to_owned()),
+            parser: ParserKind::Structural,
+            symbols: vec![coverage_only],
+            relations: Vec::new(),
+        })?;
+        require_eq(
+            &store.max_symbol_end_line_for_path("docs/partial.docx")?,
+            &0,
+            "coverage-only documents have no inferred rendered lines",
+        )?;
+        let plan = store
+            .connection
+            .prepare("EXPLAIN QUERY PLAN SELECT path FROM symbols WHERE path IN ('docs/partial.docx') AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')")?
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        if !plan.contains("idx_symbols_path") {
+            return Err(io::Error::other(format!(
+                "bounded document symbols missed the path index: {plan}"
             ))
             .into());
         }

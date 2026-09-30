@@ -6385,7 +6385,7 @@ fn stage_symbols_for_nodes_with_limits(
                 SymbolParseOutcome::Parsed(parsed) => {
                     let next_symbols = checked_symbol_publication_usage(
                         report.symbols as u64,
-                        parsed.graph.symbols.len() as u64,
+                        graph_projection::navigable_symbol_count(&parsed.graph) as u64,
                         limits.symbol_rows,
                         IndexWorkResource::SymbolRows,
                     )?;
@@ -6541,6 +6541,9 @@ fn symbol_parse_output_bytes(parsed: &SymbolParseSuccess) -> u64 {
         + parsed.summary.len() as u64
         + parsed.purpose_suggestion.as_ref().map_or(0, String::len) as u64;
     for symbol in &graph.symbols {
+        if graph_projection::is_document_coverage_marker(graph, symbol) {
+            continue;
+        }
         bytes = bytes.saturating_add(
             symbol.path.len() as u64
                 + symbol.language.as_ref().map_or(0, String::len) as u64
@@ -6717,6 +6720,7 @@ fn document_parse_error_outcome(path: &str, error: DocumentExtractionError) -> S
             let resource = match limit {
                 DocumentLimit::FactCount => IndexWorkResource::SymbolRows,
                 DocumentLimit::ExecutionFuel => IndexWorkResource::ParserFuel,
+                DocumentLimit::ParserWorkBytes => IndexWorkResource::ParserWorkBytes,
                 DocumentLimit::OutputBytes => IndexWorkResource::OutputBytes,
                 DocumentLimit::EntryCount | DocumentLimit::NestingDepth => {
                     IndexWorkResource::Entries
@@ -6752,6 +6756,7 @@ fn document_navigation_error(path: &str, error: DocumentExtractionError) -> CliE
             let resource = match limit {
                 DocumentLimit::FactCount => IndexWorkResource::SymbolRows,
                 DocumentLimit::ExecutionFuel => IndexWorkResource::ParserFuel,
+                DocumentLimit::ParserWorkBytes => IndexWorkResource::ParserWorkBytes,
                 DocumentLimit::OutputBytes => IndexWorkResource::OutputBytes,
                 DocumentLimit::EntryCount | DocumentLimit::NestingDepth => {
                     IndexWorkResource::Entries
@@ -13644,6 +13649,54 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                 .contains("pdf:page=1;text-span="),
             &true,
             "document locator persisted in graph symbol",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn document_coverage_marker_does_not_use_publication_symbol_budget()
+    -> Result<(), Box<dyn Error>> {
+        let facts = projectatlas_symbols::DocumentFacts {
+            format: projectatlas_symbols::DocumentFormat::Docx,
+            text: "Hello".to_owned(),
+            facts: vec![projectatlas_symbols::DocumentFact {
+                text: "Hello".to_owned(),
+                locator: projectatlas_symbols::DocumentLocator::Docx {
+                    part: "word/document.xml".to_owned(),
+                    paragraph: 1,
+                    run: 1,
+                    text_start: 0,
+                    text_end: 5,
+                },
+                line_start: 1,
+                line_end: 1,
+            }],
+            symbols: Vec::new(),
+            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                gaps: vec![projectatlas_symbols::DocumentCoverageGap::UnexaminedStory],
+            },
+            provenance: projectatlas_symbols::DocumentParserProvenance::QuickXml,
+        };
+        let mut parsed = SymbolParseSuccess {
+            path: "guide.docx".to_owned(),
+            graph: facts.symbol_graph("guide.docx", None),
+            markdown_facts: None,
+            source_parser: ParserKind::Structural,
+            summary: "Hello".to_owned(),
+            summary_is_structural: true,
+            purpose_suggestion: None,
+        };
+        let with_marker = symbol_parse_output_bytes(&parsed);
+        require_eq(
+            &graph_projection::navigable_symbol_count(&parsed.graph),
+            &1,
+            "only the real document block uses a symbol row",
+        )?;
+        parsed.graph.symbols.pop();
+        require_eq(
+            &with_marker,
+            &symbol_parse_output_bytes(&parsed),
+            "coverage marker used publication output bytes",
         )?;
         Ok(())
     }

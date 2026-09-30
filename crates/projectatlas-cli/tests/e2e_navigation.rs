@@ -10048,6 +10048,558 @@ fn require_json_contains_from_value(
     }
 }
 
+fn docx_wps_text_box(content: &str) -> String {
+    format!(
+        concat!(
+            "<w:drawing><wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">",
+            "<wp:extent cx=\"914400\" cy=\"914400\"/><wp:docPr id=\"1\" name=\"Text box\"/>",
+            "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">",
+            "<a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+            "<wps:wsp xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+            "<wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>{}</w:txbxContent></wps:txbx>",
+            "<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"
+        ),
+        content
+    )
+}
+
+#[test]
+fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(), Box<dyn Error>> {
+    const SOURCE_DIR: &str = "src";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("docx-symbol-publication");
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::create_dir_all(repo.join(SOURCE_DIR))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(
+        repo.join(SOURCE_DIR).join("lib.rs"),
+        "pub fn still_indexed() {}\n",
+    )?;
+    fs::write(
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        "[project]\nroot = \".\"\n",
+    )?;
+    let document = repo.join("docs/symbols.docx");
+    let write_docx = |repeated: bool,
+                      live_field: bool,
+                      header_relationship: Option<&str>|
+     -> Result<(), Box<dyn Error>> {
+        let mut archive = ZipWriter::new(fs::File::create(&document)?);
+        let field = if live_field { "<w:pgNum/>" } else { "" };
+        let header_relationship = header_relationship.unwrap_or(
+            r#"<Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>"#,
+        );
+        let document_relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{header_relationship}<Relationship Id="f" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/><Relationship Id="n" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="e" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="c" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#
+        );
+        let main = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Before</w:t><w:sym w:font="Wingdings" w:char="F03A"/>{field}<w:t>After</w:t>{}</w:r></w:p><w:p><w:pPr><w:framePr/></w:pPr><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p><w:p><w:r><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/><w:commentReference w:id="4"/></w:r></w:p><w:sectPr><w:headerReference r:id="h"/><w:footerReference r:id="f"/></w:sectPr></w:body></w:document>"#,
+            docx_wps_text_box("<w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p>")
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/><Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            ("word/document.xml", main.as_str()),
+            (
+                "word/_rels/document.xml.rels",
+                document_relationships.as_str(),
+            ),
+            (
+                "word/footer1.xml",
+                r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:ftr>"#,
+            ),
+            (
+                "word/footnotes.xml",
+                r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="0" w:type="separator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:r><w:t>Footnote</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote></w:footnotes>"#,
+            ),
+            (
+                "word/endnotes.xml",
+                r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="0" w:type="separator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:endnote><w:endnote w:id="3"><w:p><w:r><w:t>Endnote</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:endnote></w:endnotes>"#,
+            ),
+            (
+                "word/comments.xml",
+                r#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:p><w:r><w:t>Comment</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:comment></w:comments>"#,
+            ),
+            (
+                "word/settings.xml",
+                r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnotePr><w:footnote w:id="0"/></w:footnotePr><w:endnotePr><w:endnote w:id="0"/></w:endnotePr></w:settings>"#,
+            ),
+        ];
+        for (name, xml) in parts {
+            archive.start_file(name, FileOptions::default())?;
+            archive.write_all(xml.as_bytes())?;
+        }
+        archive.start_file("word/header1.xml", FileOptions::default())?;
+        let extra = if repeated {
+            r#"<w:sym w:font="Wingdings" w:char="F03A"/>"#
+        } else {
+            ""
+        };
+        write!(
+            archive,
+            "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:p><w:r><w:t>Header</w:t><w:sym w:font=\"Wingdings\" w:char=\"F03A\"/>{extra}</w:r></w:p></w:hdr>"
+        )?;
+        archive.finish()?;
+        Ok(())
+    };
+    write_docx(false, false, None)?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &database)?;
+    let verify = |expected: usize| -> Result<(), Box<dyn Error>> {
+        let store = Connection::open(&database)?;
+        let signatures = store.prepare("SELECT signature FROM symbols WHERE path = 'docs/symbols.docx' AND name LIKE 'document-symbol-%' ORDER BY name")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if signatures.len() != expected
+            || signatures.iter().collect::<BTreeSet<_>>().len() != expected
+            || !signatures.iter().all(|signature| {
+                signature.contains("font=Some(\"Wingdings\");code=F03A")
+                    || signature.contains("font=Some(\"Symbol\");code=F061")
+            })
+            || [
+                ("word/document.xml", 3),
+                ("word/header1.xml", expected - 9),
+                ("word/footer1.xml", 1),
+                ("word/footnotes.xml", 2),
+                ("word/endnotes.xml", 2),
+                ("word/comments.xml", 1),
+            ]
+            .iter()
+            .any(|(part, count)| {
+                signatures
+                    .iter()
+                    .filter(|signature| signature.contains(&format!("part={part};")))
+                    .count()
+                    != *count
+            })
+        {
+            return Err(io::Error::other(format!(
+                "persisted DOCX symbols lost part or occurrence: {signatures:?}"
+            ))
+            .into());
+        }
+        let visible_count =
+            AtlasStore::open(&database)?.symbol_count_for_path("docs/symbols.docx")?;
+        let raw_count: i64 = store.query_row(
+            "SELECT COUNT(*) FROM symbols WHERE path = 'docs/symbols.docx'",
+            [],
+            |row| row.get(0),
+        )?;
+        if raw_count != i64::try_from(visible_count)? + 1 {
+            return Err(io::Error::other(format!(
+                "DOCX visible symbol count {visible_count} did not exclude one internal marker from {raw_count} stored rows"
+            )).into());
+        }
+        if AtlasStore::open(&database)?
+            .load_symbols(Some("docs/symbols.docx"), None, 20)?
+            .iter()
+            .any(|symbol| symbol.name == "document-text-coverage")
+        {
+            return Err(
+                io::Error::other("raw symbol navigation exposed the DOCX coverage marker").into(),
+            );
+        }
+        let (state, reason): (String, String) = store.query_row(
+            "SELECT state, reason FROM graph_coverage WHERE scope_path = 'docs/symbols.docx' AND relation_scope IS NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if state != "partial"
+            || !reason.contains("unknown_symbol_mapping")
+            || !reason.contains("unevaluated_field")
+        {
+            return Err(io::Error::other(format!(
+                "DOCX coverage lost symbol or reference-marker uncertainty: {state} {reason}"
+            ))
+            .into());
+        }
+        let visible_marker_entities: i64 = store.query_row(
+            "SELECT COUNT(*) FROM graph_entities WHERE repository_path = 'docs/symbols.docx' AND symbol_name = 'document-text-coverage'",
+            [],
+            |row| row.get(0),
+        )?;
+        if visible_marker_entities != 0 {
+            return Err(io::Error::other("DOCX coverage marker leaked into graph entities").into());
+        }
+        let graph_symbols: i64 = store.query_row(
+            "SELECT COUNT(*) FROM graph_entities WHERE repository_path = 'docs/symbols.docx' AND symbol_name LIKE 'document-symbol-%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if graph_symbols != i64::try_from(expected)? {
+            return Err(io::Error::other(format!(
+                "DOCX graph published {graph_symbols} of {expected} rendered symbols"
+            ))
+            .into());
+        }
+        let source: String = store.query_row(
+            "SELECT content FROM file_texts WHERE path = 'src/lib.rs'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !source.contains("still_indexed") {
+            return Err(
+                io::Error::other("ordinary source was not indexed beside partial DOCX").into(),
+            );
+        }
+        let document_text: String = store.query_row(
+            "SELECT content FROM file_texts WHERE path = 'docs/symbols.docx'",
+            [],
+            |row| row.get(0),
+        )?;
+        if [
+            "Before", "After", "Header", "Footer", "Footnote", "Endnote", "Comment", "α",
+        ]
+        .iter()
+        .any(|text| !document_text.contains(text))
+        {
+            return Err(io::Error::other(format!(
+                "rendered DOCX stories or verified Symbol mapping were lost: {document_text:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    };
+    verify(10)?;
+    let executable = mcp_contract_executable();
+    let overview = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "overview".to_owned(),
+        ],
+    )?;
+    require_json_usize_at_least(&overview, &["files"], 2)?;
+    let symbols = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "symbols".to_owned(),
+            "list".to_owned(),
+            "--file".to_owned(),
+            "docs/symbols.docx".to_owned(),
+        ],
+    )?;
+    let symbols_text = serde_json::to_string(&symbols)?;
+    if symbols_text.contains("document-text-coverage")
+        || !symbols_text.contains("document-symbol-2")
+        || [
+            "word/document.xml",
+            "word/header1.xml",
+            "word/footer1.xml",
+            "word/footnotes.xml",
+            "word/endnotes.xml",
+            "word/comments.xml",
+        ]
+        .iter()
+        .any(|part| !symbols_text.contains(part))
+    {
+        return Err(
+            io::Error::other(format!("CLI omitted DOCX story evidence: {symbols_text}")).into(),
+        );
+    }
+    let search = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "search".to_owned(),
+            "Before".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/symbols.docx".to_owned(),
+        ],
+    )?;
+    if !serde_json::to_string(&search)?.contains("Before") {
+        return Err(io::Error::other("CLI search lost surrounding DOCX text").into());
+    }
+    let coverage = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "health-check".to_owned(),
+            "--coverage".to_owned(),
+            "--path-prefix".to_owned(),
+            "docs/symbols.docx".to_owned(),
+        ],
+    )?;
+    if !serde_json::to_string(&coverage)?
+        .contains("document_text_incomplete:unknown_symbol_mapping")
+    {
+        return Err(io::Error::other("CLI coverage omitted DOCX mapping gap").into());
+    }
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let overview =
+            session.call_tool("atlas_overview", &json!({"project_path": repo.as_path()}))?;
+        if !overview.contains("overview:") {
+            return Err(io::Error::other("MCP overview rejected partial DOCX publication").into());
+        }
+        let symbols = session.call_tool(
+            "atlas_symbols",
+            &json!({
+                "project_path": repo.as_path(), "file": "docs/symbols.docx", "limit": 50,
+            }),
+        )?;
+        if symbols.contains("document-text-coverage")
+            || !symbols.contains("code=F03A")
+            || [
+                "word/document.xml",
+                "word/header1.xml",
+                "word/footer1.xml",
+                "word/footnotes.xml",
+                "word/endnotes.xml",
+                "word/comments.xml",
+            ]
+            .iter()
+            .any(|part| !symbols.contains(part))
+        {
+            return Err(
+                io::Error::other(format!("MCP omitted DOCX story evidence: {symbols}")).into(),
+            );
+        }
+        let search = session.call_tool("atlas_search", &json!({
+            "project_path": repo.as_path(), "pattern": "Before", "file_pattern": "docs/symbols.docx", "limit": 10,
+        }))?;
+        if !search.contains("Before") {
+            return Err(io::Error::other("MCP search lost surrounding DOCX text").into());
+        }
+        let summary = session.call_tool(
+            "atlas_file_summary",
+            &json!({
+                "project_path": repo.as_path(), "file": "docs/symbols.docx", "compact": true,
+            }),
+        )?;
+        if !summary.contains("incomplete coverage") {
+            return Err(io::Error::other("MCP summary hid partial DOCX text").into());
+        }
+        let coverage = session.call_tool("atlas_health", &json!({
+            "project_path": repo.as_path(), "coverage": true, "path_prefix": "docs/symbols.docx", "limit": 10,
+        }))?;
+        if !coverage.contains("document_text_incomplete:unknown_symbol_mapping") {
+            return Err(io::Error::other("MCP coverage omitted DOCX mapping gap").into());
+        }
+        let scan = session.call_tool(
+            "atlas_scan",
+            &json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+        )?;
+        if !scan.contains("scan:") {
+            return Err(io::Error::other(format!("MCP full scan failed: {scan}")).into());
+        }
+        verify(10)?;
+        write_docx(true, false, None)?;
+        let watch = session.call_tool(
+            "atlas_watch_once",
+            &json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+        )?;
+        if !watch.contains("watch:") || !watch.contains("single-refresh") {
+            return Err(io::Error::other(format!("MCP DOCX refresh failed: {watch}")).into());
+        }
+        verify(11)?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(mcp_result, || session.shutdown())?;
+    write_docx(true, true, None)?;
+    run_watch_once(&repo, &database)?;
+    verify(11)?;
+    let (text, reason): (String, String) = Connection::open(&database)?.query_row(
+        "SELECT f.content, g.reason FROM file_texts f JOIN graph_coverage g ON g.scope_path = f.path WHERE f.path = 'docs/symbols.docx' AND g.relation_scope IS NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if !text.contains("Before") || !text.contains("After") || !reason.contains("unevaluated_field")
+    {
+        return Err(
+            io::Error::other("live DOCX field lost surrounding text or typed coverage").into(),
+        );
+    }
+    for relationship in [
+        r#"<Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="https://example.invalid/header.xml" TargetMode="External"/>"#,
+        r#"<Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="../../outside.xml"/>"#,
+        r#"<Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="missing.xml"/>"#,
+        r#"<Relationship Id="h" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="header1.xml"/>"#,
+    ] {
+        write_docx(true, true, Some(relationship))?;
+        let refusal = run_watch_once(&repo, &database).err().ok_or_else(|| {
+            io::Error::other(format!(
+                "unsafe or wrong-type DOCX relationship replaced the last generation: {relationship}"
+            ))
+        })?;
+        if !refusal.to_string().contains("invalid DOCX package") {
+            return Err(io::Error::other(format!(
+                "DOCX relationship did not fail as an unsafe package: {relationship}: {refusal}"
+            ))
+            .into());
+        }
+        verify(11)?;
+    }
+    write_docx(true, true, None)?;
+    run_watch_once(&repo, &database)?;
+    verify(11)?;
+
+    let probe = repo.join("docs/probe.docx");
+    let write_probe = |body: &str| -> Result<(), Box<dyn Error>> {
+        let mut archive = ZipWriter::new(fs::File::create(&probe)?);
+        for (name, xml) in [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ] {
+            archive.start_file(name, FileOptions::default())?;
+            archive.write_all(xml.as_bytes())?;
+        }
+        archive.start_file("word/document.xml", FileOptions::default())?;
+        write!(
+            archive,
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r>{body}</w:r></w:p></w:body></w:document>"
+        )?;
+        archive.finish()?;
+        Ok(())
+    };
+    let probe_coverage = || -> Result<Option<String>, Box<dyn Error>> {
+        Ok(Connection::open(&database)?
+            .query_row(
+                "SELECT reason FROM graph_coverage WHERE scope_path = 'docs/probe.docx' AND relation_scope IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    };
+    write_probe("<w:t>Live field</w:t><w:pgNum/>")?;
+    run_watch_once(&repo, &database)?;
+    if !probe_coverage()?.is_some_and(|reason| reason.contains("unevaluated_field")) {
+        return Err(io::Error::other("live DOCX field lacked file-local coverage").into());
+    }
+    let repeated_symbol = r#"<w:sym w:font="Wingdings" w:char="F03A"/>"#
+        .repeat(projectatlas_symbols::MAX_DOCUMENT_FACTS);
+    write_probe(&repeated_symbol)?;
+    run_watch_once(&repo, &database)?;
+    if !probe_coverage()?.is_some_and(|reason| reason.contains("resource_limit:fact_count")) {
+        return Err(io::Error::other("safe DOCX fact ceiling was not file-local").into());
+    }
+    let limited_cli = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "health-check".to_owned(),
+            "--coverage".to_owned(),
+            "--path-prefix".to_owned(),
+            "docs/probe.docx".to_owned(),
+        ],
+    )?;
+    if !serde_json::to_string(&limited_cli)?
+        .contains("document_text_incomplete:resource_limit:fact_count")
+    {
+        return Err(io::Error::other("CLI hid the DOCX fact ceiling").into());
+    }
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let limited_mcp = (|| -> Result<(), Box<dyn Error>> {
+        let coverage = session.call_tool(
+            "atlas_health",
+            &json!({"project_path": repo.as_path(), "coverage": true, "path_prefix": "docs/probe.docx", "limit": 10}),
+        )?;
+        if !coverage.contains("document_text_incomplete:resource_limit:fact_count") {
+            return Err(io::Error::other("MCP hid the DOCX fact ceiling").into());
+        }
+        let source = session.call_tool(
+            "atlas_search",
+            &json!({"project_path": repo.as_path(), "pattern": "still_indexed", "file_pattern": "src/lib.rs", "limit": 10}),
+        )?;
+        if !source.contains("still_indexed") {
+            return Err(io::Error::other("MCP lost ordinary source beside limited DOCX").into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(limited_mcp, || session.shutdown())?;
+    verify(11)?;
+    let before_deadline = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("DOCX publication missing before deadline"))?;
+    let before_deadline_coverage = probe_coverage()?;
+    write_probe(r#"<w:sym w:font="Symbol" w:char="F061"/>"#)?;
+    Command::new(&executable)
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&database)
+        .args(["watch", ".", "--once", "--timeout-seconds", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("index work deadline was reached"));
+    if AtlasStore::open_read_only(&database)?.index_publication()? != Some(before_deadline)
+        || probe_coverage()? != before_deadline_coverage
+    {
+        return Err(io::Error::other("DOCX deadline changed the last partial generation").into());
+    }
+    verify(11)?;
+    fs::write(&probe, b"PK\x03\x04truncated-document")?;
+    if run_watch_once(&repo, &database).is_ok()
+        || !probe_coverage()?.is_some_and(|reason| reason.contains("resource_limit:fact_count"))
+    {
+        return Err(io::Error::other("malformed DOCX replaced the last partial generation").into());
+    }
+    write_probe(r#"<w:sym w:font="Symbol" w:char="F061"/>"#)?;
+    run_watch_once(&repo, &database)?;
+    let repaired_coverage = probe_coverage()?;
+    if repaired_coverage.as_deref() != Some("parser does not prove complete relationship coverage")
+    {
+        return Err(io::Error::other(format!(
+            "DOCX repair retained text-incomplete or unexpected coverage: {repaired_coverage:?}"
+        ))
+        .into());
+    }
+    let text_markers: i64 = Connection::open(&database)?.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE path = 'docs/probe.docx' AND name = 'document-text-coverage'",
+        [],
+        |row| row.get(0),
+    )?;
+    if text_markers != 0 {
+        return Err(io::Error::other("DOCX repair retained a text-coverage marker").into());
+    }
+    let repaired_symbols = AtlasStore::open(&database)?
+        .load_symbols(Some("docs/probe.docx"), None, 10)?
+        .into_iter()
+        .filter(|symbol| symbol.name.starts_with("document-symbol-"))
+        .collect::<Vec<_>>();
+    if repaired_symbols.len() != 1
+        || !repaired_symbols[0]
+            .signature
+            .contains("font=Some(\"Symbol\");code=F061")
+    {
+        return Err(io::Error::other(format!(
+            "DOCX repair did not publish the exact recovered symbol: {repaired_symbols:?}"
+        ))
+        .into());
+    }
+    let repaired_text: String = Connection::open(&database)?.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/probe.docx'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !repaired_text.contains('α') {
+        return Err(io::Error::other("DOCX repair lost verified symbol text").into());
+    }
+    Ok(())
+}
+
 #[test]
 fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Error>> {
     const PDF_FILE: &str = "guide.pdf";
@@ -10190,11 +10742,18 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     let write_docx = |path: &Path, text: &str| -> Result<(), Box<dyn Error>> {
         let docx_file = fs::File::create(path)?;
         let mut docx = ZipWriter::new(docx_file);
+        docx.start_file("[Content_Types].xml", FileOptions::default())?;
+        docx.write_all(br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#)?;
+        docx.start_file("_rels/.rels", FileOptions::default())?;
+        docx.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#)?;
         docx.start_file("word/document.xml", FileOptions::default())?;
         write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\" mc:Ignorable=\"future\"><w:body><future:wrapper><w:p><w:r><w:t>Ignored extension text</w:t></w:r></w:p></future:wrapper><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t> {text} </w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:del><w:r><w:delText>Removed</w:delText><w:noBreakHyphen/><w:br/></w:r></w:del><w:moveFrom><w:r><w:t>Moved source</w:t><w:tab/><w:softHyphen/></w:r></w:moveFrom><w:r xml:space=\"preserve\"><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"future\"><w:t>Wrong alternative</w:t></mc:Choice><mc:Fallback><w:instrText>Inside box</w:instrText></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t><w:ptab w:alignment=\"left\" w:relativeTo=\"margin\" w:leader=\"none\"/><w:t>tabbed</w:t><w:lastRenderedPageBreak/><w:t>next page</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\" mc:Ignorable=\"future\"><w:body><future:wrapper><w:p><w:r><w:t>Ignored extension text</w:t></w:r></w:p></future:wrapper><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t> {text} </w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:del><w:r><w:delText>Removed</w:delText><w:noBreakHyphen/><w:br/></w:r></w:del><w:moveFrom><w:r><w:t>Moved source</w:t><w:tab/><w:softHyphen/></w:r></w:moveFrom><w:r xml:space=\"preserve\"><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/>{}<w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t><w:ptab w:alignment=\"left\" w:relativeTo=\"margin\" w:leader=\"none\"/><w:t>tabbed</w:t><w:lastRenderedPageBreak/><w:t>next page</w:t></w:r></w:p></w:body></w:document>",
+            docx_wps_text_box(
+                "<w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"w\"><w:instrText>Inside box</w:instrText></mc:Choice><mc:Fallback><w:t>Wrong alternative</w:t></mc:Fallback></mc:AlternateContent></w:r></w:p>"
+            )
         )?;
         docx.finish()?;
         Ok(())
@@ -10775,6 +11334,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         .replace("26 0 obj\n1\nendobj\n", "26 0 obj\n0\nendobj\n");
     fs::write(&pdf_path, &empty_pdf)?;
     let mut empty_docx = ZipWriter::new(fs::File::create(&docx_path)?);
+    empty_docx.start_file("[Content_Types].xml", FileOptions::default())?;
+    empty_docx.write_all(br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#)?;
+    empty_docx.start_file("_rels/.rels", FileOptions::default())?;
+    empty_docx.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#)?;
     empty_docx.start_file("word/document.xml", FileOptions::default())?;
     empty_docx.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#)?;
     empty_docx.finish()?;
@@ -10901,36 +11464,20 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             "xml:space must be default or preserve",
         ),
         (
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:pgNum/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
-            "dynamic DOCX text blocks",
-        ),
-        (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
-            "dynamic DOCX text blocks",
+            "word/_rels/document.xml.rels is missing",
         ),
         (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:endnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
-            "dynamic DOCX text blocks",
-        ),
-        (
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Partial prefix</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:body></w:document>"#.as_bytes().to_vec(),
-            "font-specific symbols",
+            "word/_rels/document.xml.rels is missing",
         ),
         (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p></w:body></w:document>"#.as_bytes().to_vec(),
             "foreign-namespace text",
         ),
         (
-            std::iter::once(0xfeff).chain(r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>UTF16 text</w:t></w:r></w:p></w:body></w:document>"#.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
-            "DOCX XML encoding is not supported",
-        ),
-        (
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><w:altChunk r:id="html"/></w:body></w:document>"#.as_bytes().to_vec(),
-            "alternate-format DOCX chunks",
-        ),
-        (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r><w:subDoc r:id="child"/></w:p></w:body></w:document>"#.as_bytes().to_vec(),
-            "referenced DOCX subdocuments",
+            "word/_rels/document.xml.rels is missing",
         ),
         (
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><future:wrapper mc:ProcessContent="future:wrapper"><w:p><w:r><w:t>Unsupported policy</w:t></w:r></w:p></future:wrapper></w:body></w:document>"#.as_bytes().to_vec(),
@@ -10943,6 +11490,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     ] {
         {
             let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
+            archive.start_file("[Content_Types].xml", FileOptions::default())?;
+            archive.write_all(br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#)?;
+            archive.start_file("_rels/.rels", FileOptions::default())?;
+            archive.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#)?;
             archive.start_file("word/document.xml", FileOptions::default())?;
             archive.write_all(&xml)?;
             archive.finish()?;
@@ -10973,6 +11524,69 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
             .into());
         }
     }
+
+    {
+        let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
+        archive.start_file("[Content_Types].xml", FileOptions::default())?;
+        archive.write_all(br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#)?;
+        archive.start_file("_rels/.rels", FileOptions::default())?;
+        archive.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#)?;
+        archive.start_file("word/document.xml", FileOptions::default())?;
+        let xml = r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>UTF16 text</w:t><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:body></w:document>"#;
+        let xml = std::iter::once(0xfeff)
+            .chain(xml.encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        archive.write_all(&xml)?;
+        archive.finish()?;
+    }
+    run_scan(&repo, &database)?;
+    let utf16_text: String = Connection::open(&database)?.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/guide.docx'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !utf16_text.contains("UTF16 text") || !utf16_text.contains('α') {
+        return Err(io::Error::other("valid UTF-16 DOCX lost text or mapped symbol").into());
+    }
+
+    {
+        let mut archive = ZipWriter::new(fs::File::create(&docx_path)?);
+        archive.start_file("[Content_Types].xml", FileOptions::default())?;
+        archive.write_all(br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Default Extension="html" ContentType="text/html"/></Types>"#)?;
+        archive.start_file("_rels/.rels", FileOptions::default())?;
+        archive.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#)?;
+        archive.start_file("word/document.xml", FileOptions::default())?;
+        archive.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Partial prefix</w:t></w:r></w:p><w:altChunk r:id="html"/></w:body></w:document>"#)?;
+        archive.start_file("word/_rels/document.xml.rels", FileOptions::default())?;
+        archive.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="html" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk" Target="import.html"/></Relationships>"#)?;
+        archive.start_file("word/import.html", FileOptions::default())?;
+        archive.write_all(b"<p>Imported</p>")?;
+        archive.finish()?;
+    }
+    run_scan(&repo, &database)?;
+    let partial: String = Connection::open(&database)?.query_row(
+        "SELECT reason FROM graph_coverage WHERE scope_path = 'docs/guide.docx' AND relation_scope IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if !partial.contains("unexamined_story") {
+        return Err(io::Error::other(
+            "valid alternate-format import lacked local partial coverage",
+        )
+        .into());
+    }
+    write_docx(&docx_path, "DOCX replacement marker")?;
+    run_scan(&repo, &database)?;
+    let repaired_text: String = Connection::open(&database)?.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/guide.docx'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !repaired_text.contains("DOCX replacement marker") {
+        return Err(io::Error::other("DOCX repair lost the restored text").into());
+    }
+    let before_failed_refresh = mcp_database_snapshot(&database)?;
 
     fs::write(
         &docx_path,

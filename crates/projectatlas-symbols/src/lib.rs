@@ -14,8 +14,9 @@ pub use configured_modules::{
     MAX_CONFIGURED_MODULE_TARGETS,
 };
 pub use documents::{
-    DOCX_DOCUMENT_PART, DocumentCompleteness, DocumentExtractionError, DocumentFact, DocumentFacts,
-    DocumentFormat, DocumentLimit, DocumentLocator, DocumentParserProvenance, LOPDF_VERSION,
+    DOCUMENT_COVERAGE_SYMBOL, DOCX_DOCUMENT_PART, DocumentCompleteness, DocumentCoverageGap,
+    DocumentExtractionError, DocumentFact, DocumentFacts, DocumentFormat, DocumentLimit,
+    DocumentLocator, DocumentParserProvenance, DocumentSymbol, LOPDF_VERSION,
     MAX_DOCUMENT_COMPRESSED_BYTES, MAX_DOCUMENT_ENTRIES, MAX_DOCUMENT_EXPANDED_BYTES,
     MAX_DOCUMENT_FACTS, MAX_DOCUMENT_MEMORY_BYTES, MAX_DOCUMENT_OUTPUT_BYTES,
     MAX_DOCUMENT_RECURSION_DEPTH, PDF_EXTRACT_VERSION, QUICK_XML_VERSION, document_format_for_path,

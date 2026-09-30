@@ -58,6 +58,8 @@ def fixture(root):
     for index in range(64):
         (docs / f"guide-{index:02}.pdf").write_bytes(pdf)
         with zipfile.ZipFile(docs / f"guide-{index:02}.docx", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+            archive.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
             archive.writestr("word/document.xml", xml)
     return sum(path.stat().st_size for path in docs.iterdir())
 
