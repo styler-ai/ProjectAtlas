@@ -3013,6 +3013,8 @@ fn parse_docx_part(
     let mut element_depth = 0usize;
     let mut root_seen = false;
     let mut root_closed = false;
+    let mut main_body_seen = false;
+    let mut main_body_unexamined = false;
     let mut event_index = 0usize;
     let mut seen_ids = HashSet::new();
     let mut seen_special_ids = HashSet::new();
@@ -3130,8 +3132,20 @@ fn parse_docx_part(
                 {
                     paragraph_number += 1;
                 }
-                if skipped_branch_depth.is_some() {
+                if let Some(branch_depth) = skipped_branch_depth {
                     validate_docx_attributes(&event, &reader, control, stage)?;
+                    if root_name == "document"
+                        && wordprocessing
+                        && name.as_ref() == "body"
+                        && element_depth == branch_depth + 1
+                        && alternatives.last().is_some_and(|alternative| {
+                            alternative.selection == DocxAlternativeSelection::Uncertain
+                                && alternative.depth + 1 == branch_depth
+                                && alternative.depth == 2 + 2 * selected_branches.len()
+                        })
+                    {
+                        main_body_unexamined = true;
+                    }
                     continue;
                 }
                 if wordprocessing
@@ -3437,6 +3451,17 @@ fn parse_docx_part(
                 } else {
                     DocxSectionAncestor::Other
                 };
+                if root_name == "document" && wordprocessing && name.as_ref() == "body" {
+                    if section_ancestors[element_depth] != DocxSectionAncestor::Body
+                        || main_body_seen
+                    {
+                        return Err(DocumentExtractionError::Malformed {
+                            format: DocumentFormat::Docx,
+                            message: "DOCX main document requires one direct body".to_owned(),
+                        });
+                    }
+                    main_body_seen = true;
+                }
                 inside_main_body[element_depth] = if wordprocessing && name.as_ref() == "body" {
                     section_ancestors[element_depth] == DocxSectionAncestor::Body
                 } else if wordprocessing
@@ -4627,6 +4652,7 @@ fn parse_docx_part(
     }
     if !root_seen
         || !root_closed
+        || (root_name == "document" && !main_body_seen && !main_body_unexamined)
         || element_depth != 0
         || paragraph.open
         || !text_boxes.is_empty()
@@ -9683,6 +9709,62 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn docx_main_document_requires_one_direct_body() {
+        for content in [
+            "",
+            "<w:body/><w:body><w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p></w:body>",
+            "<w:body><w:p><w:body/></w:p></w:body>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">{content}</w:document>"
+            );
+            assert!(
+                matches!(
+                    parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn docx_top_level_compatibility_body_preserves_coverage() {
+        let uncertain = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><mc:AlternateContent><mc:Choice Requires="future"><w:body><w:p><w:r><w:t>Unknown</w:t></w:r></w:p></w:body></mc:Choice><mc:Fallback><w:body><w:p><w:r><w:t>Fallback</w:t></w:r></w:p></w:body></mc:Fallback></mc:AlternateContent></w:document>"#;
+        let parsed = extract_document_text_controlled(
+            &docx_archive(uncertain, CompressionMethod::Stored),
+            "uncertain-body.docx",
+            None,
+            &control(),
+        )
+        .expect("an unexamined top-level alternative does not prove a missing body");
+        assert!(parsed.text.is_empty());
+        assert!(parsed.symbols.is_empty());
+        assert!(
+            matches!(parsed.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnexaminedStory))
+        );
+
+        let selected = std::str::from_utf8(uncertain)
+            .expect("ASCII fixture")
+            .replace("Requires=\"future\"", "Requires=\"w\"");
+        let parsed = extract_document_text_controlled(
+            &docx_archive(selected.as_bytes(), CompressionMethod::Stored),
+            "selected-body.docx",
+            None,
+            &control(),
+        )
+        .expect("the supported direct-root choice selects its body");
+        assert_eq!(parsed.text, "Unknown");
+        assert_eq!(parsed.completeness, DocumentCompleteness::Complete);
+
+        let absent = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:future="urn:future"><mc:AlternateContent><mc:Choice Requires="future"><w:p/></mc:Choice><mc:Fallback><w:p/></mc:Fallback></mc:AlternateContent></w:document>"#;
+        assert!(matches!(
+            parse_docx(absent, &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
     }
 
     #[test]

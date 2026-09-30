@@ -96,6 +96,11 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** an alternate-format import or subdocument anchor appears inside paragraph or structured-document properties instead of its supported rendered block or paragraph-content parent
 - **THEN** extraction rejects the malformed story before the anchor selects a relationship or incomplete coverage, while retaining valid anchors in rendered content
 
+#### Scenario: Main document body cardinality
+- **WHEN** the main DOCX document omits its direct body, repeats it, or nests a body under rendered content
+- **THEN** extraction rejects the malformed part before any second-body text or symbol can enter a new publication
+- **AND** a direct-root compatibility alternative with an unexamined possible body retains document-local incomplete coverage rather than turning uncertainty into a malformed-body refusal
+
 #### Scenario: BOM-less UTF-16 XML with leading whitespace
 - **WHEN** an unambiguous BOM-less UTF-16 LE or BE DOCX XML part without an XML declaration starts with XML whitespace before its root
 - **THEN** the bytes are decoded as an explicit compatibility tolerance and the resulting XML is validated like the same part without leading whitespace
