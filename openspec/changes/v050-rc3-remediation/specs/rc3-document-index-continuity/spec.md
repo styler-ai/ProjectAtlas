@@ -113,6 +113,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a safely admitted DOCX contains a live page-number or date field whose value requires evaluation and has no admitted literal cached result
 - **THEN** surrounding literal text remains indexed and the field has durable file-local incomplete text coverage, without fabricated field text or a whole-document completeness claim
 
+#### Scenario: Simple field outside rendered paragraph content
+- **WHEN** an active, selected, non-deleted DOCX `w:fldSimple` appears directly under a block or inside paragraph properties rather than a rendered paragraph-content parent
+- **THEN** the malformed story is rejected before any field coverage or replacement generation is published
+
 #### Scenario: Story anchor inside a field instruction
 - **WHEN** a complex-field instruction contains an alternate-format import or subdocument anchor before its result separator, including across paragraphs
 - **THEN** the non-rendered anchor selects no relationship or incomplete story coverage, while a literal cached result remains available

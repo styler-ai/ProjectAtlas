@@ -3782,6 +3782,13 @@ fn parse_docx_part(
                         }
                     }
                     "fldSimple" if deleted_depth.is_none() => {
+                        if !paragraph.open || !direct_run_parents[parent_depth] {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX simple field is outside rendered paragraph content"
+                                    .to_owned(),
+                            });
+                        }
                         simple_fields.push(DocxSimpleField {
                             depth: element_depth,
                             has_cached_text: false,
@@ -7269,6 +7276,12 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect("simple fields inside an outer instruction cannot render");
         assert_eq!(simple.text, "Result");
         assert_eq!(simple.completeness, DocumentCompleteness::Complete);
+        let selected_simple = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><mc:AlternateContent><mc:Choice Requires="w"><w:fldSimple w:instr="PAGE"/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:p></w:body></w:document>"#;
+        let selected = parse_docx(selected_simple, &control(), IndexWorkStage::TextIndex)
+            .expect("selected compatibility content preserves valid paragraph fields");
+        assert!(
+            matches!(selected.completeness, DocumentCompleteness::Partial { ref gaps } if gaps.contains(&DocumentCoverageGap::UnevaluatedField))
+        );
         let symbol_field = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:sym w:font="Wingdings" w:char="F03A"/><w:fldChar w:fldCharType="separate"/><w:sym w:font="Symbol" w:char="F061"/><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
         let symbol_field = parse_docx(symbol_field, &control(), IndexWorkStage::TextIndex)
             .expect("only the cached field result is rendered");
@@ -7303,6 +7316,27 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         ] {
             assert!(matches!(
                 parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+        for invalid in [
+            text.replace("<w:body>", "<w:body><w:fldSimple w:instr=\"PAGE\"/>"),
+            text.replace(
+                "<w:p>",
+                "<w:p><w:pPr><w:fldSimple w:instr=\"PAGE\"/></w:pPr>",
+            ),
+        ] {
+            assert!(matches!(
+                parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+            assert!(matches!(
+                extract_document_text_controlled(
+                    &docx_archive(invalid.as_bytes(), CompressionMethod::Deflated),
+                    "invalid-field.docx",
+                    None,
+                    &control(),
+                ),
                 Err(DocumentExtractionError::Malformed { .. })
             ));
         }
