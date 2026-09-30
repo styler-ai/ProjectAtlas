@@ -68,9 +68,9 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a story, settings, content-type, or relationship attribute contains an undefined or invalid XML entity, including an attribute in an unselected compatibility branch, or ignored settings text contains one
 - **THEN** the malformed DOCX is rejected before publication rather than treating ignored content as well-formed
 
-#### Scenario: Character-reference whitespace between story elements
-- **WHEN** valid XML character references decode entirely to spaces, tabs, carriage returns, or line feeds outside rendered text leaves
-- **THEN** extraction treats them as inter-element whitespace while still rejecting non-whitespace or invalid references there
+#### Scenario: Encoded whitespace between story elements
+- **WHEN** valid XML character references or CDATA inside the story root contain only spaces, tabs, carriage returns, or line feeds outside rendered text leaves
+- **THEN** extraction treats them as inter-element whitespace while still rejecting non-whitespace, invalid references, or CDATA outside the root
 
 #### Scenario: Text payload inside non-rendered metadata
 - **WHEN** a run or paragraph, including one nested under an otherwise supported wrapper, appears inside paragraph or structured-document properties instead of rendered content

@@ -4132,6 +4132,15 @@ fn parse_docx_part(
                     continue;
                 }
                 if text_carrier.is_none() {
+                    if root_seen
+                        && !root_closed
+                        && event
+                            .as_ref()
+                            .chars()
+                            .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n'))
+                    {
+                        continue;
+                    }
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "CDATA appeared outside a run".to_owned(),
@@ -9280,12 +9289,30 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_structural_cdata_accepts_only_xml_whitespace_inside_the_root() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>First</w:t></w:r></w:p><![CDATA[
+ ]]><w:p><w:r><w:t>Second</w:t></w:r></w:p></w:body></w:document>"#;
+        let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
+            .expect("whitespace CDATA inside a story is structural whitespace");
+        assert_eq!(facts.text, "First\nSecond");
+        for xml in [
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><![CDATA[Injected]]></w:body></w:document>"#.as_slice(),
+            br#"<![CDATA[ ]]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_docx(xml, &control(), IndexWorkStage::TextIndex),
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn docx_table_block_wrappers_preserve_cell_paragraphs() {
         for table in [
             "<w:tbl><w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt></w:tbl>",
-            "<w:tbl><w:customXml><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:customXml></w:tbl>",
+            "<w:tbl><w:customXml w:element=\"row\"><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:customXml></w:tbl>",
             "<w:tbl><w:tr><w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:tbl>",
-            "<w:tbl><w:tr><w:customXml><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:customXml></w:tr></w:tbl>",
+            "<w:tbl><w:tr><w:customXml w:element=\"cell\"><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:customXml></w:tr></w:tbl>",
         ] {
             let xml = format!(
                 "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>{table}</w:body></w:document>"
