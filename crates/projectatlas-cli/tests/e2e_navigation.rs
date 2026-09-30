@@ -10048,6 +10048,21 @@ fn require_json_contains_from_value(
     }
 }
 
+fn docx_wps_text_box(content: &str) -> String {
+    format!(
+        concat!(
+            "<w:drawing><wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">",
+            "<wp:extent cx=\"914400\" cy=\"914400\"/><wp:docPr id=\"1\" name=\"Text box\"/>",
+            "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">",
+            "<a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+            "<wps:wsp xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+            "<wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>{}</w:txbxContent></wps:txbx>",
+            "<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"
+        ),
+        content
+    )
+}
+
 #[test]
 fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(), Box<dyn Error>> {
     const SOURCE_DIR: &str = "src";
@@ -10078,7 +10093,8 @@ fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{header_relationship}<Relationship Id="f" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/><Relationship Id="n" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="e" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="c" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/><Relationship Id="s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#
         );
         let main = format!(
-            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Before</w:t><w:sym w:font="Wingdings" w:char="F03A"/>{field}<w:t>After</w:t><w:drawing><w:txbxContent><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p><w:p><w:pPr><w:framePr/></w:pPr><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p><w:p><w:r><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/><w:commentReference w:id="4"/></w:r></w:p><w:sectPr><w:headerReference r:id="h"/><w:footerReference r:id="f"/></w:sectPr></w:body></w:document>"#
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Before</w:t><w:sym w:font="Wingdings" w:char="F03A"/>{field}<w:t>After</w:t>{}</w:r></w:p><w:p><w:pPr><w:framePr/></w:pPr><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p><w:p><w:r><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/><w:commentReference w:id="4"/></w:r></w:p><w:sectPr><w:headerReference r:id="h"/><w:footerReference r:id="f"/></w:sectPr></w:body></w:document>"#,
+            docx_wps_text_box("<w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p>")
         );
         let parts = [
             (
@@ -10734,7 +10750,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
         write!(docx, "<!--{}-->", " ".repeat(2_000_001))?;
         write!(
             docx,
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\" mc:Ignorable=\"future\"><w:body><future:wrapper><w:p><w:r><w:t>Ignored extension text</w:t></w:r></w:p></future:wrapper><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t> {text} </w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:del><w:r><w:delText>Removed</w:delText><w:noBreakHyphen/><w:br/></w:r></w:del><w:moveFrom><w:r><w:t>Moved source</w:t><w:tab/><w:softHyphen/></w:r></w:moveFrom><w:r xml:space=\"preserve\"><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/><w:drawing><w:txbxContent><w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"w\"><w:instrText>Inside box</w:instrText></mc:Choice><mc:Fallback><w:t>Wrong alternative</w:t></mc:Fallback></mc:AlternateContent></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t><w:ptab w:alignment=\"left\" w:relativeTo=\"margin\" w:leader=\"none\"/><w:t>tabbed</w:t><w:lastRenderedPageBreak/><w:t>next page</w:t></w:r></w:p></w:body></w:document>"
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:future\" mc:Ignorable=\"future\"><w:body><future:wrapper><w:p><w:r><w:t>Ignored extension text</w:t></w:r></w:p></future:wrapper><w:p/><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t> {text} </w:t><w:fldChar w:fldCharType=\"end\"/><w:delText>Deleted content</w:delText></w:r><w:del><w:r><w:delText>Removed</w:delText><w:noBreakHyphen/><w:br/></w:r></w:del><w:moveFrom><w:r><w:t>Moved source</w:t><w:tab/><w:softHyphen/></w:r></w:moveFrom><w:r xml:space=\"preserve\"><w:t> joined run</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After empty</w:t><w:br/><w:t>continued</w:t><w:br/>{}<w:t>After</w:t><w:noBreakHyphen/><w:t>box</w:t><w:softHyphen/><w:t>end</w:t><w:ptab w:alignment=\"left\" w:relativeTo=\"margin\" w:leader=\"none\"/><w:t>tabbed</w:t><w:lastRenderedPageBreak/><w:t>next page</w:t></w:r></w:p></w:body></w:document>",
+            docx_wps_text_box(
+                "<w:p><w:r><mc:AlternateContent><mc:Choice Requires=\"w\"><w:instrText>Inside box</w:instrText></mc:Choice><mc:Fallback><w:t>Wrong alternative</w:t></mc:Fallback></mc:AlternateContent></w:r></w:p>"
+            )
         )?;
         docx.finish()?;
         Ok(())

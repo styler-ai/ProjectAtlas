@@ -92,6 +92,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **WHEN** a run or paragraph, including one nested under an otherwise supported wrapper, appears inside paragraph or structured-document properties instead of rendered content
 - **THEN** extraction rejects the malformed story before its text, symbols, or references can enter a new publication, while retaining valid block, table-row, and table-cell content wrappers
 
+#### Scenario: Story anchor inside non-rendered metadata
+- **WHEN** an alternate-format import or subdocument anchor appears inside paragraph or structured-document properties instead of its supported rendered block or paragraph-content parent
+- **THEN** extraction rejects the malformed story before the anchor selects a relationship or incomplete coverage, while retaining valid anchors in rendered content
+
 #### Scenario: BOM-less UTF-16 XML with leading whitespace
 - **WHEN** an unambiguous BOM-less UTF-16 LE or BE DOCX XML part without an XML declaration starts with XML whitespace before its root
 - **THEN** the bytes are decoded as an explicit compatibility tolerance and the resulting XML is validated like the same part without leading whitespace
@@ -143,6 +147,10 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 #### Scenario: Alternate-format chunk replaces a glossary placeholder
 - **WHEN** a non-displayed glossary placeholder has actual SDT content containing a safely referenced alternate-format chunk in a table cell
 - **THEN** the chunk counts as SDT content, its reference and incomplete story coverage remain retained, and no unrelated glossary relationship is required
+
+#### Scenario: Alternate-format chunk inside rendered text box
+- **WHEN** a validated drawing-owned text box contains an alternate-format chunk with a safe internal relationship
+- **THEN** surrounding text and document-local unexamined-story coverage are retained without refusing the package
 
 #### Scenario: Field-instruction references are not rendered
 - **WHEN** note or comment references appear in a complex field's instruction region before the cached-result separator

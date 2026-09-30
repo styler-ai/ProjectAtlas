@@ -2994,6 +2994,8 @@ fn parse_docx_part(
     let mut block_ancestors = [DocxBlockAncestor::Other; MAX_DOCX_XML_DEPTH + 1];
     let mut rendered_run_ancestry = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut direct_run_parents = [false; MAX_DOCX_XML_DEPTH + 1];
+    let mut import_anchor_parents = [false; MAX_DOCX_XML_DEPTH + 1];
+    let mut text_box_content_parents = [false; MAX_DOCX_XML_DEPTH + 1];
     let mut sdt_stack: Vec<DocxSdtContext> = Vec::new();
     let mut simple_fields: Vec<DocxSimpleField> = Vec::new();
     let mut header_section: Option<DocxHeaderSection> = None;
@@ -3046,6 +3048,23 @@ fn parse_docx_part(
                     | "http://purl.oclc.org/ooxml/drawingml/picture"
                     | "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
                     | "urn:schemas-microsoft-com:vml"));
+        let text_box_content_parent = match (&namespace, &event) {
+            (ResolveResult::Bound(namespace), Event::Start(element) | Event::Empty(element)) => {
+                matches!(
+                    (namespace.as_ref(), element.local_name().as_ref()),
+                    (
+                        "http://schemas.openxmlformats.org/drawingml/2006/main"
+                            | "http://purl.oclc.org/ooxml/drawingml/main",
+                        "graphicData",
+                    ) | ("urn:schemas-microsoft-com:vml", "textbox")
+                        | (
+                            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                            "txbx",
+                        )
+                )
+            }
+            _ => false,
+        };
         if matches!(event, Event::Decl(_)) && event_index != 1 {
             return Err(DocumentExtractionError::Malformed {
                 format: DocumentFormat::Docx,
@@ -3402,6 +3421,7 @@ fn parse_docx_part(
                         parent_depth -= 2;
                     }
                 }
+                text_box_content_parents[element_depth] = text_box_content_parent;
                 section_ancestors[element_depth] = if wordprocessing {
                     match (name.as_ref(), section_ancestors[parent_depth]) {
                         ("document", _) if element_depth == 1 => DocxSectionAncestor::Document,
@@ -3499,6 +3519,19 @@ fn parse_docx_part(
                             )));
                 direct_run_parents[element_depth] =
                     rendered_run_ancestry[element_depth] && name.as_ref() != "sdt";
+                import_anchor_parents[element_depth] = wordprocessing
+                    && block_ancestors[element_depth] == DocxBlockAncestor::Content
+                    && matches!(
+                        name.as_ref(),
+                        "body"
+                            | "hdr"
+                            | "ftr"
+                            | "footnote"
+                            | "endnote"
+                            | "comment"
+                            | "tc"
+                            | "txbxContent"
+                    );
                 // Comment anchors belong to content, never property metadata.
                 comment_range_parents[element_depth] = wordprocessing
                     && matches!(
@@ -3824,6 +3857,14 @@ fn parse_docx_part(
                         if deleted_depth.is_none()
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
+                        if !direct_run_parents[parent_depth] {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message:
+                                    "DOCX subdocument anchor is outside rendered paragraph content"
+                                        .to_owned(),
+                            });
+                        }
                         let id =
                             docx_attribute(&event, &reader, "id", office_relationship_namespace)?
                                 .ok_or_else(|| DocumentExtractionError::Malformed {
@@ -3841,6 +3882,14 @@ fn parse_docx_part(
                         if deleted_depth.is_none()
                             && !paragraph.fields.contains(&DocxFieldPhase::Instruction) =>
                     {
+                        if !import_anchor_parents[parent_depth] {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message:
+                                    "DOCX alternate-format import is outside rendered block content"
+                                        .to_owned(),
+                            });
+                        }
                         let id =
                             docx_attribute(&event, &reader, "id", office_relationship_namespace)?
                                 .ok_or_else(|| DocumentExtractionError::Malformed {
@@ -3866,6 +3915,12 @@ fn parse_docx_part(
                         deleted_depth = Some(element_depth);
                     }
                     "txbxContent" => {
+                        if !text_box_content_parents[parent_depth] {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX text box has no supported drawing parent".to_owned(),
+                            });
+                        }
                         if !paragraph.run.as_ref().is_some_and(|run| {
                             run.drawing_depth.is_some() && run.properties_depth.is_none()
                         }) {
@@ -4740,6 +4795,22 @@ mod tests {
 
     fn control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), None)
+    }
+
+    fn docx_drawing_text_box(content: &str, id: u32) -> String {
+        format!(
+            concat!(
+                "<w:drawing><wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\">",
+                "<wp:extent cx=\"914400\" cy=\"914400\"/><wp:docPr id=\"{id}\" name=\"Text box {id}\"/>",
+                "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">",
+                "<a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+                "<wps:wsp xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">",
+                "<wps:cNvSpPr txBox=\"1\"/><wps:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx>",
+                "<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>"
+            ),
+            id = id,
+            content = content
+        )
     }
 
     fn docx_archive(xml: &[u8], method: CompressionMethod) -> Vec<u8> {
@@ -6522,6 +6593,32 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 .expect("actual alternate-format content must not load a glossary placeholder");
         assert_eq!(sdt_facts.text, "Prefix");
         assert_eq!(sdt_facts.completeness, direct.completeness);
+        let text_box = xml.replace(
+            "<w:altChunk r:id=\"html\"/>",
+            &format!(
+                "<w:p><w:r>{}</w:r></w:p>",
+                docx_drawing_text_box("<w:altChunk r:id=\"html\"/>", 1)
+            ),
+        );
+        let text_box_archive = docx_archive_with_parts(&[
+            ("[Content_Types].xml", manifest),
+            (
+                "_rels/.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            (DOCX_DOCUMENT_PART, text_box.as_bytes()),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/import.html", imported),
+        ]);
+        let text_box_facts = extract_document_text_controlled(
+            &text_box_archive,
+            "text-box-import.docx",
+            None,
+            &control(),
+        )
+        .expect("rendered text-box import retains local incomplete coverage");
+        assert_eq!(text_box_facts.text, "Prefix\n");
+        assert_eq!(text_box_facts.completeness, direct.completeness);
         let rels = std::str::from_utf8(rels).expect("ASCII fixture");
         for broken in [
             rels.replace("relationships/aFChunk", "relationships/header"),
@@ -6832,11 +6929,17 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_hidden_outer_run_does_not_publish_nested_text_box() {
-        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:drawing><w:txbxContent><w:p><w:r><w:t>Hidden</w:t><w:sym w:font="Wingdings" w:char="F03A"/><w:footnoteReference w:id="1"/></w:r></w:p></w:txbxContent></w:drawing></w:r><w:r><w:t>Visible</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p></w:body></w:document>"#;
+        let main = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:rPr><w:vanish/></w:rPr>{}</w:r><w:r><w:t>Visible</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p></w:body></w:document>",
+            docx_drawing_text_box(
+                "<w:p><w:r><w:t>Hidden</w:t><w:sym w:font=\"Wingdings\" w:char=\"F03A\"/><w:footnoteReference w:id=\"1\"/></w:r></w:p>",
+                1
+            )
+        );
         let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="note" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>"#;
         let notes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote></w:footnotes>"#;
         let archive = docx_archive_with_parts(&[
-            (DOCX_DOCUMENT_PART, main),
+            (DOCX_DOCUMENT_PART, main.as_bytes()),
             ("word/_rels/document.xml.rels", rels),
             ("word/footnotes.xml", notes),
         ]);
@@ -7126,8 +7229,11 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 }
             );
         }
-        let nested = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>OUTER</w:instrText><w:drawing><w:txbxContent><w:p><w:r><w:instrText>Box</w:instrText></w:r></w:p></w:txbxContent></w:drawing><w:fldChar w:fldCharType="begin"/><w:instrText>INNER</w:instrText><w:fldChar w:fldCharType="separate"/><w:instrText>Outer code remains ignored</w:instrText><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="separate"/><w:t>Result</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
-        let nested = parse_docx(nested, &control(), IndexWorkStage::TextIndex)
+        let nested = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>OUTER</w:instrText>{}<w:fldChar w:fldCharType=\"begin\"/><w:instrText>INNER</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:instrText>Outer code remains ignored</w:instrText><w:fldChar w:fldCharType=\"end\"/><w:fldChar w:fldCharType=\"separate\"/><w:t>Result</w:t><w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:body></w:document>",
+            docx_drawing_text_box("<w:p><w:r><w:instrText>Box</w:instrText></w:r></w:p>", 1)
+        );
+        let nested = parse_docx(nested.as_bytes(), &control(), IndexWorkStage::TextIndex)
             .expect("text boxes inside field instructions do not publish code text");
         assert_eq!(nested.text, "Result");
         assert_eq!(nested.facts.len(), 1);
@@ -7195,7 +7301,8 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ("", false),
         ] {
             let xml = format!(
-                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:drawing><w:txbxContent><w:p><w:r>{content}</w:r></w:p></w:txbxContent></w:drawing><w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:body></w:document>"
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType=\"separate\"/>{}<w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:body></w:document>",
+                docx_drawing_text_box(&format!("<w:p><w:r>{content}</w:r></w:p>"), 1)
             );
             let parsed = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
                 .expect("a text box can contain a field's cached result");
@@ -7556,8 +7663,11 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_nested_text_boxes_preserve_run_order_and_locators() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Before</w:t><w:drawing><w:txbxContent><w:p><w:r><w:t>Inside</w:t></w:r></w:p></w:txbxContent></w:drawing><w:t>After</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p></w:body></w:document>"#;
-        let bytes = docx_archive(xml, CompressionMethod::Stored);
+        let xml = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t>{}<w:t>After</w:t></w:r></w:p><w:p><w:r><w:t>Following</w:t></w:r></w:p></w:body></w:document>",
+            docx_drawing_text_box("<w:p><w:r><w:t>Inside</w:t></w:r></w:p>", 1)
+        );
+        let bytes = docx_archive(xml.as_bytes(), CompressionMethod::Stored);
         let parsed = extract_document_text_controlled(&bytes, "text-box.docx", None, &control())
             .expect("nested text container is valid WordprocessingML");
         assert_eq!(parsed.text, "Before\nInside\nAfter\nFollowing");
@@ -7586,8 +7696,13 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
 
     #[test]
     fn docx_separate_text_boxes_have_distinct_symbol_locators() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:drawing><w:txbxContent><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:txbxContent></w:drawing><w:drawing><w:txbxContent><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p></w:body></w:document>"#;
-        let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
+        let content = "<w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p>";
+        let xml = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r>{}{}</w:r></w:p></w:body></w:document>",
+            docx_drawing_text_box(content, 1),
+            docx_drawing_text_box(content, 2)
+        );
+        let facts = parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex)
             .expect("both text boxes have rendered symbols");
         assert_eq!(facts.symbols.len(), 2);
         assert_ne!(facts.symbols[0].locator, facts.symbols[1].locator);
@@ -8306,6 +8421,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
                 Err(DocumentExtractionError::Malformed { message, .. })
                     if message.contains("no rendered drawing owner")
+                        || message.contains("no supported drawing parent")
             ));
         }
         let comments = br#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="4"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:comment></w:comments>"#;
@@ -8418,7 +8534,13 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/><Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>"#;
         let package_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rMain" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
         let document_rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml" TargetMode="Internal"/><Relationship Id="rFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/><Relationship Id="rFootnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/><Relationship Id="rEndnotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/><Relationship Id="rComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/><Relationship Id="rSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
-        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Main</w:t><w:sym w:font="Wingdings" w:char="F03A"/><w:drawing><w:txbxContent><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p><w:p><w:pPr><w:framePr/></w:pPr><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p><w:p><w:r><w:footnoteReference w:id="2"/><w:endnoteReference w:id="3"/><w:commentReference w:id="4"/></w:r></w:p><w:sectPr><w:headerReference r:id="rHeader" w:type="default"/><w:footerReference r:id="rFooter" w:type="default"/></w:sectPr></w:body></w:document>"#;
+        let main = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body><w:p><w:r><w:t>Main</w:t><w:sym w:font=\"Wingdings\" w:char=\"F03A\"/>{}</w:r></w:p><w:p><w:pPr><w:framePr/></w:pPr><w:r><w:sym w:font=\"Wingdings\" w:char=\"F03A\"/></w:r></w:p><w:p><w:r><w:footnoteReference w:id=\"2\"/><w:endnoteReference w:id=\"3\"/><w:commentReference w:id=\"4\"/></w:r></w:p><w:sectPr><w:headerReference r:id=\"rHeader\" w:type=\"default\"/><w:footerReference r:id=\"rFooter\" w:type=\"default\"/></w:sectPr></w:body></w:document>",
+            docx_drawing_text_box(
+                "<w:p><w:r><w:sym w:font=\"Symbol\" w:char=\"F061\"/></w:r></w:p>",
+                1
+            )
+        );
         let header = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:hdr>"#;
         let footer = br#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:ftr>"#;
         let footnotes = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="0" w:type="separator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:footnote><w:footnote w:id="1" w:type="continuationSeparator"><w:p><w:r><w:sym w:font="Symbol" w:char="F061"/></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:r><w:t>Footnote</w:t><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote><w:footnote w:id="99"><w:p><w:r><w:sym w:font="Wingdings" w:char="F03A"/></w:r></w:p></w:footnote></w:footnotes>"#;
@@ -8430,7 +8552,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             docx_archive_with_parts(&[
                 ("[Content_Types].xml", manifest),
                 ("_rels/.rels", package_rels),
-                (DOCX_DOCUMENT_PART, main),
+                (DOCX_DOCUMENT_PART, main.as_bytes()),
                 ("word/_rels/document.xml.rels", document_rels),
                 ("word/header1.xml", header),
                 ("word/footer1.xml", footer),
@@ -9540,6 +9662,27 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
             .expect("supported paragraph-content containers retain runs");
         assert_eq!(facts.text, "LinkedContent");
+    }
+
+    #[test]
+    fn docx_story_anchors_require_rendered_content_parents() {
+        for invalid in [
+            "<w:p><w:pPr><w:altChunk r:id=\"chunk\"/></w:pPr></w:p>",
+            "<w:p><w:pPr><w:subDoc r:id=\"child\"/></w:pPr></w:p>",
+            "<w:p><w:sdt><w:sdtPr><w:subDoc r:id=\"child\"/></w:sdtPr><w:sdtContent/></w:sdt></w:p>",
+            "<w:p><w:r><w:drawing><w:txbxContent><w:altChunk r:id=\"chunk\"/></w:txbxContent></w:drawing></w:r></w:p>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body>{invalid}</w:body></w:document>"
+            );
+            assert!(
+                matches!(
+                    parse_docx(xml.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]
