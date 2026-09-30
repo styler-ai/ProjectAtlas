@@ -1376,6 +1376,7 @@ fn docx_settings(
     }
     let mut reader = NsReader::from_reader(xml.as_slice());
     reader.config_mut().expand_empty_elements = true;
+    reader.config_mut().check_comments = true;
     let mut depth = 0usize;
     let mut seen_root = false;
     let mut seen_switch = false;
@@ -1599,14 +1600,39 @@ fn docx_settings(
                 }
                 depth -= 1;
             }
+            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case("xml") => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML processing instruction uses the reserved XML target"
+                        .to_owned(),
+                });
+            }
             Event::DocType(_) => {
                 return Err(DocumentExtractionError::Malformed {
                     format: DocumentFormat::Docx,
                     message: "DOCX settings DOCTYPE is unsupported".to_owned(),
                 });
             }
+            Event::Text(text) if depth == 0 && !text.as_ref().chars().all(xml_whitespace) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX settings contain text outside the root".to_owned(),
+                });
+            }
+            Event::CData(_) if depth == 0 => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX settings contain CDATA outside the root".to_owned(),
+                });
+            }
             Event::GeneralRef(reference) => {
                 decode_docx_reference(&reference)?;
+                if depth == 0 {
+                    return Err(DocumentExtractionError::Malformed {
+                        format: DocumentFormat::Docx,
+                        message: "DOCX settings contain a reference outside the root".to_owned(),
+                    });
+                }
             }
             Event::Eof => break,
             _ => {}
@@ -1724,6 +1750,7 @@ fn decode_docx_xml(
     };
     let Some((little_endian, bom_bytes)) = encoding else {
         validate_docx_xml_encoding(&xml, None)?;
+        validate_docx_xml_characters(&xml, control, stage)?;
         return Ok(xml);
     };
     let (chunks, remainder) = xml[bom_bytes..].as_chunks::<2>();
@@ -1778,7 +1805,55 @@ fn decode_docx_xml(
     }
     let decoded = decoded.into_bytes();
     validate_docx_xml_encoding(&decoded, Some(little_endian))?;
+    validate_docx_xml_characters(&decoded, control, stage)?;
     Ok(decoded)
+}
+
+/// Reject non-XML characters in every selected package part before parsing any branch.
+fn validate_docx_xml_characters(
+    xml: &[u8],
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<(), DocumentExtractionError> {
+    let text = std::str::from_utf8(xml).map_err(|error| DocumentExtractionError::Malformed {
+        format: DocumentFormat::Docx,
+        message: error.to_string(),
+    })?;
+    for (index, character) in text.chars().enumerate() {
+        check_parser_iteration(index, &mut || control.check(stage))?;
+        if !xml10_character(character) {
+            return Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: "DOCX XML contains an invalid character".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// XML 1.0 `Char`, including its exact permitted controls and scalar ranges.
+fn xml10_character(character: char) -> bool {
+    matches!(
+        character,
+        '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
+/// XML `S` is narrower than Rust's Unicode and ASCII whitespace classes.
+fn xml_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\r' | '\n')
+}
+
+/// Split namespace prefix lists using only XML `S` separators.
+fn xml_whitespace_tokens(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(xml_whitespace)
+        .filter(|token| !token.is_empty())
+}
+
+/// Only whitespace character content inside an open XML root is structural.
+fn internal_xml_whitespace(depth: usize, value: &str) -> bool {
+    depth > 0 && value.chars().all(xml_whitespace)
 }
 
 /// Check the original byte encoding before every package XML reader sees normalized text.
@@ -1787,6 +1862,7 @@ fn validate_docx_xml_encoding(
     utf16_little_endian: Option<bool>,
 ) -> Result<(), DocumentExtractionError> {
     let mut reader = NsReader::from_reader(xml.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(xml));
+    reader.config_mut().check_comments = true;
     let Event::Decl(declaration) =
         reader
             .read_event()
@@ -1797,14 +1873,39 @@ fn validate_docx_xml_encoding(
     else {
         return Ok(());
     };
-    let Some(encoding) = declaration.encoding() else {
+    let attributes = BytesStart::from_content(declaration.as_ref(), 3);
+    let mut encoding = None;
+    let mut fields = 0usize;
+    for attribute in attributes.attributes() {
+        let attribute = attribute.map_err(|error| DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: error.to_string(),
+        })?;
+        let value = attribute.value.as_ref();
+        match (fields, attribute.key.as_ref()) {
+            (0, "version") if value == "1.0" => {}
+            (1, "encoding") => encoding = Some(value.to_owned()),
+            (1 | 2, "standalone")
+                if matches!(value, "yes" | "no") && (fields == 1 || encoding.is_some()) => {}
+            _ => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML declaration has invalid or duplicate fields".to_owned(),
+                });
+            }
+        }
+        fields += 1;
+    }
+    if fields == 0 {
+        return Err(DocumentExtractionError::Malformed {
+            format: DocumentFormat::Docx,
+            message: "DOCX XML declaration is missing version 1.0".to_owned(),
+        });
+    }
+    let Some(encoding) = encoding else {
         return Ok(());
     };
-    let encoding = encoding.map_err(|error| DocumentExtractionError::Malformed {
-        format: DocumentFormat::Docx,
-        message: error.to_string(),
-    })?;
-    let encoding = encoding.as_ref();
+    let encoding = encoding.as_str();
     let utf8 = encoding.eq_ignore_ascii_case("UTF-8");
     let ascii = encoding.eq_ignore_ascii_case("US-ASCII");
     let utf16 = encoding.eq_ignore_ascii_case("UTF-16");
@@ -1843,6 +1944,7 @@ fn parse_docx_content_types(
     }
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().expand_empty_elements = true;
+    reader.config_mut().check_comments = true;
     let mut types = DocxContentTypes::default();
     let mut depth = 0usize;
     let mut closed = false;
@@ -1945,7 +2047,16 @@ fn parse_docx_content_types(
                     closed = true;
                 }
             }
-            Event::Text(text) if text.as_ref().chars().all(char::is_whitespace) => {}
+            Event::Text(text) if text.as_ref().chars().all(xml_whitespace) => {}
+            Event::CData(text) if internal_xml_whitespace(depth, text.as_ref()) => {}
+            Event::GeneralRef(reference) => {
+                let text = decode_docx_reference(&reference)?;
+                if !internal_xml_whitespace(depth, &text) {
+                    return Err(DocumentExtractionError::InvalidDocxPackage {
+                        message: "DOCX content types contain non-structural XML text".to_owned(),
+                    });
+                }
+            }
             Event::Decl(_) if events == 1 => {}
             Event::Decl(_) => {
                 return Err(DocumentExtractionError::Malformed {
@@ -1954,6 +2065,14 @@ fn parse_docx_content_types(
                 });
             }
             Event::Comment(_) => {}
+            Event::PI(instruction) if !instruction.target().eq_ignore_ascii_case("xml") => {}
+            Event::PI(_) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML processing instruction uses the reserved XML target"
+                        .to_owned(),
+                });
+            }
             Event::Eof => break,
             _ => {
                 return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -2007,6 +2126,7 @@ fn parse_docx_relationships(
     }
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().expand_empty_elements = true;
+    reader.config_mut().check_comments = true;
     let mut result = HashMap::new();
     let mut depth = 0usize;
     let mut closed = false;
@@ -2119,7 +2239,16 @@ fn parse_docx_relationships(
                     closed = true;
                 }
             }
-            Event::Text(text) if text.as_ref().chars().all(char::is_whitespace) => {}
+            Event::Text(text) if text.as_ref().chars().all(xml_whitespace) => {}
+            Event::CData(text) if internal_xml_whitespace(depth, text.as_ref()) => {}
+            Event::GeneralRef(reference) => {
+                let text = decode_docx_reference(&reference)?;
+                if !internal_xml_whitespace(depth, &text) {
+                    return Err(DocumentExtractionError::InvalidDocxPackage {
+                        message: "DOCX relationships contain non-structural XML text".to_owned(),
+                    });
+                }
+            }
             Event::Decl(_) if events == 1 => {}
             Event::Decl(_) => {
                 return Err(DocumentExtractionError::Malformed {
@@ -2128,6 +2257,14 @@ fn parse_docx_relationships(
                 });
             }
             Event::Comment(_) => {}
+            Event::PI(instruction) if !instruction.target().eq_ignore_ascii_case("xml") => {}
+            Event::PI(_) => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML processing instruction uses the reserved XML target"
+                        .to_owned(),
+                });
+            }
             Event::Eof => break,
             _ => {
                 return Err(DocumentExtractionError::InvalidDocxPackage {
@@ -2425,14 +2562,14 @@ fn docx_choice_supported(
             message: error.to_string(),
         }
     })?;
-    if requires.split_whitespace().next().is_none() {
+    if xml_whitespace_tokens(&requires).next().is_none() {
         return Err(DocumentExtractionError::Malformed {
             format: DocumentFormat::Docx,
             message: "DOCX compatibility choice requires namespace prefixes".to_owned(),
         });
     }
     let mut supported = true;
-    for (index, prefix) in requires.split_whitespace().enumerate() {
+    for (index, prefix) in xml_whitespace_tokens(&requires).enumerate() {
         check_parser_iteration(index, &mut || control.check(stage))?;
         if prefix.contains(':') {
             return Err(DocumentExtractionError::Malformed {
@@ -2700,12 +2837,18 @@ fn validate_docx_attributes(
                 message: format!("DOCX XML attribute has an undeclared namespace prefix: {prefix}"),
             });
         }
-        let _value = quick_xml::escape::unescape(&attribute.value).map_err(|error| {
+        let value = quick_xml::escape::unescape(&attribute.value).map_err(|error| {
             DocumentExtractionError::Malformed {
                 format: DocumentFormat::Docx,
                 message: error.to_string(),
             }
         })?;
+        if !value.chars().all(xml10_character) {
+            return Err(DocumentExtractionError::Malformed {
+                format: DocumentFormat::Docx,
+                message: "DOCX XML attribute contains an invalid character".to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -2832,6 +2975,7 @@ fn parse_docx_part(
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = true;
+    reader.config_mut().check_comments = true;
     let mut output = String::new();
     let mut output_line = 1usize;
     let mut facts = Vec::new();
@@ -3142,6 +3286,13 @@ fn parse_docx_part(
                                     message: error.to_string(),
                                 }
                             })?;
+                        if !value.chars().all(xml10_character) {
+                            return Err(DocumentExtractionError::Malformed {
+                                format: DocumentFormat::Docx,
+                                message: "DOCX XML attribute contains an invalid character"
+                                    .to_owned(),
+                            });
+                        }
                         if suppressed {
                             continue;
                         }
@@ -3170,7 +3321,7 @@ fn parse_docx_part(
                         {
                             continue;
                         }
-                        if value.split_whitespace().next().is_none() {
+                        if xml_whitespace_tokens(&value).next().is_none() {
                             continue;
                         }
                         if attribute_name.as_ref() != "Ignorable" || element_depth != 1 {
@@ -3178,7 +3329,7 @@ fn parse_docx_part(
                                 message: "DOCX compatibility policy supports only root Ignorable namespaces".to_owned(),
                             });
                         }
-                        for (index, prefix) in value.split_whitespace().enumerate() {
+                        for (index, prefix) in xml_whitespace_tokens(&value).enumerate() {
                             check_parser_iteration(index, &mut || control.check(stage))?;
                             if prefix.contains(':') {
                                 return Err(DocumentExtractionError::Malformed {
@@ -4114,13 +4265,9 @@ fn parse_docx_part(
                         });
                     };
                     if text_carrier == Some(DocxTextCarrier::Rendered) {
-                        append_docx_run_text(run, event.as_ref(), output.len())?;
+                        append_docx_run_text(run, event.xml10_content().as_ref(), output.len())?;
                     }
-                } else if !event
-                    .as_ref()
-                    .chars()
-                    .all(|character| character.is_ascii_whitespace())
-                {
+                } else if !event.as_ref().chars().all(xml_whitespace) {
                     return Err(DocumentExtractionError::Malformed {
                         format: DocumentFormat::Docx,
                         message: "DOCX XML contained text outside its document root".to_owned(),
@@ -4132,13 +4279,7 @@ fn parse_docx_part(
                     continue;
                 }
                 if text_carrier.is_none() {
-                    if root_seen
-                        && !root_closed
-                        && event
-                            .as_ref()
-                            .chars()
-                            .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n'))
-                    {
+                    if root_seen && !root_closed && event.as_ref().chars().all(xml_whitespace) {
                         continue;
                     }
                     return Err(DocumentExtractionError::Malformed {
@@ -4153,7 +4294,7 @@ fn parse_docx_part(
                     });
                 };
                 if text_carrier == Some(DocxTextCarrier::Rendered) {
-                    append_docx_run_text(run, event.as_ref(), output.len())?;
+                    append_docx_run_text(run, event.xml10_content().as_ref(), output.len())?;
                 }
             }
             Event::GeneralRef(reference) => {
@@ -4162,10 +4303,7 @@ fn parse_docx_part(
                     continue;
                 }
                 if text_carrier.is_none() {
-                    if text
-                        .chars()
-                        .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n'))
-                    {
+                    if root_seen && !root_closed && text.chars().all(xml_whitespace) {
                         continue;
                     }
                     return Err(DocumentExtractionError::Malformed {
@@ -4182,6 +4320,13 @@ fn parse_docx_part(
                 if text_carrier == Some(DocxTextCarrier::Rendered) {
                     append_docx_run_text(run, &text, output.len())?;
                 }
+            }
+            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case("xml") => {
+                return Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Docx,
+                    message: "DOCX XML processing instruction uses the reserved XML target"
+                        .to_owned(),
+                });
             }
             Event::DocType(_) => {
                 return Err(DocumentExtractionError::Malformed {
@@ -4560,8 +4705,7 @@ fn decode_docx_reference(reference: &BytesRef<'_>) -> Result<String, DocumentExt
                 message: error.to_string(),
             })?
     {
-        let valid = matches!(character, '\u{9}' | '\u{a}' | '\u{d}') || character >= '\u{20}';
-        if !valid {
+        if !xml10_character(character) {
             return Err(DocumentExtractionError::Malformed {
                 format: DocumentFormat::Docx,
                 message: "DOCX XML contained an invalid character reference".to_owned(),
@@ -7152,7 +7296,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 Err(DocumentExtractionError::UnsupportedDocxInput { .. })
             ));
         }
-        for policy in ["missing", "future:wrapper"] {
+        for policy in ["missing", "future:wrapper", "future\u{a0}w"] {
             assert!(matches!(
                 parse_docx(
                     xml.replace(
@@ -7233,6 +7377,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         }
         for invalid in [
             xml.replace("Requires=\"future\"", "Requires=\"\""),
+            xml.replace("Requires=\"w\"", "Requires=\"w\u{a0}w\""),
             xml.replace("<mc:AlternateContent>", "<mc:AlternateContent><w:p/>"),
             xml.replace("</mc:AlternateContent>", "<mc:Fallback/></mc:AlternateContent>"),
             xml.replace("<mc:AlternateContent>", "<mc:AlternateContent><mc:Fallback/>"),
@@ -7340,6 +7485,44 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             ),
             Err(DocumentExtractionError::Malformed { message, .. }) if message.contains("undefined")
         ));
+    }
+
+    #[test]
+    fn docx_settings_reject_content_outside_its_root() {
+        let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="settings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#;
+        let settings = "<w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:evenAndOddHeaders/></w:settings>";
+        let archive = |settings: &str| {
+            docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, main),
+                ("word/_rels/document.xml.rels", rels),
+                ("word/settings.xml", settings.as_bytes()),
+            ])
+        };
+        let internal = settings.replace("</w:settings>", "&#x20;<![CDATA[ ]]></w:settings>");
+        extract_document_text_controlled(&archive(&internal), "settings.docx", None, &control())
+            .expect("structural XML whitespace inside settings remains valid");
+        for invalid in [
+            format!("junk{settings}"),
+            format!("{settings}junk"),
+            format!("&#x20;{settings}"),
+            format!("{settings}&#x20;"),
+            format!("<![CDATA[ ]]>{settings}"),
+            format!("{settings}<![CDATA[ ]]>"),
+        ] {
+            assert!(
+                matches!(
+                    extract_document_text_controlled(
+                        &archive(&invalid),
+                        "settings.docx",
+                        None,
+                        &control()
+                    ),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]
@@ -8516,6 +8699,85 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
+    fn docx_package_metadata_rejects_non_xml_structural_whitespace() {
+        let types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\u{a0}</Types>";
+        assert!(matches!(
+            parse_docx_content_types(types.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::InvalidDocxPackage { .. })
+        ));
+        let rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\u{2003}</Relationships>";
+        assert!(matches!(
+            parse_docx_relationships(rels.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::InvalidDocxPackage { .. })
+        ));
+    }
+
+    #[test]
+    fn docx_package_metadata_preserves_ordinary_processing_instructions() {
+        let types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><?producer marker?></Types>";
+        assert!(
+            parse_docx_content_types(types.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .is_ok()
+        );
+        let rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><?producer marker?></Relationships>";
+        assert!(
+            parse_docx_relationships(rels.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .is_ok()
+        );
+        for invalid in [
+            types.replace("<?producer marker?>", "<?XML marker?>"),
+            rels.replace("<?producer marker?>", "<?XML marker?>"),
+        ] {
+            let result = if invalid.starts_with("<Types") {
+                parse_docx_content_types(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                    .map(|_| ())
+            } else {
+                parse_docx_relationships(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                    .map(|_| ())
+            };
+            assert!(matches!(
+                result,
+                Err(DocumentExtractionError::Malformed { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn docx_package_metadata_accepts_only_internal_whitespace_references() {
+        let types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">&#x20;&#x9;<![CDATA[\n ]]></Types>";
+        assert!(
+            parse_docx_content_types(types.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .is_ok()
+        );
+        let rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">&#xA;<![CDATA[ ]]></Relationships>";
+        assert!(
+            parse_docx_relationships(rels.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                .is_ok()
+        );
+        for invalid in [
+            types.replace("&#x20;&#x9;", "&#x41;"),
+            types.replace("&#x20;&#x9;", "&missing;"),
+            types.replace("<![CDATA[\n ]]>", "<![CDATA[Injected]]>"),
+            format!("&#x20;{types}"),
+            format!("<![CDATA[ ]]> {types}"),
+            rels.replace("&#xA;", "&#x41;"),
+            rels.replace("&#xA;", "&missing;"),
+            rels.replace("<![CDATA[ ]]>", "<![CDATA[Injected]]>"),
+            format!("{rels}&#x20;"),
+            format!("{rels}<![CDATA[ ]]>"),
+        ] {
+            let result = if invalid.contains("<Types") {
+                parse_docx_content_types(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                    .map(|_| ())
+            } else {
+                parse_docx_relationships(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex)
+                    .map(|_| ())
+            };
+            assert!(result.is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn docx_safe_percent_encoded_story_target_retains_symbols() {
         let manifest = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header%20one.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#;
         let main = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:sectPr><w:headerReference r:id="h"/></w:sectPr></w:body></w:document>"#;
@@ -9304,6 +9566,65 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
                 Err(DocumentExtractionError::Malformed { .. })
             ));
         }
+    }
+
+    #[test]
+    fn docx_xml_characters_and_root_reference_boundaries_are_validated() {
+        let valid = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>";
+        for invalid in [
+            format!("&#x20;{valid}"),
+            format!("{valid}&#x20;"),
+            valid.replace("<w:body>", "<w:body>\u{b}"),
+            valid.replace("<w:t>Visible", "<w:t>\u{c}Visible"),
+            valid.replace("<w:t>Visible", "<w:t>&#xFFFE;Visible"),
+            valid.replace("<w:body>", "<w:body w:extra=\"&#xFFFE;\">"),
+        ] {
+            assert!(
+                matches!(
+                    parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn docx_xml_declarations_and_comments_follow_xml_grammar() {
+        let valid = "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Visible</w:t></w:r></w:p></w:body></w:document>";
+        for invalid in [
+            format!("<?xml encoding=\"UTF-8\"?>{valid}"),
+            format!("<?xml version=\"1.0&#xFFFE;\"?>{valid}"),
+            format!("<?xml version=\"1.0\" version=\"1.0\"?>{valid}"),
+            format!("<?xml version=\"1.0\" standalone=\"maybe\"?>{valid}"),
+            format!("<?XML version=\"1.0\"?>{valid}"),
+            valid.replace("<w:body>", "<w:body><!--bad--comment-->"),
+        ] {
+            assert!(
+                matches!(
+                    parse_docx(invalid.as_bytes(), &control(), IndexWorkStage::TextIndex),
+                    Err(DocumentExtractionError::Malformed { .. })
+                ),
+                "{invalid}"
+            );
+        }
+        let types = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><!--bad--comment--></Types>";
+        assert!(matches!(
+            parse_docx_content_types(types.as_bytes(), &control(), IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn docx_literal_xml_line_endings_normalize_before_publication() {
+        let xml = b"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>First\r\nSecond<![CDATA[\rThird]]></w:t></w:r></w:p></w:body></w:document>";
+        let facts = parse_docx(xml, &control(), IndexWorkStage::TextIndex)
+            .expect("literal source line endings remain valid XML text");
+        assert_eq!(facts.text, "First\nSecond\nThird");
+        let referenced = b"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>First&#xD;Second</w:t></w:r></w:p></w:body></w:document>";
+        let facts = parse_docx(referenced, &control(), IndexWorkStage::TextIndex)
+            .expect("character references are expanded after literal EOL normalization");
+        assert_eq!(facts.text, "First\rSecond");
     }
 
     #[test]

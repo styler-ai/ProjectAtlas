@@ -70,7 +70,23 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 
 #### Scenario: Encoded whitespace between story elements
 - **WHEN** valid XML character references or CDATA inside the story root contain only spaces, tabs, carriage returns, or line feeds outside rendered text leaves
-- **THEN** extraction treats them as inter-element whitespace while still rejecting non-whitespace, invalid references, or CDATA outside the root
+- **THEN** extraction treats them as inter-element whitespace while still rejecting non-whitespace, invalid references, or CDATA and character references outside the root
+
+#### Scenario: XML character and line-ending fidelity
+- **WHEN** a DOCX package part contains a character outside XML 1.0 `Char`, or literal CR/CRLF inside rendered text or CDATA
+- **THEN** illegal characters are rejected before publication, and literal line endings are normalized to LF while a referenced carriage return remains CR
+
+#### Scenario: XML declaration and comment well-formedness
+- **WHEN** a DOCX package part has a missing, invalid, duplicate, or out-of-order XML declaration field, a reserved XML processing-instruction target, or a malformed comment
+- **THEN** extraction rejects the malformed part before publishing its facts while retaining ordinary well-formed processing instructions
+
+#### Scenario: XML whitespace in compatibility and package metadata
+- **WHEN** namespace-prefix lists or structural package metadata contain non-XML whitespace such as NBSP
+- **THEN** that character is not treated as an XML separator and cannot select or suppress a rendered branch
+
+#### Scenario: Character content in package and settings roots
+- **WHEN** a package metadata or settings part has character references or CDATA outside its root, or non-whitespace raw text outside the settings root
+- **THEN** extraction rejects the malformed part; XML-whitespace references and CDATA inside package metadata roots and ordinary processing instructions remain accepted
 
 #### Scenario: Text payload inside non-rendered metadata
 - **WHEN** a run or paragraph, including one nested under an otherwise supported wrapper, appears inside paragraph or structured-document properties instead of rendered content
