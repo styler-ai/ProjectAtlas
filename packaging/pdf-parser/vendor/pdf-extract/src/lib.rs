@@ -1413,23 +1413,23 @@ pub enum PathOp {
 
 #[derive(Debug)]
 pub struct Path {
-    pub ops: Vec<PathOp>
+    pub ops: Vec<PathOp>,
+    subpath_start: Option<(f64, f64)>,
 }
 
 impl Path {
     fn new() -> Path {
-        Path { ops: Vec::new() }
+        Path { ops: Vec::new(), subpath_start: None }
+    }
+    fn clear(&mut self) {
+        self.ops.clear();
+        self.subpath_start = None;
     }
     fn current_point(&self) -> Option<(f64, f64)> {
         match *self.ops.last()? {
             PathOp::MoveTo(x, y) | PathOp::LineTo(x, y) | PathOp::Rect(x, y, _, _) => Some((x, y)),
             PathOp::CurveTo(_, _, _, _, x, y) => Some((x, y)),
-            // ponytail: closing paths scan back to their origin under the guest fuel limit;
-            // cache that origin if path-heavy documents exhaust the budget.
-            PathOp::Close => self.ops.iter().rev().find_map(|operation| match *operation {
-                PathOp::MoveTo(x, y) | PathOp::Rect(x, y, _, _) => Some((x, y)),
-                _ => None,
-            }),
+            PathOp::Close => self.subpath_start,
         }
     }
 }
@@ -1838,7 +1838,11 @@ impl<'a> Processor<'a> {
                 "i" => { dlog!("unhandled graphics state flattness operator {:?}", operation); }
                 "w" => { gs.line_width = as_num(&operation.operands[0]); }
                 "J" | "j" | "M" | "d" | "ri"  => { dlog!("unknown graphics state operator {:?}", operation); }
-                "m" => { path.ops.push(PathOp::MoveTo(as_num(&operation.operands[0]), as_num(&operation.operands[1]))) }
+                "m" => {
+                    let (x, y) = (as_num(&operation.operands[0]), as_num(&operation.operands[1]));
+                    path.subpath_start = Some((x, y));
+                    path.ops.push(PathOp::MoveTo(x, y));
+                }
                 "l" => { path.ops.push(PathOp::LineTo(as_num(&operation.operands[0]), as_num(&operation.operands[1]))) }
                 "c" => {
                     path.ops.push(PathOp::CurveTo(
@@ -1871,27 +1875,31 @@ impl<'a> Processor<'a> {
                 }
                 "h" => { path.ops.push(PathOp::Close) }
                 "re" => {
-                    path.ops.push(PathOp::Rect(as_num(&operation.operands[0]),
-                                               as_num(&operation.operands[1]),
-                                               as_num(&operation.operands[2]),
-                                               as_num(&operation.operands[3])))
+                    let (x, y, width, height) = (
+                        as_num(&operation.operands[0]),
+                        as_num(&operation.operands[1]),
+                        as_num(&operation.operands[2]),
+                        as_num(&operation.operands[3]),
+                    );
+                    path.subpath_start = Some((x, y));
+                    path.ops.push(PathOp::Rect(x, y, width, height));
                 }
                 "s" | "f*" | "B" | "B*" | "b" | "b*" => {
                     dlog!("unhandled path op {:?}", operation);
-                    path.ops.clear();
+                    path.clear();
                 }
                 "S" => {
                     output.stroke(&gs.ctm, &gs.stroke_colorspace, &gs.stroke_color, &path)?;
-                    path.ops.clear();
+                    path.clear();
                 }
                 "F" | "f" => {
                     output.fill(&gs.ctm, &gs.fill_colorspace, &gs.fill_color, &path)?;
-                    path.ops.clear();
+                    path.clear();
                 }
                 "W" | "w*" => { dlog!("unhandled clipping operation {:?}", operation); }
                 "n" => {
                     dlog!("discard {:?}", path);
-                    path.ops.clear();
+                    path.clear();
                 }
                 "BMC" | "BDC" => {
                     let has_properties = operation.operator == "BDC";

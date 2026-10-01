@@ -501,6 +501,7 @@ jobs:
             binary="${binary}.exe"
           fi
           python3 .github/scripts/measure-bounded-documents.py --binary "$binary" --output .tmp/document-resources.json
+          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture
 
       - name: Upload document resource measurements
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')

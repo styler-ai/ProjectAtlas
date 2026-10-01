@@ -7891,6 +7891,43 @@ mod tests {
                 )?;
             }
         }
+        let facts = projectatlas_symbols::DocumentFacts {
+            format: projectatlas_symbols::DocumentFormat::Pdf,
+            text: String::new(),
+            facts: Vec::new(),
+            symbols: Vec::new(),
+            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
+                    projectatlas_symbols::DocumentLimit::ExecutionFuel,
+                )],
+            },
+            provenance: projectatlas_symbols::DocumentParserProvenance::PdfExtract,
+        };
+        let graph = facts.symbol_graph("docs/limited.pdf", Some("PDF"));
+        let coverage = super::coverage_for_graph(
+            &graph,
+            IndexGeneration::new(1),
+            &GraphIdentityAdmission::default(),
+            &GraphIdentityAdmission::default(),
+        )?;
+        require_eq(&graph.language.as_deref(), &Some("pdf"), "PDF language")?;
+        require_eq(
+            &super::navigable_symbol_count(&graph),
+            &0,
+            "PDF coverage marker",
+        )?;
+        require_eq(
+            &coverage.state(),
+            &CoverageState::Failed,
+            "PDF incomplete state",
+        )?;
+        require_eq(&coverage.reached_limit(), &None, "fuel is not a byte limit")?;
+        require(
+            coverage
+                .reason()
+                .is_some_and(|reason| reason.as_str().contains("resource_limit:execution_fuel")),
+            "PDF fuel reason was lost",
+        )?;
         Ok(())
     }
 

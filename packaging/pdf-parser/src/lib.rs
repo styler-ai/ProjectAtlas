@@ -16,6 +16,20 @@ thread_local! {
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "projectatlas")]
+unsafe extern "C" {
+    fn admitted();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn notify_admitted() {
+    unsafe { admitted() }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn notify_admitted() {}
+
 /// Reserve bounded input; zero is a refusal and never a writable input pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn input(size: u32) -> u32 {
@@ -75,6 +89,195 @@ fn page_content(
     Ok(content)
 }
 
+// ponytail: cap nested Forms at 64; raise only with guest stack and fuel proof.
+const FORM_DEPTH_LIMIT: usize = 64;
+
+fn page_resources(
+    document: &lopdf::Document,
+    page: lopdf::ObjectId,
+) -> Result<Option<&lopdf::Dictionary>, Failure> {
+    let mut current = Some(page);
+    let mut visited = HashSet::new();
+    while let Some(id) = current {
+        if !visited.insert(id) {
+            return Err(Failure::Malformed);
+        }
+        let node = document.get_dictionary(id).map_err(parser_failure)?;
+        match node.get(b"Resources") {
+            Ok(resources) => {
+                return document
+                    .dereference(resources)
+                    .map_err(parser_failure)?
+                    .1
+                    .as_dict()
+                    .map(Some)
+                    .map_err(parser_failure);
+            }
+            Err(lopdf::Error::DictKey(_)) => {}
+            Err(error) => return Err(parser_failure(error)),
+        }
+        current = match node.get(b"Parent") {
+            Ok(parent) => Some(parent.as_reference().map_err(parser_failure)?),
+            Err(lopdf::Error::DictKey(_)) => None,
+            Err(error) => return Err(parser_failure(error)),
+        };
+    }
+    Ok(None)
+}
+
+fn validate_forms(
+    document: &lopdf::Document,
+    operations: &[lopdf::content::Operation],
+    resources: Option<&lopdf::Dictionary>,
+    depth: usize,
+    active: &mut HashSet<lopdf::ObjectId>,
+    checked: &mut HashSet<(lopdf::ObjectId, usize)>,
+) -> Result<(), Failure> {
+    for operation in operations {
+        if operation.operator != "Do" {
+            continue;
+        }
+        if operation.operands.len() != 1 {
+            return Err(Failure::Malformed);
+        }
+        let resources = resources.ok_or(Failure::Malformed)?;
+        let name = operation.operands[0].as_name().map_err(parser_failure)?;
+        let xobjects = resources.get(b"XObject").map_err(parser_failure)?;
+        let (_, xobjects) = document.dereference(xobjects).map_err(parser_failure)?;
+        let xobjects = xobjects.as_dict().map_err(parser_failure)?;
+        let object = xobjects.get(name).map_err(parser_failure)?;
+        let (id, object) = document.dereference(object).map_err(parser_failure)?;
+        let stream = object.as_stream().map_err(parser_failure)?;
+        let subtype = stream
+            .dict
+            .get_deref(b"Subtype", document)
+            .map_err(parser_failure)?
+            .as_name()
+            .map_err(parser_failure)?;
+        match subtype {
+            b"Image" | b"PS" => continue,
+            b"Form" => {}
+            _ => return Err(Failure::Malformed),
+        }
+        let subtype2 = match stream.dict.get(b"Subtype2") {
+            Ok(value) => Some(
+                document
+                    .dereference(value)
+                    .map_err(parser_failure)?
+                    .1
+                    .as_name()
+                    .map_err(parser_failure)?,
+            ),
+            Err(lopdf::Error::DictKey(_)) => None,
+            Err(error) => return Err(parser_failure(error)),
+        };
+        if subtype2 == Some(b"PS".as_slice()) {
+            continue;
+        }
+        if depth >= FORM_DEPTH_LIMIT {
+            return Err(Failure::Unsupported);
+        }
+        if let Some(id) = id
+            && active.contains(&id)
+        {
+            return Err(Failure::Malformed);
+        }
+        let inherited_key = resources as *const lopdf::Dictionary as usize;
+        let form_resources = match stream.dict.get(b"Resources") {
+            Ok(form_resources) => {
+                let (_, form_resources) = document
+                    .dereference(form_resources)
+                    .map_err(parser_failure)?;
+                Some(form_resources.as_dict().map_err(parser_failure)?)
+            }
+            Err(lopdf::Error::DictKey(_)) => Some(resources),
+            Err(error) => return Err(parser_failure(error)),
+        };
+        let resource_key = form_resources.map_or(inherited_key, |value| {
+            value as *const lopdf::Dictionary as usize
+        });
+        if let Some(id) = id {
+            let key = (id, resource_key);
+            if checked.contains(&key) {
+                continue;
+            }
+            if checked.len() >= FACT_LIMIT {
+                return Err(Failure::Unsupported);
+            }
+            checked.insert(key);
+            active.insert(id);
+        }
+        match stream.dict.get(b"Matrix") {
+            Ok(value) => {
+                let matrix = document.dereference(value).map_err(parser_failure)?.1;
+                let matrix = matrix.as_array().map_err(parser_failure)?;
+                if matrix.len() != 6
+                    || matrix.iter().any(|value| {
+                        !matches!(value, lopdf::Object::Integer(_) | lopdf::Object::Real(_))
+                            || match value {
+                                lopdf::Object::Integer(_) => false,
+                                lopdf::Object::Real(value) => !value.is_finite(),
+                                _ => true,
+                            }
+                    })
+                {
+                    return Err(Failure::Malformed);
+                }
+            }
+            Err(lopdf::Error::DictKey(_)) => {}
+            Err(error) => return Err(parser_failure(error)),
+        }
+        let content = match stream.dict.get(b"Filter") {
+            Ok(_) => Some(
+                stream
+                    .get_plain_content_with_limit(EXPANDED_LIMIT)
+                    .map_err(parser_failure)?,
+            ),
+            Err(lopdf::Error::DictKey(_)) => None,
+            Err(error) => return Err(parser_failure(error)),
+        };
+        let content =
+            lopdf::content::Content::decode_strict(content.as_deref().unwrap_or(&stream.content))
+                .map_err(parser_failure)?;
+        let result = validate_forms(
+            document,
+            &content.operations,
+            form_resources,
+            depth + 1,
+            active,
+            checked,
+        );
+        if let Some(id) = id {
+            active.remove(&id);
+        }
+        result?;
+    }
+    Ok(())
+}
+
+fn validate_page_forms(
+    document: &lopdf::Document,
+    page: lopdf::ObjectId,
+    operations: &[lopdf::content::Operation],
+    checked: &mut HashSet<(lopdf::ObjectId, usize)>,
+) -> Result<(), Failure> {
+    if !operations
+        .iter()
+        .any(|operation| operation.operator == "Do")
+    {
+        return Ok(());
+    }
+    let resources = page_resources(document, page)?;
+    validate_forms(
+        document,
+        operations,
+        resources,
+        0,
+        &mut HashSet::new(),
+        checked,
+    )
+}
+
 fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
     if !bytes.starts_with(b"%PDF-") {
         return Err(Failure::Malformed);
@@ -89,7 +292,7 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
     }
     refuse_structure_replacements(&document)?;
     let discovered = validate_page_tree(&mut document)?;
-    let pages = document.get_pages();
+    let pages: Vec<_> = document.get_pages().into_iter().collect();
     if pages.len() != discovered {
         return Err(Failure::Malformed);
     }
@@ -138,13 +341,18 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
         stream.dict.remove(b"DecodeParms");
     }
     drop(images);
+    let mut checked_forms = HashSet::new();
+    for (_, id) in &pages {
+        let content = page_content(&document, *id, EXPANDED_LIMIT)?;
+        let decoded = lopdf::content::Content::decode_strict(&content).map_err(parser_failure)?;
+        validate_page_forms(&document, *id, &decoded.operations, &mut checked_forms)?;
+    }
+    notify_admitted();
+
     let mut wire = Vec::new();
     wire.extend_from_slice(&(pages.len() as u32).to_le_bytes());
     let mut total = 0usize;
-    for (page, id) in pages {
-        let content = page_content(&document, id, EXPANDED_LIMIT)?;
-        lopdf::content::Content::decode_strict(&content).map_err(parser_failure)?;
-        drop(content);
+    for (page, _) in pages {
         let text = text::page(&document, page, OUTPUT_LIMIT.saturating_sub(total))?;
         total = total.saturating_add(text.len());
         if total > OUTPUT_LIMIT {
@@ -213,10 +421,10 @@ fn validate_page_tree(document: &mut lopdf::Document) -> Result<usize, Failure> 
         .map_err(parser_failure)?
         .as_reference()
         .map_err(parser_failure)?;
-    let mut pending = vec![(root, None)];
+    let mut pending = vec![(root, None, None)];
     let mut visited = HashSet::new();
     let mut discovered = 0usize;
-    while let Some((id, entered_at)) = pending.pop() {
+    while let Some((id, entered_at, expected_parent)) = pending.pop() {
         let node = document.get_dictionary(id).map_err(parser_failure)?;
         if let Some(before) = entered_at {
             let declared = node
@@ -231,6 +439,11 @@ fn validate_page_tree(document: &mut lopdf::Document) -> Result<usize, Failure> 
         }
         if !visited.insert(id) {
             return Err(Failure::Malformed);
+        }
+        match (expected_parent, node.get(b"Parent")) {
+            (None, Err(lopdf::Error::DictKey(_))) => {}
+            (Some(expected), Ok(lopdf::Object::Reference(actual))) if *actual == expected => {}
+            _ => return Err(Failure::Malformed),
         }
         let indirect_type = matches!(node.get(b"Type"), Ok(lopdf::Object::Reference(_)));
         let node_type = match node
@@ -250,9 +463,13 @@ fn validate_page_tree(document: &mut lopdf::Document) -> Result<usize, Failure> 
                     .map_err(parser_failure)?
                     .as_array()
                     .map_err(parser_failure)?;
-                pending.push((id, Some(discovered)));
+                pending.push((id, Some(discovered), expected_parent));
                 for child in children.iter().rev() {
-                    pending.push((child.as_reference().map_err(parser_failure)?, None));
+                    pending.push((
+                        child.as_reference().map_err(parser_failure)?,
+                        None,
+                        Some(id),
+                    ));
                 }
             }
             b"Page" => {
@@ -369,6 +586,101 @@ mod tests {
         assert_eq!(output_len(), 0);
         assert_eq!(input(0), 0);
         assert_eq!(input(INPUT_LIMIT as u32 + 1), 0);
+    }
+
+    #[test]
+    fn malformed_late_page_is_rejected_during_admission() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let resources = dictionary! { "Font" => dictionary! { "F1" => font } };
+        let first_content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"BT /F1 12 Tf (Visible) Tj ET".to_vec(),
+        ));
+        let late_content =
+            document.add_object(lopdf::Stream::new(lopdf::Dictionary::new(), b"(".to_vec()));
+        let mut page = |contents| {
+            document.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages, "Contents" => contents,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => resources.clone()
+            })
+        };
+        let first = page(first_content);
+        let late = page(late_content);
+        document.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![first.into(), late.into()], "Count" => 2 }
+                .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+
+        assert_eq!(parse(&bytes), Err(Failure::Malformed));
+
+        document
+            .get_object_mut(late_content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(Vec::new());
+        document
+            .get_dictionary_mut(late)
+            .unwrap()
+            .set("Parent", first);
+        bytes.clear();
+        document.save_to(&mut bytes).unwrap();
+        assert_eq!(parse(&bytes), Err(Failure::Malformed));
+
+        document.get_dictionary_mut(late).unwrap().remove(b"Parent");
+        bytes.clear();
+        document.save_to(&mut bytes).unwrap();
+        assert_eq!(parse(&bytes), Err(Failure::Malformed));
+    }
+
+    #[test]
+    fn recursive_or_missing_form_xobjects_refuse_admission() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let page_content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"/Loop Do".to_vec(),
+        ));
+        let form = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()]
+            },
+            b"/Loop Do".to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => page_content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "XObject" => dictionary! { "Loop" => form } }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+
+        for content in [b"/Loop Do".as_slice(), b"/Missing Do"] {
+            document
+                .get_object_mut(page_content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .set_content(content.to_vec());
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            assert_eq!(parse(&bytes), Err(Failure::Malformed));
+        }
     }
 
     #[test]
@@ -538,6 +850,18 @@ mod tests {
                 assert_eq!(result, Err(Failure::Malformed));
             }
         }
+
+        let path = format!("10 20 m {} S", "h 50 60 70 80 v ".repeat(10_000));
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(format!("{path} BT /F1 12 Tf 72 700 Td (Visible) Tj ET").into_bytes());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        let (wire, _) = parse(&bytes).unwrap();
+        assert_eq!(std::str::from_utf8(&wire[12..]).unwrap().trim(), "Visible");
     }
 
     #[test]

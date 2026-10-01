@@ -154,6 +154,7 @@ impl DocumentCoverageGap {
             Self::ResourceLimit(DocumentLimit::ParserWorkBytes) => {
                 "resource_limit:parser_work_bytes"
             }
+            Self::ResourceLimit(DocumentLimit::ExecutionFuel) => "resource_limit:execution_fuel",
             Self::ResourceLimit(_) => "resource_limit:other",
         }
     }
@@ -577,10 +578,21 @@ fn extract_pdf(
             },
         });
     }
-    let pages = pdf_runtime::extract_pages(bytes, control, stage)?;
+    let pages = match pdf_runtime::extract_pages(bytes, control, stage) {
+        Ok(pdf_runtime::PdfPages::Complete(pages)) => pages,
+        Ok(pdf_runtime::PdfPages::Incomplete(limit)) => {
+            return Ok(empty_partial_document(
+                DocumentFormat::Pdf,
+                DocumentParserProvenance::PdfExtract,
+                DocumentCoverageGap::ResourceLimit(limit),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     let mut text = String::new();
     let mut facts = Vec::new();
-    for (page_number, page) in &pages {
+    let mut reached_limit = None;
+    'pages: for (page_number, page) in &pages {
         control.check(stage)?;
         let mut page_offset = 0usize;
         for line in page.split('\n') {
@@ -590,22 +602,16 @@ fn extract_pdf(
                 continue;
             }
             if facts.len() >= MAX_DOCUMENT_FACTS {
-                return Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::FactCount,
-                    observed: facts.len().saturating_add(1),
-                    maximum: MAX_DOCUMENT_FACTS,
-                });
+                reached_limit = Some(DocumentLimit::FactCount);
+                break 'pages;
             }
             let required = text
                 .len()
                 .saturating_add(usize::from(!text.is_empty()))
                 .saturating_add(line.len());
             if required > MAX_DOCUMENT_OUTPUT_BYTES {
-                return Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::OutputBytes,
-                    observed: required,
-                    maximum: MAX_DOCUMENT_OUTPUT_BYTES,
-                });
+                reached_limit = Some(DocumentLimit::OutputBytes);
+                break 'pages;
             }
             if !text.is_empty() {
                 push_output_byte(&mut text, b'\n')?;
@@ -635,7 +641,11 @@ fn extract_pdf(
         text,
         facts,
         symbols: Vec::new(),
-        completeness: DocumentCompleteness::Complete,
+        completeness: reached_limit.map_or(DocumentCompleteness::Complete, |limit| {
+            DocumentCompleteness::Partial {
+                gaps: vec![DocumentCoverageGap::ResourceLimit(limit)],
+            }
+        }),
         provenance: DocumentParserProvenance::PdfExtract,
     })
 }
@@ -836,7 +846,11 @@ fn extract_docx(
             Ok(xml) => xml,
             Err(error) => {
                 if let Some(limit) = accepted_docx_limit(&error) {
-                    return Ok(empty_partial_docx(limit));
+                    return Ok(empty_partial_document(
+                        DocumentFormat::Docx,
+                        DocumentParserProvenance::QuickXml,
+                        DocumentCoverageGap::ResourceLimit(limit),
+                    ));
                 }
                 return Err(error);
             }
@@ -846,7 +860,11 @@ fn extract_docx(
     let memory_check = check_docx_story_memory(bytes.len(), xml.capacity(), 0);
     if let Err(error) = memory_check {
         if let Some(limit) = accepted_docx_limit(&error) {
-            return Ok(empty_partial_docx(limit));
+            return Ok(empty_partial_document(
+                DocumentFormat::Docx,
+                DocumentParserProvenance::QuickXml,
+                DocumentCoverageGap::ResourceLimit(limit),
+            ));
         }
         return Err(error);
     }
@@ -864,7 +882,11 @@ fn extract_docx(
         Ok(document) => document,
         Err(error) => {
             if let Some(limit) = accepted_docx_limit(&error) {
-                return Ok(empty_partial_docx(limit));
+                return Ok(empty_partial_document(
+                    DocumentFormat::Docx,
+                    DocumentParserProvenance::QuickXml,
+                    DocumentCoverageGap::ResourceLimit(limit),
+                ));
             }
             return Err(error);
         }
@@ -1106,16 +1128,18 @@ fn check_docx_story_memory(
 }
 
 /// Preserve a typed coverage fact when no main-story evidence fits the retained ceiling.
-fn empty_partial_docx(limit: DocumentLimit) -> DocumentFacts {
+fn empty_partial_document(
+    format: DocumentFormat,
+    provenance: DocumentParserProvenance,
+    gap: DocumentCoverageGap,
+) -> DocumentFacts {
     DocumentFacts {
-        format: DocumentFormat::Docx,
+        format,
         text: String::new(),
         facts: Vec::new(),
         symbols: Vec::new(),
-        completeness: DocumentCompleteness::Partial {
-            gaps: vec![DocumentCoverageGap::ResourceLimit(limit)],
-        },
-        provenance: DocumentParserProvenance::QuickXml,
+        completeness: DocumentCompleteness::Partial { gaps: vec![gap] },
+        provenance,
     }
 }
 
@@ -5123,7 +5147,7 @@ mod tests {
         pdf
     }
 
-    fn multi_page_pdf() -> Vec<u8> {
+    pub(super) fn multi_page_pdf() -> Vec<u8> {
         let objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n".as_slice(),
@@ -5915,12 +5939,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         assert!(
             matches!(
                 result,
-                Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::MemoryBytes | DocumentLimit::ExecutionFuel,
+                Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Pdf,
                     ..
-                } | DocumentExtractionError::Work(
-                    projectatlas_core::IndexWorkFailure::DeadlineExceeded { .. }
-                ))
+                })
             ),
             "{result:?}"
         );
