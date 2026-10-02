@@ -8587,6 +8587,8 @@ struct McpContractSession {
     next_request_id: u64,
 }
 
+const MCP_CONTRACT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[allow(dead_code)]
 impl McpContractSession {
     /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
@@ -8776,7 +8778,7 @@ impl McpContractSession {
         method: &str,
     ) -> Result<Value, Box<dyn Error>> {
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
+            .checked_add(MCP_CONTRACT_RESPONSE_TIMEOUT)
             .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -8787,10 +8789,24 @@ impl McpContractSession {
                 )
                 .into());
             }
-            let line = self
-                .responses
-                .recv_timeout(remaining)
-                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(line) => line?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "MCP contract request {request_id} for {method} timed out after {MCP_CONTRACT_RESPONSE_TIMEOUT:?}"
+                        ),
+                    )
+                    .into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other(format!(
+                        "MCP contract stdout closed while waiting for request {request_id} for {method}"
+                    ))
+                    .into());
+                }
+            };
             let response: Value = serde_json::from_str(line.trim())?;
             if response.get("id").and_then(Value::as_u64) == Some(request_id) {
                 return Ok(response);
@@ -10682,8 +10698,8 @@ fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Er
     )?;
     let pdf_path = repo.join("docs/fuel.pdf");
     let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
-    // The debug interpreter reaches the 10-second clock first; release exercises the old 500M-fuel regression.
-    let valid_repetitions = if cfg!(debug_assertions) { 300 } else { 4_000 };
+    // Keep the debug fixture small under parallel E2E load; release exercises the old 500M-fuel regression.
+    let valid_repetitions = if cfg!(debug_assertions) { 100 } else { 4_000 };
     fs::write(
         &pdf_path,
         pdf_with_closed_path_curves(valid_repetitions, PdfLatePage::None),
@@ -10834,7 +10850,7 @@ fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Er
     let before_failure = AtlasStore::open_read_only(&database)?
         .index_publication()?
         .ok_or_else(|| io::Error::other("PDF publication missing before unsafe input"))?;
-    let late_repetitions = if cfg!(debug_assertions) { 300 } else { 8_000 };
+    let late_repetitions = if cfg!(debug_assertions) { 100 } else { 8_000 };
     for invalid in [
         b"%PDF-1.4\ntruncated".to_vec(),
         pdf_with_closed_path_curves(late_repetitions, PdfLatePage::MalformedContent),
