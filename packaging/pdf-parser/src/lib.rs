@@ -105,13 +105,10 @@ fn page_resources(
         let node = document.get_dictionary(id).map_err(parser_failure)?;
         match node.get(b"Resources") {
             Ok(resources) => {
-                return document
-                    .dereference(resources)
-                    .map_err(parser_failure)?
-                    .1
-                    .as_dict()
-                    .map(Some)
-                    .map_err(parser_failure);
+                let (_, resources) = document.dereference(resources).map_err(parser_failure)?;
+                if !matches!(resources, lopdf::Object::Null) {
+                    return resources.as_dict().map(Some).map_err(parser_failure);
+                }
             }
             Err(lopdf::Error::DictKey(_)) => {}
             Err(error) => return Err(parser_failure(error)),
@@ -188,7 +185,11 @@ fn validate_forms(
                 let (_, form_resources) = document
                     .dereference(form_resources)
                     .map_err(parser_failure)?;
-                Some(form_resources.as_dict().map_err(parser_failure)?)
+                if matches!(form_resources, lopdf::Object::Null) {
+                    Some(resources)
+                } else {
+                    Some(form_resources.as_dict().map_err(parser_failure)?)
+                }
             }
             Err(lopdf::Error::DictKey(_)) => Some(resources),
             Err(error) => return Err(parser_failure(error)),
@@ -681,6 +682,85 @@ mod tests {
             document.save_to(&mut bytes).unwrap();
             assert_eq!(parse(&bytes), Err(Failure::Malformed));
         }
+    }
+
+    #[test]
+    fn null_page_and_form_resources_inherit_without_admitting_other_types() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica"
+        });
+        let form = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => lopdf::Object::Null
+            },
+            b"BT /F1 12 Tf 72 500 Td (Inherited Marker) Tj ET".to_vec(),
+        ));
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"/Form Do".to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => lopdf::Object::Null
+        });
+        document.objects.insert(
+            pages,
+            dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => font },
+                    "XObject" => dictionary! { "Form" => form }
+                }
+            }
+            .into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let extract = |document: &mut lopdf::Document| {
+            let mut bytes = Vec::new();
+            document.save_to(&mut bytes).unwrap();
+            parse(&bytes)
+        };
+
+        let output = extract(&mut document).unwrap().0;
+        assert!(String::from_utf8_lossy(&output).contains("Inherited Marker"));
+        let null = document.add_object(lopdf::Object::Null);
+        document
+            .get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", null);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Resources", null);
+        let output = extract(&mut document).unwrap().0;
+        assert!(String::from_utf8_lossy(&output).contains("Inherited Marker"));
+
+        document
+            .get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
+        document
+            .get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", null);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Resources", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
     }
 
     #[test]
