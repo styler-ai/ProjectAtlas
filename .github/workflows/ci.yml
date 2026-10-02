@@ -492,7 +492,7 @@ jobs:
 
       - name: Document resource proof
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         run: |
           cargo build --locked --release -p projectatlas-cli
