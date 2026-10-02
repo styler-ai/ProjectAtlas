@@ -110,6 +110,23 @@ fn limit(resource: DocumentLimit, maximum: usize) -> DocumentExtractionError {
     }
 }
 
+/// Treat a decoded-byte ceiling as document-local only after structural admission.
+fn expanded_result(
+    admitted: bool,
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<PdfPages, DocumentExtractionError> {
+    if admitted {
+        control.check(stage)?;
+        Ok(PdfPages::Incomplete(DocumentLimit::ExpandedBytes))
+    } else {
+        Err(limit(
+            DocumentLimit::ExpandedBytes,
+            MAX_DOCUMENT_EXPANDED_BYTES,
+        ))
+    }
+}
+
 /// Preserve interpreter resource refusals as typed document limits.
 fn vm_error(error: &wasmi::Error) -> DocumentExtractionError {
     match error.as_trap_code() {
@@ -303,10 +320,7 @@ pub(super) fn extract_pages(
             return Err(limit(DocumentLimit::OutputBytes, MAX_DOCUMENT_OUTPUT_BYTES));
         }
         Ok(Failure::Expanded) => {
-            return Err(limit(
-                DocumentLimit::ExpandedBytes,
-                MAX_DOCUMENT_EXPANDED_BYTES,
-            ));
+            return expanded_result(store.data().admitted, &control, stage);
         }
         Ok(Failure::Malformed) => {
             return Err(malformed(
@@ -543,6 +557,31 @@ mod tests {
             matches!(result, Ok(ParserRun::Complete(code)) if code == Failure::Malformed as i32)
         );
         assert!(!store.data().admitted);
+    }
+
+    #[test]
+    fn expanded_bytes_are_local_only_after_admission() {
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        assert!(matches!(
+            expanded_result(false, &control, IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::ExpandedBytes,
+                ..
+            })
+        ));
+        assert!(matches!(
+            expanded_result(true, &control, IndexWorkStage::TextIndex),
+            Ok(PdfPages::Incomplete(DocumentLimit::ExpandedBytes))
+        ));
+
+        cancellation.cancel();
+        assert!(matches!(
+            expanded_result(true, &control, IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Work(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::TextIndex
+            }))
+        ));
     }
 
     #[test]

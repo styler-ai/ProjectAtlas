@@ -18,7 +18,7 @@ use std::fmt;
 use std::str;
 use std::fs::File;
 use std::slice::Iter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
 use std::marker::PhantomData;
@@ -69,6 +69,113 @@ impl From<lopdf::Error> for OutputError {
     fn from(e: lopdf::Error) -> Self {
         OutputError::PdfError(e)
     }
+}
+
+/// A per-document budget for strict decoding of streams consumed by the renderer.
+///
+/// Decoded resource streams are cached by their stable in-document address so a
+/// repeated font, color space, or Form does not consume the budget or decode
+/// fuel more than once. Streams normalized during structural admission remain
+/// charged but are not retained in the cache.
+pub struct StreamDecodeBudget {
+    limit: usize,
+    used: usize,
+    decoded: HashMap<*const Stream, Rc<Vec<u8>>>,
+    normalized: HashSet<*const Stream>,
+}
+
+impl StreamDecodeBudget {
+    /// Create a stream decoder with a maximum aggregate expanded-byte budget.
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: 0,
+            decoded: HashMap::new(),
+            normalized: HashSet::new(),
+        }
+    }
+
+    /// Return decoded stream bytes, rejecting malformed and unsupported filters.
+    ///
+    /// # Errors
+    /// Returns the underlying PDF error when a stream cannot be decoded or the
+    /// aggregate expanded-byte budget is exceeded.
+    pub fn decode_stream(
+        &mut self,
+        document: &Document,
+        stream: &Stream,
+    ) -> Result<Rc<Vec<u8>>, OutputError> {
+        let identity = std::ptr::from_ref(stream);
+        if let Some(decoded) = self.decoded.get(&identity) {
+            return Ok(Rc::clone(decoded));
+        }
+        if self.normalized.contains(&identity) {
+            return Ok(Rc::new(stream.content.clone()));
+        }
+
+        let remaining = self.limit.saturating_sub(self.used);
+        let content = match stream.dict.get(b"Filter") {
+            Ok(filter)
+                if matches!(document.dereference(filter)?.1, Object::Null) =>
+            {
+                if stream.content.len() > remaining {
+                    return Err(memory_limit_error(remaining));
+                }
+                stream.content.clone()
+            }
+            Ok(_) => {
+                // `get_plain_content_with_limit` intentionally preserves lopdf's
+                // raw fallback for invalid filter dictionaries; validate first so
+                // renderer-consumed streams never inherit that fallback.
+                stream.filters()?;
+                stream.get_plain_content_with_limit(remaining)?
+            }
+            Err(lopdf::Error::DictKey(_)) => stream.get_plain_content_with_limit(remaining)?,
+            Err(error) => return Err(error.into()),
+        };
+        if content.len() > remaining {
+            return Err(memory_limit_error(remaining));
+        }
+
+        self.used = self.used.saturating_add(content.len());
+        let content = Rc::new(content);
+        self.decoded.insert(identity, Rc::clone(&content));
+        Ok(content)
+    }
+
+    /// Decode and normalize a stream object selected during structural admission.
+    ///
+    /// # Errors
+    /// Returns the underlying PDF error when the object is not a stream, its
+    /// filter is malformed or unsupported, or the aggregate byte limit is hit.
+    pub fn normalize_stream(
+        &mut self,
+        document: &mut Document,
+        id: ObjectId,
+    ) -> Result<(), OutputError> {
+        let identity = {
+            let stream = document.get_object(id)?.as_stream()?;
+            std::ptr::from_ref(stream)
+        };
+        if self.normalized.contains(&identity) {
+            return Ok(());
+        }
+        let decoded = {
+            let stream = document.get_object(id)?.as_stream()?;
+            self.decode_stream(document, stream)?
+        };
+        let stream = document.get_object_mut(id)?.as_stream_mut()?;
+        stream.set_content(decoded.as_ref().clone());
+        stream.dict.remove(b"Filter");
+        stream.dict.remove(b"DecodeParms");
+        self.decoded.remove(&identity);
+        self.normalized.insert(identity);
+        Ok(())
+    }
+}
+
+fn memory_limit_error(limit: usize) -> OutputError {
+    lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { limit }).into()
 }
 
 macro_rules! dlog {
@@ -323,7 +430,8 @@ struct PdfType3Font<'a> {
 
 
 fn make_font<'a>(doc: &'a Document, font: &'a Dictionary,
-                 fonts: &mut HashMap<*const Dictionary, Rc<dyn PdfFont + 'a>>) -> Result<Rc<dyn PdfFont + 'a>, OutputError> {
+                 fonts: &mut HashMap<*const Dictionary, Rc<dyn PdfFont + 'a>>,
+                 budget: &mut StreamDecodeBudget) -> Result<Rc<dyn PdfFont + 'a>, OutputError> {
     let entry = fonts.entry(std::ptr::from_ref(font));
     if let Entry::Occupied(entry) = entry {
         return Ok(entry.get().clone());
@@ -338,11 +446,11 @@ fn make_font<'a>(doc: &'a Document, font: &'a Dictionary,
             }
             _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Type 0 font encoding").into()),
         }
-        Rc::new(PdfCIDFont::new(doc, font))
+        Rc::new(PdfCIDFont::new(doc, font, budget)?)
     } else if subtype == "Type3" {
-        Rc::new(PdfType3Font::new(doc, font)?)
+        Rc::new(PdfType3Font::new(doc, font, budget)?)
     } else {
-        Rc::new(PdfSimpleFont::new(doc, font)?)
+        Rc::new(PdfSimpleFont::new(doc, font, budget)?)
     };
     Ok(entry.or_insert(font).clone())
 }
@@ -387,7 +495,7 @@ fn encoding_to_unicode_table(name: &[u8]) -> Vec<u16> {
     described in Section 5.5.5, “Character Encoding.”
 */
 impl<'a> PdfSimpleFont<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> Result<PdfSimpleFont<'a>, OutputError> {
+    fn new(doc: &'a Document, font: &'a Dictionary, budget: &mut StreamDecodeBudget) -> Result<PdfSimpleFont<'a>, OutputError> {
         let base_name = get_name_string(doc, font, b"BaseFont");
         let subtype = get_name_string(doc, font, b"Subtype");
 
@@ -403,7 +511,7 @@ impl<'a> PdfSimpleFont<'a> {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile");
                 match file {
                     Some(&Object::Stream(ref s)) => {
-                        let s = get_contents(s);
+                        let s = get_contents(doc, s, budget)?;
                         //dlog!("font contents {:?}", pdf_to_utf8(&s));
                         type1_encoding = Some(type1_encoding_parser::get_encoding_map(&s).expect("encoding"));
                     }
@@ -413,7 +521,7 @@ impl<'a> PdfSimpleFont<'a> {
                 let file = maybe_get_obj(doc, descriptor, b"FontFile2");
                 match file {
                     Some(&Object::Stream(ref s)) => {
-                        let _s = get_contents(s);
+                        let _s = get_contents(doc, s, budget)?;
                         //File::create(format!("/tmp/{}", base_name)).unwrap().write_all(&s);
                     }
                     _ => { dlog!("font file {:?}", file) }
@@ -425,7 +533,7 @@ impl<'a> PdfSimpleFont<'a> {
                 Some(&Object::Stream(ref s)) => {
                     let subtype = get_name_string(doc, &s.dict, b"Subtype");
                     dlog!("font file {}, {:?}", subtype, s);
-                    let s = get_contents(s);
+                    let s = get_contents(doc, s, budget)?;
                     if subtype == "Type1C" {
                         let table = cff_parser::Table::parse(&s).unwrap();
                         //use std::io::Write;
@@ -468,11 +576,11 @@ impl<'a> PdfSimpleFont<'a> {
 
         let mut unicode_map = match unicode_map {
             Some(mut unicode_map) => {
-                unicode_map.extend(get_unicode_map(doc, font).unwrap_or(HashMap::new()));
+                unicode_map.extend(get_unicode_map(doc, font, budget)?.unwrap_or_default());
                 Some(unicode_map)
             }
             None => {
-                get_unicode_map(doc, font)
+                get_unicode_map(doc, font, budget)?
             }
         };
 
@@ -726,7 +834,7 @@ impl<'a> PdfSimpleFont<'a> {
 
 
 impl<'a> PdfType3Font<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> Result<PdfType3Font<'a>, OutputError> {
+    fn new(doc: &'a Document, font: &'a Dictionary, budget: &mut StreamDecodeBudget) -> Result<PdfType3Font<'a>, OutputError> {
         let matrix = doc.dereference(font.get(b"FontMatrix")?)?.1.as_array()?;
         if matrix.len() != 6 || matrix.iter().any(|value|
             !matches!(value, Object::Integer(_) | Object::Real(_)) || !as_num(value).is_finite()) {
@@ -735,7 +843,7 @@ impl<'a> PdfType3Font<'a> {
         // Type 3 widths are glyph-space vectors; only their transformed horizontal
         // component contributes to text displacement, even for a rotated matrix.
         let width_scale = as_num(&matrix[0]) * 1000.;
-        let unicode_map = get_unicode_map(doc, font);
+        let unicode_map = get_unicode_map(doc, font, budget)?;
         let encoding: Option<&Object> = get(doc, font, b"Encoding");
 
         let encoding_table;
@@ -958,14 +1066,18 @@ struct PdfCIDFont<'a> {
     default_width: Option<f64>, // only used for CID fonts and we should probably brake out the different font types
 }
 
-fn get_unicode_map<'a>(doc: &'a Document, font: &'a Dictionary) -> Option<HashMap<u32, String>> {
+fn get_unicode_map<'a>(
+    doc: &'a Document,
+    font: &'a Dictionary,
+    budget: &mut StreamDecodeBudget,
+) -> Result<Option<HashMap<u32, String>>, OutputError> {
     let to_unicode = maybe_get_obj(doc, font, b"ToUnicode");
     dlog!("ToUnicode: {:?}", to_unicode);
     let mut unicode_map = None;
     match to_unicode {
         Some(&Object::Stream(ref stream)) => {
-            let contents = get_contents(stream);
-            dlog!("Stream: {}", String::from_utf8(contents.clone()).unwrap());
+            let contents = get_contents(doc, stream, budget)?;
+            dlog!("Stream: {}", String::from_utf8(contents.as_ref().clone()).unwrap());
 
             let cmap = adobe_cmap_parser::get_unicode_map(&contents).unwrap();
             let mut unicode = HashMap::new();
@@ -1005,12 +1117,12 @@ fn get_unicode_map<'a>(doc: &'a Document, font: &'a Dictionary) -> Option<HashMa
         }
         _ => { panic!("unsupported cmap {:?}", to_unicode)}
     }
-    unicode_map
+    Ok(unicode_map)
 }
 
 
 impl<'a> PdfCIDFont<'a> {
-    fn new(doc: &'a Document, font: &'a Dictionary) -> PdfCIDFont<'a> {
+    fn new(doc: &'a Document, font: &'a Dictionary, budget: &mut StreamDecodeBudget) -> Result<PdfCIDFont<'a>, OutputError> {
         let base_name = get_name_string(doc, font, b"BaseFont");
         let descendants = maybe_get_array(doc, font, b"DescendantFonts").expect("Descendant fonts required");
         let ciddict = maybe_deref(doc, &descendants[0]).as_dict().expect("should be CID dict");
@@ -1022,7 +1134,7 @@ impl<'a> PdfCIDFont<'a> {
         // We should also look inside the truetype data to see if there's a cmap table. It will help us convert as well.
         // This won't work if the cmap has been subsetted. A better approach might be to hash glyph contents and use that against
         // a global library of glyph hashes
-        let unicode_map = get_unicode_map(doc, font);
+        let unicode_map = get_unicode_map(doc, font, budget)?;
 
         dlog!("descendents {:?} {:?}", descendants, ciddict);
 
@@ -1056,7 +1168,7 @@ impl<'a> PdfCIDFont<'a> {
                 }
             }
         }
-        PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width) }
+        Ok(PdfCIDFont{doc, font, widths, to_unicode: unicode_map, encoding, default_width: Some(default_width) })
     }
 }
 
@@ -1138,7 +1250,7 @@ impl<'a> fmt::Debug for PdfFontDescriptor<'a> {
 struct Type0Func {
     domain: Vec<f64>,
     range: Vec<f64>,
-    contents: Vec<u8>,
+    contents: Rc<Vec<u8>>,
     size: Vec<i64>,
     bits_per_sample: i64,
     encode: Vec<f64>,
@@ -1180,11 +1292,11 @@ enum Function {
     #[allow(dead_code)]
     Type3,
     #[allow(dead_code)]
-    Type4(Vec<u8>)
+    Type4(Rc<Vec<u8>>)
 }
 
 impl Function {
-    fn new(doc: &Document, obj: &Object) -> Function {
+    fn new(doc: &Document, obj: &Object, budget: &mut StreamDecodeBudget) -> Result<Function, OutputError> {
         let dict = match obj {
             &Object::Dictionary(ref dict) => dict,
             &Object::Stream(ref stream) => &stream.dict,
@@ -1200,7 +1312,7 @@ impl Function {
                 };
                 let range: Vec<f64> = get(doc, dict, b"Range");
                 let domain: Vec<f64> = get(doc, dict, b"Domain");
-                let contents = get_contents(stream);
+                let contents = get_contents(doc, stream, budget)?;
                 let size: Vec<i64> = get(doc, dict, b"Size");
                 let bits_per_sample = get(doc, dict, b"BitsPerSample");
                 // We ignore 'Order' like pdfium, poppler and pdf.js
@@ -1233,9 +1345,9 @@ impl Function {
                 // PostScript calculator function
                 let contents = match obj {
                     &Object::Stream(ref stream) => {
-                        let contents = get_contents(stream);
+                        let contents = get_contents(doc, stream, budget)?;
                         warn!("unhandled type-4 function");
-                        warn!("Stream: {}", String::from_utf8(contents.clone()).unwrap());
+                        warn!("Stream: {}", String::from_utf8(contents.as_ref().clone()).unwrap());
                         contents
                     }
                     _ => { panic!("type 4 functions should be streams") }
@@ -1244,7 +1356,7 @@ impl Function {
             }
             _ => { panic!("unhandled function type {}", function_type) }
         };
-        f
+        Ok(f)
     }
 }
 
@@ -1269,13 +1381,12 @@ struct TextState<'a>
     tm: Transform,
 }
 
-// XXX: We'd ideally implement this without having to copy the uncompressed data
-fn get_contents(contents: &Stream) -> Vec<u8> {
-    if contents.filters().is_ok() {
-        contents.decompressed_content().unwrap_or_else(|_|contents.content.clone())
-    } else {
-        contents.content.clone()
-    }
+fn get_contents(
+    document: &Document,
+    contents: &Stream,
+    budget: &mut StreamDecodeBudget,
+) -> Result<Rc<Vec<u8>>, OutputError> {
+    budget.decode_stream(document, contents)
 }
 
 #[derive(Clone)]
@@ -1355,7 +1466,8 @@ pub struct MediaBox {
 }
 
 fn apply_state<'a>(doc: &'a Document, gs: &mut GraphicsState<'a>, state: &'a Dictionary,
-                   fonts: &mut HashMap<*const Dictionary, Rc<dyn PdfFont + 'a>>) -> Result<(), OutputError> {
+                   fonts: &mut HashMap<*const Dictionary, Rc<dyn PdfFont + 'a>>,
+                   budget: &mut StreamDecodeBudget) -> Result<(), OutputError> {
     for (k, v) in state.iter() {
         let k : &[u8] = k.as_ref();
         match k {
@@ -1373,7 +1485,7 @@ fn apply_state<'a>(doc: &'a Document, gs: &mut GraphicsState<'a>, state: &'a Dic
                 if !size.is_finite() {
                     return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "non-finite ExtGState font size").into());
                 }
-                gs.ts.font = Some(make_font(doc, dictionary, fonts)?);
+                gs.ts.font = Some(make_font(doc, dictionary, fonts, budget)?);
                 gs.ts.font_size = size;
             }
             b"SMask" => { match maybe_deref(doc, v)  {
@@ -1464,7 +1576,7 @@ pub enum AlternateColorSpace {
     CalRGB(CalRGB),
     CalGray(CalGray),
     Lab(Lab),
-    ICCBased(Vec<u8>)
+    ICCBased(Rc<Vec<u8>>)
 }
 
 #[derive(Clone)]
@@ -1486,11 +1598,16 @@ pub enum ColorSpace {
     CalGray(CalGray),
     Lab(Lab),
     Separation(Separation),
-    ICCBased(Vec<u8>)
+    ICCBased(Rc<Vec<u8>>)
 }
 
-fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary) -> ColorSpace {
-    match name {
+fn make_colorspace<'a>(
+    doc: &'a Document,
+    name: &[u8],
+    resources: &'a Dictionary,
+    budget: &mut StreamDecodeBudget,
+) -> Result<ColorSpace, OutputError> {
+    let colorspace = match name {
         b"DeviceGray" => ColorSpace::DeviceGray,
         b"DeviceRGB" => ColorSpace::DeviceRGB,
         b"DeviceCMYK" => ColorSpace::DeviceCMYK,
@@ -1518,8 +1635,7 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
                                     "ICCBased" => {
                                         let stream = maybe_deref(doc, &cs[1]).as_stream().unwrap();
                                         dlog!("ICCBased {:?}", stream);
-                                        // XXX: we're going to be continually decompressing everytime this object is referenced
-                                        AlternateColorSpace::ICCBased(get_contents(stream))
+                                        AlternateColorSpace::ICCBased(get_contents(doc, stream, budget)?)
                                     }
                                     "CalGray" => {
                                         let dict = maybe_deref(doc, &cs[1]).as_dict().expect("second arg must be a dict");
@@ -1551,7 +1667,7 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
                             }
                             _ => panic!("Alternate space should be name or array {:?}", cs[2])
                         };
-                        let tint_transform = Box::new(Function::new(doc, maybe_deref(doc, &cs[3])));
+                        let tint_transform = Box::new(Function::new(doc, maybe_deref(doc, &cs[3]), budget)?);
 
                         dlog!("{:?} {:?} {:?}", name, alternate_space, tint_transform);
                         ColorSpace::Separation(Separation{ name, alternate_space, tint_transform})
@@ -1559,8 +1675,7 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
                     "ICCBased" => {
                         let stream = maybe_deref(doc, &cs[1]).as_stream().unwrap();
                         dlog!("ICCBased {:?}", stream);
-                        // XXX: we're going to be continually decompressing everytime this object is referenced
-                        ColorSpace::ICCBased(get_contents(stream))
+                        ColorSpace::ICCBased(get_contents(doc, stream, budget)?)
                     }
                     "CalGray" => {
                         let dict = maybe_deref(doc, &cs[1]).as_dict().expect("second arg must be a dict");
@@ -1611,7 +1726,8 @@ fn make_colorspace<'a>(doc: &'a Document, name: &[u8], resources: &'a Dictionary
                 panic!();
             }
         }
-    }
+    };
+    Ok(colorspace)
 }
 
 struct Processor<'a> {
@@ -1624,7 +1740,7 @@ impl<'a> Processor<'a> {
         Processor { font_table: HashMap::new(), _none: PhantomData }
     }
 
-    fn process_stream(&mut self, doc: &'a Document, content: Vec<u8>, resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32, mut gs: GraphicsState<'a>) -> Result<(), OutputError> {
+    fn process_stream(&mut self, doc: &'a Document, content: &[u8], resources: &'a Dictionary, media_box: &MediaBox, output: &mut dyn OutputDev, page_num: u32, budget: &mut StreamDecodeBudget, prevalidated_streams: &HashSet<ObjectId>, mut gs: GraphicsState<'a>) -> Result<(), OutputError> {
         let content = Content::decode_strict(&content)?;
         //let mut ts = &mut gs.ts;
         let mut gs_stack = Vec::new();
@@ -1659,11 +1775,11 @@ impl<'a> Processor<'a> {
                 }
                 "CS" => {
                     let name = operation.operands[0].as_name().unwrap();
-                    gs.stroke_colorspace = make_colorspace(doc, name, resources);
+                    gs.stroke_colorspace = make_colorspace(doc, name, resources, budget)?;
                 }
                 "cs" => {
                     let name = operation.operands[0].as_name().unwrap();
-                    gs.fill_colorspace = make_colorspace(doc, name, resources);
+                    gs.fill_colorspace = make_colorspace(doc, name, resources, budget)?;
                 }
                 "SC" | "SCN" => {
                     gs.stroke_color = match gs.stroke_colorspace {
@@ -1748,7 +1864,7 @@ impl<'a> Processor<'a> {
                     let name = operation.operands[0].as_name().unwrap();
                     // Resource names are scoped; two Forms can have unrelated /F1 fonts.
                     let dictionary = get::<&Dictionary>(doc, fonts, name);
-                    let font = make_font(doc, dictionary, &mut self.font_table)?;
+                    let font = make_font(doc, dictionary, &mut self.font_table, budget)?;
                     {
                         /*let file = font.get_descriptor().and_then(|desc| desc.get_file());
                     if let Some(file) = file {
@@ -1833,7 +1949,7 @@ impl<'a> Processor<'a> {
                     let ext_gstate: &Dictionary = get(doc, resources, b"ExtGState");
                     let name = operation.operands[0].as_name().unwrap();
                     let state: &Dictionary = get(doc, ext_gstate, name);
-                    apply_state(doc, &mut gs, state, &mut self.font_table)?;
+                    apply_state(doc, &mut gs, state, &mut self.font_table, budget)?;
                 }
                 "i" => { dlog!("unhandled graphics state flattness operator {:?}", operation); }
                 "w" => { gs.line_width = as_num(&operation.operands[0]); }
@@ -1933,7 +2049,9 @@ impl<'a> Processor<'a> {
                     // with the subdocument content and resources
                     let xobject: &Dictionary = get(&doc, resources, b"XObject");
                     let name = operation.operands[0].as_name().unwrap();
-                    let xf: &Stream = get(&doc, xobject, name);
+                    let object = xobject.get(name)?;
+                    let (form_id, object) = doc.dereference(object)?;
+                    let xf = object.as_stream()?;
                     match doc.dereference(xf.dict.get(b"Subtype")?)?.1.as_name()? {
                         b"Image" | b"PS" => continue, // Pixels and print-only PostScript do not supply displayed text.
                         b"Form" if maybe_get_obj(doc, &xf.dict, b"Subtype2")
@@ -1942,7 +2060,6 @@ impl<'a> Processor<'a> {
                         _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported XObject subtype").into()),
                     }
                     let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
-                    let contents = get_contents(xf);
                     let mut nested = gs.clone();
                     if let Some(matrix) = maybe_get_obj(doc, &xf.dict, b"Matrix")
                         .filter(|matrix| !matches!(matrix, Object::Null)) {
@@ -1955,7 +2072,32 @@ impl<'a> Processor<'a> {
                             as_num(&matrix[0]), as_num(&matrix[1]), as_num(&matrix[2]),
                             as_num(&matrix[3]), as_num(&matrix[4]), as_num(&matrix[5])));
                     }
-                    self.process_stream(&doc, contents, resources, &media_box, output, page_num, nested)?;
+                    if form_id.is_some_and(|id| prevalidated_streams.contains(&id)) {
+                        self.process_stream(
+                            doc,
+                            &xf.content,
+                            resources,
+                            &media_box,
+                            output,
+                            page_num,
+                            budget,
+                            prevalidated_streams,
+                            nested,
+                        )?;
+                    } else {
+                        let contents = budget.decode_stream(doc, xf)?;
+                        self.process_stream(
+                            doc,
+                            contents.as_slice(),
+                            resources,
+                            &media_box,
+                            output,
+                            page_num,
+                            budget,
+                            prevalidated_streams,
+                            nested,
+                        )?;
+                    }
                 }
                 _ => { dlog!("unknown operation {:?}", operation); }
 
@@ -2468,15 +2610,43 @@ pub fn output_doc(doc: &Document, output: &mut dyn OutputDev) -> Result<(), Outp
     let empty_resources = Dictionary::new();
     let pages = doc.get_pages();
     let mut p = Processor::new();
+    let mut budget = StreamDecodeBudget::new(usize::MAX);
+    let prevalidated_streams = HashSet::new();
     for dict in pages {
         let page_num = dict.0;
         let object_id = dict.1;
-        output_doc_inner(page_num, object_id, doc, &mut p, output, &empty_resources)?;
+        output_doc_inner(
+            page_num,
+            object_id,
+            doc,
+            &mut p,
+            output,
+            &empty_resources,
+            &mut budget,
+            &prevalidated_streams,
+        )?;
     }
     Ok(())
 }
 
 pub fn output_doc_page(doc: &Document, output: &mut dyn OutputDev, page_num: u32) -> Result<(), OutputError> {
+    let mut budget = StreamDecodeBudget::new(usize::MAX);
+    let prevalidated_streams = HashSet::new();
+    output_doc_page_with_budget(doc, output, page_num, &mut budget, &prevalidated_streams)
+}
+
+/// Render one page using a caller-owned aggregate stream budget and the IDs of
+/// page/Form streams already strictly decoded during structural admission.
+///
+/// # Errors
+/// Returns output, PDF, unsupported-filter, or expanded-byte-limit errors.
+pub fn output_doc_page_with_budget(
+    doc: &Document,
+    output: &mut dyn OutputDev,
+    page_num: u32,
+    budget: &mut StreamDecodeBudget,
+    prevalidated_streams: &HashSet<ObjectId>,
+) -> Result<(), OutputError> {
     if doc.is_encrypted() {
         error!("Encrypted documents must be decrypted with a password using {{extract_text|extract_text_from_mem|output_doc}}_encrypted");
     }
@@ -2484,11 +2654,20 @@ pub fn output_doc_page(doc: &Document, output: &mut dyn OutputDev, page_num: u32
     let pages = doc.get_pages();
     let object_id = pages.get(&page_num).ok_or(lopdf::Error::PageNumberNotFound(page_num))?;
     let mut p = Processor::new();
-    output_doc_inner(page_num, *object_id, doc, &mut p, output, &empty_resources)?;
+    output_doc_inner(
+        page_num,
+        *object_id,
+        doc,
+        &mut p,
+        output,
+        &empty_resources,
+        budget,
+        prevalidated_streams,
+    )?;
     Ok(())
 }
 
-fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p: & mut Processor<'a>, output: &mut dyn OutputDev, empty_resources: &'a Dictionary) -> Result<(), OutputError> {
+fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p: & mut Processor<'a>, output: &mut dyn OutputDev, empty_resources: &'a Dictionary, budget: &mut StreamDecodeBudget, prevalidated_streams: &HashSet<ObjectId>) -> Result<(), OutputError> {
     let page_dict = doc.get_object(object_id).unwrap().as_dict().unwrap();
     dlog!("page {} {:?}", page_num, page_dict);
     // XXX: Some pdfs lack a Resources directory
@@ -2528,7 +2707,34 @@ fn output_doc_inner<'a>(page_num: u32, object_id: ObjectId, doc: &'a Document, p
         smask: None
     };
     output.begin_page(page_num, &media_box, art_box)?;
-    p.process_stream(&doc, doc.get_page_content(object_id), resources, &media_box, output, page_num, gs)?;
+    let content = get_page_content_with_budget(doc, object_id, budget)?;
+    p.process_stream(
+        doc,
+        &content,
+        resources,
+        &media_box,
+        output,
+        page_num,
+        budget,
+        prevalidated_streams,
+        gs,
+    )?;
     output.end_page()?;
     Ok(())
+}
+
+fn get_page_content_with_budget(
+    doc: &Document,
+    page_id: ObjectId,
+    budget: &mut StreamDecodeBudget,
+) -> Result<Vec<u8>, OutputError> {
+    let streams = doc.get_page_contents(page_id);
+    let mut content = Vec::new();
+    for id in streams {
+        let stream = doc.get_object(id)?.as_stream()?;
+        let decoded = budget.decode_stream(doc, stream)?;
+        content.extend_from_slice(decoded.as_ref());
+        content.push(b'\n');
+    }
+    Ok(content)
 }
