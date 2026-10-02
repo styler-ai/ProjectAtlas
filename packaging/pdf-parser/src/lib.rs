@@ -145,7 +145,7 @@ fn validate_forms(
     resources: Option<&lopdf::Dictionary>,
     depth: usize,
     active: &mut HashSet<lopdf::ObjectId>,
-    checked: &mut HashSet<(lopdf::ObjectId, usize)>,
+    checked: &mut HashSet<(lopdf::ObjectId, usize, usize)>,
 ) -> Result<(), Failure> {
     for operation in operations {
         if operation.operator != "Do" {
@@ -215,7 +215,7 @@ fn validate_forms(
             value as *const lopdf::Dictionary as usize
         });
         if let Some(id) = id {
-            let key = (id, resource_key);
+            let key = (id, resource_key, depth);
             if checked.contains(&key) {
                 continue;
             }
@@ -279,7 +279,7 @@ fn validate_page_forms(
     document: &lopdf::Document,
     page: lopdf::ObjectId,
     operations: &[lopdf::content::Operation],
-    checked: &mut HashSet<(lopdf::ObjectId, usize)>,
+    checked: &mut HashSet<(lopdf::ObjectId, usize, usize)>,
 ) -> Result<(), Failure> {
     if !operations
         .iter()
@@ -726,6 +726,72 @@ mod tests {
             document.save_to(&mut bytes).unwrap();
             assert_eq!(parse(&bytes), Err(Failure::Malformed));
         }
+    }
+
+    #[test]
+    fn reused_form_is_rechecked_at_deeper_invocation_depth() {
+        let mut document = lopdf::Document::new();
+        let pages = document.new_object_id();
+        let forms: Vec<_> = (0..FORM_DEPTH_LIMIT)
+            .map(|_| document.new_object_id())
+            .collect();
+        let mut xobjects = lopdf::Dictionary::new();
+        for (index, id) in forms.iter().enumerate() {
+            xobjects.set(format!("F{index}"), *id);
+            let content = if index + 1 == forms.len() {
+                Vec::new()
+            } else {
+                format!("/F{} Do", index + 1).into_bytes()
+            };
+            document.objects.insert(
+                *id,
+                lopdf::Stream::new(
+                    dictionary! {
+                        "Type" => "XObject", "Subtype" => "Form",
+                        "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()]
+                    },
+                    content,
+                )
+                .into(),
+            );
+        }
+        let outer = document.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 612.into(), 792.into()]
+            },
+            b"/F0 Do".to_vec(),
+        ));
+        xobjects.set("Outer", outer);
+        let content = document.add_object(lopdf::Stream::new(
+            lopdf::Dictionary::new(),
+            b"/F0 Do /Outer Do".to_vec(),
+        ));
+        let page = document.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "Resources" => dictionary! { "XObject" => xobjects }
+        });
+        document.objects.insert(
+            pages,
+            dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }.into(),
+        );
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+
+        let shallow = lopdf::content::Content::decode_strict(b"/F0 Do").unwrap();
+        assert_eq!(
+            validate_page_forms(&document, page, &shallow.operations, &mut HashSet::new()),
+            Ok(())
+        );
+        let both = lopdf::content::Content::decode_strict(b"/F0 Do /Outer Do").unwrap();
+        assert_eq!(
+            validate_page_forms(&document, page, &both.operations, &mut HashSet::new()),
+            Err(Failure::Unsupported)
+        );
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        assert_eq!(parse(&bytes), Err(Failure::Unsupported));
     }
 
     #[test]
