@@ -5775,6 +5775,7 @@ fn coverage_for_graph(
     } else if document_gaps.is_some_and(|gaps| {
         gaps.contains("resource_limit:memory_bytes")
             || gaps.contains("resource_limit:parser_work_bytes")
+            || gaps.contains("resource_limit:expanded_bytes")
     }) {
         Some(GraphLimitKind::IntermediateBytes)
     } else {
@@ -7891,43 +7892,60 @@ mod tests {
                 )?;
             }
         }
-        let facts = projectatlas_symbols::DocumentFacts {
-            format: projectatlas_symbols::DocumentFormat::Pdf,
-            text: String::new(),
-            facts: Vec::new(),
-            symbols: Vec::new(),
-            completeness: projectatlas_symbols::DocumentCompleteness::Partial {
-                gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
-                    projectatlas_symbols::DocumentLimit::ExecutionFuel,
-                )],
-            },
-            provenance: projectatlas_symbols::DocumentParserProvenance::PdfExtract,
-        };
-        let graph = facts.symbol_graph("docs/limited.pdf", Some("PDF"));
-        let coverage = super::coverage_for_graph(
-            &graph,
-            IndexGeneration::new(1),
-            &GraphIdentityAdmission::default(),
-            &GraphIdentityAdmission::default(),
-        )?;
-        require_eq(&graph.language.as_deref(), &Some("pdf"), "PDF language")?;
-        require_eq(
-            &super::navigable_symbol_count(&graph),
-            &0,
-            "PDF coverage marker",
-        )?;
-        require_eq(
-            &coverage.state(),
-            &CoverageState::Failed,
-            "PDF incomplete state",
-        )?;
-        require_eq(&coverage.reached_limit(), &None, "fuel is not a byte limit")?;
-        require(
-            coverage
-                .reason()
-                .is_some_and(|reason| reason.as_str().contains("resource_limit:execution_fuel")),
-            "PDF fuel reason was lost",
-        )?;
+        for (limit, reached_limit, reason) in [
+            (
+                projectatlas_symbols::DocumentLimit::ExecutionFuel,
+                None,
+                "resource_limit:execution_fuel",
+            ),
+            (
+                projectatlas_symbols::DocumentLimit::ExpandedBytes,
+                Some(GraphLimitKind::IntermediateBytes),
+                "resource_limit:expanded_bytes",
+            ),
+        ] {
+            let facts = projectatlas_symbols::DocumentFacts {
+                format: projectatlas_symbols::DocumentFormat::Pdf,
+                text: String::new(),
+                facts: Vec::new(),
+                symbols: Vec::new(),
+                completeness: projectatlas_symbols::DocumentCompleteness::Partial {
+                    gaps: vec![projectatlas_symbols::DocumentCoverageGap::ResourceLimit(
+                        limit,
+                    )],
+                },
+                provenance: projectatlas_symbols::DocumentParserProvenance::PdfExtract,
+            };
+            let graph = facts.symbol_graph("docs/limited.pdf", Some("PDF"));
+            let coverage = super::coverage_for_graph(
+                &graph,
+                IndexGeneration::new(1),
+                &GraphIdentityAdmission::default(),
+                &GraphIdentityAdmission::default(),
+            )?;
+            require_eq(&graph.language.as_deref(), &Some("pdf"), "PDF language")?;
+            require_eq(
+                &super::navigable_symbol_count(&graph),
+                &0,
+                "PDF coverage marker",
+            )?;
+            require_eq(
+                &coverage.state(),
+                &CoverageState::Failed,
+                "PDF incomplete state",
+            )?;
+            require_eq(
+                &coverage.reached_limit(),
+                &reached_limit,
+                "PDF resource ceiling",
+            )?;
+            require(
+                coverage
+                    .reason()
+                    .is_some_and(|value| value.as_str().contains(reason)),
+                "PDF resource reason was lost",
+            )?;
+        }
         Ok(())
     }
 

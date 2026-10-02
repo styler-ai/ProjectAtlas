@@ -151,6 +151,7 @@ impl DocumentCoverageGap {
             Self::ResourceLimit(DocumentLimit::OutputBytes) => "resource_limit:output_bytes",
             Self::ResourceLimit(DocumentLimit::FactCount) => "resource_limit:fact_count",
             Self::ResourceLimit(DocumentLimit::MemoryBytes) => "resource_limit:memory_bytes",
+            Self::ResourceLimit(DocumentLimit::ExpandedBytes) => "resource_limit:expanded_bytes",
             Self::ResourceLimit(DocumentLimit::ParserWorkBytes) => {
                 "resource_limit:parser_work_bytes"
             }
