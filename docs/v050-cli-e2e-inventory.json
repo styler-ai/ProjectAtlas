@@ -6,7 +6,7 @@
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "c636cb6b1eb625f347652aeaf44d4db3b5571707cbd03e40a6ff4c99a98f8041",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "f17200d96abd7811f1667cfd297f16d8944bd7f469dfb81ab0caa98d8a73769e",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "4b0c99a7f8ee33e3a4e2d9ad3880398304a5dd4215626adf09cf8a873e90f7d0",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "5430e41477a0e90a7ea8db0a662f2c02b8be1c128509c6ad36c172b4537fb4c9",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 201,
+  "test_count": 202,
   "symbol_count": 433,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -47,6 +47,14 @@
       "name": "pdf_parser_limits_preserve_cli_and_mcp_publication",
       "owner": "e2e_navigation",
       "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "pdf_rendering_resource_stop_preserves_source_and_repairs",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[cfg(not(debug_assertions))]",
         "#[test]"
       ]
     },
@@ -19567,6 +19575,10 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "text": "          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_rendering_resource_stop_preserves_source_and_repairs -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",

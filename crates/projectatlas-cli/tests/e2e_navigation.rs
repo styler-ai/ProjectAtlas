@@ -10683,6 +10683,161 @@ fn pdf_with_closed_path_curves(repetitions: usize, late_page: PdfLatePage) -> Ve
     pdf
 }
 
+#[cfg(not(debug_assertions))]
+fn pdf_exceeding_expanded_stream_limit(renderer_resource: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut document =
+        lopdf::Document::load_mem(&pdf_with_closed_path_curves(0, PdfLatePage::None))?;
+    let expanded = projectatlas_symbols::MAX_DOCUMENT_EXPANDED_BYTES;
+    if renderer_resource {
+        let mut color_spaces = lopdf::Dictionary::new();
+        let mut content = String::new();
+        for index in 0..16 {
+            let mut profile =
+                lopdf::Stream::new(lopdf::dictionary! { "N" => 3 }, vec![b' '; expanded / 16]);
+            profile.compress()?;
+            let profile = document.add_object(profile);
+            color_spaces.set(
+                format!("CS{index}"),
+                vec![
+                    lopdf::Object::Name(b"ICCBased".to_vec()),
+                    lopdf::Object::Reference(profile),
+                ],
+            );
+            content.push_str("/CS");
+            content.push_str(&index.to_string());
+            content.push_str(" cs\n");
+        }
+        content.push_str("BT /F1 12 Tf 72 720 Td (Fuel PDF) Tj ET\n");
+        document
+            .get_object_mut((4, 0))?
+            .as_stream_mut()?
+            .set_content(content.into_bytes());
+        document
+            .get_dictionary_mut((3, 0))?
+            .get_mut(b"Resources")?
+            .as_dict_mut()?
+            .set("ColorSpace", color_spaces);
+    } else {
+        let stream = document.get_object_mut((4, 0))?.as_stream_mut()?;
+        stream.set_content(vec![b' '; expanded + 1]);
+        stream.compress()?;
+    }
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn pdf_rendering_resource_stop_preserves_source_and_repairs() -> Result<(), Box<dyn Error>> {
+    const SOURCE_PATH: &str = "src/lib.rs";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("pdf-expanded-stream-coverage");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(repo.join(SOURCE_PATH), "pub fn still_indexed() {}\n")?;
+    fs::write(
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        "[project]\nroot = \".\"\n",
+    )?;
+    let pdf_path = repo.join("docs/expanded.pdf");
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    fs::write(&pdf_path, pdf_exceeding_expanded_stream_limit(true)?)?;
+    run_scan(&repo, &database)?;
+
+    let store = Connection::open(&database)?;
+    let (state, reason): (String, String) = store.query_row(
+        "SELECT state, reason FROM graph_coverage WHERE scope_path = 'docs/expanded.pdf' AND relation_scope IS NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let pdf_text: String = store.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/expanded.pdf'",
+        [],
+        |row| row.get(0),
+    )?;
+    let source_text: String = store.query_row(
+        "SELECT content FROM file_texts WHERE path = 'src/lib.rs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if state != "failed"
+        || !["expanded_bytes", "execution_fuel", "memory_bytes"]
+            .iter()
+            .any(|limit| reason.contains(&format!("resource_limit:{limit}")))
+        || !pdf_text.is_empty()
+        || !source_text.contains("still_indexed")
+    {
+        return Err(io::Error::other(format!(
+            "post-admission rendering limit lost file-local coverage: {state} {reason} {pdf_text:?}"
+        ))
+        .into());
+    }
+    drop(store);
+
+    let executable = mcp_contract_executable();
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let health = session.call_tool(
+            "atlas_health",
+            &json!({"project_path": repo.as_path(), "coverage": true, "path_prefix": "docs/expanded.pdf", "limit": 10}),
+        )?;
+        if !health.contains(&reason) {
+            return Err(io::Error::other("MCP hid PDF rendering-resource coverage").into());
+        }
+        let source = session.call_tool(
+            "atlas_search",
+            &json!({"project_path": repo.as_path(), "pattern": "still_indexed", "file_pattern": SOURCE_PATH, "limit": 10}),
+        )?;
+        if !source.contains("still_indexed") {
+            return Err(io::Error::other("MCP lost source beside expansion-limited PDF").into());
+        }
+        fs::write(&pdf_path, pdf_with_closed_path_curves(0, PdfLatePage::None))?;
+        let watch = session.call_tool(
+            "atlas_watch_once",
+            &json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+        )?;
+        if !watch.contains("watch:") {
+            return Err(
+                io::Error::other(format!("MCP PDF expansion repair failed: {watch}")).into(),
+            );
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(mcp_result, || session.shutdown())?;
+
+    let repaired = Connection::open(&database)?;
+    let repaired_text: String = repaired.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/expanded.pdf'",
+        [],
+        |row| row.get(0),
+    )?;
+    let repaired_reason: String = repaired.query_row(
+        "SELECT reason FROM graph_coverage WHERE scope_path = 'docs/expanded.pdf' AND relation_scope IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if repaired_text != "Fuel PDF"
+        || ["expanded_bytes", "execution_fuel", "memory_bytes"]
+            .iter()
+            .any(|limit| repaired_reason.contains(limit))
+    {
+        return Err(io::Error::other("PDF expansion repair left stale resource coverage").into());
+    }
+    drop(repaired);
+    let before_failure = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("PDF repair publication missing"))?;
+    fs::write(&pdf_path, pdf_exceeding_expanded_stream_limit(false)?)?;
+    if run_watch_once(&repo, &database).is_ok()
+        || AtlasStore::open_read_only(&database)?.index_publication()? != Some(before_failure)
+    {
+        return Err(io::Error::other("pre-admission expansion replaced valid publication").into());
+    }
+    Ok(())
+}
+
 #[test]
 fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Error>> {
     const SOURCE_DIR: &str = "src";
