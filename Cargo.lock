@@ -1873,6 +1873,7 @@ dependencies = [
  "jsonc-parser",
  "landlock",
  "libloading",
+ "lopdf",
  "nix",
  "notify",
  "predicates",

@@ -8587,6 +8587,8 @@ struct McpContractSession {
     next_request_id: u64,
 }
 
+const MCP_CONTRACT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[allow(dead_code)]
 impl McpContractSession {
     /// Spawn and initialize one telemetry-disabled release-candidate MCP process.
@@ -8776,7 +8778,7 @@ impl McpContractSession {
         method: &str,
     ) -> Result<Value, Box<dyn Error>> {
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(10))
+            .checked_add(MCP_CONTRACT_RESPONSE_TIMEOUT)
             .ok_or_else(|| io::Error::other("MCP contract response deadline overflowed"))?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -8787,10 +8789,24 @@ impl McpContractSession {
                 )
                 .into());
             }
-            let line = self
-                .responses
-                .recv_timeout(remaining)
-                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+            let line = match self.responses.recv_timeout(remaining) {
+                Ok(line) => line?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "MCP contract request {request_id} for {method} timed out after {MCP_CONTRACT_RESPONSE_TIMEOUT:?}"
+                        ),
+                    )
+                    .into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::other(format!(
+                        "MCP contract stdout closed while waiting for request {request_id} for {method}"
+                    ))
+                    .into());
+                }
+            };
             let response: Value = serde_json::from_str(line.trim())?;
             if response.get("id").and_then(Value::as_u64) == Some(request_id) {
                 return Ok(response);
@@ -10596,6 +10612,449 @@ fn docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch() -> Result<(
     )?;
     if !repaired_text.contains('α') {
         return Err(io::Error::other("DOCX repair lost verified symbol text").into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum PdfLatePage {
+    None,
+    MalformedContent,
+    WrongParent,
+}
+
+fn pdf_with_closed_path_curves(repetitions: usize, late_page: PdfLatePage) -> Vec<u8> {
+    let mut content = String::from("10 20 m ");
+    for _ in 0..repetitions {
+        content.push_str("h 50 60 70 80 v ");
+    }
+    content.push_str("n\nBT /F1 12 Tf 72 720 Td (Fuel PDF) Tj ET\n");
+    let stream = format!(
+        "4 0 obj\n<< /Length {} >>\nstream\n{content}endstream\nendobj\n",
+        content.len()
+    );
+    let pages = if matches!(late_page, PdfLatePage::None) {
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".as_slice()
+    } else {
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n".as_slice()
+    };
+    let mut objects = vec![
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec(),
+        pages.to_vec(),
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_vec(),
+        stream.into_bytes(),
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_vec(),
+    ];
+    if !matches!(late_page, PdfLatePage::None) {
+        let parent = if matches!(late_page, PdfLatePage::WrongParent) {
+            3
+        } else {
+            2
+        };
+        let late_content = if matches!(late_page, PdfLatePage::MalformedContent) {
+            "("
+        } else {
+            " "
+        };
+        objects.extend([
+            format!("6 0 obj\n<< /Type /Page /Parent {parent} 0 R /MediaBox [0 0 612 792] /Contents 7 0 R >>\nendobj\n").into_bytes(),
+            format!("7 0 obj\n<< /Length 1 >>\nstream\n{late_content}\nendstream\nendobj\n").into_bytes(),
+        ]);
+    }
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for object in &objects {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(object);
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+#[cfg(not(debug_assertions))]
+fn pdf_exceeding_expanded_stream_limit(renderer_resource: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut document =
+        lopdf::Document::load_mem(&pdf_with_closed_path_curves(0, PdfLatePage::None))?;
+    let expanded = projectatlas_symbols::MAX_DOCUMENT_EXPANDED_BYTES;
+    if renderer_resource {
+        let mut color_spaces = lopdf::Dictionary::new();
+        let mut content = String::new();
+        for index in 0..16 {
+            let mut profile =
+                lopdf::Stream::new(lopdf::dictionary! { "N" => 3 }, vec![b' '; expanded / 16]);
+            profile.compress()?;
+            let profile = document.add_object(profile);
+            color_spaces.set(
+                format!("CS{index}"),
+                vec![
+                    lopdf::Object::Name(b"ICCBased".to_vec()),
+                    lopdf::Object::Reference(profile),
+                ],
+            );
+            content.push_str("/CS");
+            content.push_str(&index.to_string());
+            content.push_str(" cs\n");
+        }
+        content.push_str("BT /F1 12 Tf 72 720 Td (Fuel PDF) Tj ET\n");
+        document
+            .get_object_mut((4, 0))?
+            .as_stream_mut()?
+            .set_content(content.into_bytes());
+        document
+            .get_dictionary_mut((3, 0))?
+            .get_mut(b"Resources")?
+            .as_dict_mut()?
+            .set("ColorSpace", color_spaces);
+    } else {
+        let stream = document.get_object_mut((4, 0))?.as_stream_mut()?;
+        stream.set_content(vec![b' '; expanded + 1]);
+        stream.compress()?;
+    }
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes)?;
+    Ok(bytes)
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn pdf_rendering_resource_stop_preserves_source_and_repairs() -> Result<(), Box<dyn Error>> {
+    const SOURCE_PATH: &str = "src/lib.rs";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("pdf-expanded-stream-coverage");
+    fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(repo.join(SOURCE_PATH), "pub fn still_indexed() {}\n")?;
+    fs::write(
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        "[project]\nroot = \".\"\n",
+    )?;
+    let pdf_path = repo.join("docs/expanded.pdf");
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    fs::write(&pdf_path, pdf_exceeding_expanded_stream_limit(true)?)?;
+    run_scan(&repo, &database)?;
+
+    let store = Connection::open(&database)?;
+    let (state, reason): (String, String) = store.query_row(
+        "SELECT state, reason FROM graph_coverage WHERE scope_path = 'docs/expanded.pdf' AND relation_scope IS NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let pdf_text: String = store.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/expanded.pdf'",
+        [],
+        |row| row.get(0),
+    )?;
+    let source_text: String = store.query_row(
+        "SELECT content FROM file_texts WHERE path = 'src/lib.rs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if state != "failed"
+        || !["expanded_bytes", "execution_fuel", "memory_bytes"]
+            .iter()
+            .any(|limit| reason.contains(&format!("resource_limit:{limit}")))
+        || !pdf_text.is_empty()
+        || !source_text.contains("still_indexed")
+    {
+        return Err(io::Error::other(format!(
+            "post-admission rendering limit lost file-local coverage: {state} {reason} {pdf_text:?}"
+        ))
+        .into());
+    }
+    drop(store);
+
+    let executable = mcp_contract_executable();
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let health = session.call_tool(
+            "atlas_health",
+            &json!({"project_path": repo.as_path(), "coverage": true, "path_prefix": "docs/expanded.pdf", "limit": 10}),
+        )?;
+        if !health.contains(&reason) {
+            return Err(io::Error::other("MCP hid PDF rendering-resource coverage").into());
+        }
+        let source = session.call_tool(
+            "atlas_search",
+            &json!({"project_path": repo.as_path(), "pattern": "still_indexed", "file_pattern": SOURCE_PATH, "limit": 10}),
+        )?;
+        if !source.contains("still_indexed") {
+            return Err(io::Error::other("MCP lost source beside expansion-limited PDF").into());
+        }
+        fs::write(&pdf_path, pdf_with_closed_path_curves(0, PdfLatePage::None))?;
+        let watch = session.call_tool(
+            "atlas_watch_once",
+            &json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+        )?;
+        if !watch.contains("watch:") {
+            return Err(
+                io::Error::other(format!("MCP PDF expansion repair failed: {watch}")).into(),
+            );
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(mcp_result, || session.shutdown())?;
+
+    let repaired = Connection::open(&database)?;
+    let repaired_text: String = repaired.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/expanded.pdf'",
+        [],
+        |row| row.get(0),
+    )?;
+    let repaired_reason: String = repaired.query_row(
+        "SELECT reason FROM graph_coverage WHERE scope_path = 'docs/expanded.pdf' AND relation_scope IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if repaired_text != "Fuel PDF"
+        || ["expanded_bytes", "execution_fuel", "memory_bytes"]
+            .iter()
+            .any(|limit| repaired_reason.contains(limit))
+    {
+        return Err(io::Error::other("PDF expansion repair left stale resource coverage").into());
+    }
+    drop(repaired);
+    let before_failure = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("PDF repair publication missing"))?;
+    fs::write(&pdf_path, pdf_exceeding_expanded_stream_limit(false)?)?;
+    if run_watch_once(&repo, &database).is_ok()
+        || AtlasStore::open_read_only(&database)?.index_publication()? != Some(before_failure)
+    {
+        return Err(io::Error::other("pre-admission expansion replaced valid publication").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Error>> {
+    const SOURCE_DIR: &str = "src";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("pdf-fuel-continuity");
+    fs::create_dir_all(repo.join(SOURCE_DIR))?;
+    fs::create_dir_all(repo.join("docs"))?;
+    fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
+    fs::write(repo.join("src/lib.rs"), "pub fn still_indexed() {}\n")?;
+    fs::write(
+        repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        "[project]\nroot = \".\"\n",
+    )?;
+    let pdf_path = repo.join("docs/fuel.pdf");
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    // Keep the debug fixture small under parallel E2E load; release exercises the old 500M-fuel regression.
+    let valid_repetitions = if cfg!(debug_assertions) { 100 } else { 4_000 };
+    fs::write(
+        &pdf_path,
+        pdf_with_closed_path_curves(valid_repetitions, PdfLatePage::None),
+    )?;
+    run_scan(&repo, &database)?;
+    let indexed_pdf: String = Connection::open(&database)?.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/fuel.pdf'",
+        [],
+        |row| row.get(0),
+    )?;
+    if indexed_pdf != "Fuel PDF" {
+        return Err(io::Error::other(format!(
+            "valid path-heavy PDF lost exact text: {indexed_pdf:?}"
+        ))
+        .into());
+    }
+    let executable = mcp_contract_executable();
+    let search = run_mcp_contract_json(
+        &executable,
+        &repo,
+        &[
+            "--db".to_owned(),
+            database.display().to_string(),
+            "search".to_owned(),
+            "Fuel PDF".to_owned(),
+            "--file-pattern".to_owned(),
+            "docs/fuel.pdf".to_owned(),
+        ],
+    )?;
+    if !serde_json::to_string(&search)?.contains("Fuel PDF") {
+        return Err(io::Error::other("CLI search lost valid path-heavy PDF text").into());
+    }
+
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let scan = session.call_tool(
+            "atlas_scan",
+            &json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+        )?;
+        if !scan.contains("scan:") {
+            return Err(io::Error::other(format!("MCP PDF full scan failed: {scan}")).into());
+        }
+        let pdf = session.call_tool(
+            "atlas_search",
+            &json!({"project_path": repo.as_path(), "pattern": "Fuel PDF", "file_pattern": "docs/fuel.pdf", "limit": 10}),
+        )?;
+        if !pdf.contains("Fuel PDF") {
+            return Err(io::Error::other("MCP lost valid path-heavy PDF text").into());
+        }
+        let source = session.call_tool(
+            "atlas_search",
+            &json!({"project_path": repo.as_path(), "pattern": "still_indexed", "file_pattern": "src/lib.rs", "limit": 10}),
+        )?;
+        if !source.contains("still_indexed") {
+            return Err(io::Error::other("MCP lost source beside valid PDF").into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(mcp_result, || session.shutdown())?;
+
+    let before_heavy = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("PDF publication missing before failed input"))?;
+    let exhausting_repetitions = if cfg!(debug_assertions) {
+        50_000
+    } else {
+        8_000
+    };
+    fs::write(
+        &pdf_path,
+        pdf_with_closed_path_curves(exhausting_repetitions, PdfLatePage::None),
+    )?;
+    match run_watch_once(&repo, &database) {
+        Ok(()) => {
+            let store = Connection::open(&database)?;
+            let (state, reason): (String, String) = store.query_row(
+                "SELECT state, reason FROM graph_coverage WHERE scope_path = 'docs/fuel.pdf' AND relation_scope IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let pdf_text: String = store.query_row(
+                "SELECT content FROM file_texts WHERE path = 'docs/fuel.pdf'",
+                [],
+                |row| row.get(0),
+            )?;
+            let source_text: String = store.query_row(
+                "SELECT content FROM file_texts WHERE path = 'src/lib.rs'",
+                [],
+                |row| row.get(0),
+            )?;
+            if state != "failed"
+                || !reason.contains("resource_limit:execution_fuel")
+                || !pdf_text.is_empty()
+                || !source_text.contains("still_indexed")
+            {
+                return Err(io::Error::other(format!(
+                    "PDF limit published without exact fuel coverage: {state} {reason} {pdf_text:?}"
+                ))
+                .into());
+            }
+            let health = run_mcp_contract_json(
+                &executable,
+                &repo,
+                &[
+                    "--db".to_owned(),
+                    database.display().to_string(),
+                    "health-check".to_owned(),
+                    "--coverage".to_owned(),
+                    "--path-prefix".to_owned(),
+                    "docs/fuel.pdf".to_owned(),
+                ],
+            )?;
+            if !serde_json::to_string(&health)?.contains("resource_limit:execution_fuel") {
+                return Err(io::Error::other("CLI hid file-local PDF fuel coverage").into());
+            }
+            let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+            let result = (|| -> Result<(), Box<dyn Error>> {
+                let health = session.call_tool(
+                    "atlas_health",
+                    &json!({"project_path": repo.as_path(), "coverage": true, "path_prefix": "docs/fuel.pdf", "limit": 10}),
+                )?;
+                if !health.contains("resource_limit:execution_fuel") {
+                    return Err(io::Error::other("MCP hid file-local PDF fuel coverage").into());
+                }
+                let source = session.call_tool(
+                    "atlas_search",
+                    &json!({"project_path": repo.as_path(), "pattern": "still_indexed", "file_pattern": "src/lib.rs", "limit": 10}),
+                )?;
+                if !source.contains("still_indexed") {
+                    return Err(io::Error::other("MCP lost source beside fuel-limited PDF").into());
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(result, || session.shutdown())?;
+        }
+        Err(error) => {
+            if !cfg!(debug_assertions)
+                || !error.to_string().contains("deadline")
+                || AtlasStore::open_read_only(&database)?.index_publication()? != Some(before_heavy)
+            {
+                return Err(io::Error::other(format!(
+                    "PDF parser failure was neither bounded fuel coverage nor an atomic deadline: {error}"
+                ))
+                .into());
+            }
+        }
+    }
+    let before_failure = AtlasStore::open_read_only(&database)?
+        .index_publication()?
+        .ok_or_else(|| io::Error::other("PDF publication missing before unsafe input"))?;
+    let late_repetitions = if cfg!(debug_assertions) { 100 } else { 8_000 };
+    for invalid in [
+        b"%PDF-1.4\ntruncated".to_vec(),
+        pdf_with_closed_path_curves(late_repetitions, PdfLatePage::MalformedContent),
+        pdf_with_closed_path_curves(late_repetitions, PdfLatePage::WrongParent),
+        {
+            let mut oversized = vec![b' '; projectatlas_symbols::MAX_DOCUMENT_COMPRESSED_BYTES + 1];
+            oversized[..5].copy_from_slice(b"%PDF-");
+            oversized
+        },
+    ] {
+        fs::write(&pdf_path, invalid)?;
+        if run_watch_once(&repo, &database).is_ok()
+            || AtlasStore::open_read_only(&database)?.index_publication()?
+                != Some(before_failure.clone())
+        {
+            return Err(io::Error::other("invalid PDF replaced the last publication").into());
+        }
+    }
+    fs::write(
+        &pdf_path,
+        pdf_with_closed_path_curves(valid_repetitions + 1, PdfLatePage::None),
+    )?;
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let mcp_result = (|| -> Result<(), Box<dyn Error>> {
+        let watch = session.call_tool(
+            "atlas_watch_once",
+            &json!({"project_path": repo.as_path(), "path": repo.as_path()}),
+        )?;
+        if !watch.contains("watch:") || !watch.contains("single-refresh") {
+            return Err(io::Error::other(format!("MCP PDF repair failed: {watch}")).into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(mcp_result, || session.shutdown())?;
+    let repaired = Connection::open(&database)?;
+    let repaired_text: String = repaired.query_row(
+        "SELECT content FROM file_texts WHERE path = 'docs/fuel.pdf'",
+        [],
+        |row| row.get(0),
+    )?;
+    let repaired_reason: String = repaired.query_row(
+        "SELECT reason FROM graph_coverage WHERE scope_path = 'docs/fuel.pdf' AND relation_scope IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if repaired_text != "Fuel PDF" || repaired_reason.contains("execution_fuel") {
+        return Err(
+            io::Error::other("PDF repair retained stale fuel coverage or lost text").into(),
+        );
     }
     Ok(())
 }

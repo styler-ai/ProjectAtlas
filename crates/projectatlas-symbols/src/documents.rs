@@ -151,9 +151,11 @@ impl DocumentCoverageGap {
             Self::ResourceLimit(DocumentLimit::OutputBytes) => "resource_limit:output_bytes",
             Self::ResourceLimit(DocumentLimit::FactCount) => "resource_limit:fact_count",
             Self::ResourceLimit(DocumentLimit::MemoryBytes) => "resource_limit:memory_bytes",
+            Self::ResourceLimit(DocumentLimit::ExpandedBytes) => "resource_limit:expanded_bytes",
             Self::ResourceLimit(DocumentLimit::ParserWorkBytes) => {
                 "resource_limit:parser_work_bytes"
             }
+            Self::ResourceLimit(DocumentLimit::ExecutionFuel) => "resource_limit:execution_fuel",
             Self::ResourceLimit(_) => "resource_limit:other",
         }
     }
@@ -577,10 +579,29 @@ fn extract_pdf(
             },
         });
     }
-    let pages = pdf_runtime::extract_pages(bytes, control, stage)?;
+    let pages = match pdf_runtime::extract_pages(bytes, control, stage) {
+        Ok(pdf_runtime::PdfPages::Complete(pages)) => pages,
+        Ok(pdf_runtime::PdfPages::Incomplete(limit)) => {
+            return Ok(empty_partial_document(
+                DocumentFormat::Pdf,
+                DocumentParserProvenance::PdfExtract,
+                DocumentCoverageGap::ResourceLimit(limit),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    pdf_pages_to_facts(&pages, control, stage)
+}
+
+/// Assemble admitted PDF pages without changing their page-local source offsets.
+fn pdf_pages_to_facts(
+    pages: &[(u32, String)],
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<DocumentFacts, DocumentExtractionError> {
     let mut text = String::new();
     let mut facts = Vec::new();
-    for (page_number, page) in &pages {
+    for (page_number, page) in pages {
         control.check(stage)?;
         let mut page_offset = 0usize;
         for line in page.split('\n') {
@@ -590,22 +611,22 @@ fn extract_pdf(
                 continue;
             }
             if facts.len() >= MAX_DOCUMENT_FACTS {
-                return Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::FactCount,
-                    observed: facts.len().saturating_add(1),
-                    maximum: MAX_DOCUMENT_FACTS,
-                });
+                return Ok(empty_partial_document(
+                    DocumentFormat::Pdf,
+                    DocumentParserProvenance::PdfExtract,
+                    DocumentCoverageGap::ResourceLimit(DocumentLimit::FactCount),
+                ));
             }
             let required = text
                 .len()
                 .saturating_add(usize::from(!text.is_empty()))
                 .saturating_add(line.len());
             if required > MAX_DOCUMENT_OUTPUT_BYTES {
-                return Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::OutputBytes,
-                    observed: required,
-                    maximum: MAX_DOCUMENT_OUTPUT_BYTES,
-                });
+                return Ok(empty_partial_document(
+                    DocumentFormat::Pdf,
+                    DocumentParserProvenance::PdfExtract,
+                    DocumentCoverageGap::ResourceLimit(DocumentLimit::OutputBytes),
+                ));
             }
             if !text.is_empty() {
                 push_output_byte(&mut text, b'\n')?;
@@ -836,7 +857,11 @@ fn extract_docx(
             Ok(xml) => xml,
             Err(error) => {
                 if let Some(limit) = accepted_docx_limit(&error) {
-                    return Ok(empty_partial_docx(limit));
+                    return Ok(empty_partial_document(
+                        DocumentFormat::Docx,
+                        DocumentParserProvenance::QuickXml,
+                        DocumentCoverageGap::ResourceLimit(limit),
+                    ));
                 }
                 return Err(error);
             }
@@ -846,7 +871,11 @@ fn extract_docx(
     let memory_check = check_docx_story_memory(bytes.len(), xml.capacity(), 0);
     if let Err(error) = memory_check {
         if let Some(limit) = accepted_docx_limit(&error) {
-            return Ok(empty_partial_docx(limit));
+            return Ok(empty_partial_document(
+                DocumentFormat::Docx,
+                DocumentParserProvenance::QuickXml,
+                DocumentCoverageGap::ResourceLimit(limit),
+            ));
         }
         return Err(error);
     }
@@ -864,7 +893,11 @@ fn extract_docx(
         Ok(document) => document,
         Err(error) => {
             if let Some(limit) = accepted_docx_limit(&error) {
-                return Ok(empty_partial_docx(limit));
+                return Ok(empty_partial_document(
+                    DocumentFormat::Docx,
+                    DocumentParserProvenance::QuickXml,
+                    DocumentCoverageGap::ResourceLimit(limit),
+                ));
             }
             return Err(error);
         }
@@ -1106,16 +1139,18 @@ fn check_docx_story_memory(
 }
 
 /// Preserve a typed coverage fact when no main-story evidence fits the retained ceiling.
-fn empty_partial_docx(limit: DocumentLimit) -> DocumentFacts {
+fn empty_partial_document(
+    format: DocumentFormat,
+    provenance: DocumentParserProvenance,
+    gap: DocumentCoverageGap,
+) -> DocumentFacts {
     DocumentFacts {
-        format: DocumentFormat::Docx,
+        format,
         text: String::new(),
         facts: Vec::new(),
         symbols: Vec::new(),
-        completeness: DocumentCompleteness::Partial {
-            gaps: vec![DocumentCoverageGap::ResourceLimit(limit)],
-        },
-        provenance: DocumentParserProvenance::QuickXml,
+        completeness: DocumentCompleteness::Partial { gaps: vec![gap] },
+        provenance,
     }
 }
 
@@ -5123,7 +5158,7 @@ mod tests {
         pdf
     }
 
-    fn multi_page_pdf() -> Vec<u8> {
+    pub(super) fn multi_page_pdf() -> Vec<u8> {
         let objects = [
             b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".as_slice(),
             b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n".as_slice(),
@@ -5222,6 +5257,51 @@ mod tests {
                 text_end: 8
             }
         ));
+    }
+
+    #[test]
+    fn pdf_host_limits_discard_all_page_evidence() {
+        let work = control();
+        let stage = IndexWorkStage::SymbolParsing;
+        let exact = pdf_pages_to_facts(&[(1, "x".repeat(MAX_DOCUMENT_OUTPUT_BYTES))], &work, stage)
+            .expect("exact output limit remains complete");
+        assert_eq!(exact.completeness, DocumentCompleteness::Complete);
+        assert_eq!(exact.text.len(), MAX_DOCUMENT_OUTPUT_BYTES);
+        assert_eq!(exact.facts.len(), 1);
+        let exact_facts =
+            pdf_pages_to_facts(&[(1, "x\n".repeat(MAX_DOCUMENT_FACTS))], &work, stage)
+                .expect("exact fact limit remains complete");
+        assert_eq!(exact_facts.completeness, DocumentCompleteness::Complete);
+        assert_eq!(exact_facts.facts.len(), MAX_DOCUMENT_FACTS);
+
+        let over_output = pdf_pages_to_facts(
+            &[
+                (1, "x".repeat(MAX_DOCUMENT_OUTPUT_BYTES - 1)),
+                (2, "y".to_owned()),
+            ],
+            &work,
+            stage,
+        )
+        .expect("host output exhaustion is document-local");
+        let assert_empty_gap = |facts: DocumentFacts, limit| {
+            assert!(facts.text.is_empty());
+            assert!(facts.facts.is_empty());
+            assert!(facts.symbols.is_empty());
+            assert_eq!(facts.format, DocumentFormat::Pdf);
+            assert_eq!(facts.provenance, DocumentParserProvenance::PdfExtract);
+            assert_eq!(
+                facts.completeness,
+                DocumentCompleteness::Partial {
+                    gaps: vec![DocumentCoverageGap::ResourceLimit(limit)]
+                }
+            );
+        };
+        assert_empty_gap(over_output, DocumentLimit::OutputBytes);
+
+        let over_facts =
+            pdf_pages_to_facts(&[(1, "x\n".repeat(MAX_DOCUMENT_FACTS + 1))], &work, stage)
+                .expect("host fact exhaustion is document-local");
+        assert_empty_gap(over_facts, DocumentLimit::FactCount);
     }
 
     #[test]
@@ -5915,12 +5995,10 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         assert!(
             matches!(
                 result,
-                Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::MemoryBytes | DocumentLimit::ExecutionFuel,
+                Err(DocumentExtractionError::Malformed {
+                    format: DocumentFormat::Pdf,
                     ..
-                } | DocumentExtractionError::Work(
-                    projectatlas_core::IndexWorkFailure::DeadlineExceeded { .. }
-                ))
+                })
             ),
             "{result:?}"
         );

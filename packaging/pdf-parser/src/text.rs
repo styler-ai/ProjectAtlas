@@ -1,7 +1,11 @@
 //! Bound the canonical text formatter and reject undecodable character callbacks.
 
+use std::collections::HashSet;
+
 use crate::limits::Failure;
-use pdf_extract::{MediaBox, OutputDev, OutputError, PlainTextOutput, Transform};
+use pdf_extract::{
+    MediaBox, OutputDev, OutputError, PlainTextOutput, StreamDecodeBudget, Transform,
+};
 
 struct Text {
     value: String,
@@ -74,20 +78,35 @@ impl OutputDev for CheckedText<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn page(
     document: &lopdf::Document,
     page: u32,
     maximum: usize,
+) -> Result<String, Failure> {
+    let mut budget = StreamDecodeBudget::new(usize::MAX);
+    let prevalidated_streams = HashSet::new();
+    page_with_budget(document, page, maximum, &mut budget, &prevalidated_streams)
+}
+
+pub(crate) fn page_with_budget(
+    document: &lopdf::Document,
+    page: u32,
+    maximum: usize,
+    budget: &mut StreamDecodeBudget,
+    prevalidated_streams: &HashSet<lopdf::ObjectId>,
 ) -> Result<String, Failure> {
     let mut text = Text {
         value: String::new(),
         maximum,
         exceeded: false,
     };
-    let result = pdf_extract::output_doc_page(
+    let result = pdf_extract::output_doc_page_with_budget(
         document,
         &mut CheckedText(PlainTextOutput::new(&mut text)),
         page,
+        budget,
+        prevalidated_streams,
     );
     if text.exceeded {
         return Err(Failure::Output);
@@ -96,6 +115,9 @@ pub(crate) fn page(
         OutputError::IoError(error) if error.kind() == std::io::ErrorKind::Unsupported => {
             Failure::Unsupported
         }
+        OutputError::PdfError(lopdf::Error::Decompress(
+            lopdf::DecompressError::MemoryLimitExceeded { .. },
+        )) => Failure::Expanded,
         _ => Failure::Malformed,
     })?;
     Ok(text.value)

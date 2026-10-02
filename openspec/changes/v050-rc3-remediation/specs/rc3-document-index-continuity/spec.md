@@ -3,6 +3,8 @@
 ### Requirement: Bounded document failures are file-specific and truthful
 DOCX/PDF extraction SHALL retain finite time, memory, fuel, input, and output bounds. Every syntactically valid rendered DOCX `w:sym` in package-reachable document stories—including the main body, headers, footers, footnotes, endnotes, referenced comments, frames, and nested text boxes—and within those bounds SHALL retain its exact font/code, story-part, and occurrence identity in durable queryable evidence; a verified font mapping SHALL produce Unicode text, while an unknown mapping SHALL identify unresolved text coverage without discarding surrounding content. Unreferenced glossary content is non-rendered; a referenced glossary, subdocument, or other rendered story that cannot be safely examined SHALL be recorded as explicitly incomplete, not silently treated as symbol-free. Story relationships SHALL be validated for type, existence, and package containment without external fetch or path escape. An accepted parser output, fact, memory, or repeated-decompression-work limit after safe package admission SHALL produce typed document-local incomplete coverage without claiming unexamined symbols were retained. The extractor SHALL batch reachable note/comment IDs before reading their shared story parts where possible; the finite work ceiling is a fail-safe, not a substitute for supported-story extraction. Unsafe package/ZIP input limits, cancellation, and the shared indexing deadline SHALL remain generation-fatal. PDF fuel use SHALL be measured on valid and adversarial fixtures; a finite budget increase is allowed only when it demonstrably admits valid input under retained bounds. Remaining PDF fuel exhaustion SHALL identify its file and typed reason. The system MUST NOT guess missing text, silently omit it from a complete-coverage claim, or conflate PDF parser fuel with the per-file text-index byte cap.
 
+For PDF resource stops, safe admission means bounded object and page-tree validation, strict selected page-content syntax, and actually invoked Form syntax and `/Do` XObject-reference graph validation; unused resources are not decoded merely because they are declared. Fuel or expanded-stream-byte exhaustion before that admission is generation-fatal. After admission, text-rendering semantics not reached before an accepted fuel, output, aggregate expanded-stream-byte, or configured linear-memory limit remain unverified: the document-local gap publishes no PDF text and never asserts semantic validity or absence. Stack overflow is not an accepted linear-memory limit and remains generation-fatal. Any malformed or unsupported content actually detected by the parser remains generation-fatal.
+
 Relationship attribute values SHALL be XML-decoded before type, target, and internal/external target-mode validation.
 For `w:sym`, exact font/code identity means retaining each supplied decoded value and retaining absence when `w:font` or `w:char` is omitted; a missing attribute is unresolved text coverage, not malformed package input.
 
@@ -166,8 +168,16 @@ For RC3, the modified `repository-content-intelligence` requirements supersede #
 - **THEN** their stories are not followed and their markers do not enter rendered text or coverage
 
 #### Scenario: PDF exhausts parser fuel
-- **WHEN** a PDF beside ordinary source consumes its finite Wasmi execution-fuel budget during text indexing
+- **WHEN** a safely admitted PDF beside ordinary source consumes its finite Wasmi execution-fuel budget during text indexing
 - **THEN** the published generation retains verified source, identifies that PDF with durable file-local incomplete coverage and a typed execution-fuel limit, and retains cancellation and other resource ceilings
+
+#### Scenario: PDF fuel before safe admission
+- **WHEN** a PDF exhausts finite fuel before its structural admission pass completes, including a high-work page before malformed later page or Form syntax
+- **THEN** the generation fails atomically and retains the last complete publication rather than treating unvalidated structure as a document-local gap
+
+#### Scenario: PDF expanded-stream limit respects admission
+- **WHEN** selected page content or an invoked Form exceeds the aggregate expanded-stream-byte ceiling before safe admission, or an actually used rendering resource reaches that ceiling after admission
+- **THEN** the pre-admission case fails atomically, while the post-admission case publishes typed file-local incomplete coverage with no PDF text and leaves unexamined semantics unknown
 
 #### Scenario: Valid PDF exceeds the old fuel ceiling
 - **WHEN** a reproducible valid PDF exceeds the RC2 fuel ceiling but completes under a measured finite budget within wall-time, memory, output, and cancellation limits

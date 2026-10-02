@@ -492,7 +492,7 @@ jobs:
 
       - name: Document resource proof
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         run: |
           cargo build --locked --release -p projectatlas-cli
@@ -501,6 +501,8 @@ jobs:
             binary="${binary}.exe"
           fi
           python3 .github/scripts/measure-bounded-documents.py --binary "$binary" --output .tmp/document-resources.json
+          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_parser_limits_preserve_cli_and_mcp_publication -- --exact --nocapture
+          cargo test --release --locked -p projectatlas-cli --test e2e_navigation pdf_rendering_resource_stop_preserves_source_and_repairs -- --exact --nocapture
 
       - name: Upload document resource measurements
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')

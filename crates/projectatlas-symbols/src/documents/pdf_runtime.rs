@@ -25,12 +25,17 @@ const TOTAL_FUEL: u64 = 500_000_000;
 const FUEL_SLICE: u64 = 10_000;
 
 /// Keep hard allocation traps while allowing fuel exhaustion to suspend growth.
-struct PdfStoreLimits(StoreLimits);
+struct PdfStoreLimits {
+    /// Configured Wasmi resource ceilings.
+    limits: StoreLimits,
+    /// Set only after the guest's structural admission pass.
+    admitted: bool,
+}
 
 impl Default for PdfStoreLimits {
     fn default() -> Self {
-        Self(
-            StoreLimitsBuilder::new()
+        Self {
+            limits: StoreLimitsBuilder::new()
                 .memory_size(MEMORY_BYTES)
                 .memories(1)
                 .instances(1)
@@ -38,7 +43,8 @@ impl Default for PdfStoreLimits {
                 .table_elements(4096)
                 .trap_on_grow_failure(true)
                 .build(),
-        )
+            admitted: false,
+        }
     }
 }
 
@@ -49,7 +55,7 @@ impl ResourceLimiter for PdfStoreLimits {
         desired: usize,
         maximum: Option<usize>,
     ) -> Result<bool, LimiterError> {
-        self.0.memory_growing(current, desired, maximum)
+        self.limits.memory_growing(current, desired, maximum)
     }
 
     fn memory_grow_failed(&mut self, error: &MemoryError) -> Result<(), LimiterError> {
@@ -57,7 +63,7 @@ impl ResourceLimiter for PdfStoreLimits {
         if matches!(error, MemoryError::OutOfFuel { .. }) {
             return Ok(());
         }
-        self.0.memory_grow_failed(error)
+        self.limits.memory_grow_failed(error)
     }
 
     fn table_growing(
@@ -66,24 +72,24 @@ impl ResourceLimiter for PdfStoreLimits {
         desired: usize,
         maximum: Option<usize>,
     ) -> Result<bool, LimiterError> {
-        self.0.table_growing(current, desired, maximum)
+        self.limits.table_growing(current, desired, maximum)
     }
 
     fn table_grow_failed(&mut self, error: &TableError) -> Result<(), LimiterError> {
         if matches!(error, TableError::OutOfFuel { .. }) {
             return Ok(());
         }
-        self.0.table_grow_failed(error)
+        self.limits.table_grow_failed(error)
     }
 
     fn instances(&self) -> usize {
-        self.0.instances()
+        self.limits.instances()
     }
     fn memories(&self) -> usize {
-        self.0.memories()
+        self.limits.memories()
     }
     fn tables(&self) -> usize {
-        self.0.tables()
+        self.limits.tables()
     }
 }
 
@@ -104,12 +110,30 @@ fn limit(resource: DocumentLimit, maximum: usize) -> DocumentExtractionError {
     }
 }
 
+/// Treat a decoded-byte ceiling as document-local only after structural admission.
+fn expanded_result(
+    admitted: bool,
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<PdfPages, DocumentExtractionError> {
+    if admitted {
+        control.check(stage)?;
+        Ok(PdfPages::Incomplete(DocumentLimit::ExpandedBytes))
+    } else {
+        Err(limit(
+            DocumentLimit::ExpandedBytes,
+            MAX_DOCUMENT_EXPANDED_BYTES,
+        ))
+    }
+}
+
 /// Preserve interpreter resource refusals as typed document limits.
 fn vm_error(error: &wasmi::Error) -> DocumentExtractionError {
     match error.as_trap_code() {
-        Some(wasmi::TrapCode::GrowthOperationLimited | wasmi::TrapCode::StackOverflow) => {
+        Some(wasmi::TrapCode::GrowthOperationLimited) => {
             limit(DocumentLimit::MemoryBytes, MEMORY_BYTES)
         }
+        Some(wasmi::TrapCode::StackOverflow) => malformed("PDF guest stack overflow"),
         Some(wasmi::TrapCode::OutOfFuel) => {
             limit(DocumentLimit::ExecutionFuel, TOTAL_FUEL as usize)
         }
@@ -120,6 +144,15 @@ fn vm_error(error: &wasmi::Error) -> DocumentExtractionError {
 /// Expose entropy and an empty environment, without filesystem/network/process access.
 fn linker(engine: &Engine) -> Result<Linker<PdfStoreLimits>, DocumentExtractionError> {
     let mut linker = Linker::new(engine);
+    linker
+        .func_wrap(
+            "projectatlas",
+            "admitted",
+            |mut caller: Caller<'_, PdfStoreLimits>| {
+                caller.data_mut().admitted = true;
+            },
+        )
+        .map_err(|error| malformed(error.to_string()))?;
     linker
         .func_wrap(
             "wasi_snapshot_preview1",
@@ -216,12 +249,20 @@ fn parser_module() -> Result<&'static Module, DocumentExtractionError> {
         .map_err(|error| malformed(error.clone()))
 }
 
+/// The only recoverable failures follow the guest's complete admission pass.
+pub(super) enum PdfPages {
+    /// Every page produced validated text.
+    Complete(Vec<(u32, String)>),
+    /// An admitted document stopped at a finite resource ceiling.
+    Incomplete(DocumentLimit),
+}
+
 /// Run one document and return validated page text only after complete success.
 pub(super) fn extract_pages(
     bytes: &[u8],
     control: &IndexWorkControl,
     stage: IndexWorkStage,
-) -> Result<Vec<(u32, String)>, DocumentExtractionError> {
+) -> Result<PdfPages, DocumentExtractionError> {
     let control = control.with_timeout_ceiling(
         control
             .started_at()
@@ -260,21 +301,26 @@ pub(super) fn extract_pages(
     let extract = instance
         .get_typed_func::<(), i32>(&store, "extract")
         .map_err(|error| vm_error(&error))?;
-    let status = run_parser(&mut store, extract, || {
+    let outcome = run_parser(&mut store, extract, || {
         control.check(stage).map_err(DocumentExtractionError::from)
     })?;
+    let status = match outcome {
+        ParserRun::Complete(status) => status,
+        ParserRun::FuelExhausted => return Ok(PdfPages::Incomplete(DocumentLimit::ExecutionFuel)),
+        ParserRun::MemoryExhausted => return Ok(PdfPages::Incomplete(DocumentLimit::MemoryBytes)),
+    };
     match Failure::try_from(status) {
         Ok(Failure::Encrypted) => return Err(DocumentExtractionError::EncryptedPdf),
         Ok(Failure::Unsupported) => return Err(DocumentExtractionError::UnsupportedPdfInput),
         Ok(Failure::Pages) => return Err(limit(DocumentLimit::FactCount, MAX_DOCUMENT_FACTS)),
+        Ok(Failure::Output) if store.data().admitted => {
+            return Ok(PdfPages::Incomplete(DocumentLimit::OutputBytes));
+        }
         Ok(Failure::Output) => {
             return Err(limit(DocumentLimit::OutputBytes, MAX_DOCUMENT_OUTPUT_BYTES));
         }
         Ok(Failure::Expanded) => {
-            return Err(limit(
-                DocumentLimit::ExpandedBytes,
-                MAX_DOCUMENT_EXPANDED_BYTES,
-            ));
+            return expanded_result(store.data().admitted, &control, stage);
         }
         Ok(Failure::Malformed) => {
             return Err(malformed(
@@ -284,9 +330,41 @@ pub(super) fn extract_pages(
         Err(value) if value >= 0 => {}
         Err(_) => return Err(malformed("PDF guest returned an unknown status")),
     }
-    let pages = read_output(instance, &mut store, status as usize)?;
+    finish_output(instance, &mut store, status as usize, &control, stage)
+}
+
+/// Finish an admitted parse without treating accessor fuel as a document failure.
+fn finish_output(
+    instance: Instance,
+    store: &mut Store<PdfStoreLimits>,
+    expected_bytes: usize,
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<PdfPages, DocumentExtractionError> {
+    let pages = match read_output(instance, store, expected_bytes) {
+        Ok(pages) => pages,
+        Err(DocumentExtractionError::ResourceLimit {
+            limit: DocumentLimit::ExecutionFuel,
+            ..
+        }) if store.data().admitted => {
+            control.check(stage)?;
+            return Ok(PdfPages::Incomplete(DocumentLimit::ExecutionFuel));
+        }
+        Err(error) => return Err(error),
+    };
     control.check(stage)?;
-    Ok(pages)
+    Ok(PdfPages::Complete(pages))
+}
+
+/// One resumable guest call before output access.
+#[derive(Debug)]
+enum ParserRun {
+    /// Guest returned its status code.
+    Complete(i32),
+    /// Finite interpreter fuel ended after admission.
+    FuelExhausted,
+    /// Configured linear memory ended after admission.
+    MemoryExhausted,
 }
 
 /// Spend a single finite fuel balance, checking cancellation at each suspension.
@@ -294,14 +372,22 @@ fn run_parser(
     store: &mut Store<PdfStoreLimits>,
     extract: wasmi::TypedFunc<(), i32>,
     mut check: impl FnMut() -> Result<(), DocumentExtractionError>,
-) -> Result<i32, DocumentExtractionError> {
+) -> Result<ParserRun, DocumentExtractionError> {
     let mut remaining = store.get_fuel().map_err(|error| vm_error(&error))?;
     let maximum = usize::try_from(remaining).map_err(|error| malformed(error.to_string()))?;
     let mut grant = FUEL_SLICE.min(remaining);
     store.set_fuel(grant).map_err(|error| vm_error(&error))?;
-    let mut state = extract
-        .call_resumable(&mut *store, ())
-        .map_err(|error| vm_error(&error))?;
+    let mut state = match extract.call_resumable(&mut *store, ()) {
+        Ok(state) => state,
+        Err(error)
+            if store.data().admitted
+                && error.as_trap_code() == Some(wasmi::TrapCode::GrowthOperationLimited) =>
+        {
+            check()?;
+            return Ok(ParserRun::MemoryExhausted);
+        }
+        Err(error) => return Err(vm_error(&error)),
+    };
     let status = loop {
         remaining -= grant - store.get_fuel().map_err(|error| vm_error(&error))?;
         check()?;
@@ -310,11 +396,26 @@ fn run_parser(
             TypedResumableCall::OutOfFuel(call) => {
                 let needed = call.required_fuel();
                 if remaining == 0 || needed > remaining {
-                    return Err(limit(DocumentLimit::ExecutionFuel, maximum));
+                    return if store.data().admitted {
+                        Ok(ParserRun::FuelExhausted)
+                    } else {
+                        Err(limit(DocumentLimit::ExecutionFuel, maximum))
+                    };
                 }
                 grant = FUEL_SLICE.max(needed).min(remaining);
                 store.set_fuel(grant).map_err(|error| vm_error(&error))?;
-                state = call.resume(&mut *store).map_err(|error| vm_error(&error))?;
+                state = match call.resume(&mut *store) {
+                    Ok(state) => state,
+                    Err(error)
+                        if store.data().admitted
+                            && error.as_trap_code()
+                                == Some(wasmi::TrapCode::GrowthOperationLimited) =>
+                    {
+                        check()?;
+                        return Ok(ParserRun::MemoryExhausted);
+                    }
+                    Err(error) => return Err(vm_error(&error)),
+                };
             }
             TypedResumableCall::HostTrap(_) => {
                 return Err(malformed("PDF guest attempted a denied host operation"));
@@ -324,7 +425,7 @@ fn run_parser(
     store
         .set_fuel(remaining)
         .map_err(|error| vm_error(&error))?;
-    Ok(status)
+    Ok(ParserRun::Complete(status))
 }
 
 /// Validate all guest records before copying text into native ownership.
@@ -406,7 +507,9 @@ mod tests {
     use super::*;
     use projectatlas_core::{IndexCancellation, IndexWorkFailure};
 
-    fn admitted_guest() -> (Store<PdfStoreLimits>, wasmi::TypedFunc<(), i32>) {
+    fn guest_with_input(
+        bytes: &[u8],
+    ) -> (Store<PdfStoreLimits>, Instance, wasmi::TypedFunc<(), i32>) {
         let module = parser_module().expect("fixed module");
         let mut store = Store::new(module.engine(), PdfStoreLimits::default());
         store.limiter(|limits| limits);
@@ -415,7 +518,6 @@ mod tests {
             .unwrap()
             .instantiate_and_start(&mut store, module)
             .unwrap();
-        let bytes = super::super::tests::minimal_pdf();
         let input = instance
             .get_typed_func::<u32, u32>(&store, "input")
             .unwrap();
@@ -425,17 +527,105 @@ mod tests {
         instance
             .get_memory(&store, "memory")
             .unwrap()
-            .write(&mut store, ptr as usize, &bytes)
+            .write(&mut store, ptr as usize, bytes)
             .unwrap();
         let extract = instance
             .get_typed_func::<(), i32>(&store, "extract")
             .unwrap();
-        (store, extract)
+        (store, instance, extract)
+    }
+
+    fn admitted_guest() -> (Store<PdfStoreLimits>, Instance, wasmi::TypedFunc<(), i32>) {
+        guest_with_input(&super::super::tests::minimal_pdf())
+    }
+
+    #[test]
+    fn malformed_later_page_never_sets_admission_marker() {
+        let mut document =
+            lopdf::Document::load_mem(&super::super::tests::multi_page_pdf()).unwrap();
+        document
+            .get_object_mut((7, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"(".to_vec());
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        let (mut store, _, extract) = guest_with_input(&bytes);
+        let result = run_parser(&mut store, extract, || Ok(()));
+        assert!(
+            matches!(result, Ok(ParserRun::Complete(code)) if code == Failure::Malformed as i32)
+        );
+        assert!(!store.data().admitted);
+    }
+
+    #[test]
+    fn expanded_bytes_are_local_only_after_admission() {
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        assert!(matches!(
+            expanded_result(false, &control, IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::ExpandedBytes,
+                ..
+            })
+        ));
+        assert!(matches!(
+            expanded_result(true, &control, IndexWorkStage::TextIndex),
+            Ok(PdfPages::Incomplete(DocumentLimit::ExpandedBytes))
+        ));
+
+        cancellation.cancel();
+        assert!(matches!(
+            expanded_result(true, &control, IndexWorkStage::TextIndex),
+            Err(DocumentExtractionError::Work(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::TextIndex
+            }))
+        ));
+    }
+
+    #[test]
+    fn admitted_output_accessor_fuel_is_a_local_gap() {
+        let (mut store, instance, extract) = admitted_guest();
+        let result = run_parser(&mut store, extract, || Ok(())).unwrap();
+        assert!(matches!(result, ParserRun::Complete(_)));
+        let ParserRun::Complete(status) = result else {
+            return;
+        };
+        assert!(store.data().admitted);
+        store.set_fuel(0).unwrap();
+        let cancellation = IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let result = finish_output(
+            instance,
+            &mut store,
+            status as usize,
+            &control,
+            IndexWorkStage::TextIndex,
+        );
+        assert!(matches!(
+            result,
+            Ok(PdfPages::Incomplete(DocumentLimit::ExecutionFuel))
+        ));
+        cancellation.cancel();
+        let result = finish_output(
+            instance,
+            &mut store,
+            status as usize,
+            &control,
+            IndexWorkStage::TextIndex,
+        );
+        assert!(matches!(
+            result,
+            Err(DocumentExtractionError::Work(
+                IndexWorkFailure::Cancelled { .. }
+            ))
+        ));
     }
 
     #[test]
     fn resumptions_cannot_refill_the_total_execution_budget() {
-        let (mut store, extract) = admitted_guest();
+        let (mut store, _, extract) = admitted_guest();
         store.set_fuel(FUEL_SLICE * 2).unwrap();
         let mut checkpoints = 0;
         let result = run_parser(&mut store, extract, || {
@@ -460,7 +650,7 @@ mod tests {
 
     #[test]
     fn cancellation_stops_a_suspended_parse_without_returning_text() {
-        let (mut store, extract) = admitted_guest();
+        let (mut store, _, extract) = admitted_guest();
         let cancellation = IndexCancellation::new();
         let control = IndexWorkControl::new(cancellation.clone(), None);
         let mut checkpoints = 0;
@@ -485,7 +675,7 @@ mod tests {
 
     #[test]
     fn deadline_stops_a_suspended_parse_without_returning_text() {
-        let (mut store, extract) = admitted_guest();
+        let (mut store, _, extract) = admitted_guest();
         let mut checkpoints = 0;
         let mut control = IndexWorkControl::new(IndexCancellation::new(), None);
         let result = run_parser(&mut store, extract, || {
@@ -518,27 +708,92 @@ mod tests {
         // () -> i32, one memory, grow by 1152 pages (72 MiB).
         let wasm = b"\0asm\x01\0\0\0\x01\x05\x01\x60\x00\x01\x7f\x03\x02\x01\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06invoke\x00\x00\x0a\x09\x01\x07\x00\x41\x80\x09\x40\x00\x0b";
         let module = Module::new(engine, wasm).unwrap();
-        let mut store = Store::new(engine, PdfStoreLimits::default());
-        store.limiter(|limits| limits);
-        store.set_fuel(TOTAL_FUEL).unwrap();
-        let instance = linker(engine)
-            .unwrap()
-            .instantiate_and_start(&mut store, &module)
-            .unwrap();
-        let grow = instance
-            .get_typed_func::<(), i32>(&store, "invoke")
-            .unwrap();
-        let result = run_parser(&mut store, grow, || Ok(()));
-        assert!(
-            matches!(
-                result,
-                Err(DocumentExtractionError::ResourceLimit {
-                    limit: DocumentLimit::MemoryBytes,
-                    ..
-                })
-            ),
-            "{result:?}"
-        );
+        for admitted in [false, true] {
+            let mut store = Store::new(engine, PdfStoreLimits::default());
+            store.limiter(|limits| limits);
+            store.set_fuel(TOTAL_FUEL).unwrap();
+            let instance = linker(engine)
+                .unwrap()
+                .instantiate_and_start(&mut store, &module)
+                .unwrap();
+            store.data_mut().admitted = admitted;
+            let grow = instance
+                .get_typed_func::<(), i32>(&store, "invoke")
+                .unwrap();
+            let result = run_parser(&mut store, grow, || Ok(()));
+            if admitted {
+                assert!(
+                    matches!(result, Ok(ParserRun::MemoryExhausted)),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(DocumentExtractionError::ResourceLimit {
+                            limit: DocumentLimit::MemoryBytes,
+                            ..
+                        })
+                    ),
+                    "{result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stack_overflow_is_fatal_not_an_accepted_linear_memory_gap() {
+        let error = wasmi::Error::from(wasmi::TrapCode::StackOverflow);
+        assert!(matches!(
+            vm_error(&error),
+            DocumentExtractionError::Malformed { .. }
+        ));
+    }
+
+    #[test]
+    fn admitted_memory_stop_does_not_mask_cancellation_or_deadline() {
+        let engine = parser_module().unwrap().engine();
+        let wasm = b"\0asm\x01\0\0\0\x01\x05\x01\x60\x00\x01\x7f\x03\x02\x01\x00\x05\x03\x01\x00\x01\x07\x0a\x01\x06invoke\x00\x00\x0a\x09\x01\x07\x00\x41\x80\x09\x40\x00\x0b";
+        let module = Module::new(engine, wasm).unwrap();
+        for cancelled in [true, false] {
+            let mut store = Store::new(engine, PdfStoreLimits::default());
+            store.limiter(|limits| limits);
+            store.set_fuel(TOTAL_FUEL).unwrap();
+            let instance = linker(engine)
+                .unwrap()
+                .instantiate_and_start(&mut store, &module)
+                .unwrap();
+            store.data_mut().admitted = true;
+            let grow = instance
+                .get_typed_func::<(), i32>(&store, "invoke")
+                .unwrap();
+            let result = run_parser(&mut store, grow, || {
+                Err(DocumentExtractionError::Work(if cancelled {
+                    IndexWorkFailure::Cancelled {
+                        stage: IndexWorkStage::TextIndex,
+                    }
+                } else {
+                    IndexWorkFailure::DeadlineExceeded {
+                        stage: IndexWorkStage::TextIndex,
+                    }
+                }))
+            });
+            if cancelled {
+                assert!(matches!(
+                    result,
+                    Err(DocumentExtractionError::Work(
+                        IndexWorkFailure::Cancelled { .. }
+                    ))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(DocumentExtractionError::Work(
+                        IndexWorkFailure::DeadlineExceeded { .. }
+                    ))
+                ));
+            }
+        }
     }
 
     // Tiny binary fixture: one imported function re-exported as `invoke`.
