@@ -74,7 +74,15 @@ fn page_content(
     for object in streams {
         let (_, object) = document.dereference(object).map_err(parser_failure)?;
         let stream = object.as_stream().map_err(parser_failure)?;
-        if stream.dict.has(b"Filter") {
+        if stream.dict.has(b"Filter")
+            && !matches!(
+                stream
+                    .dict
+                    .get_deref(b"Filter", document)
+                    .map_err(parser_failure)?,
+                lopdf::Object::Null
+            )
+        {
             stream.filters().map_err(parser_failure)?;
         }
         let data = stream
@@ -114,7 +122,16 @@ fn page_resources(
             Err(error) => return Err(parser_failure(error)),
         }
         current = match node.get(b"Parent") {
-            Ok(parent) => Some(parent.as_reference().map_err(parser_failure)?),
+            Ok(parent) => {
+                if matches!(
+                    document.dereference(parent).map_err(parser_failure)?.1,
+                    lopdf::Object::Null
+                ) {
+                    None
+                } else {
+                    Some(parent.as_reference().map_err(parser_failure)?)
+                }
+            }
             Err(lopdf::Error::DictKey(_)) => None,
             Err(error) => return Err(parser_failure(error)),
         };
@@ -157,14 +174,14 @@ fn validate_forms(
             _ => return Err(Failure::Malformed),
         }
         let subtype2 = match stream.dict.get(b"Subtype2") {
-            Ok(value) => Some(
-                document
-                    .dereference(value)
-                    .map_err(parser_failure)?
-                    .1
-                    .as_name()
-                    .map_err(parser_failure)?,
-            ),
+            Ok(value) => {
+                let (_, value) = document.dereference(value).map_err(parser_failure)?;
+                if matches!(value, lopdf::Object::Null) {
+                    None
+                } else {
+                    Some(value.as_name().map_err(parser_failure)?)
+                }
+            }
             Err(lopdf::Error::DictKey(_)) => None,
             Err(error) => return Err(parser_failure(error)),
         };
@@ -211,18 +228,20 @@ fn validate_forms(
         match stream.dict.get(b"Matrix") {
             Ok(value) => {
                 let matrix = document.dereference(value).map_err(parser_failure)?.1;
-                let matrix = matrix.as_array().map_err(parser_failure)?;
-                if matrix.len() != 6
-                    || matrix.iter().any(|value| {
-                        !matches!(value, lopdf::Object::Integer(_) | lopdf::Object::Real(_))
-                            || match value {
-                                lopdf::Object::Integer(_) => false,
-                                lopdf::Object::Real(value) => !value.is_finite(),
-                                _ => true,
-                            }
-                    })
-                {
-                    return Err(Failure::Malformed);
+                if !matches!(matrix, lopdf::Object::Null) {
+                    let matrix = matrix.as_array().map_err(parser_failure)?;
+                    if matrix.len() != 6
+                        || matrix.iter().any(|value| {
+                            !matches!(value, lopdf::Object::Integer(_) | lopdf::Object::Real(_))
+                                || match value {
+                                    lopdf::Object::Integer(_) => false,
+                                    lopdf::Object::Real(value) => !value.is_finite(),
+                                    _ => true,
+                                }
+                        })
+                    {
+                        return Err(Failure::Malformed);
+                    }
                 }
             }
             Err(lopdf::Error::DictKey(_)) => {}
@@ -303,6 +322,26 @@ fn parse(bytes: &[u8]) -> Result<(Vec<u8>, usize), Failure> {
     // Decode admitted streams once with an aggregate ceiling. The canonical
     // formatter therefore never reaches its historical decompression fallback.
     // Images remain opaque because their pixels are outside text extraction.
+    let null_filters: Vec<_> = document
+        .objects
+        .iter()
+        .filter_map(|(id, object)| {
+            let lopdf::Object::Stream(stream) = object else {
+                return None;
+            };
+            let filter = stream.dict.get(b"Filter").ok()?;
+            matches!(document.dereference(filter), Ok((_, lopdf::Object::Null))).then_some(*id)
+        })
+        .collect();
+    for id in null_filters {
+        document
+            .get_object_mut(id)
+            .map_err(parser_failure)?
+            .as_stream_mut()
+            .map_err(parser_failure)?
+            .dict
+            .remove(b"Filter");
+    }
     let images: HashSet<_> = document
         .objects
         .iter()
@@ -443,6 +482,11 @@ fn validate_page_tree(document: &mut lopdf::Document) -> Result<usize, Failure> 
         }
         match (expected_parent, node.get(b"Parent")) {
             (None, Err(lopdf::Error::DictKey(_))) => {}
+            (None, Ok(parent))
+                if matches!(
+                    document.dereference(parent).map_err(parser_failure)?.1,
+                    lopdf::Object::Null
+                ) => {}
             (Some(expected), Ok(lopdf::Object::Reference(actual))) if *actual == expected => {}
             _ => return Err(Failure::Malformed),
         }
@@ -685,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn null_page_and_form_resources_inherit_without_admitting_other_types() {
+    fn optional_null_page_and_form_entries_preserve_inheritance() {
         let mut document = lopdf::Document::new();
         let pages = document.new_object_id();
         let font = document.add_object(dictionary! {
@@ -727,8 +771,8 @@ mod tests {
             parse(&bytes)
         };
 
-        let output = extract(&mut document).unwrap().0;
-        assert!(String::from_utf8_lossy(&output).contains("Inherited Marker"));
+        let expected = extract(&mut document).unwrap().0;
+        assert!(String::from_utf8_lossy(&expected).contains("Inherited Marker"));
         let null = document.add_object(lopdf::Object::Null);
         document
             .get_dictionary_mut(page)
@@ -741,8 +785,164 @@ mod tests {
             .unwrap()
             .dict
             .set("Resources", null);
-        let output = extract(&mut document).unwrap().0;
-        assert!(String::from_utf8_lossy(&output).contains("Inherited Marker"));
+        assert_eq!(extract(&mut document).unwrap().0, expected);
+
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Parent", lopdf::Object::Null);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Subtype2", lopdf::Object::Null);
+        assert_eq!(extract(&mut document).unwrap().0, expected);
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Parent", null);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Subtype2", null);
+        assert_eq!(extract(&mut document).unwrap().0, expected);
+        let inherited = document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .remove(b"Resources")
+            .unwrap();
+        assert!(matches!(page_resources(&document, page), Ok(None)));
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Resources", inherited);
+
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matrix", lopdf::Object::Null);
+        assert_eq!(extract(&mut document).unwrap().0, expected);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matrix", null);
+        assert_eq!(extract(&mut document).unwrap().0, expected);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Matrix", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .remove(b"Matrix");
+
+        for filter in [lopdf::Object::Null, null.into()] {
+            document
+                .get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("Filter", filter.clone());
+            document
+                .get_object_mut(form)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("Filter", filter);
+            assert_eq!(extract(&mut document).unwrap().0, expected);
+        }
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Filter", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
+        document
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .remove(b"Filter");
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Filter", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .remove(b"Filter");
+
+        let mut inline_content = document
+            .get_object(content)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .clone();
+        inline_content.dict.set("Filter", lopdf::Object::Null);
+        document
+            .get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", lopdf::Object::Stream(inline_content));
+        assert_eq!(
+            page_content(&document, page, EXPANDED_LIMIT),
+            Ok(b"/Form Do\n".to_vec())
+        );
+        document
+            .get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", content);
+
+        document.get_dictionary_mut(pages).unwrap().set("Parent", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
+        document
+            .get_dictionary_mut(pages)
+            .unwrap()
+            .set("Parent", null);
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Subtype2", 7);
+        assert_eq!(extract(&mut document), Err(Failure::Malformed));
+        document
+            .get_object_mut(form)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("Subtype2", null);
 
         document
             .get_dictionary_mut(page)

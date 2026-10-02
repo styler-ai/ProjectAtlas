@@ -1944,7 +1944,8 @@ impl<'a> Processor<'a> {
                     let resources = maybe_get_obj(&doc, &xf.dict, b"Resources").and_then(|n| n.as_dict().ok()).unwrap_or(resources);
                     let contents = get_contents(xf);
                     let mut nested = gs.clone();
-                    if let Some(matrix) = maybe_get_obj(doc, &xf.dict, b"Matrix") {
+                    if let Some(matrix) = maybe_get_obj(doc, &xf.dict, b"Matrix")
+                        .filter(|matrix| !matches!(matrix, Object::Null)) {
                         let matrix = matrix.as_array()?;
                         if matrix.len() != 6 || matrix.iter().any(|value|
                             !matches!(value, Object::Integer(_) | Object::Real(_)) || !as_num(value).is_finite()) {
