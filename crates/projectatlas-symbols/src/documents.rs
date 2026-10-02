@@ -589,10 +589,18 @@ fn extract_pdf(
         }
         Err(error) => return Err(error),
     };
+    pdf_pages_to_facts(&pages, control, stage)
+}
+
+/// Assemble admitted PDF pages without changing their page-local source offsets.
+fn pdf_pages_to_facts(
+    pages: &[(u32, String)],
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+) -> Result<DocumentFacts, DocumentExtractionError> {
     let mut text = String::new();
     let mut facts = Vec::new();
-    let mut reached_limit = None;
-    'pages: for (page_number, page) in &pages {
+    for (page_number, page) in pages {
         control.check(stage)?;
         let mut page_offset = 0usize;
         for line in page.split('\n') {
@@ -602,16 +610,22 @@ fn extract_pdf(
                 continue;
             }
             if facts.len() >= MAX_DOCUMENT_FACTS {
-                reached_limit = Some(DocumentLimit::FactCount);
-                break 'pages;
+                return Ok(empty_partial_document(
+                    DocumentFormat::Pdf,
+                    DocumentParserProvenance::PdfExtract,
+                    DocumentCoverageGap::ResourceLimit(DocumentLimit::FactCount),
+                ));
             }
             let required = text
                 .len()
                 .saturating_add(usize::from(!text.is_empty()))
                 .saturating_add(line.len());
             if required > MAX_DOCUMENT_OUTPUT_BYTES {
-                reached_limit = Some(DocumentLimit::OutputBytes);
-                break 'pages;
+                return Ok(empty_partial_document(
+                    DocumentFormat::Pdf,
+                    DocumentParserProvenance::PdfExtract,
+                    DocumentCoverageGap::ResourceLimit(DocumentLimit::OutputBytes),
+                ));
             }
             if !text.is_empty() {
                 push_output_byte(&mut text, b'\n')?;
@@ -641,11 +655,7 @@ fn extract_pdf(
         text,
         facts,
         symbols: Vec::new(),
-        completeness: reached_limit.map_or(DocumentCompleteness::Complete, |limit| {
-            DocumentCompleteness::Partial {
-                gaps: vec![DocumentCoverageGap::ResourceLimit(limit)],
-            }
-        }),
+        completeness: DocumentCompleteness::Complete,
         provenance: DocumentParserProvenance::PdfExtract,
     })
 }
@@ -5246,6 +5256,51 @@ mod tests {
                 text_end: 8
             }
         ));
+    }
+
+    #[test]
+    fn pdf_host_limits_discard_all_page_evidence() {
+        let work = control();
+        let stage = IndexWorkStage::SymbolParsing;
+        let exact = pdf_pages_to_facts(&[(1, "x".repeat(MAX_DOCUMENT_OUTPUT_BYTES))], &work, stage)
+            .expect("exact output limit remains complete");
+        assert_eq!(exact.completeness, DocumentCompleteness::Complete);
+        assert_eq!(exact.text.len(), MAX_DOCUMENT_OUTPUT_BYTES);
+        assert_eq!(exact.facts.len(), 1);
+        let exact_facts =
+            pdf_pages_to_facts(&[(1, "x\n".repeat(MAX_DOCUMENT_FACTS))], &work, stage)
+                .expect("exact fact limit remains complete");
+        assert_eq!(exact_facts.completeness, DocumentCompleteness::Complete);
+        assert_eq!(exact_facts.facts.len(), MAX_DOCUMENT_FACTS);
+
+        let over_output = pdf_pages_to_facts(
+            &[
+                (1, "x".repeat(MAX_DOCUMENT_OUTPUT_BYTES - 1)),
+                (2, "y".to_owned()),
+            ],
+            &work,
+            stage,
+        )
+        .expect("host output exhaustion is document-local");
+        let assert_empty_gap = |facts: DocumentFacts, limit| {
+            assert!(facts.text.is_empty());
+            assert!(facts.facts.is_empty());
+            assert!(facts.symbols.is_empty());
+            assert_eq!(facts.format, DocumentFormat::Pdf);
+            assert_eq!(facts.provenance, DocumentParserProvenance::PdfExtract);
+            assert_eq!(
+                facts.completeness,
+                DocumentCompleteness::Partial {
+                    gaps: vec![DocumentCoverageGap::ResourceLimit(limit)]
+                }
+            );
+        };
+        assert_empty_gap(over_output, DocumentLimit::OutputBytes);
+
+        let over_facts =
+            pdf_pages_to_facts(&[(1, "x\n".repeat(MAX_DOCUMENT_FACTS + 1))], &work, stage)
+                .expect("host fact exhaustion is document-local");
+        assert_empty_gap(over_facts, DocumentLimit::FactCount);
     }
 
     #[test]
