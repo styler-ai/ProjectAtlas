@@ -6938,12 +6938,13 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         fs::write(&log, "")?;
         let skip_registry_update = field == "env";
         let rejected = run(false, skip_registry_update)?;
+        let normalized_rejected = rejected.split_whitespace().collect::<Vec<_>>().join(" ");
         let calls = fs::read_to_string(&log)?;
         if receipt_path.exists()
             || calls.contains("mcp remove projectatlas") == skip_registry_update
             || calls.contains("mcp add projectatlas")
             || fs::read(&db)? != prior_db
-            || !rejected.contains(if skip_registry_update {
+            || !normalized_rejected.contains(if skip_registry_update {
                 "Codex MCP registry update skipped"
             } else {
                 "could not remove stale global projectatlas server"
@@ -6958,12 +6959,14 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     fs::remove_file(&state)?;
     fs::write(&log, "")?;
     let ambiguous = run(true, false)?;
+    let normalized_ambiguous = ambiguous.split_whitespace().collect::<Vec<_>>().join(" ");
     let calls = fs::read_to_string(&log)?;
     if state.exists()
         || calls.contains("mcp add projectatlas")
         || calls.contains("mcp remove projectatlas")
         || fs::read(&db)? != prior_db
-        || !ambiguous.contains("could not confirm that the global projectatlas entry is absent")
+        || !normalized_ambiguous
+            .contains("could not confirm that the global projectatlas entry is absent")
     {
         return Err(io::Error::other(format!(
             "ambiguous registry inventory did not fail closed: {ambiguous}\n{calls}"
@@ -15558,10 +15561,14 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         String::from_utf8_lossy(&installer_output.stderr)
     );
     let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
-    if installer_output_text.contains("Codex ProjectAtlas plugin marketplace updated")
-        || installer_output_text.contains("Codex ProjectAtlas plugin skill verified")
-        || !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
-        || !installer_output_text.contains(
+    let normalized_installer_output = installer_output_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized_installer_output.contains("Codex ProjectAtlas plugin marketplace updated")
+        || normalized_installer_output.contains("Codex ProjectAtlas plugin skill verified")
+        || !normalized_installer_output.contains("Codex ProjectAtlas plugin update failed")
+        || !normalized_installer_output.contains(
             "Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent",
         )
     {
