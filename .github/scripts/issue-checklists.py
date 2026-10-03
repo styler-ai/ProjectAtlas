@@ -143,6 +143,8 @@ EXPLICIT_QUALIFIED_OWNER_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
+PR_STATE_WORKFLOW_RUNS_PER_PAGE = 100
+MAX_PR_STATE_WORKFLOW_RUN_PAGES = 10
 PR_STATE_CHECK_APP_ID = 15368
 PR_STATE_WAKEUP_TITLE_RE = re.compile(
     r"^pr-state-wakeup\|([1-9][0-9]*)\|([0-9a-f]{40})$"
@@ -898,6 +900,42 @@ def matching_pr_state_run(
     return None
 
 
+def pr_state_workflow_run_page(repo: str, page: int) -> list[object]:
+    payload = gh_api_json(
+        [
+            "--method",
+            "GET",
+            f"repos/{repo}/actions/workflows/pr-state.yml/runs",
+            "-f",
+            "event=pull_request_target",
+            "-f",
+            f"per_page={PR_STATE_WORKFLOW_RUNS_PER_PAGE}",
+            "-f",
+            f"page={page}",
+            "-f",
+            "sort=created",
+            "-f",
+            "direction=desc",
+        ]
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
+        raise SystemExit("PR-state workflow-run query did not return a run list")
+    return payload["workflow_runs"]
+
+
+def find_pr_state_workflow_run(
+    repo: str, pull_request: int, head: str, default_branch: str
+) -> tuple[dict[str, object] | None, bool]:
+    for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1):
+        runs = pr_state_workflow_run_page(repo, page)
+        workflow_run = matching_pr_state_run(pull_request, head, default_branch, runs)
+        if workflow_run is not None:
+            return workflow_run, False
+        if len(runs) < PR_STATE_WORKFLOW_RUNS_PER_PAGE:
+            return None, False
+    return None, True
+
+
 def pr_state_workflow_path(path: object, default_branch: str) -> bool:
     if not isinstance(path, str):
         return False
@@ -1167,39 +1205,46 @@ def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
     refreshes = pr_state_refreshes(repo, issue_number, payload)
     default_branch = pr_state_default_branch(repo)
     for refresh in refreshes:
+        pull_request = int(refresh["number"])
+        head = str(refresh["head"])
+        workflow_run, search_truncated = find_pr_state_workflow_run(
+            repo, pull_request, head, default_branch
+        )
         for attempt in range(30):
-            runs_payload = gh_api_json(
-                [
-                    "--method",
-                    "GET",
-                    f"repos/{repo}/actions/workflows/pr-state.yml/runs",
-                    "-f",
-                    "event=pull_request_target",
-                    "-f",
-                    "per_page=100",
-                    "-f",
-                    "sort=created",
-                    "-f",
-                    "direction=desc",
-                ]
-            )
-            if not isinstance(runs_payload, dict):
-                raise SystemExit("PR-state workflow-run query did not return an object")
-            workflow_run = matching_pr_state_run(
-                int(refresh["number"]),
-                str(refresh["head"]),
-                default_branch,
-                runs_payload.get("workflow_runs"),
-            )
+            if attempt > 0 and workflow_run is None:
+                workflow_run = matching_pr_state_run(
+                    pull_request,
+                    head,
+                    default_branch,
+                    pr_state_workflow_run_page(repo, 1),
+                )
+            elif attempt > 0 and workflow_run["status"] != "completed":
+                selected_run_id = workflow_run["id"]
+                latest_run = gh_api_json(
+                    [f"repos/{repo}/actions/runs/{selected_run_id}"]
+                )
+                if not isinstance(latest_run, dict) or latest_run.get("id") != selected_run_id:
+                    raise SystemExit("PR-state workflow-run lookup returned the wrong identity")
+                workflow_run = matching_pr_state_run(
+                    pull_request, head, default_branch, [latest_run]
+                )
+                if workflow_run is None:
+                    raise SystemExit("PR-state workflow run changed identity during refresh")
             if workflow_run is not None and workflow_run["status"] == "completed":
                 break
             if attempt == 29:
                 if workflow_run is None:
+                    if search_truncated:
+                        raise SystemExit(
+                            "PR-state workflow-run search reached its "
+                            f"{MAX_PR_STATE_WORKFLOW_RUN_PAGES}-page bound without "
+                            f"finding a current-head run for pull request #{pull_request}"
+                        )
                     raise SystemExit(
-                        f"no PR-state workflow run found for pull request #{refresh['number']}"
+                        f"no PR-state workflow run found for pull request #{pull_request}"
                     )
                 raise SystemExit(
-                    f"latest PR-state workflow run for pull request #{refresh['number']} "
+                    f"latest PR-state workflow run for pull request #{pull_request} "
                     "did not complete within the refresh bound"
                 )
             time.sleep(2)
@@ -3440,6 +3485,7 @@ Mitigations:
         "pull_requests": [],
     }
     assert trusted_refresh_run["head_sha"] != refresh_pr["headRefOid"]
+    refresh_run_pages: dict[int, list[object]] = {1: [trusted_refresh_run]}
     observed_refresh_api: list[list[str]] = []
     observed_reruns: list[list[str]] = []
     saved_refresh_functions = {
@@ -3459,7 +3505,14 @@ Mitigations:
         if args[0] == "--method" and args[2] == (
             "repos/owner/repo/actions/workflows/pr-state.yml/runs"
         ):
-            return {"workflow_runs": [trusted_refresh_run]}
+            page = next(
+                int(item.removeprefix("page="))
+                for item in args
+                if item.startswith("page=")
+            )
+            return {"workflow_runs": refresh_run_pages.get(page, [])}
+        if args == ["repos/owner/repo/actions/runs/77"]:
+            return {**trusted_refresh_run, "status": "completed"}
         raise AssertionError(f"unexpected issue-refresh API request: {args}")
 
     def refresh_run(args: list[str], *, raw_output: bool = False) -> str:
@@ -3475,6 +3528,8 @@ Mitigations:
         refresh_pr_state_for_issue("owner/repo", 517)
         assert observed_refresh_api[1][0:3] == ["--method", "GET", "repos/owner/repo/actions/workflows/pr-state.yml/runs"]
         assert "event=pull_request_target" in observed_refresh_api[1]
+        assert "per_page=100" in observed_refresh_api[1]
+        assert "page=1" in observed_refresh_api[1]
         assert not any(item.startswith("head_sha=") for item in observed_refresh_api[1])
         assert observed_reruns == [
             [
@@ -3485,14 +3540,95 @@ Mitigations:
                 "repos/owner/repo/actions/runs/77/rerun",
             ]
         ]
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        trusted_refresh_run["status"] = "in_progress"
+        refresh_run_pages.clear()
+        refresh_run_pages[1] = [trusted_refresh_run]
+        refresh_pr_state_for_issue("owner/repo", 517)
+        assert observed_refresh_api[-1] == ["repos/owner/repo/actions/runs/77"]
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        trusted_refresh_run["status"] = "completed"
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        decoy_run = {
+            **trusted_refresh_run,
+            "id": 78,
+            "display_title": f"pr-state-wakeup|600|{'b' * 40}",
+        }
+        refresh_run_pages.clear()
+        refresh_run_pages.update(
+            {
+                1: [decoy_run] * PR_STATE_WORKFLOW_RUNS_PER_PAGE,
+                2: [trusted_refresh_run],
+            }
+        )
+        refresh_pr_state_for_issue("owner/repo", 517)
+        page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert page_requests == ["page=1", "page=2"]
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        observed_refresh_api.clear()
         observed_reruns.clear()
         trusted_refresh_run["display_title"] = f"pr-state-wakeup|600|{'b' * 40}"
+        refresh_run_pages.clear()
+        refresh_run_pages[1] = [trusted_refresh_run]
         try:
             refresh_pr_state_for_issue("owner/repo", 517)
         except SystemExit as error:
             assert "no PR-state workflow run found" in str(error)
         else:
             raise AssertionError("issue refresh reran a stale-head PR-state workflow")
+        assert observed_reruns == []
+        missing_page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert missing_page_requests == ["page=1"] * 30
+        observed_refresh_api.clear()
+        decoy_run["display_title"] = f"pr-state-wakeup|601|{'b' * 40}"
+        refresh_run_pages.clear()
+        refresh_run_pages.update(
+            {
+                page: [decoy_run] * PR_STATE_WORKFLOW_RUNS_PER_PAGE
+                for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1)
+            }
+        )
+        try:
+            refresh_pr_state_for_issue("owner/repo", 517)
+        except SystemExit as error:
+            assert f"{MAX_PR_STATE_WORKFLOW_RUN_PAGES}-page bound" in str(error)
+        else:
+            raise AssertionError("issue refresh did not refuse a truncated run search")
+        exhausted_page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert exhausted_page_requests == [
+            *(f"page={page}" for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1)),
+            *("page=1" for _ in range(29)),
+        ]
         assert observed_reruns == []
     finally:
         for name, function in saved_refresh_functions.items():
