@@ -6,13 +6,13 @@ IssueOps and PR-state independently scan PR title/body text for every local-look
 
 **Goals:** Make explicit local PR ownership unambiguous in IssueOps and a required base-controlled PR-state check; accept the three existing bot PRs under aggregate #499 and matching milestones; preserve JSONC, pinned-action, MCP, parser-pack, and supported-platform behavior; retain the two owners to the RC3 release graph.
 
-**Non-Goals:** New PR templates or ownership infrastructure, broad dependency updates, a new MCP protocol, weakened warning gates, stable promotion, or treating upstream changelog links as ProjectAtlas owners when an explicit local ownership line exists. The legacy no-closing-line fallback remains non-origin-aware.
+**Non-Goals:** New PR templates or ownership infrastructure, broad dependency updates, a new MCP protocol, weakened warning gates, stable promotion, or treating upstream changelog links as ProjectAtlas owners when an explicit local ownership line exists. The fallback when no explicit ownership line exists remains non-origin-aware.
 
 ## Decisions
 
 ### Prefer one standalone ownership line
 
-Recognize an unindented standalone `Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N` line naming this repository before the legacy all-reference fallback. Reject multiple distinct explicit local owners, mixed closing/non-closing references even for the same issue, and foreign qualified owners; allow repeated references of one kind to the same issue and retain the existing single-reference fallback for older PRs that lack an explicit ownership line. Mirror the rule in IssueOps and PR-state with matching positive/negative tests. The compatibility fallback can still misread one bare upstream HTML `#N` without an explicit line; require an explicit line on each new bot PR rather than claiming the legacy fallback is origin-aware.
+Recognize an unindented standalone `Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N` line naming this repository before the legacy all-reference fallback. Reject multiple distinct explicit local owners, mixed closing/non-closing references even for the same issue, and standalone ownership declarations naming a foreign repository. Ordinary foreign-qualified mentions and changelog links remain valid context alongside one explicit local owner. Allow repeated references of one kind to the same issue and retain the existing single-reference fallback for older PRs that lack an explicit ownership line. Mirror the rule in IssueOps and PR-state with matching positive/negative tests. The compatibility fallback can still misread one bare upstream HTML `#N` without an explicit line; require an explicit line on each new bot PR rather than claiming the legacy fallback is origin-aware.
 
 ### Keep the required owner check base-controlled
 
@@ -20,7 +20,7 @@ Use a protected-base `pull_request_target` workflow for API-only owner/milestone
 
 ### Keep the existing aggregate dependency owner
 
-Reuse #499 for all three existing bot PRs; do not create one issue per PR. PR #623 and #635 use an explicit non-closing `Refs #499` line so the aggregate remains open until all planned updates pass. The final closeout uses `Closes #499` after all dependency tasks and acceptance are complete. The explicit parser recognizes the non-closing owner without scanning incidental upstream references and rejects conflicting closing/non-closing owners. #623 and #635 remain independent after #639; #636 waits for accepted PR #623 because both alter Cargo.lock. Each refreshed head receives its affected proof and independent review; #499 closes only after all three PR dispositions and final acceptance.
+Reuse #499 for all three existing bot PRs; do not create one issue per PR. PR #623 and #635 use an explicit non-closing `Refs #499` line so the aggregate remains open until all planned updates pass. The final closeout uses `Closes #499` after all dependency tasks and acceptance are complete. The explicit parser recognizes the non-closing owner without scanning incidental upstream references and rejects conflicting closing/non-closing owners. #623 and #635 remain independent after #639; #636 waits for accepted PR #623 because both alter Cargo.lock. Each refreshed head receives its affected proof and independent review; #499 closes only after all three PRs merge successfully and final aggregate acceptance passes.
 
 ### Adapt only the grouped update's actual source break
 
