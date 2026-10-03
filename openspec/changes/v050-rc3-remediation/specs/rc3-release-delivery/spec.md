@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: RC3 owns a reconciled release graph and exact installed acceptance
-The `v0.5.0-00` release owner #492 SHALL be the sole direct native parent and direct blocker consumer for accepted RC3 work #620, #624, #625, #627, and #633, implement no product fixes, and close last. An RC3 candidate MUST come from exact accepted main after every child task, review, and required gate passes.
+The `v0.5.0-00` release owner #492 SHALL be the sole direct native parent and direct blocker consumer for all accepted RC3 children declared in `openspec/issue-map.json`, implement no product fixes, and close last. An RC3 candidate MUST come from exact accepted main after every child task, review, and required gate passes.
 
 #### Scenario: Planning and child implementation
 - **WHEN** RC3 work is active
