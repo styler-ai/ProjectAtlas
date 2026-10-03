@@ -36,7 +36,9 @@ Use RMCP 3.5's supported server/client configuration type names at existing adap
 
 ## Migration Plan
 
-Merge #639 first. Bind/refresh and merge #640 and #641 when independently green; refresh and adapt #636 after #640 lands. If an update fails, leave that issue/PR open and keep RC3 blocked; a compatible rollback reverts only the accepted dependency commit, without touching project databases. #492 then freezes the integrated candidate and performs installed release acceptance before publication.
+Deploy #639 through an initial non-closing owner PR that installs the protected-base wakeup and default-branch publisher while retaining the existing read-only metadata job for `pull_request`. Retain its accepted-base metadata code unchanged and remove its candidate checkout and dependency execution; ordinary CI owns candidate IssueOps proof. Independently review the deployment and verify the existing required check against its exact workflow path, event, revision, PR head, API result, and live owner/milestone metadata before merging. This initial base deployment does not complete the new publisher acceptance contract.
+
+Once the workflows are on the default branch, prove trusted current-head Dependabot publication, invalid metadata and stale-head refusal, and issue-change refresh. Enforce the narrow event policy, remove the temporary legacy job/event in the same owner's closeout, and close #639 only when its complete proof passes. Bind/refresh and merge #640 and #641 when independently green; refresh and adapt #636 after #640 lands. If an update fails, leave that issue/PR open and keep RC3 blocked; a compatible rollback reverts only the accepted dependency commit, without touching project databases. #492 then freezes the integrated candidate and performs installed release acceptance before publication.
 
 ## Dependencies / Cross-Issue Impact
 
