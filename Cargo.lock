@@ -1887,6 +1887,7 @@ dependencies = [
  "regex",
  "rmcp",
  "rusqlite",
+ "same-file",
  "scraper",
  "seccompiler",
  "serde",

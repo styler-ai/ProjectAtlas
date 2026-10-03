@@ -1417,13 +1417,16 @@ fn bare_relative_projectatlas_config_path_drives_scan_map_and_lint() -> Result<(
         .success()
         .stderr(predicate::str::contains("Atlas map").not());
 
-    Command::cargo_bin("projectatlas")?
+    let map_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .args(["--config", ".projectatlas/config.toml", "map", "--force"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("io error for \"\"").not());
-    let map = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
+        .output()?;
+    if !map_output.status.success() {
+        return Err(
+            io::Error::other(String::from_utf8_lossy(&map_output.stderr).to_string()).into(),
+        );
+    }
+    let map = String::from_utf8(map_output.stdout)?;
     if !map.contains("src/main.rs") {
         return Err(io::Error::other("bare-config map omitted src/main.rs").into());
     }
@@ -4929,13 +4932,20 @@ fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn E
         "pub fn excluded_from_map_and_lint() {}\n",
     )?;
 
-    Command::cargo_bin("projectatlas")?
+    let map_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .args(["map", "--force"])
-        .assert()
-        .success();
+        .output()?;
+    if !map_output.status.success() {
+        return Err(
+            io::Error::other(String::from_utf8_lossy(&map_output.stderr).to_string()).into(),
+        );
+    }
 
-    let map = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
+    let map = String::from_utf8(map_output.stdout)?;
+    if repo.join(ATLAS_DIR_NAME).join("projectatlas.toon").exists() {
+        return Err(io::Error::other("map unexpectedly wrote a TOON snapshot").into());
+    }
     if !map.contains("src/engine.rs") {
         return Err(io::Error::other("map omitted indexed source file").into());
     }
@@ -4949,6 +4959,164 @@ fn map_and_lint_honor_configured_exclude_path_prefixes() -> Result<(), Box<dyn E
         .assert()
         .success()
         .stderr(predicate::str::contains("docs/api/noise.rs").not());
+    Ok(())
+}
+
+#[test]
+fn map_response_preserves_legacy_file_and_separates_format_from_json_sidecar()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let relocated_bin = temp.path().join("relocated").join("bin");
+    fs::create_dir_all(&relocated_bin)?;
+    let executable = relocated_bin.join(format!("projectatlas{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(mcp_contract_executable(), &executable)?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir(&repo)?;
+    fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    fs::write(
+        repo.join(SRC_DIR_NAME).join("main.rs"),
+        "// Purpose: Map response fixture.\nfn main() {}\n",
+    )?;
+    Command::new(&executable)
+        .current_dir(&repo)
+        .arg("init")
+        .assert()
+        .success();
+
+    let atlas = repo.join(ATLAS_DIR_NAME);
+    let legacy = atlas.join("archive").join("legacy.toon");
+    let sidecar = legacy.with_extension("json");
+    fs::create_dir_all(legacy.parent().ok_or("legacy parent missing")?)?;
+    let legacy_bytes =
+        b"version: 1\nfiles[1]{path,summary,source}:\n  src/main.rs,Legacy purpose,file\n";
+    fs::write(&legacy, legacy_bytes)?;
+    fs::write(
+        atlas.join("config.toml"),
+        "[project]\nroot = \".\"\nmap_path = \".projectatlas/archive/legacy.toon\"\n",
+    )?;
+
+    let toon = Command::new(&executable)
+        .current_dir(&repo)
+        .env("CI", "false")
+        .env_remove("GITHUB_ACTIONS")
+        .args(["--format", "toon", "map", "--json"])
+        .output()?;
+    if !toon.status.success() || !String::from_utf8_lossy(&toon.stdout).contains("src/main.rs") {
+        return Err(io::Error::other(format!(
+            "TOON map failed: {}",
+            String::from_utf8_lossy(&toon.stderr)
+        ))
+        .into());
+    }
+    if !sidecar.exists() || fs::read(&legacy)? != legacy_bytes {
+        return Err(io::Error::other(
+            "TOON response did not preserve legacy file and write JSON sidecar",
+        )
+        .into());
+    }
+    fs::remove_file(&sidecar)?;
+
+    let json_output = Command::new(&executable)
+        .current_dir(&repo)
+        .env("CI", "false")
+        .env_remove("GITHUB_ACTIONS")
+        .args(["--format", "json", "map"])
+        .output()?;
+    let json: Value = serde_json::from_slice(&json_output.stdout)?;
+    if !json_output.status.success() || json["files"].as_array().is_none() || sidecar.exists() {
+        return Err(io::Error::other(
+            "JSON stdout unexpectedly wrote a sidecar or omitted map data",
+        )
+        .into());
+    }
+
+    let ci = Command::new(&executable)
+        .current_dir(&repo)
+        .env("CI", "true")
+        .env_remove("GITHUB_ACTIONS")
+        .args(["map", "--json"])
+        .output()?;
+    if !ci.status.success() || ci.stdout.is_empty() || sidecar.exists() {
+        return Err(io::Error::other("CI skipped the map response or wrote its sidecar").into());
+    }
+    Command::new(&executable)
+        .current_dir(&repo)
+        .env("CI", "true")
+        .env_remove("GITHUB_ACTIONS")
+        .args(["map", "--json", "--force"])
+        .assert()
+        .success();
+    if !sidecar.exists() || fs::read(&legacy)? != legacy_bytes {
+        return Err(io::Error::other("forced CI sidecar changed the legacy TOON file").into());
+    }
+
+    fs::remove_file(&sidecar)?;
+    let messages = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"map-response-e2e","version":"0.1.0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"atlas_map","arguments":{"json":true}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"atlas_map","arguments":{"json":true,"force":true}}}"#,
+    ];
+    let stdout = run_mcp_stdio_with_env(
+        &executable,
+        &repo,
+        &["mcp".to_string()],
+        &messages,
+        &[("CI", Some("true")), ("GITHUB_ACTIONS", None)],
+    )?;
+    let skipped: Value = toon_format::decode_default(&mcp_tool_text(&stdout, 2)?)?;
+    let forced: Value = toon_format::decode_default(&mcp_tool_text(&stdout, 3)?)?;
+    if skipped["map"]["written"] != false
+        || skipped["map"]["json_written"] != false
+        || skipped["map"]["format"] != "json"
+        || !skipped["map"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("src/main.rs")
+        || forced["map"]["json_written"] != true
+        || !forced["map"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("src/main.rs")
+        || !sidecar.exists()
+        || fs::read(&legacy)? != legacy_bytes
+    {
+        return Err(io::Error::other(format!(
+            "MCP map sidecar contract failed: skipped={skipped}, forced={forced}"
+        ))
+        .into());
+    }
+
+    let other = temp.path().join("other-project");
+    fs::create_dir(&other)?;
+    fs::write(
+        other.join("other.rs"),
+        "// Purpose: Other root.\nfn other() {}\n",
+    )?;
+    let other_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": { "name": "atlas_map", "arguments": { "project_path": other } }
+    })
+    .to_string();
+    let other_stdout = run_mcp_stdio(
+        &executable,
+        &repo,
+        &["mcp".to_string()],
+        &[messages[0].to_string(), messages[1].to_string(), other_call],
+    )?;
+    let other_map: Value = toon_format::decode_default(&mcp_tool_text(&other_stdout, 2)?)?;
+    let other_content = other_map["map"]["content"].as_str().unwrap_or_default();
+    if !other_content.contains("other.rs")
+        || other_content.contains("src/main.rs")
+        || other.join(ATLAS_DIR_NAME).exists()
+    {
+        return Err(io::Error::other(format!(
+            "MCP map borrowed or initialized the wrong root: {other_map}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -9023,10 +9191,14 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         let current_tool = current_by_name
             .get(name)
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
-        if baseline_tool.get("description") != current_tool.get("description") {
+        let expected_description = if name == "atlas_map" {
+            Some("Return the current ProjectAtlas map; optionally write a JSON sidecar.")
+        } else {
+            baseline_tool.get("description").and_then(Value::as_str)
+        };
+        if current_tool.get("description").and_then(Value::as_str) != expected_description {
             return Err(io::Error::other(format!(
-                "MCP tool description drifted for {name}: baseline={:?}, current={:?}",
-                baseline_tool.get("description"),
+                "MCP tool description drifted for {name}: expected={expected_description:?}, current={:?}",
                 current_tool.get("description")
             ))
             .into());
@@ -9034,9 +9206,18 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         let baseline_schema = baseline_tool
             .get("inputSchema")
             .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
-        let normalized_schema = (name == "atlas_purpose_review")
-            .then(|| inline_legacy_purpose_review_item_schema(baseline_schema))
-            .transpose()?;
+        let normalized_schema = if name == "atlas_purpose_review" {
+            Some(inline_legacy_purpose_review_item_schema(baseline_schema)?)
+        } else if name == "atlas_map" {
+            let mut schema = baseline_schema.clone();
+            schema["properties"]["json"]["description"] =
+                json!("Return JSON map content and write the adjacent JSON sidecar when true.");
+            schema["properties"]["force"]["description"] =
+                json!("Write the requested JSON sidecar even in CI-like environments.");
+            Some(schema)
+        } else {
+            None
+        };
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
             normalized_schema.as_ref().unwrap_or(baseline_schema),
@@ -11240,12 +11421,16 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     fs::write(&config_path, &legacy_config)?;
     let database = atlas.join("projectatlas.db");
     run_scan(&repo, &database)?;
-    Command::cargo_bin("projectatlas")?
+    let map_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .args(["map", "--force"])
-        .assert()
-        .success();
-    let map = fs::read_to_string(atlas.join("projectatlas.toon"))?;
+        .output()?;
+    if !map_output.status.success() {
+        return Err(
+            io::Error::other(String::from_utf8_lossy(&map_output.stderr).to_string()).into(),
+        );
+    }
+    let map = String::from_utf8(map_output.stdout)?;
     for document in ["docs/guide.pdf", "docs/guide.docx"] {
         if !map.contains(document) {
             return Err(io::Error::other(format!("map omitted document {document}")).into());

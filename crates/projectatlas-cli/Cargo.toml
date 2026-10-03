@@ -56,6 +56,7 @@ cli-core = [
     "dep:regex",
     "dep:rmcp",
     "dep:scraper",
+    "dep:same-file",
     "dep:tempfile",
     "dep:tiktoken",
     "dep:tokio",
@@ -108,6 +109,7 @@ ratatui = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 scraper = { workspace = true, optional = true }
+same-file = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

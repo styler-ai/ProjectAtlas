@@ -595,9 +595,9 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     }
     for path in ["docs/workflow.md", "docs/adoption.md"] {
         let text = fs::read_to_string(workspace_root.join(path))?;
-        if !text.contains("Optional compatibility map export") {
+        if !text.contains("Optional current map response") {
             return Err(io::Error::other(format!(
-                "{path} must describe the static TOON map as an optional compatibility export"
+                "{path} must describe the fileless current map response"
             ))
             .into());
         }
@@ -4436,15 +4436,22 @@ fn init_map_and_lint_flow_uses_rust_implementation() -> Result<(), Box<dyn Error
         )?;
     }
 
-    Command::cargo_bin("projectatlas")?
+    let map_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .args(["map", "--force"])
-        .assert()
-        .success();
+        .output()?;
+    if !map_output.status.success() {
+        return Err(
+            io::Error::other(String::from_utf8_lossy(&map_output.stderr).to_string()).into(),
+        );
+    }
 
-    let map = fs::read_to_string(repo.join(ATLAS_DIR_NAME).join("projectatlas.toon"))?;
+    let map = String::from_utf8(map_output.stdout)?;
     if !map.contains("src/main.rs") {
-        return Err(io::Error::other("generated atlas did not include src/main.rs").into());
+        return Err(io::Error::other("map response did not include src/main.rs").into());
+    }
+    if repo.join(ATLAS_DIR_NAME).join("projectatlas.toon").exists() {
+        return Err(io::Error::other("map unexpectedly wrote a TOON snapshot").into());
     }
 
     Command::cargo_bin("projectatlas")?

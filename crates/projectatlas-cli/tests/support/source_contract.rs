@@ -3,19 +3,19 @@
 pub(super) const CLI_E2E_SOURCE_SHA256: &[(&str, &str)] = &[
     (
         "crates/projectatlas-cli/tests/e2e_delivery.rs",
-        "c636cb6b1eb625f347652aeaf44d4db3b5571707cbd03e40a6ff4c99a98f8041",
+        "e90b6ac21334fa1552aad5c071c894688ae905dcd808a386dc3969998d0b6cd5",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
-        "f17200d96abd7811f1667cfd297f16d8944bd7f469dfb81ab0caa98d8a73769e",
+        "f44f98ca4c6dd4d4543ca4fb5eb18faa972b4c531817563ed569da9d086dcca8",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_maintenance.rs",
-        "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
+        "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_navigation.rs",
-        "5430e41477a0e90a7ea8db0a662f2c02b8be1c128509c6ad36c172b4537fb4c9",
+        "faf5a89c663717e20c650ddca726eb99a7c8279e5cb6cca7469122a895f9490b",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_worktrees.rs",

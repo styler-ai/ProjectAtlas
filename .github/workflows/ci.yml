@@ -858,6 +858,11 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e_lifecycle
 
+      - name: Fileless map candidate CLI and MCP E2E
+        if: contains(matrix.contracts, 'mcp') || matrix.label == 'macos-x64'
+        timeout-minutes: 5
+        run: cargo test --locked -p projectatlas-cli --test e2e_navigation map_response_preserves_legacy_file_and_separates_format_from_json_sidecar -- --exact
+
       - name: Native source-observer teardown and MCP identity
         if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5

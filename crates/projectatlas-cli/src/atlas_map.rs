@@ -1,4 +1,4 @@
-//! Purpose: Generate and lint `ProjectAtlas` structure maps from Rust.
+//! Purpose: Render and lint `ProjectAtlas` structure maps from Rust.
 
 use blake3::Hasher;
 use projectatlas_core::{
@@ -11,8 +11,8 @@ use projectatlas_fs::{ScanOptions, explicit_language_override, scan_repo};
 use projectatlas_symbols::document_format_for_path;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -20,8 +20,10 @@ use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// Legacy folder-purpose filename accepted only as migration input.
 const DEFAULT_LEGACY_PURPOSE_FILENAME: &str = ".purpose";
-/// Default generated map path.
+/// Default legacy map import path and adjacent JSON export location.
 const DEFAULT_MAP_PATH: &str = ".projectatlas/projectatlas.toon";
+/// Maximum bytes in a complete map response.
+pub(crate) const MAX_MAP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Default non-source summary input path.
 const DEFAULT_NONSOURCE_PATH: &str = ".projectatlas/projectatlas-nonsource-files.toon";
 /// Durable `.projectatlas` inputs indexed by `SQLite` but ignored by legacy map/lint.
@@ -87,6 +89,14 @@ const DEFAULT_LINE_COMMENT_PREFIXES: &[&str] = &["//", "#", "--", ";"];
 /// Atlas map operation errors.
 #[derive(Debug, Error)]
 pub(crate) enum AtlasMapError {
+    /// A complete map cannot fit in the supported response budget.
+    #[error("map response exceeds byte limit: observed {observed}, limit {limit}")]
+    ResponseLimitExceeded {
+        /// Encoded response size.
+        observed: usize,
+        /// Maximum supported response size.
+        limit: usize,
+    },
     /// Filesystem operation failed.
     #[error("io error for {path:?}: {source}")]
     Io {
@@ -165,7 +175,7 @@ struct RawConfig {
 struct RawProject {
     /// Repository root.
     root: Option<String>,
-    /// Generated map path.
+    /// Legacy map import path and adjacent JSON sidecar location.
     map_path: Option<String>,
     /// Non-source file summary path.
     nonsource_files_path: Option<String>,
@@ -404,7 +414,7 @@ struct MapRecord {
     source: String,
 }
 
-/// Snapshot written to `ProjectAtlas` TOON.
+/// Snapshot rendered as a current `ProjectAtlas` map.
 #[derive(Debug)]
 struct AtlasSnapshot {
     /// Folder records.
@@ -912,12 +922,52 @@ pub(crate) fn remove_ignore_entry(
     ))
 }
 
-/// Generate and write the atlas map.
-pub(crate) fn write_map(config: &AtlasMapConfig, write_json: bool) -> AtlasMapResult<()> {
+/// Complete current map response and optional sidecar state.
+pub(crate) struct MapResponse {
+    /// Complete selected-format map content.
+    pub(crate) content: String,
+}
+
+/// Render a current map without writing a legacy TOON snapshot.
+pub(crate) fn render_map(
+    config: &AtlasMapConfig,
+    json_response: bool,
+    write_json: bool,
+) -> AtlasMapResult<MapResponse> {
+    render_map_with_limit(config, json_response, write_json, MAX_MAP_RESPONSE_BYTES)
+}
+
+/// Render under an explicit budget so refusal and no-write order are testable.
+fn render_map_with_limit(
+    config: &AtlasMapConfig,
+    json_response: bool,
+    write_json: bool,
+    response_limit: usize,
+) -> AtlasMapResult<MapResponse> {
     let snapshot = build_snapshot(config)?;
-    write_toon(&snapshot, config)?;
+    let content = if json_response {
+        render_json_map(&snapshot)?
+    } else {
+        render_toon(&snapshot, config)
+    };
+    enforce_map_response_limit(&content, response_limit)?;
     if write_json {
-        write_json_map(&snapshot, config)?;
+        if json_response {
+            write_json_map(&content, config)?;
+        } else {
+            write_json_map(&render_json_map(&snapshot)?, config)?;
+        }
+    }
+    Ok(MapResponse { content })
+}
+
+/// Refuse a partial response before any optional file mutation.
+pub(crate) fn enforce_map_response_limit(content: &str, limit: usize) -> AtlasMapResult<()> {
+    if content.len() > limit {
+        return Err(AtlasMapError::ResponseLimitExceeded {
+            observed: content.len(),
+            limit,
+        });
     }
     Ok(())
 }
@@ -1689,25 +1739,11 @@ fn build_snapshot(config: &AtlasMapConfig) -> AtlasMapResult<AtlasSnapshot> {
         folder_tree,
         folder_duplicates,
         file_duplicates,
-        generated_at: stable_generated_at(config, &file_hash, &folder_hash),
+        generated_at: generated_at(),
         file_hash,
         folder_hash,
         overview,
     })
-}
-
-/// Preserve an existing timestamp when map contents are unchanged.
-fn stable_generated_at(config: &AtlasMapConfig, file_hash: &str, folder_hash: &str) -> String {
-    if let Ok(content) = fs::read_to_string(&config.map_path) {
-        let (existing_file_hash, existing_folder_hash) = read_hashes(&content);
-        if existing_file_hash.as_deref() == Some(file_hash)
-            && existing_folder_hash.as_deref() == Some(folder_hash)
-            && let Some(existing_generated_at) = read_generated_at(&content)
-        {
-            return existing_generated_at;
-        }
-    }
-    generated_at()
 }
 
 /// Return a simple UTC-ish generated timestamp.
@@ -2620,23 +2656,8 @@ fn format_overview(overview: &BTreeMap<String, usize>) -> String {
     format!("overview: {}", parts.join(" "))
 }
 
-/// Write TOON map to disk.
-fn write_toon(snapshot: &AtlasSnapshot, config: &AtlasMapConfig) -> AtlasMapResult<()> {
-    if let Some(parent) = config.map_path.parent() {
-        fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(&config.map_path, render_toon(snapshot, config)).map_err(|source| AtlasMapError::Io {
-        path: config.map_path.clone(),
-        source,
-    })
-}
-
-/// Write JSON map next to TOON map.
-fn write_json_map(snapshot: &AtlasSnapshot, config: &AtlasMapConfig) -> AtlasMapResult<()> {
-    let json_path = config.map_path.with_extension("json");
+/// Render the JSON map payload.
+fn render_json_map(snapshot: &AtlasSnapshot) -> AtlasMapResult<String> {
     let payload = serde_json::json!({
         "version": 1,
         "generated_at": snapshot.generated_at,
@@ -2650,12 +2671,107 @@ fn write_json_map(snapshot: &AtlasSnapshot, config: &AtlasMapConfig) -> AtlasMap
         "file_summary_duplicates": snapshot.file_duplicates,
         "folder_tree": snapshot.folder_tree,
     });
-    fs::write(&json_path, serde_json::to_string_pretty(&payload)? + "\n").map_err(|source| {
-        AtlasMapError::Io {
+    Ok(serde_json::to_string_pretty(&payload)? + "\n")
+}
+
+/// Write an explicitly requested JSON map next to the legacy import location.
+pub(crate) fn write_json_map(content: &str, config: &AtlasMapConfig) -> AtlasMapResult<()> {
+    let json_path = match config
+        .map_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some(extension) if extension.eq_ignore_ascii_case("json") => {
+            config.map_path.with_extension(format!("{extension}.json"))
+        }
+        _ => config.map_path.with_extension("json"),
+    };
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let legacy = match same_file::Handle::from_path(&config.map_path) {
+        Ok(handle) => Some(handle),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(&config.map_path) {
+                Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(AtlasMapError::Io {
+                        path: config.map_path.clone(),
+                        source: io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "legacy map is a dangling symlink",
+                        ),
+                    });
+                }
+                Ok(_) => {
+                    return Err(AtlasMapError::Io {
+                        path: config.map_path.clone(),
+                        source,
+                    });
+                }
+                Err(source) => {
+                    return Err(AtlasMapError::Io {
+                        path: config.map_path.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+        Err(source) => {
+            return Err(AtlasMapError::Io {
+                path: config.map_path.clone(),
+                source,
+            });
+        }
+    };
+    let mut output = match OpenOptions::new().write(true).open(&json_path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&json_path)
+            .map_err(|source| AtlasMapError::Io {
+                path: json_path.clone(),
+                source,
+            })?,
+        Err(source) => {
+            return Err(AtlasMapError::Io {
+                path: json_path,
+                source,
+            });
+        }
+    };
+    let identity =
+        same_file::Handle::from_file(output.try_clone().map_err(|source| AtlasMapError::Io {
+            path: json_path.clone(),
+            source,
+        })?)
+        .map_err(|source| AtlasMapError::Io {
+            path: json_path.clone(),
+            source,
+        })?;
+    if legacy.as_ref() == Some(&identity) {
+        return Err(AtlasMapError::Io {
+            path: json_path,
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSON sidecar aliases the legacy map",
+            ),
+        });
+    }
+    output.set_len(0).map_err(|source| AtlasMapError::Io {
+        path: json_path.clone(),
+        source,
+    })?;
+    output
+        .write_all(content.as_bytes())
+        .map_err(|source| AtlasMapError::Io {
             path: json_path,
             source,
-        }
-    })
+        })
 }
 
 /// Convert a map record to JSON.
@@ -2708,29 +2824,6 @@ fn build_untracked_report(
         excluded_paths_present: paths.excluded_paths.len(),
         strict: options.strict_untracked,
         disallowed,
-    })
-}
-
-/// Parse file and folder hashes from TOON.
-fn read_hashes(content: &str) -> (Option<String>, Option<String>) {
-    let mut file_hash = None;
-    let mut folder_hash = None;
-    for line in content.lines().map(str::trim) {
-        if let Some((_, value)) = line.split_once("file_hash:") {
-            file_hash = Some(value.trim().trim_matches('"').to_string());
-        }
-        if let Some((_, value)) = line.split_once("folder_hash:") {
-            folder_hash = Some(value.trim().trim_matches('"').to_string());
-        }
-    }
-    (file_hash, folder_hash)
-}
-
-/// Parse the generated timestamp from TOON.
-fn read_generated_at(content: &str) -> Option<String> {
-    content.lines().map(str::trim).find_map(|line| {
-        line.split_once("generated_at:")
-            .map(|(_, value)| value.trim().to_string())
     })
 }
 
@@ -3023,16 +3116,20 @@ impl From<serde_json::Error> for AtlasMapError {
 mod tests {
     use super::{
         AtlasMapConfig, AtlasMapError, DEFAULT_TEXT_INDEX_MAX_BYTES, IgnoreEntryKind, MapRecord,
-        add_ignore_entry, append_existing_map_purpose_records, append_record_rows,
-        collect_repo_paths, default_config_root_value, exclude_dir_name_set,
-        extract_block_comment_purpose, extract_line_comment_purpose, load_atlas_config_from_text,
-        normalize_repo_string, project_root_for_projectatlas_config, remove_ignore_entry,
-        split_record_cells, stable_generated_at, toon_cell,
+        add_ignore_entry, append_existing_map_purpose_records, append_record_rows, build_snapshot,
+        collect_repo_paths, default_config_root_value, enforce_map_response_limit,
+        exclude_dir_name_set, extract_block_comment_purpose, extract_line_comment_purpose,
+        load_atlas_config_from_text, normalize_repo_string, project_root_for_projectatlas_config,
+        remove_ignore_entry, render_map_with_limit, split_record_cells, toon_cell, write_json_map,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink as symlink_file;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file;
     use std::path::Path;
 
     fn test_config(map_path: std::path::PathBuf) -> AtlasMapConfig {
@@ -3066,6 +3163,153 @@ mod tests {
             purpose_default_style: "line-comment".to_string(),
             line_comment_prefixes: vec!["//".to_string()],
         }
+    }
+
+    #[test]
+    fn json_sidecar_never_aliases_custom_legacy_json_path() -> Result<(), Box<dyn Error>> {
+        for (name, sidecar) in [
+            ("legacy.json", "legacy.json.json"),
+            ("legacy.JSON", "legacy.JSON.json"),
+            ("legacy.toon", "legacy.json"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let legacy = temp.path().join(name);
+            fs::write(&legacy, "legacy purpose input")?;
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone()))?;
+            if fs::read_to_string(&legacy)? != "legacy purpose input"
+                || fs::read_to_string(temp.path().join(sidecar))? != "{\"files\":[]}"
+            {
+                return Err(io::Error::other(format!(
+                    "JSON sidecar overwrote the legacy map for {name}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_sidecar_refuses_hard_link_without_changing_legacy_import() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let legacy = temp.path().join("legacy.toon");
+        let sidecar = temp.path().join("legacy.json");
+        fs::write(&legacy, "legacy purpose input")?;
+        fs::hard_link(&legacy, &sidecar)?;
+        if !matches!(
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone())),
+            Err(AtlasMapError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ) {
+            return Err(io::Error::other("JSON sidecar did not refuse a legacy hard link").into());
+        }
+        if fs::read_to_string(&legacy)? != "legacy purpose input"
+            || fs::read_to_string(&sidecar)? != "legacy purpose input"
+        {
+            return Err(io::Error::other("JSON sidecar changed the hard-linked legacy map").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn json_sidecar_refuses_symlink_without_changing_legacy_import() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let legacy = temp.path().join("legacy.toon");
+        let sidecar = temp.path().join("legacy.json");
+        fs::write(&legacy, "legacy purpose input")?;
+        let linked = symlink_file(&legacy, &sidecar);
+        #[cfg(windows)]
+        if matches!(&linked, Err(source) if source.raw_os_error() == Some(1314)) {
+            return Ok(());
+        }
+        linked?;
+        if !matches!(
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone())),
+            Err(AtlasMapError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ) {
+            return Err(io::Error::other("JSON sidecar did not refuse a legacy symlink").into());
+        }
+        if fs::read_to_string(&legacy)? != "legacy purpose input"
+            || !fs::symlink_metadata(&sidecar)?.file_type().is_symlink()
+        {
+            return Err(io::Error::other("JSON sidecar changed the symlinked legacy map").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn json_sidecar_refuses_dangling_legacy_symlink_before_creation() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let legacy = temp.path().join("legacy.toon");
+        let sidecar = temp.path().join("legacy.json");
+        let linked = symlink_file(&sidecar, &legacy);
+        #[cfg(windows)]
+        if matches!(&linked, Err(source) if source.raw_os_error() == Some(1314)) {
+            return Ok(());
+        }
+        linked?;
+        if !matches!(
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone())),
+            Err(AtlasMapError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ) {
+            return Err(
+                io::Error::other("JSON sidecar did not refuse a dangling legacy symlink").into(),
+            );
+        }
+        if fs::symlink_metadata(&sidecar).is_ok() || fs::read_link(&legacy)? != sidecar {
+            return Err(io::Error::other("JSON sidecar mutated a dangling legacy symlink").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_sidecar_update_preserves_existing_file_identity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let sidecar = temp.path().join("legacy.json");
+        fs::write(&sidecar, "old")?;
+        let identity = same_file::Handle::from_path(&sidecar)?;
+        write_json_map("new", &test_config(temp.path().join("legacy.toon")))?;
+        if same_file::Handle::from_path(&sidecar)? != identity
+            || fs::read_to_string(&sidecar)? != "new"
+        {
+            return Err(io::Error::other("JSON sidecar replacement changed file identity").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn map_response_limit_refuses_complete_oversize_content() -> Result<(), Box<dyn Error>> {
+        enforce_map_response_limit("abcd", 4)?;
+        if !matches!(
+            enforce_map_response_limit("abcde", 4),
+            Err(AtlasMapError::ResponseLimitExceeded {
+                observed: 5,
+                limit: 4
+            })
+        ) {
+            return Err(io::Error::other("map response limit did not report exact bytes").into());
+        }
+        let temp = tempfile::tempdir()?;
+        let map_path = temp.path().join("projectatlas.toon");
+        let config = test_config(map_path.clone());
+        fs::write(
+            temp.path().join("source.rs"),
+            "// Purpose: Map budget fixture.\n",
+        )?;
+        if !matches!(
+            render_map_with_limit(&config, false, true, 1),
+            Err(AtlasMapError::ResponseLimitExceeded { limit: 1, .. })
+        ) || map_path.exists()
+            || map_path.with_extension("json").exists()
+        {
+            return Err(io::Error::other(
+                "oversized map response wrote a file or lost its typed refusal",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -3786,25 +4030,27 @@ root = "."
     }
 
     #[test]
-    fn generated_at_is_stable_when_map_hashes_match() -> Result<(), Box<dyn std::error::Error>> {
+    fn generated_at_is_render_time_not_legacy_snapshot_time() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let map_path = temp.path().join("projectatlas.toon");
-        std::fs::write(
+        let config = test_config(map_path.clone());
+        let first = build_snapshot(&config)?;
+        fs::write(
             &map_path,
-            "version: 1\ngenerated_at: unix:123\nfile_hash: \"files\"\nfolder_hash: \"folders\"\n",
+            format!(
+                "version: 1\ngenerated_at: unix:123\nfile_hash: \"{}\"\nfolder_hash: \"{}\"\n",
+                first.file_hash, first.folder_hash
+            ),
         )?;
-        let config = test_config(map_path);
-
-        let unchanged_generated_at = stable_generated_at(&config, "files", "folders");
-        if unchanged_generated_at != "unix:123" {
-            return Err(std::io::Error::other(format!(
-                "expected stable timestamp, got {unchanged_generated_at}"
-            ))
-            .into());
-        }
-        let changed_generated_at = stable_generated_at(&config, "changed", "folders");
-        if changed_generated_at == "unix:123" {
-            return Err(std::io::Error::other("stale timestamp survived hash change").into());
+        let second = build_snapshot(&config)?;
+        if second.generated_at == "unix:123"
+            || !second.generated_at.starts_with("unix:")
+            || first.file_hash != second.file_hash
+            || first.folder_hash != second.folder_hash
+        {
+            return Err(
+                io::Error::other("map render reused a legacy timestamp or changed hashes").into(),
+            );
         }
         Ok(())
     }

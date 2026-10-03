@@ -3,6 +3,8 @@
 ### Requirement: Map routes return a current map without a legacy file write
 `projectatlas map` and MCP `atlas_map` SHALL remain available. They SHALL render the selected project's current map as a CLI/MCP response in TOON or JSON, and MUST NOT create, overwrite, or delete a TOON snapshot at the default or a configured alternate `map_path`. Global CLI `--format` SHALL select stdout format independently of map-local `--json`, which SHALL retain its existing adjacent JSON sidecar export behavior. MCP `json: true` SHALL retain the sidecar and select JSON map response content. An oversized response MUST fail explicitly before emission, not claim a complete partial map.
 
+The `generated_at` field SHALL describe the current render time, not a stable content revision or a timestamp inherited from a retained legacy TOON file. Consumers comparing map content SHALL use `file_hash` and `folder_hash`.
+
 #### Scenario: CLI map from a project without a legacy snapshot
 - **WHEN** a user runs `projectatlas map` or `projectatlas map --json` in a supported project
 - **THEN** stdout contains the selected format's map data, the TOON snapshot is not created, and the JSON sidecar is written only when explicitly requested

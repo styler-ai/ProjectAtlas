@@ -2,7 +2,7 @@
 
 # Workflow and Troubleshooting
 
-ProjectAtlas is designed to run locally with a project-local SQLite atlas and optional TOON exports.
+ProjectAtlas is designed to run locally with a project-local SQLite atlas and on-demand map responses.
 
 ## Recommended workflow
 
@@ -13,7 +13,7 @@ ProjectAtlas is designed to run locally with a project-local SQLite atlas and op
 5. Copy returned selectors into `atlas_slice`; use the manual CLI summary/outline/slice funnel only as a fallback.
 6. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
 7. Run `projectatlas lint --report-untracked --purpose-level low`.
-8. Run `projectatlas map --force` only when a compatibility TOON snapshot is explicitly needed.
+8. Run `projectatlas map` only when the current AtlasMap response is explicitly needed.
 9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
 10. Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 
@@ -185,15 +185,15 @@ Environment toggles:
 
 ## Troubleshooting
 
-### Optional compatibility map export
+### Optional current map response
 
-Only older integrations need a static `.projectatlas/projectatlas.toon` snapshot. Generate it explicitly:
+When you need the complete current AtlasMap, request it directly:
 
 ```bash
-projectatlas map --force
+projectatlas map
 ```
 
-Normal ProjectAtlas 3 agent workflows should read from `.projectatlas/projectatlas.db` through the CLI or MCP tools.
+This emits TOON by default or JSON with global `--format json`; neither writes a TOON file. `map --json` separately writes an adjacent JSON sidecar outside CI, or with `--force` in CI. Existing legacy TOON files remain unchanged and may still provide purpose-import input. Normal agent workflows should read from `.projectatlas/projectatlas.db` through the CLI or MCP tools.
 
 ### Missing or suggested purposes
 

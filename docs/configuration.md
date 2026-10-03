@@ -7,7 +7,7 @@ ProjectAtlas reads `projectatlas.toml` or `.projectatlas/config.toml`. All paths
 ```toml
 [project]
 root = "."
-# Optional compatibility export path used only by `projectatlas map`.
+# Read-only legacy purpose-import path and adjacent optional JSON sidecar location.
 map_path = ".projectatlas/projectatlas.toon"
 nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
 
@@ -186,6 +186,7 @@ to `docs/` or plugin skill documentation instead of committing private workspace
 During migration from legacy TOON maps, `projectatlas scan` imports purpose records only for paths still present in
 the freshly indexed file set. Stale or newly excluded map rows are counted as skipped stale imports instead of
 failing the first scan with a low-level SQLite no-row error.
+`projectatlas map` never creates or changes the configured legacy map file. `projectatlas map --json` writes only the adjacent `.json` sidecar; if `map_path` already ends in `.json` (any ASCII case), the sidecar appends another `.json` to avoid overwriting that legacy file. An existing sidecar retains its file permissions, and export refuses a sidecar linked to the legacy map rather than changing legacy bytes. The global `--format json` flag changes stdout alone.
 
 `scan.text_index_max_bytes` caps the size of each UTF-8 file stored in SQLite for indexed text search. Oversized
 files remain indexed as repository nodes, but their full text is skipped for search to keep large repositories fast

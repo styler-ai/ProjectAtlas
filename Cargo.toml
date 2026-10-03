@@ -107,6 +107,7 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 rmcp = { version = "3.1.4", default-features = false, features = ["server", "transport-io", "macros"] }
 rusqlite = { version = "0.40", features = ["backup", "bundled", "hooks"] }
 scraper = "0.27"
+same-file = "1.0"
 seccompiler = { version = "=0.5.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

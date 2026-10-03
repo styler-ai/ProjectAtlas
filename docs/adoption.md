@@ -43,13 +43,13 @@ Legacy Purpose headers and `.purpose` files are still imported during migration,
 
 Add summaries for non-source files in `.projectatlas/projectatlas-nonsource-files.toon` (agent-maintained input).
 
-## 6. Optional compatibility map export
+## 6. Optional current map response
 
 ```bash
-projectatlas map --force
+projectatlas map
 ```
 
-Skip this step unless an older integration still reads `.projectatlas/projectatlas.toon`.
+Use this when you need the current AtlasMap on stdout. It does not write `.projectatlas/projectatlas.toon`; use `projectatlas map --json` only when an adjacent JSON sidecar is explicitly needed.
 
 ## 7. Lint
 
@@ -73,11 +73,11 @@ projectatlas-check:
 	@projectatlas scan
 	@projectatlas lint --report-untracked --purpose-level low
 
-projectatlas-export-map:
-	@projectatlas map --force
+projectatlas-show-map:
+	@projectatlas map
 ```
 
-Keep `projectatlas-export-map` opt-in for older integrations only; normal agent workflows should use the SQLite index.
+Keep `projectatlas-show-map` opt-in; normal agent workflows should use the SQLite index.
 
 ## 9. Agent setup
 

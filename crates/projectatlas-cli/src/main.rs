@@ -11,7 +11,7 @@ mod token_tui;
 use atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
     init_gitignore, init_project_with_config, list_ignore_entries, load_atlas_config,
-    remove_ignore_entry, write_map,
+    remove_ignore_entry,
 };
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -344,6 +344,8 @@ enum AgentErrorKind {
     UnsupportedContainment,
     /// The requested optional search mode has no ready generation.
     SearchCapabilityUnavailable,
+    /// A complete map cannot fit in the supported response budget.
+    ResponseLimitExceeded,
 }
 
 /// Content-free database placement details with direct recovery guidance.
@@ -465,7 +467,8 @@ struct CliNextCall<'a> {
 }
 
 /// CLI output serialization format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 enum OutputFormat {
     /// Token-efficient object notation for agent-facing responses.
     Toon,
@@ -1044,12 +1047,12 @@ enum Command {
         #[arg(long)]
         text_index_max_bytes: Option<u64>,
     },
-    /// Generate the `ProjectAtlas` TOON map.
+    /// Return the current `ProjectAtlas` map without writing a TOON file.
     Map {
-        /// Also write JSON next to the TOON map.
+        /// Also write an adjacent JSON sidecar independently of stdout format.
         #[arg(long)]
         json: bool,
-        /// Run map generation even when CI environment variables are present.
+        /// Write the requested JSON sidecar even in CI.
         #[arg(long)]
         force: bool,
     },
@@ -1832,13 +1835,16 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             }
         }
         Command::Map { json, force } => {
-            if !force && (truthy_env("CI") || truthy_env("GITHUB_ACTIONS")) {
-                write_stderr("Skipping ProjectAtlas map update in CI.\n")?;
-                return Ok(());
-            }
             cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
-            write_map(&config, *json)?;
+            let write_json =
+                *json && (*force || !(truthy_env("CI") || truthy_env("GITHUB_ACTIONS")));
+            let response =
+                atlas_map::render_map(&config, cli.format == OutputFormat::Json, write_json)?;
+            if *json && !write_json {
+                write_stderr("Skipping ProjectAtlas JSON sidecar update in CI.\n")?;
+            }
+            write_stdout(&response.content)?;
         }
         Command::Scan {
             path,
@@ -3300,6 +3306,20 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
         };
     }
     let details = match error {
+        CliError::AtlasMap(atlas_map::AtlasMapError::ResponseLimitExceeded { .. }) => {
+            Some(CliErrorPayload {
+                kind: AgentErrorKind::ResponseLimitExceeded,
+                message: error.to_string(),
+                refresh_required: None,
+                init_required: None,
+                worktree_required: None,
+                verification_incomplete: None,
+                project_mismatch: None,
+                database_filesystem: None,
+                search_capability: None,
+                next: None,
+            })
+        }
         #[cfg(feature = "optional-parser-supervisor")]
         CliError::ParserPack(source) if source.is_unsupported_containment() => {
             Some(CliErrorPayload {
@@ -6008,6 +6028,30 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    #[test]
+    fn cli_map_response_limit_is_typed_in_json_and_toon() -> Result<(), Box<dyn Error>> {
+        let error = CliError::AtlasMap(super::atlas_map::AtlasMapError::ResponseLimitExceeded {
+            observed: 5,
+            limit: 4,
+        });
+        for format in [OutputFormat::Json, OutputFormat::Toon] {
+            let rendered = render_cli_error(format, &error)?;
+            let payload: Value = if format == OutputFormat::Json {
+                serde_json::from_str(&rendered)?
+            } else {
+                toon_format::decode_default(&rendered)?
+            };
+            require_condition(
+                payload["error"]["kind"] == "response_limit_exceeded"
+                    && payload["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("observed 5, limit 4")),
+                "CLI map response limit lost its typed error or exact byte counts",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

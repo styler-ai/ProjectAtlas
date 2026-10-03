@@ -8,9 +8,10 @@ use task_registry::{
 };
 
 use crate::atlas_map::{
-    AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
-    init_gitignore, init_project_with_config, list_ignore_entries, load_atlas_config,
-    load_atlas_config_for_root, remove_ignore_entry, write_map,
+    AtlasMapConfig, IgnoreEntryKind, LintOptions, MAX_MAP_RESPONSE_BYTES, add_ignore_entry,
+    effective_config_report, enforce_map_response_limit, init_gitignore, init_project_with_config,
+    list_ignore_entries, load_atlas_config, load_atlas_config_for_root, remove_ignore_entry,
+    render_map, write_json_map,
 };
 use crate::runtime::{
     DEFAULT_HEALTH_LIMIT, INDEX_WORKER_SAFE_CEILING, IndexInitRequired, IndexProjectMismatch,
@@ -596,9 +597,9 @@ const MCP_ERROR_COVERAGE_FILTERS_REQUIRE_COVERAGE: &str = "coverage filters requ
 const MCP_ENV_CI: &str = "CI";
 /// GitHub Actions environment variable used by MCP map export safeguards.
 const MCP_ENV_GITHUB_ACTIONS: &str = "GITHUB_ACTIONS";
-/// Compatibility map skip reason in CI.
+/// Optional JSON sidecar skip reason in CI.
 const MCP_MAP_SKIPPED_IN_CI_REASON: &str =
-    "skipped in CI; pass force=true to write the compatibility map";
+    "JSON sidecar skipped in CI; pass force=true to write it";
 /// Placeholder when no routed root is available for a diagnostic.
 const MCP_NO_ROOT_PLACEHOLDER: &str = "none";
 /// Invalid ignore kind diagnostic prefix.
@@ -845,9 +846,9 @@ struct AtlasMapParams {
     project_path: Option<String>,
     /// Optional registered worktree alias for this call. Mutually exclusive with `project_path`.
     worktree: Option<String>,
-    /// Write JSON compatibility content when true.
+    /// Return JSON map content and write the adjacent JSON sidecar when true.
     json: Option<bool>,
-    /// Force map generation even in CI-like environments.
+    /// Write the requested JSON sidecar even in CI-like environments.
     force: Option<bool>,
 }
 
@@ -1851,18 +1852,24 @@ enum McpConfigValidation {
     Deferred,
 }
 
-/// MCP response for compatibility map export.
+/// MCP response for the current map and optional JSON sidecar.
 #[derive(Debug, Serialize)]
 struct McpMapReport {
     /// Canonical project root used for map generation.
     root: Option<String>,
     /// Map path from the effective config.
     map_path: Option<String>,
-    /// Whether a map file was written by this call.
+    /// Legacy TOON output is never written by this call.
     written: bool,
-    /// Whether JSON compatibility output was requested.
+    /// Whether JSON map content and sidecar were requested.
     json: bool,
-    /// Human-readable reason when no file was written.
+    /// Selected response format.
+    format: crate::OutputFormat,
+    /// Complete selected-format map content.
+    content: String,
+    /// Whether the adjacent JSON sidecar was written.
+    json_written: bool,
+    /// Human-readable reason when a requested sidecar was not written.
     skipped_reason: Option<String>,
 }
 
@@ -4794,28 +4801,53 @@ impl ProjectAtlasMcpServer {
         message
     }
 
-    /// Build a compatibility map report, writing the map unless CI skip policy applies.
+    /// Build the current map report, applying CI policy only to the optional sidecar.
     fn build_map_report(
         state: &McpProjectState,
         json: bool,
         force: bool,
-    ) -> Result<McpMapReport, CliError> {
+    ) -> Result<String, CliError> {
+        Self::build_map_report_with_limit(state, json, force, MAX_MAP_RESPONSE_BYTES)
+    }
+
+    /// Keep the complete-envelope refusal before the optional sidecar write.
+    fn build_map_report_with_limit(
+        state: &McpProjectState,
+        json: bool,
+        force: bool,
+        response_limit: usize,
+    ) -> Result<String, CliError> {
         let config = Self::load_config_for_state(state)?;
-        let skipped_reason = if !force
+        let skipped_reason = if json
+            && !force
             && (crate::truthy_env(MCP_ENV_CI) || crate::truthy_env(MCP_ENV_GITHUB_ACTIONS))
         {
             Some(MCP_MAP_SKIPPED_IN_CI_REASON.to_string())
         } else {
-            write_map(&config, json)?;
             None
         };
-        Ok(McpMapReport {
+        let json_written = json && skipped_reason.is_none();
+        let response = render_map(&config, json, false)?;
+        let report = McpMapReport {
             root: lossless_project_root_display(&config.root),
             map_path: lossless_native_path_display(&config.map_path),
-            written: skipped_reason.is_none(),
+            written: false,
             json,
+            format: if json {
+                crate::OutputFormat::Json
+            } else {
+                crate::OutputFormat::Toon
+            },
+            content: response.content,
+            json_written,
             skipped_reason,
-        })
+        };
+        let encoded = Self::encode_named_payload(MCP_PAYLOAD_MAP, &report)?;
+        enforce_map_response_limit(&encoded, response_limit)?;
+        if json_written {
+            write_json_map(&report.content, &config)?;
+        }
+        Ok(encoded)
     }
 
     /// Build typed MCP session capabilities from active server state.
@@ -7539,6 +7571,19 @@ impl ProjectAtlasMcpServer {
             search_capability,
             next,
         ) = match error {
+            CliError::AtlasMap(crate::atlas_map::AtlasMapError::ResponseLimitExceeded {
+                ..
+            }) => (
+                AgentErrorKind::ResponseLimitExceeded,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             CliError::InitRequired(report) => (
                 AgentErrorKind::InitRequired,
                 None,
@@ -8234,20 +8279,19 @@ impl ProjectAtlasMcpServer {
         })())
     }
 
-    /// Write an explicit compatibility map export.
+    /// Return the current map and optionally write a JSON sidecar.
     #[tool(
         name = "atlas_map",
-        description = "Write the explicit compatibility ProjectAtlas map export for older workflows."
+        description = "Return the current ProjectAtlas map; optionally write a JSON sidecar."
     )]
     fn atlas_map(&self, Parameters(params): Parameters<AtlasMapParams>) -> McpToolTextResult {
         Self::as_mcp_text((|| {
             let state = self.admin_project_root(params.project_path, params.worktree)?;
-            let report = Self::build_map_report(
+            Self::build_map_report(
                 &state,
                 params.json.unwrap_or(false),
                 params.force.unwrap_or(false),
-            )?;
-            Self::encode_named_payload(MCP_PAYLOAD_MAP, &report)
+            )
         })())
     }
 
@@ -10288,6 +10332,65 @@ mod tests {
         } else {
             Err(io::Error::other(message.to_string()).into())
         }
+    }
+
+    #[test]
+    fn mcp_map_response_limit_checks_encoded_envelope_and_typed_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let error = CliError::AtlasMap(crate::atlas_map::AtlasMapError::ResponseLimitExceeded {
+            observed: 5,
+            limit: 4,
+        });
+        let payload: serde_json::Value =
+            toon_format::decode_default(&ProjectAtlasMcpServer::encode_error_payload(&error))?;
+        require(
+            payload["error"]["kind"] == "response_limit_exceeded"
+                && payload["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("observed 5, limit 4")),
+            "MCP map response limit lost its typed error",
+        )?;
+
+        let report = McpMapReport {
+            root: None,
+            map_path: None,
+            written: false,
+            json: false,
+            format: crate::OutputFormat::Toon,
+            content: "\"".repeat(2_100_000),
+            json_written: false,
+            skipped_reason: None,
+        };
+        let encoded = ProjectAtlasMcpServer::encode_named_payload(MCP_PAYLOAD_MAP, &report)?;
+        require(
+            report.content.len() < 4 * 1024 * 1024
+                && matches!(
+                    enforce_map_response_limit(&encoded, MAX_MAP_RESPONSE_BYTES),
+                    Err(crate::atlas_map::AtlasMapError::ResponseLimitExceeded { .. })
+                ),
+            "MCP map accepted an encoded envelope larger than the response limit",
+        )?;
+
+        let temp = tempfile::tempdir()?;
+        fs::write(
+            temp.path().join("source.rs"),
+            "// Purpose: MCP envelope limit fixture.\n",
+        )?;
+        let state = McpProjectState {
+            root: fs::canonicalize(temp.path())?,
+            db_path: temp.path().join(".projectatlas").join("projectatlas.db"),
+            config_path: None,
+            worktree: None,
+        };
+        require(
+            matches!(
+                ProjectAtlasMcpServer::build_map_report_with_limit(&state, true, true, 1),
+                Err(CliError::AtlasMap(
+                    crate::atlas_map::AtlasMapError::ResponseLimitExceeded { limit: 1, .. }
+                ))
+            ) && !temp.path().join(".projectatlas").exists(),
+            "MCP envelope refusal created a JSON sidecar or legacy TOON file",
+        )
     }
 
     /// Downgrade a current fixture to the released schema-19 worktree shape.
