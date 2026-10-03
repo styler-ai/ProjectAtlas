@@ -4,7 +4,7 @@ Three open Dependabot PRs are blocked from RC3 acceptance by missing issue owner
 
 ## What Changes
 
-- Bind one explicit local closing reference before incidental upstream changelog references in IssueOps and PR-state, while retaining one-owner and milestone enforcement. Run the required owner/milestone check from protected base-branch workflow code without executing PR-head code there.
+- Bind one explicit local closing reference before incidental upstream changelog references in IssueOps and PR-state, while retaining one-owner and milestone enforcement. Run the required owner/milestone check from protected base-branch workflow code and publish current-head status through a trusted default-branch follow-up that supports Dependabot permissions, without executing PR-head code in either privileged path.
 - Accept the existing jsonc-parser, install-action, and grouped Cargo bot PRs under separate RC3 issues after refreshing each onto accepted main and proving its affected behavior.
 - Adapt the grouped update to supported RMCP server/client configuration types and validate MCP and optional parser-pack behavior without weakening warnings, tests, or platform gates.
 - Reconcile the four issue/task owners, native parent/blocker relations, milestone, and release-owner installed acceptance before RC3 publication.

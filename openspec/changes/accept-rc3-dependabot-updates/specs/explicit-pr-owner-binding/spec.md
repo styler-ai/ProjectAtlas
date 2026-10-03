@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Explicit local closing reference owns a pull request
-ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL resolve a single unindented standalone closing reference (`Fixes #N`, `Closes #N`, or `Resolves #N`) to one local open issue before considering incidental issue numbers in the PR title or body. They MUST reject multiple distinct explicit local owners, foreign qualified references, and missing or mismatched issue/PR milestones. The required check MUST run protected workflow code, execute no PR-head code, and report a current-head status. When no explicit closing line exists, the existing unique-local-reference compatibility rule SHALL remain; it is not origin-aware for a lone bare upstream `#N`.
+ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL resolve a single unindented standalone closing reference (`Fixes #N`, `Closes #N`, or `Resolves #N`) to one local open issue before considering incidental issue numbers in the PR title or body. They MUST reject multiple distinct explicit local owners, foreign qualified references, and missing or mismatched issue/PR milestones. The required check MUST run protected workflow code, execute no PR-head code, and publish a status to the exact current PR head through a trusted writable path, including for Dependabot. A default-branch `workflow_run` publisher MUST validate the triggering workflow identity/event, re-read live owner/milestone metadata, refuse stale heads, and consume no candidate code or artifacts. Before every merge, the exact trusted workflow path, event, revision, current PR head, and independently API-published result MUST be verified; the shared Actions app and check name alone are not provenance proof. Same-repository write access remains trusted. When no explicit closing line exists, the existing unique-local-reference compatibility rule SHALL remain; it is not origin-aware for a lone bare upstream `#N`.
 
 #### Scenario: Dependabot changelog contains upstream issue numbers
 - **WHEN** a PR body contains one standalone local `Fixes #N` line and HTML changelog links with other issue numbers
@@ -18,6 +18,10 @@ ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL r
 #### Scenario: Older one-reference PR remains valid
 - **WHEN** a PR has no standalone closing line but exactly one local reference in its title or body
 - **THEN** IssueOps and PR-state retain that issue as owner and still require matching milestones
+
+#### Scenario: Dependabot requires writable current-head publication
+- **WHEN** a Dependabot-triggered validation run cannot write a head status
+- **THEN** a trusted default-branch follow-up with narrowly scoped write permission revalidates live metadata and publishes the result to the current head, refusing stale runs and candidate-provided results
 
 #### Scenario: PR changes its own workflow
 - **WHEN** a PR edits PR-state workflow or IssueOps files while claiming an owner
