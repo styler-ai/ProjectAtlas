@@ -3257,6 +3257,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
     let pr_state = fs::read_to_string(workflows.join("pr-state.yml"))?;
+    let pr_state_publish = fs::read_to_string(workflows.join("pr-state-publish.yml"))?;
     let planner = fs::read_to_string(github.join("scripts").join("affected-ci-proof.py"))?;
     let docs_workflow = fs::read_to_string(workflows.join(DOCS_WORKFLOW_FILE_NAME))?;
     let auto_release_workflow = fs::read_to_string(workflows.join("03-auto-release.yml"))?;
@@ -3810,13 +3811,20 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
+        "def pull_request_owner_issue(",
+        "def trusted_pr_state_binding(",
+        "def validate_pr_state_owner(",
+        "PR_STATE_WAKEUP_TITLE_RE",
+        "PR_STATE_CHECK_APP_ID = 15368",
+        "def start_pr_state_check(",
+        "def complete_pr_state_check(",
         "pull request must reference exactly one owning issue",
         "pull request owner must be an open issue",
-        "Pull request milestone must match owning issue",
+        "pull request milestone must match its owning issue",
     ] {
-        if !pr_state.contains(required) {
+        if !issueops.contains(required) {
             return Err(io::Error::other(format!(
-                "pr-state omitted ownership boundary {required:?}"
+                "IssueOps PR-state implementation omitted ownership boundary {required:?}"
             ))
             .into());
         }
@@ -3992,51 +4000,126 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "types: [closed, reopened, edited, labeled, unlabeled, milestoned, demilestoned]",
         "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
         "cancel-in-progress: false",
+        "format('pr-state-wakeup|{0}|{1}', github.event.pull_request.number, github.event.pull_request.head.sha)",
+        "pull_request:",
+        "pull_request_target:",
+        "permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
         "name: pr-state",
-        "if: github.event_name == 'pull_request'",
+        "name: pr-state-wakeup",
+        "permissions: {}",
+        "Record trusted PR-state snapshot",
         "name: refresh-pr-state",
         "if: github.event_name == 'issues'",
         "timeout-minutes: 2",
         "actions: write",
         "--refresh-pr-state-for-issue",
-        "Validate issue reference and milestone",
-        "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
-        "name: Validate IssueOps",
-        "ref: ${{ github.event.pull_request.head.sha }}",
-        "--pull-request \"$PR_NUMBER\"",
-        "--base \"$PR_BASE_SHA\"",
+        "ref: ${{ github.event.repository.default_branch }}",
     ] {
         if !pr_state.contains(required) {
             return Err(io::Error::other(format!(
-                "PR-state workflow omitted live metadata contract {required:?}"
+                "PR-state wakeup or refresh workflow omitted contract {required:?}"
             ))
             .into());
         }
     }
     let direct_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
+    let wakeup_pr_state_job = workflow_job_block(&pr_state, "pr-state-wakeup")?;
     let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
-    for forbidden in ["cargo ", "codex-pr-review-gate.py"] {
-        if direct_pr_state_job.contains(forbidden) {
-            return Err(io::Error::other(format!(
-                "direct PR-state validation retained unrelated source work {forbidden:?}"
-            ))
-            .into());
-        }
-    }
-    if direct_pr_state_job.contains("github.event.action == 'edited'") {
+    if !direct_pr_state_job.contains("gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"")
+        || direct_pr_state_job.matches("- name: ").count() != 1
+    {
         return Err(io::Error::other(
-            "PR-state IssueOps validation must run for every pull-request event",
+            "temporary PR-state bridge must contain only accepted-base inline metadata validation",
         )
         .into());
     }
     for forbidden in [
         "cargo ",
+        "codex-pr-review-gate.py",
+        "npm ci",
+        "--pull-request",
+        "checks: write",
+        "actions/checkout@",
+    ] {
+        if direct_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "temporary PR-state bridge includes candidate or privileged work {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "cargo ",
+        "checks: write",
+        "actions/checkout@",
         "github.event.pull_request.head",
+        "GH_TOKEN",
+    ] {
+        if wakeup_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "PR-state wakeup must not execute candidate or privileged behavior {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "cargo ",
+        "github.event.pull_request.head",
+        "checks: write",
         "continue-on-error: true",
     ] {
         if refresh_pr_state_job.contains(forbidden) {
             return Err(io::Error::other(format!(
                 "issue-event PR-state refresh retained unsafe behavior {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    for required in [
+        "name: PR state publisher",
+        "workflow_run:",
+        "workflows: [PR state]",
+        "types: [completed]",
+        "if: github.event.workflow_run.event == 'pull_request_target'",
+        "actions: read",
+        "checks: write",
+        "contents: read",
+        "issues: read",
+        "pull-requests: read",
+        "run-name: PR state publisher | ${{ github.workflow_sha }} | ${{ github.event.workflow_run.id }}",
+        "ref: ${{ github.workflow_sha }}",
+        "--trusted-pr-state-event \"$GITHUB_EVENT_PATH\"",
+        "--start-pr-state-check \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
+        "--validate-pr-state-owner \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
+        "--complete-pr-state-check \"$CHECK_ID\" \"$PR_NUMBER\" \"$PR_HEAD_SHA\" \"$CHECK_CONCLUSION\"",
+        "always() && steps.owner-check.outputs.check_id != ''",
+        "github.event.workflow_run.display_title",
+        "cancel-in-progress: false",
+    ] {
+        if !pr_state_publish.contains(required) {
+            return Err(io::Error::other(format!(
+                "PR-state publisher omitted exact-head contract {required:?}"
+            ))
+            .into());
+        }
+    }
+    let publisher_job = workflow_job_block(&pr_state_publish, "publish")?;
+    if publisher_job.matches("uses: actions/checkout@").count() != 1 {
+        return Err(io::Error::other(
+            "PR-state publisher must check out only its trusted default branch",
+        )
+        .into());
+    }
+    for forbidden in [
+        "github.event.workflow_run.head_branch",
+        "github.event.pull_request.head",
+        "actions/download-artifact",
+        "actions/upload-artifact",
+        "git fetch",
+    ] {
+        if publisher_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "PR-state publisher consumed untrusted or unrelated source {forbidden:?}"
             ))
             .into());
         }
@@ -4055,6 +4138,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "not in (\"main\", \"dev\")",
         "open pull-request inventory reached the refresh bound",
         "actions/workflows/pr-state.yml/runs",
+        "event=pull_request_target",
+        "display_title",
+        "pr_state_workflow_path",
         "actions/runs/{workflow_run['id']}/rerun",
         "no PR-state workflow run found",
     ] {
