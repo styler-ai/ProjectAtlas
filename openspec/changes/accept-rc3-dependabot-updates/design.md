@@ -12,7 +12,7 @@ IssueOps and PR-state independently scan PR title/body text for every local-look
 
 ### Prefer one standalone ownership line
 
-Recognize an unindented standalone `Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N` line naming this repository before the legacy all-reference fallback. Reject multiple distinct explicit local owners and foreign qualified owners; retain the existing single-reference fallback for older PRs that lack an explicit ownership line. Mirror the rule in IssueOps and PR-state with matching positive/negative tests. The compatibility fallback can still misread one bare upstream HTML `#N` without an explicit line; require an explicit line on each new bot PR rather than claiming the legacy fallback is origin-aware.
+Recognize an unindented standalone `Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N` line naming this repository before the legacy all-reference fallback. Reject multiple distinct explicit local owners, mixed closing/non-closing references even for the same issue, and foreign qualified owners; allow repeated references of one kind to the same issue and retain the existing single-reference fallback for older PRs that lack an explicit ownership line. Mirror the rule in IssueOps and PR-state with matching positive/negative tests. The compatibility fallback can still misread one bare upstream HTML `#N` without an explicit line; require an explicit line on each new bot PR rather than claiming the legacy fallback is origin-aware.
 
 ### Keep the required owner check base-controlled
 

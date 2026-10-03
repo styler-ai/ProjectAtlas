@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Explicit local ownership reference owns a pull request
-ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL resolve a single unindented standalone ownership reference (`Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N`) to one local open issue before considering incidental issue numbers in the PR title or body. They MUST reject multiple distinct explicit local owners, foreign qualified references, and missing or mismatched issue/PR milestones. The required check MUST run protected workflow code, execute no PR-head code, and publish a status to the exact current PR head through a trusted writable path, including for Dependabot. A default-branch `workflow_run` publisher MUST validate the triggering workflow identity/event, re-read live owner/milestone metadata, refuse stale heads, and consume no candidate code or artifacts. Before every merge, the exact trusted workflow path, event, revision, current PR head, and independently API-published result MUST be verified; the shared Actions app and check name alone are not provenance proof. Same-repository write access remains trusted. When no explicit ownership line exists, the existing unique-local-reference compatibility rule SHALL remain; it is not origin-aware for a lone bare upstream `#N`.
+ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL resolve a single unindented standalone ownership reference (`Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N`) to one local open issue before considering incidental issue numbers in the PR title or body. They MUST reject multiple distinct explicit local owners, mixed closing and non-closing references even when they name the same issue, foreign qualified references, and missing or mismatched issue/PR milestones. Repeated references of the same kind to the same issue SHALL remain valid. The required check MUST run protected workflow code, execute no PR-head code, and publish a status to the exact current PR head through a trusted writable path, including for Dependabot. A default-branch `workflow_run` publisher MUST validate the triggering workflow identity/event, re-read live owner/milestone metadata, refuse stale heads, and consume no candidate code or artifacts. Before every merge, the exact trusted workflow path, event, revision, current PR head, and independently API-published result MUST be verified; the shared Actions app and check name alone are not provenance proof. Same-repository write access remains trusted. When no explicit ownership line exists, the existing unique-local-reference compatibility rule SHALL remain; it is not origin-aware for a lone bare upstream `#N`.
 
 #### Scenario: Dependabot changelog contains upstream issue numbers
 - **WHEN** a PR body contains one standalone local `Fixes #N` line and HTML changelog links with other issue numbers
@@ -14,6 +14,14 @@ ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL r
 #### Scenario: Foreign and embedded references do not override an explicit owner
 - **WHEN** a PR has one explicit local closing line plus foreign-repository links, HTML list links, or inline changelog `#number` text
 - **THEN** only the explicit local issue owns the PR
+
+#### Scenario: Closing and non-closing references name the same issue
+- **WHEN** a PR contains both standalone `Refs #499` and `Closes #499` lines
+- **THEN** both gates refuse the conflicting reference kinds rather than deduplicating them to one valid owner
+
+#### Scenario: Repeated references preserve one ownership kind
+- **WHEN** a PR repeats standalone non-closing references to one issue, or uses only closing references to that issue
+- **THEN** both gates retain that issue as the sole owner
 
 #### Scenario: Older one-reference PR remains valid
 - **WHEN** a PR has no standalone closing line but exactly one local reference in its title or body
