@@ -831,7 +831,12 @@ def pr_state_refreshes(
     for pull_request in pull_requests:
         body = pull_request_body(pull_request)
         owners = referenced_issue_numbers(repo, pull_request.get("title"), body)
-        owners = explicit_owner_numbers(repo, body) or owners
+        try:
+            explicit_owners = explicit_owner_numbers(repo, body)
+        except SystemExit:
+            # Local refs can still trigger failure publication for malformed owners.
+            explicit_owners = []
+        owners = explicit_owners or owners
         if issue_number not in owners:
             continue
         base = pull_request.get("baseRefName")
@@ -3471,8 +3476,36 @@ Mitigations:
         "headRefOid": "a" * 40,
         "baseRefName": "main",
     }
-    assert pr_state_refreshes("owner/repo", 499, [{**refresh_pr, "body": refs_body}]) == [
-        {"number": 600, "head": "a" * 40}
+    unrelated_foreign_owner_pr = {
+        **refresh_pr,
+        "number": 601,
+        "headRefOid": "b" * 40,
+        "body": "Fixes other/repo#499",
+    }
+    unrelated_mixed_owner_pr = {
+        **refresh_pr,
+        "number": 602,
+        "headRefOid": "c" * 40,
+        "body": "Refs #518\nCloses #519",
+    }
+    malformed_affected_owner_pr = {
+        **refresh_pr,
+        "number": 603,
+        "headRefOid": "d" * 40,
+        "body": "Closes #499\nRefs #499",
+    }
+    assert pr_state_refreshes(
+        "owner/repo",
+        499,
+        [
+            {**refresh_pr, "body": refs_body},
+            unrelated_foreign_owner_pr,
+            unrelated_mixed_owner_pr,
+            malformed_affected_owner_pr,
+        ],
+    ) == [
+        {"number": 600, "head": "a" * 40},
+        {"number": 603, "head": "d" * 40},
     ]
     trusted_refresh_run = {
         "id": 77,
