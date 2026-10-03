@@ -3,10 +3,10 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "c636cb6b1eb625f347652aeaf44d4db3b5571707cbd03e40a6ff4c99a98f8041",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "f17200d96abd7811f1667cfd297f16d8944bd7f469dfb81ab0caa98d8a73769e",
-      "crates/projectatlas-cli/tests/e2e_maintenance.rs": "18df75d6ef00528c2d0bfcc62b0739aff25c53a736a00f898b4a156a11f56539",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "5430e41477a0e90a7ea8db0a662f2c02b8be1c128509c6ad36c172b4537fb4c9",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "e90b6ac21334fa1552aad5c071c894688ae905dcd808a386dc3969998d0b6cd5",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "f44f98ca4c6dd4d4543ca4fb5eb18faa972b4c531817563ed569da9d086dcca8",
+      "crates/projectatlas-cli/tests/e2e_maintenance.rs": "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "faf5a89c663717e20c650ddca726eb99a7c8279e5cb6cca7469122a895f9490b",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 202,
+  "test_count": 203,
   "symbol_count": 433,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -29,6 +29,13 @@
     "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
+    {
+      "name": "map_response_preserves_legacy_file_and_separates_format_from_json_sidecar",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
     {
       "name": "bounded_pdf_and_docx_reach_cli_and_mcp_navigation",
       "owner": "e2e_navigation",
@@ -19828,6 +19835,11 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 794,
       "text": "        run: cargo test --locked -p projectatlas-cli mcp_server_stays_bound_to_one_project_database --test e2e_lifecycle"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 864,
+      "text": "        run: cargo test --locked -p projectatlas-cli --test e2e_navigation map_response_preserves_legacy_file_and_separates_format_from_json_sidecar -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",

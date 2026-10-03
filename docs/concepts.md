@@ -37,7 +37,7 @@ signal; an empty asynchronous event queue is not mutation authority.
 
 Legacy `.purpose` files, source `Purpose:` headers, and `.projectatlas/projectatlas-nonsource-files.toon` remain import/migration sources. They are not the final ProjectAtlas 3 storage model.
 
-The compatibility map at `.projectatlas/projectatlas.toon` is an optional exported snapshot for older workflows; it should not be committed as the agent source of truth. The SQLite database is the durable source of truth.
+`projectatlas map` and `atlas_map` return a current AtlasMap without writing a TOON snapshot. A pre-existing `.projectatlas/projectatlas.toon` remains a read-only legacy purpose-import input, not the agent source of truth. The SQLite database is the durable source of truth.
 
 ## Derived graph snapshots
 

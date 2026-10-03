@@ -5077,18 +5077,25 @@ fn explicit_database_binding_is_used_by_cli_and_mcp_admin_surfaces() -> Result<(
         selected_database.to_string_lossy().as_ref(),
     )?;
 
-    Command::cargo_bin("projectatlas")?
+    let map_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&selected_database)
         .arg("--config")
         .arg(&config_path)
         .args(["map", "--force"])
-        .assert()
-        .success();
-    let map = fs::read_to_string(atlas_dir.join("projectatlas.toon"))?;
+        .output()?;
+    if !map_output.status.success() {
+        return Err(
+            io::Error::other(String::from_utf8_lossy(&map_output.stderr).to_string()).into(),
+        );
+    }
+    let map = String::from_utf8(map_output.stdout)?;
     if !map.contains("src/main.rs") {
         return Err(io::Error::other("selected-database map omitted indexed source").into());
+    }
+    if atlas_dir.join("projectatlas.toon").exists() {
+        return Err(io::Error::other("map unexpectedly wrote a TOON snapshot").into());
     }
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -5123,7 +5130,7 @@ fn explicit_database_binding_is_used_by_cli_and_mcp_admin_surfaces() -> Result<(
         .into());
     }
     let mcp_map_text = mcp_tool_text(&mcp_output, 3)?;
-    if !mcp_map_text.contains("written: true") {
+    if !mcp_map_text.contains("written: false") || !mcp_map_text.contains("src/main.rs") {
         return Err(io::Error::other(format!(
             "MCP map did not use the selected database: {mcp_map_text}"
         ))

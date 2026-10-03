@@ -393,7 +393,7 @@ Prefer the version-matched `atlas` CLI for one exact checkout. Use MCP when regi
 - `atlas_ignore_list`, `atlas_ignore_init_gitignore`, `atlas_ignore_add`, and `atlas_ignore_remove`: manage the stricter ProjectAtlas manual ignore layer.
 - `atlas_lint`: run structure, purpose, and untracked-file lint gates.
 - `atlas_mcp_config`: generate harness MCP config with absolute runtime, DB, and config paths.
-- `atlas_map`: write an explicit legacy TOON compatibility map when needed.
+- `atlas_map`: return the current map; `json: true` also writes an adjacent JSON sidecar outside CI (or with `force: true`).
 
 Reviewed CLI-only exceptions: `projectatlas mcp` starts the server process, continuous `projectatlas watch` needs a terminal/lifecycle contract, and `projectatlas token --view tui` renders a terminal dashboard. Use `atlas_watch_once`, `atlas_watch_status`, and `atlas_token_report` for MCP-safe equivalents.
 
@@ -435,7 +435,7 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Human asks for a terminal token dashboard | `atlas_token_report` first for agent state | `projectatlas token --view tui` |
 | Runtime/index diagnostics | `atlas_settings`, `atlas_watch_status`, `atlas_runtime_info` | `projectatlas settings`, `projectatlas watch-status`, `projectatlas runtime-info` |
 | Generate harness MCP config | `atlas_mcp_config` | `projectatlas --format json --db .projectatlas/projectatlas.db mcp-config` |
-| Write explicit legacy TOON map | `atlas_map` | `projectatlas map --force` |
+| Read current AtlasMap | `atlas_map` | `projectatlas map` |
 | Corrupt or intentionally discarded local index | `atlas_reset_index` dry-run first | `projectatlas reset-index --dry-run`, then `projectatlas reset-index --apply` |
 | Migrating old `.purpose` files | `atlas_strip_legacy_purpose` dry-run first | `projectatlas strip-legacy-purpose --dry-run` |
 
@@ -566,5 +566,4 @@ An installable `opencode plugin` package is separate distribution work.
 ## Lint and CI
 
 ProjectAtlas `lint` should run in local and CI workflows to surface missing or unapproved SQLite purpose records.
-The static `.projectatlas/projectatlas.toon` map is an optional compatibility export only; normal CI should not
-require a committed map diff.
+`projectatlas map` and `atlas_map` return the current map without writing a TOON file. Existing legacy `.projectatlas/projectatlas.toon` files remain read-only purpose-import inputs; normal CI should not require a committed map diff.

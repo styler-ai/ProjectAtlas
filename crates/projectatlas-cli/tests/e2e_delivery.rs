@@ -474,7 +474,7 @@ const SHORT_CLI_FILE_NAME: &str = "short-cli.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "2044084ddf9cfdcabaee2f3c727fb8aca2f06e8abab0ffea134d56a40ba15bfb";
+const MCP_TOOLS_SHA256: &str = "7963b4ce5d4e57cb62a768a3b1ab0f59e575c71bd5707b0c84a8aab090f7faf4";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -607,7 +607,6 @@ struct McpToolContractCase {
 enum CliContractOutput {
     JsonObject,
     JsonArray,
-    Empty,
     Mcp,
 }
 
@@ -4511,6 +4510,7 @@ gate_status={gate_status}
             "mcp_tools_list_preserves_frozen_contracts_without_index_state",
             "packaged_cli_surface_preserves_frozen_routes_and_defaults",
             "packaged_cli_commands_own_their_real_sqlite_effects",
+            "map_response_preserves_legacy_file_and_separates_format_from_json_sidecar",
             "packaged_cli_upgrades_published_predecessor_without_losing_state",
         ] {
             if !packaged_step.contains(contract) {
@@ -19491,7 +19491,7 @@ fn packaged_cli_commands_own_their_real_sqlite_effects() -> Result<(), Box<dyn E
         CliContractCase {
             name: "map",
             arguments: vec!["map".to_string(), "--force".to_string()],
-            output: CliContractOutput::Empty,
+            output: CliContractOutput::JsonObject,
             effect: McpSqliteEffect::None,
             expected_exit_code: 0,
         },
@@ -21994,7 +21994,7 @@ fn run_packaged_cli_contract_case(
             let expected_shape = match case.output {
                 CliContractOutput::JsonObject => decoded.is_object(),
                 CliContractOutput::JsonArray => decoded.is_array(),
-                CliContractOutput::Empty | CliContractOutput::Mcp => false,
+                CliContractOutput::Mcp => false,
             };
             if !expected_shape {
                 return Err(io::Error::other(format!(
@@ -22005,18 +22005,6 @@ fn run_packaged_cli_contract_case(
             }
             assert_cli_contract_payload(case.name, &decoded)?;
             Ok(Some(decoded))
-        }
-        CliContractOutput::Empty => {
-            if !output.stdout.is_empty() || !output.stderr.is_empty() {
-                return Err(io::Error::other(format!(
-                    "{} unexpectedly wrote output: stdout={} stderr={}",
-                    case.name,
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .into());
-            }
-            Ok(None)
         }
         CliContractOutput::Mcp => unreachable!("MCP output returned above"),
     }
@@ -22029,7 +22017,15 @@ fn assert_cli_contract_payload(name: &str, payload: &Value) -> Result<(), Box<dy
             require_json_bool(payload, &["ok"], true)?;
             require_json_array_len(payload, &["host_configs"], 3)?;
         }
-        "map" | "lint" => {}
+        "map" => {
+            let files = json_at(payload, &["files"])?
+                .as_array()
+                .ok_or_else(|| io::Error::other("packaged map omitted file rows"))?;
+            if !files.iter().any(|file| file["path"] == "src/lib.rs") {
+                return Err(io::Error::other("packaged map omitted indexed Rust source").into());
+            }
+        }
+        "lint" => {}
         "scan" => {
             require_json_usize_at_least(payload, &["overview", "files"], 1)?;
             require_json_usize_at_least(payload, &["symbols", "parsed"], 1)?;
@@ -22182,17 +22178,8 @@ fn assert_cli_contract_filesystem_effect(name: &str, repo: &Path) -> Result<(), 
         }
         "map" => {
             let path = atlas.join("projectatlas.toon");
-            let map = fs::read_to_string(&path).map_err(|error| {
-                io::Error::other(format!(
-                    "packaged map omitted readable artifact {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if !map.contains("src/lib.rs") {
-                return Err(io::Error::other(
-                    "packaged map artifact omitted the indexed Rust source",
-                )
-                .into());
+            if path.exists() {
+                return Err(io::Error::other("packaged map wrote a legacy TOON file").into());
             }
         }
         _ => {}
@@ -22359,7 +22346,6 @@ fn assert_cli_contract_outer_filesystem_delta(
     after: &BTreeMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
     let allowed_path = match name {
-        "map" => Some("cli-contract/.projectatlas/projectatlas.toon"),
         "snapshot" => Some("cli-contract-snapshot.tar.zst"),
         _ => None,
     };
@@ -22387,17 +22373,7 @@ fn assert_cli_contract_filesystem_delta(
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
-    if name == "map" {
-        let path = ".projectatlas/projectatlas.toon";
-        let mut expected = before.clone();
-        let value = after
-            .get(path)
-            .ok_or_else(|| io::Error::other("packaged map omitted its repository artifact"))?;
-        expected.insert(path.to_string(), value.clone());
-        if after == &expected {
-            return Ok(());
-        }
-    } else if before == after {
+    if before == after {
         return Ok(());
     }
     Err(io::Error::other(format!(
@@ -25079,10 +25055,14 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         let current_tool = current_by_name
             .get(name)
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
-        if baseline_tool.get("description") != current_tool.get("description") {
+        let expected_description = if name == "atlas_map" {
+            Some("Return the current ProjectAtlas map; optionally write a JSON sidecar.")
+        } else {
+            baseline_tool.get("description").and_then(Value::as_str)
+        };
+        if current_tool.get("description").and_then(Value::as_str) != expected_description {
             return Err(io::Error::other(format!(
-                "MCP tool description drifted for {name}: baseline={:?}, current={:?}",
-                baseline_tool.get("description"),
+                "MCP tool description drifted for {name}: expected={expected_description:?}, current={:?}",
                 current_tool.get("description")
             ))
             .into());
@@ -25090,9 +25070,18 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         let baseline_schema = baseline_tool
             .get("inputSchema")
             .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
-        let normalized_schema = (name == "atlas_purpose_review")
-            .then(|| inline_legacy_purpose_review_item_schema(baseline_schema))
-            .transpose()?;
+        let normalized_schema = if name == "atlas_purpose_review" {
+            Some(inline_legacy_purpose_review_item_schema(baseline_schema)?)
+        } else if name == "atlas_map" {
+            let mut schema = baseline_schema.clone();
+            schema["properties"]["json"]["description"] =
+                json!("Return JSON map content and write the adjacent JSON sidecar when true.");
+            schema["properties"]["force"]["description"] =
+                json!("Write the requested JSON sidecar even in CI-like environments.");
+            Some(schema)
+        } else {
+            None
+        };
         assert_json_contract_subset(
             &format!("{name}.inputSchema"),
             normalized_schema.as_ref().unwrap_or(baseline_schema),
@@ -25851,7 +25840,9 @@ fn assert_mcp_typed_payload(
             )?;
         }
         "atlas_map" => {
-            require_json_bool(decoded, &["map", "written"], true)?;
+            require_json_bool(decoded, &["map", "written"], false)?;
+            require_json_bool(decoded, &["map", "json_written"], false)?;
+            require_json_contains(decoded, &["map", "content"], "src/lib.rs")?;
             json_string_at(decoded, &["map", "map_path"])?;
         }
         "atlas_root" | "atlas_root_set" => {

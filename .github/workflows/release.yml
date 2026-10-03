@@ -285,7 +285,7 @@ jobs:
           case "${1:-}" in
             mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
               binary=e2e_delivery ;;
-            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
               binary=e2e_navigation ;;
             lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
               binary=e2e_maintenance ;;
@@ -417,6 +417,7 @@ jobs:
               "partial_markdown_*" { return "e2e_navigation.exe" }
               "classified_document_*" { return "e2e_navigation.exe" }
               "docx_symbols_*" { return "e2e_navigation.exe" }
+              "map_response_*" { return "e2e_navigation.exe" }
               "installed_candidate_without_git_*" { return "e2e_navigation.exe" }
               "compiler_config_*" { return "e2e_navigation.exe" }
               "lint_formats_*" { return "e2e_maintenance.exe" }
@@ -724,6 +725,7 @@ jobs:
             mcp_tools_list_preserves_frozen_contracts_without_index_state \
             packaged_cli_surface_preserves_frozen_routes_and_defaults \
             packaged_cli_commands_own_their_real_sqlite_effects \
+            map_response_preserves_legacy_file_and_separates_format_from_json_sidecar \
             packaged_cli_upgrades_published_predecessor_without_losing_state
           do
             matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
@@ -988,6 +990,7 @@ jobs:
             "mcp_tools_list_preserves_frozen_contracts_without_index_state",
             "packaged_cli_surface_preserves_frozen_routes_and_defaults",
             "packaged_cli_commands_own_their_real_sqlite_effects",
+            "map_response_preserves_legacy_file_and_separates_format_from_json_sidecar",
             "packaged_cli_upgrades_published_predecessor_without_losing_state"
           )) {
             $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count

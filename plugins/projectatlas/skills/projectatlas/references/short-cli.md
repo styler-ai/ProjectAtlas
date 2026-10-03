@@ -33,7 +33,7 @@
 | `atlas mcp-config` | Print a host MCP config with absolute runtime paths when explicitly configuring a host; `atlas mcp` starts the stdio server and is not an orientation command. |
 | `atlas snapshot export/import` | Move a portable derived-only graph snapshot when explicitly requested; validate identity and import preconditions first. |
 | `atlas parser-pack status/verify/install/enable/update/disable/remove` | Inspect or explicitly manage the optional parser pack; never change it as a side effect of navigation. |
-| `atlas map` | Explicit AtlasMap compatibility output when requested; not required for normal index, navigation, or lint. |
+| `atlas map` | Return the complete current AtlasMap on stdout when explicitly requested; global `--format json` selects JSON, while map-local `--json` independently writes an adjacent JSON sidecar outside CI (or with `--force` in CI). Never generates a TOON file; not needed for normal navigation or lint. |
 | `atlas strip-legacy-purpose` | Preview legacy `.purpose` cleanup first; apply only after migration has been verified. |
 | `atlas reset-index` | Preview derived-index/cache removal first; apply only with explicit authority and preservation of authored state. |
 

@@ -196,7 +196,7 @@ Prefer `atlas` for ordinary commands in one exact checkout, including scripts an
 - Diagnose/admin: `atlas_root`, `atlas_root_set`, `atlas_config`, `atlas_settings`, `atlas_watch_status`, `atlas_runtime_info`, `atlas_ignore_list`, `atlas_ignore_init_gitignore`, `atlas_ignore_add`, `atlas_ignore_remove`, `atlas_mcp_config`, `atlas_reset_index`, `atlas_strip_legacy_purpose`, `atlas_parity_report`
 - Bounded task model: `atlas_task_status`, `atlas_task_cancel`
 - Telemetry: `atlas_token_report`
-- Compatibility export only: `atlas_map`
+- Current AtlasMap response on explicit request: `atlas_map` (never writes a TOON file; `json: true` also requests a JSON sidecar)
 
 Read-only review or CI smoke must set `PROJECTATLAS_NO_TELEMETRY=1`.
 
