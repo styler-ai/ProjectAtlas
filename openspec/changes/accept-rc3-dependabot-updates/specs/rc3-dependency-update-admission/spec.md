@@ -1,10 +1,10 @@
 ## ADDED Requirements
 
-### Requirement: Existing Dependabot updates enter RC3 under distinct owners
-The existing PRs #623, #635, and #636 SHALL each reference exactly one open ProjectAtlas issue with a closing line and matching v0.5.0-00 milestone. The RC3 release owner SHALL remain the sole direct parent and final blocker consumer. #636 MUST refresh after the accepted #623 Cargo.lock baseline; #635 SHALL remain independent of the Cargo updates. No bot PR SHALL merge until its current head has required affected local and hosted proof plus resolved review feedback.
+### Requirement: Existing Dependabot updates enter RC3 under the existing aggregate owner
+The existing PRs #623, #635, and #636 SHALL each reference the existing aggregate issue #499 with an explicit ownership line; intermediate PRs MUST use non-closing references and #499 MUST remain open until complete aggregate acceptance and matching v0.5.0-00 milestone. The RC3 release owner SHALL remain the sole direct parent and final blocker consumer. #636 MUST refresh after the accepted #623 Cargo.lock baseline; #635 SHALL remain independent of the Cargo updates. No bot PR SHALL merge until its current head has required affected local and hosted proof plus resolved review feedback.
 
 #### Scenario: Independent action update
-- **WHEN** #639 is accepted and PR #635 is refreshed with #641 as its sole owner
+- **WHEN** #639 is accepted and PR #635 is refreshed with #499 as its sole owner
 - **THEN** its pinned-action installation and affected hosted workflow proof can be accepted independently of the Cargo PRs
 
 #### Scenario: Cargo lockfile ordering

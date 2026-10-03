@@ -24,7 +24,7 @@
         "488": { "blocked_by": [] },
         "489": { "blocked_by": [] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593, 604, 605, 606, 607, 608, 609, 620, 624, 625, 627, 633, 639, 640, 641, 642] },
+        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593, 604, 605, 606, 607, 608, 609, 620, 624, 625, 627, 633, 639, 499, 645] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -58,9 +58,8 @@
         "627": { "blocked_by": [] },
         "633": { "blocked_by": [] },
         "639": { "blocked_by": [] },
-        "640": { "blocked_by": [639] },
-        "641": { "blocked_by": [639] },
-        "642": { "blocked_by": [639, 640] }
+        "499": { "blocked_by": [639] },
+        "645": { "blocked_by": [620] }
       }
     },
     "v0.6.0-00": {
@@ -74,6 +73,11 @@
     }
   },
   "changes": {
+    "restore-subagent-skill-guidance": {
+      "contract": "checklist-v1",
+      "primary_issue": 645,
+      "owners": [{ "issue": 645, "first_task": "1.1", "last_task": "2.5" }]
+    },
     "prove-installed-release-upgrades-and-routes": 593,
     "allow-release-owner-through-publication": 590,
     "preserve-concurrent-source-witnesses": 586,
@@ -189,9 +193,7 @@
       "primary_issue": 639,
       "owners": [
         { "issue": 639, "first_task": "1.1", "last_task": "2.2" },
-        { "issue": 640, "first_task": "3.1", "last_task": "3.2" },
-        { "issue": 641, "first_task": "4.1", "last_task": "4.2" },
-        { "issue": 642, "first_task": "5.1", "last_task": "5.4" }
+        { "issue": 499, "first_task": "3.1", "last_task": "5.4" }
       ]
     },
     "complete-v060-release-acceptance": {
