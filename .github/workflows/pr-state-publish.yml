@@ -68,7 +68,7 @@ jobs:
           CHECK_ID: ${{ steps.owner-check.outputs.check_id }}
           PR_NUMBER: ${{ steps.source.outputs.number }}
           PR_HEAD_SHA: ${{ steps.source.outputs.head }}
-          CHECK_CONCLUSION: ${{ steps.validate-owner.outcome == 'success' && 'success' || (cancelled() && 'cancelled' || 'failure') }}
+          CHECK_CONCLUSION: ${{ steps.validate-owner.outcome == 'success' && 'success' || (job.status == 'cancelled' && 'cancelled' || 'failure') }}
         run: >-
           python3 .github/scripts/issue-checklists.py
           --repo "$GITHUB_REPOSITORY"

@@ -875,11 +875,13 @@ def matching_pr_state_run(
             continue
         title = workflow_run.get("display_title")
         match = PR_STATE_WAKEUP_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
+        source_head = workflow_run.get("head_sha")
         if (
             match is None
             or int(match.group(1)) != pull_request
             or match.group(2) != head
-            or workflow_run.get("head_sha") != head
+            or not isinstance(source_head, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_head) is None
         ):
             continue
         identifier = workflow_run.get("id")
@@ -990,8 +992,6 @@ def trusted_pr_state_binding(
     if match is None:
         return None
     number, head = int(match.group(1)), match.group(2)
-    if run_head != head:
-        return None
     pull_request = pr_state_live_pull_request(repo, number, head)
     if pull_request is None:
         return None
@@ -1175,8 +1175,6 @@ def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
                     f"repos/{repo}/actions/workflows/pr-state.yml/runs",
                     "-f",
                     "event=pull_request_target",
-                    "-f",
-                    f"head_sha={refresh['head']}",
                     "-f",
                     "per_page=100",
                     "-f",
@@ -3302,12 +3300,14 @@ Mitigations:
         else:
             raise AssertionError("foreign qualified owner reference was accepted")
     pr_head = "a" * 40
+    source_head = "b" * 40
+    assert source_head != pr_head
     source_run = {
         "id": 77,
         "name": "PR state",
         "path": ".github/workflows/pr-state.yml",
         "event": "pull_request_target",
-        "head_sha": pr_head,
+        "head_sha": source_head,
         "display_title": f"pr-state-wakeup|600|{pr_head}",
         "status": "completed",
         "conclusion": "success",
@@ -3319,7 +3319,7 @@ Mitigations:
         "repository": {"full_name": "owner/repo"},
         "workflow_run": {
             "id": 77,
-            "head_sha": pr_head,
+            "head_sha": source_head,
             "run_attempt": 1,
         },
     }
@@ -3378,11 +3378,9 @@ Mitigations:
         else:
             raise AssertionError("a stale pull-request head passed owner validation")
         live_pull_request["head"] = {"sha": pr_head}
-        source_run["head_sha"] = "c" * 40
         source_event["workflow_run"]["head_sha"] = "c" * 40
         assert trusted_pr_state_binding("owner/repo", source_event) is None
-        source_run["head_sha"] = pr_head
-        source_event["workflow_run"]["head_sha"] = pr_head
+        source_event["workflow_run"]["head_sha"] = source_head
         live_issue["milestone"] = {"number": 2}
         try:
             validate_pr_state_owner("owner/repo", 600, pr_head)
@@ -3436,11 +3434,12 @@ Mitigations:
         "name": "PR state",
         "path": ".github/workflows/pr-state.yml",
         "event": "pull_request_target",
-        "head_sha": "a" * 40,
+        "head_sha": source_head,
         "display_title": f"pr-state-wakeup|600|{'a' * 40}",
         "status": "completed",
         "pull_requests": [],
     }
+    assert trusted_refresh_run["head_sha"] != refresh_pr["headRefOid"]
     observed_refresh_api: list[list[str]] = []
     observed_reruns: list[list[str]] = []
     saved_refresh_functions = {
@@ -3476,7 +3475,7 @@ Mitigations:
         refresh_pr_state_for_issue("owner/repo", 517)
         assert observed_refresh_api[1][0:3] == ["--method", "GET", "repos/owner/repo/actions/workflows/pr-state.yml/runs"]
         assert "event=pull_request_target" in observed_refresh_api[1]
-        assert f"head_sha={'a' * 40}" in observed_refresh_api[1]
+        assert not any(item.startswith("head_sha=") for item in observed_refresh_api[1])
         assert observed_reruns == [
             [
                 "gh",
