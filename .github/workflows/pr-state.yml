@@ -38,12 +38,16 @@ jobs:
           payload = json.load(open(sys.argv[1], encoding="utf-8"))
           repo = os.environ["GITHUB_REPOSITORY"]
           pattern = re.compile(r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)")
-          numbers = set()
-          text = "{}\n{}".format(payload.get("title", ""), payload.get("body", ""))
-          for reference in pattern.findall(text):
-              if "#" in reference and not reference.startswith(("#", "GH-")) and reference.rsplit("#", 1)[0].casefold() != repo.casefold():
-                  continue
-              numbers.add(int(reference[3:] if reference.startswith("GH-") else reference.rsplit("#", 1)[-1]))
+          title, body = payload.get("title"), payload.get("body") or ""
+          if not isinstance(title, str) or not isinstance(body, str):
+              raise SystemExit("pull request title and body must be text")
+          explicit = re.compile(r"^(?:Fixes|Closes|Resolves) #([1-9][0-9]*)[ \t]*\r?$", re.I | re.M)
+          numbers = {int(number) for number in explicit.findall(body)}
+          if not numbers:
+              for reference in pattern.findall(f"{title}\n{body}"):
+                  if "#" in reference and not reference.startswith(("#", "GH-")) and reference.rsplit("#", 1)[0].casefold() != repo.casefold():
+                      continue
+                  numbers.add(int(reference[3:] if reference.startswith("GH-") else reference.rsplit("#", 1)[-1]))
           if len(numbers) != 1:
               raise SystemExit(f"pull request must reference exactly one owning issue; found {len(numbers)} candidates")
           milestone = payload.get("milestone") or {}

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -132,6 +133,10 @@ REQUIRED_DESIGN_HEADINGS = {
 }
 ISSUE_REFERENCE_RE = re.compile(
     r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
+)
+EXPLICIT_OWNER_RE = re.compile(
+    r"^(?:Fixes|Closes|Resolves) #([1-9][0-9]*)[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
 )
 MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
 COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
@@ -765,10 +770,19 @@ def referenced_issue_numbers(
     return sorted(numbers)
 
 
+def explicit_owner_numbers(body: str) -> list[int]:
+    """Prefer unindented local closing lines over incidental changelog links."""
+
+    return sorted({int(number) for number in EXPLICIT_OWNER_RE.findall(body)})
+
+
 def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
     """Resolve exactly one owner from the established PR issue-reference contract."""
 
-    candidates = referenced_issue_numbers(repo, payload.get("title"), payload.get("body"))
+    body = payload.get("body")
+    candidates = referenced_issue_numbers(repo, payload.get("title"), body)
+    assert isinstance(body, str)
+    candidates = explicit_owner_numbers(body) or candidates
     if len(candidates) != 1:
         raise SystemExit(
             "pull request must reference exactly one owning issue; "
@@ -786,9 +800,10 @@ def pr_state_refreshes(
         raise SystemExit("open pull-request inventory reached the refresh bound")
     refreshes = []
     for pull_request in pull_requests:
-        owners = referenced_issue_numbers(
-            repo, pull_request.get("title"), pull_request.get("body")
-        )
+        body = pull_request.get("body")
+        owners = referenced_issue_numbers(repo, pull_request.get("title"), body)
+        assert isinstance(body, str)
+        owners = explicit_owner_numbers(body) or owners
         if issue_number not in owners:
             continue
         base = pull_request.get("baseRefName")
@@ -2916,6 +2931,52 @@ Mitigations:
     assert pull_request_owner_issue(
         "owner/repo", {"title": "Work for OWNER/rePO#517", "body": ""}
     ) == 517
+    bot_body = (
+        "<a href='https://github.com/upstream/tool/issues/17'>#17</a>\n"
+        "- Fixes #18\n"
+        "Inline Fixes #19\n"
+        "Fixes #517\r\n"
+    )
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Update #20", "body": bot_body}
+    ) == 517
+    assert explicit_owner_numbers("- Fixes #18\nInline Fixes #19\n") == []
+    for body in ("Fixes #517\nCloses #518", "Fixes #517\nResolves #518"):
+        try:
+            pull_request_owner_issue("owner/repo", {"title": "Update", "body": body})
+        except SystemExit as error:
+            assert "found 2 candidates" in str(error)
+        else:
+            raise AssertionError("conflicting explicit PR owners were accepted")
+    workflow = (self_test_root / ".github" / "workflows" / "pr-state.yml").read_text(
+        encoding="utf-8"
+    )
+    start_marker = "binding=\"$(python3 -c '\n"
+    end_marker = "\n          ' \"$pr_payload\")\""
+    script = textwrap.dedent(
+        workflow.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        payload_path = Path(temp_dir) / "pr.json"
+        for title, body, expected_ok in (
+            ("Update #20", bot_body, True),
+            ("Update #20", "Fixes #517\nCloses #518", False),
+            ("Update", "Fixes other/repo#517", False),
+        ):
+            payload_path.write_text(
+                json.dumps({"title": title, "body": body, "milestone": {"number": 1}}),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(payload_path)],
+                env={**os.environ, "GITHUB_REPOSITORY": "owner/repo"},
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            assert (result.returncode == 0) == expected_ok, result.stderr
+            if expected_ok:
+                assert result.stdout.strip() == "517 1"
     refresh_pr = {
         "number": 600,
         "title": "Implement owner metadata",
@@ -2938,6 +2999,12 @@ Mitigations:
         {"number": 600, "head": "a" * 40},
         {"number": 602, "head": "a" * 40},
     ]
+    assert pr_state_refreshes(
+        "owner/repo", 517, [{**refresh_pr, "body": bot_body}]
+    ) == [{"number": 600, "head": "a" * 40}]
+    assert pr_state_refreshes(
+        "owner/repo", 17, [{**refresh_pr, "body": bot_body}]
+    ) == []
     for invalid_base in (None, 3, ""):
         try:
             pr_state_refreshes(
