@@ -26,11 +26,13 @@ Branch protection binds `pr-state` to its name and the shared Actions app, so a 
 
 ### Keep the existing aggregate dependency owner
 
-Reuse #499 for all three existing bot PRs; do not create one issue per PR. PR #623 and #635 use an explicit non-closing `Refs #499` line so the aggregate remains open until all planned updates pass. The final closeout uses `Closes #499` after all dependency tasks and acceptance are complete. The explicit parser recognizes the non-closing owner without scanning incidental upstream references and rejects conflicting closing/non-closing owners. #623 and #635 remain independent after #639; #636 waits for accepted PR #623 because both alter Cargo.lock. Each refreshed head receives its affected proof and independent review; #499 closes only after all three PRs merge successfully and final aggregate acceptance passes.
+Reuse #499 for all three existing bot PRs; do not create one issue per PR. PR #623 and #635 use an explicit non-closing `Refs #499` line so the aggregate remains open until all planned updates pass. The final closeout uses `Closes #499` after all dependency tasks and acceptance are complete. The explicit parser recognizes the non-closing owner without scanning incidental upstream references and rejects conflicting closing/non-closing owners. #623 and #635 remain independent after #639; #636 waits for accepted PR #623 because both alter Cargo.lock. Each refreshed head receives its affected proof and independent review; #499 closes only after all three updates are accepted on main, any superseded bot PR is dispositioned, and final aggregate acceptance passes.
 
 ### Adapt only the grouped update's actual source break
 
-Use RMCP 3.5's supported server/client configuration type names at existing adapter boundaries. Preserve initialize payloads and exact selected-root behavior with MCP tests. Prove native optional-parser loading at the updated language-pack version on supported Windows/Linux hosts; on macOS x64/arm64 prove typed `unsupported_containment` before worker launch and unchanged built-in parsing. Retain the current bot PR; if its branch cannot accept the minimal source adaptation, stop and revise the issue/PR route rather than force an unrelated merge.
+Use RMCP 3.5's supported server/client configuration type names at existing adapter boundaries. Preserve initialize payloads and exact selected-root behavior with MCP tests. Prove native optional-parser loading at the updated language-pack version on supported Windows/Linux hosts; on macOS x64/arm64 prove typed `unsupported_containment` before worker launch and unchanged built-in parsing.
+
+The original grouped bot branch contains unowned commit subjects that the mandatory pre-push gate refuses. Preserve that branch and deliver its exact reviewed dependency delta and adapter repair through one ordinary successor PR based on accepted main, with conventional same-owner commit subjects and #499 ownership. Do not rewrite bot history or weaken the gate. Keep both PRs non-closing until aggregate acceptance; supersede #636 only after its successor is accepted, and use the successor for final aggregate closure. Current-head local, hosted, parser-pack, and independent review requirements apply to the successor.
 
 ## Risks / Trade-offs
 
@@ -48,11 +50,11 @@ Use a temporary read-only CI bridge for the initial deployment. It may report `p
 
 After the native protected-base job reaches main, prove its real required result, Dependabot behavior, invalid metadata and stale-head refusal, and issue-event refresh. Remove the temporary bridge, obsolete custom publisher, and helpers without active consumers, then narrow the event policy to the final native workflow and its `pull_request_target`/`issues` events. Close #639 only after the final deployed workflow set and normal protected merge behavior pass. Never bypass or relax branch protection to deploy this repair.
 
-Bind/refresh and merge PR #623 and #635 when independently green under #499; refresh and adapt #636 after #623 lands. If an update fails, leave that issue/PR open and keep RC3 blocked; a compatible rollback reverts only the accepted dependency commit, without touching project databases. #492 then freezes the integrated candidate and performs installed release acceptance before publication.
+Bind/refresh and merge PR #623 and #635 when independently green under #499; refresh the grouped update after #623 lands and deliver its exact dependency delta and adapter repair through the issue-owned successor. If an update fails, leave that issue/PR open and keep RC3 blocked; a compatible rollback reverts only the accepted dependency commit, without touching project databases. #492 then freezes the integrated candidate and performs installed release acceptance before publication.
 
 ## Dependencies / Cross-Issue Impact
 
-#639 and aggregate #499 are sole direct children/blockers of #492 for this work. #499 is blocked by #639. PR #636 also waits for PR #623's accepted Cargo.lock baseline within #499; PR #635 is independent. #640–#642 are superseded by #499 with their implementation tasks preserved here. #492 closes last and implements no dependency fix.
+#639 and aggregate #499 are sole direct children/blockers of #492 for this work. #499 is blocked by #639. PR #636's update, delivered through its issue-owned successor, also waits for PR #623's accepted Cargo.lock baseline within #499; PR #635 is independent. #640–#642 are superseded by #499 with their implementation tasks preserved here. #492 closes last and implements no dependency fix.
 
 ## Open Questions
 
