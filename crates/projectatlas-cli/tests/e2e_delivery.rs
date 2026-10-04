@@ -3257,7 +3257,6 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     let mermaid_lock = fs::read_to_string(mermaid_parser.join("package-lock.json"))?;
     let ci = fs::read_to_string(workflows.join("ci.yml"))?;
     let pr_state = fs::read_to_string(workflows.join("pr-state.yml"))?;
-    let pr_state_publish = fs::read_to_string(workflows.join("pr-state-publish.yml"))?;
     let planner = fs::read_to_string(github.join("scripts").join("affected-ci-proof.py"))?;
     let docs_workflow = fs::read_to_string(workflows.join(DOCS_WORKFLOW_FILE_NAME))?;
     let auto_release_workflow = fs::read_to_string(workflows.join("03-auto-release.yml"))?;
@@ -3812,12 +3811,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     }
     for required in [
         "def pull_request_owner_issue(",
-        "def trusted_pr_state_binding(",
         "def validate_pr_state_owner(",
         "PR_STATE_NATIVE_TITLE_RE",
-        "PR_STATE_CHECK_APP_ID = 15368",
-        "def start_pr_state_check(",
-        "def complete_pr_state_check(",
         "pull request must reference exactly one owning issue",
         "pull request owner must be an open issue",
         "pull request milestone must match its owning issue",
@@ -4008,7 +4003,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "persist-credentials: false",
         "--validate-pr-state-owner \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
         "name: refresh-pr-state",
-        "if: github.event_name == 'issues'",
+        "if: github.event_name == 'issues' && github.event.issue.pull_request == null",
         "timeout-minutes: 2",
         "actions: write",
         "--refresh-pr-state-for-issue",
@@ -4068,242 +4063,17 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    let bootstrap_pr_state_job = workflow_job_block(&ci, "pr-state-bootstrap")?;
-    for required in [
-        "name: pr-state",
-        "if: github.event_name == 'pull_request'",
-        "permissions:\n      actions: read\n      checks: read\n      pull-requests: read",
-        "run.get(\"path\") == \".github/workflows/pr-state.yml\"",
-        "run.get(\"event\") == \"pull_request_target\"",
-        "event=pull_request_target&per_page=100",
-        "source_title.fullmatch(run[\"display_title\"])",
-        "check_name=pr-state&filter=all&per_page=100&page={page}",
-        "range(1, 11)",
-        "PR-state check history reached its 1,000-run bound",
-        "projectatlas-pr-state:{number}:{head}",
-        "check.get(\"external_id\") == external_id",
-        "key=lambda row: row.get(\"id\", 0)",
-        "check.get(\"head_sha\") != head",
-        "app.get(\"id\") != 15368",
-        "check.get(\"started_at\")",
-        "check_started <= source_started",
-        "completed PR-state check omitted its start time",
-        "if check.get(\"conclusion\") != \"success\":",
-        "check.get(\"status\") != \"completed\"",
-        "pulls/{number}",
-        "current_head_matches()",
-        "range(24)",
-        "time.sleep(5)",
-    ] {
-        if !bootstrap_pr_state_job.contains(required) {
-            return Err(io::Error::other(format!(
-                "temporary PR-state bootstrap omitted bounded current-head check {required:?}"
-            ))
-            .into());
-        }
+    if ci.contains("pr-state-bootstrap:") || workflows.join("pr-state-publish.yml").exists() {
+        return Err(io::Error::other("retired PR-state bootstrap or publisher remains").into());
     }
-    for forbidden in [
-        "actions/checkout@",
-        "git fetch",
-        "cargo ",
-        "npm install",
-        "checks: write",
-        "contents: write",
-        "pull-requests: write",
-        "actions: write",
+    for retired in [
+        "--trusted-pr-state-event",
+        "--start-pr-state-check",
+        "--complete-pr-state-check",
     ] {
-        if bootstrap_pr_state_job.contains(forbidden) {
+        if issueops.contains(retired) {
             return Err(io::Error::other(format!(
-                "temporary PR-state bootstrap must remain read-only and execute no candidate code: {forbidden:?}"
-            ))
-            .into());
-        }
-    }
-    if cfg!(target_os = "linux") {
-        let bootstrap_step = workflow_job_step(
-            &ci,
-            "pr-state-bootstrap",
-            "Read the exact-head PR-state result",
-        )?;
-        let run = bootstrap_step["run"]
-            .as_str()
-            .ok_or_else(|| io::Error::other("PR-state bootstrap step omitted its run script"))?;
-        let (_, script) = run
-            .split_once("python3 - <<'PY'\n")
-            .ok_or_else(|| io::Error::other("PR-state bootstrap omitted its Python entrypoint"))?;
-        let (script, _) = script
-            .split_once("\nPY")
-            .ok_or_else(|| io::Error::other("PR-state bootstrap omitted its Python terminator"))?;
-        let fixture_dir = tempfile::tempdir()?;
-        let script_path = fixture_dir.path().join("pr-state-bootstrap.py");
-        let driver_path = fixture_dir.path().join("run-bootstrap-fixture.py");
-        let fixture_path = fixture_dir.path().join("github-api.json");
-        fs::write(&script_path, script)?;
-        fs::write(
-            &driver_path,
-            r#"import json
-import subprocess
-import sys
-import time
-
-script_path, fixture_path = sys.argv[1:]
-with open(fixture_path, encoding="utf-8") as fixture_file:
-    fixture = json.load(fixture_file)
-
-def api_response(path):
-    if "/actions/workflows/pr-state.yml/runs?" in path:
-        source = fixture["source"]
-        if "head_sha=" in path and path.split("head_sha=", 1)[1].split("&", 1)[0] != source["head_sha"]:
-            return {"workflow_runs": []}
-        return {"workflow_runs": [fixture["source"]]}
-    if "/check-runs?" in path:
-        return {"check_runs": fixture["check_runs"]}
-    if "/pulls/" in path:
-        return fixture["pull_request"]
-    raise AssertionError(f"unexpected GitHub API request: {path}")
-
-def fake_run(arguments, **_kwargs):
-    response = api_response(arguments[-1])
-    return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
-
-subprocess.run = fake_run
-time.sleep = lambda _seconds: None
-with open(script_path, encoding="utf-8") as script_file:
-    exec(compile(script_file.read(), script_path, "exec"), {"__name__": "__main__"})
-"#,
-        )?;
-
-        let head = "a".repeat(40);
-        let source_head = "c".repeat(40);
-        if head == source_head {
-            return Err(io::Error::other("source fixture SHA must differ from PR head SHA").into());
-        }
-        let external_id = format!("projectatlas-pr-state:123:{head}");
-        let run_bridge = |checks: Vec<Value>, live_head: &str| -> Result<_, Box<dyn Error>> {
-            let fixture = json!({
-                "source": {
-                    "id": 456,
-                    "path": ".github/workflows/pr-state.yml",
-                    "event": "pull_request_target",
-                    "head_sha": source_head.clone(),
-                    "display_title": format!("pr-state-wakeup|123|{head}"),
-                    "created_at": "2026-10-04T08:32:08Z",
-                    "run_attempt": 1,
-                    "run_started_at": "2026-10-04T08:32:09Z",
-                    "status": "completed",
-                    "conclusion": "success"
-                },
-                "check_runs": checks,
-                "pull_request": { "state": "open", "head": { "sha": live_head } }
-            });
-            fs::write(&fixture_path, serde_json::to_vec(&fixture)?)?;
-            Ok(StdCommand::new("python3")
-                .arg(&driver_path)
-                .arg(&script_path)
-                .arg(&fixture_path)
-                .env("GITHUB_REPOSITORY", "styler-ai/ProjectAtlas")
-                .env("PR_NUMBER", "123")
-                .env("PR_HEAD_SHA", &head)
-                .output()?)
-        };
-        let check = |id: u64, status: &str, conclusion: Option<&str>, started_at: Option<&str>| {
-            let mut row = json!({
-                "id": id,
-                "external_id": external_id,
-                "name": "pr-state",
-                "head_sha": head,
-                "status": status,
-                "app": { "id": 15368 }
-            });
-            if let Some(conclusion) = conclusion {
-                row["conclusion"] = json!(conclusion);
-            }
-            if let Some(started_at) = started_at {
-                row["started_at"] = json!(started_at);
-            }
-            if status == "completed" {
-                row["completed_at"] = json!("2026-10-04T08:32:11Z");
-            }
-            row
-        };
-
-        let success = check(
-            10,
-            "completed",
-            Some("success"),
-            Some("2026-10-04T08:32:10Z"),
-        );
-        if success.get("created_at").is_some() {
-            return Err(io::Error::other("check-run fixture must omit created_at").into());
-        }
-        let accepted = run_bridge(vec![success.clone()], &head)?;
-        if !accepted.status.success() {
-            return Err(io::Error::other(format!(
-                "valid exact-head result without created_at was rejected: {}",
-                String::from_utf8_lossy(&accepted.stderr)
-            ))
-            .into());
-        }
-
-        let stale = run_bridge(
-            vec![check(
-                10,
-                "completed",
-                Some("success"),
-                Some("2026-10-04T08:32:08Z"),
-            )],
-            &head,
-        )?;
-        let stale_error = String::from_utf8_lossy(&stale.stderr);
-        if stale.status.success() || !stale_error.contains("no fresh trusted PR-state result") {
-            return Err(io::Error::other(format!(
-                "stale PR-state success was not refused: {stale_error}"
-            ))
-            .into());
-        }
-
-        let queued = run_bridge(
-            vec![success.clone(), check(11, "queued", None, None)],
-            &head,
-        )?;
-        let queued_error = String::from_utf8_lossy(&queued.stderr);
-        if queued.status.success() || !queued_error.contains("no fresh trusted PR-state result") {
-            return Err(io::Error::other(format!(
-                "newer queued PR-state check fell back to an older success: {queued_error}"
-            ))
-            .into());
-        }
-
-        let failed = run_bridge(
-            vec![
-                success.clone(),
-                check(
-                    11,
-                    "completed",
-                    Some("failure"),
-                    Some("2026-10-04T08:32:10Z"),
-                ),
-            ],
-            &head,
-        )?;
-        let failed_error = String::from_utf8_lossy(&failed.stderr);
-        if failed.status.success()
-            || !failed_error.contains("latest exact-head PR-state result failed validation")
-        {
-            return Err(io::Error::other(format!(
-                "newer failed PR-state check fell back to an older success: {failed_error}"
-            ))
-            .into());
-        }
-
-        let changed_head = "b".repeat(40);
-        let drifted = run_bridge(vec![success], &changed_head)?;
-        let drifted_error = String::from_utf8_lossy(&drifted.stderr);
-        if drifted.status.success()
-            || !drifted_error.contains("pull request head changed during PR-state verification")
-        {
-            return Err(io::Error::other(format!(
-                "PR-state bridge accepted a changed PR head: {drifted_error}"
+                "retired PR-state publisher command remains: {retired}"
             ))
             .into());
         }
@@ -4317,55 +4087,6 @@ with open(script_path, encoding="utf-8") as script_file:
         if refresh_pr_state_job.contains(forbidden) {
             return Err(io::Error::other(format!(
                 "issue-event PR-state refresh retained unsafe behavior {forbidden:?}"
-            ))
-            .into());
-        }
-    }
-    for required in [
-        "name: PR state publisher",
-        "workflow_run:",
-        "workflows: [PR state]",
-        "types: [completed]",
-        "if: github.event.workflow_run.event == 'pull_request_target'",
-        "actions: read",
-        "checks: write",
-        "contents: read",
-        "issues: read",
-        "pull-requests: read",
-        "run-name: PR state publisher | ${{ github.workflow_sha }} | ${{ github.event.workflow_run.id }}",
-        "ref: ${{ github.workflow_sha }}",
-        "--trusted-pr-state-event \"$GITHUB_EVENT_PATH\"",
-        "--start-pr-state-check \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
-        "--validate-pr-state-owner \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
-        "--complete-pr-state-check \"$CHECK_ID\" \"$PR_NUMBER\" \"$PR_HEAD_SHA\" \"$CHECK_CONCLUSION\"",
-        "always() && steps.owner-check.outputs.check_id != ''",
-        "github.event.workflow_run.display_title",
-        "cancel-in-progress: false",
-    ] {
-        if !pr_state_publish.contains(required) {
-            return Err(io::Error::other(format!(
-                "PR-state publisher omitted exact-head contract {required:?}"
-            ))
-            .into());
-        }
-    }
-    let publisher_job = workflow_job_block(&pr_state_publish, "publish")?;
-    if publisher_job.matches("uses: actions/checkout@").count() != 1 {
-        return Err(io::Error::other(
-            "PR-state publisher must check out only its trusted default branch",
-        )
-        .into());
-    }
-    for forbidden in [
-        "github.event.workflow_run.head_branch",
-        "github.event.pull_request.head",
-        "actions/download-artifact",
-        "actions/upload-artifact",
-        "git fetch",
-    ] {
-        if publisher_job.contains(forbidden) {
-            return Err(io::Error::other(format!(
-                "PR-state publisher consumed untrusted or unrelated source {forbidden:?}"
             ))
             .into());
         }
@@ -4549,6 +4270,7 @@ gate_status={gate_status}
         "timeout-minutes: 5",
         "contents: read",
         "issues: read",
+        "if: github.event_name == 'workflow_dispatch' || (github.event_name == 'issues' && github.event.issue.pull_request == null)",
     ] {
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
@@ -4556,6 +4278,10 @@ gate_status={gate_status}
             ))
             .into());
         }
+    }
+    let issue_contract_job = workflow_job_block(&issueops_workflow, "issue-contract")?;
+    if !issue_contract_job.contains("github.event.issue.pull_request == null") {
+        return Err(io::Error::other("IssueOps job must ignore pull-request issue events").into());
     }
     let prepublish_input = release
         .split("      prepublish_only:")

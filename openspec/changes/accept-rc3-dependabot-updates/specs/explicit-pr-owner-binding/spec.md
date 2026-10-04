@@ -42,3 +42,11 @@ ProjectAtlas IssueOps and the required base-controlled PR-state workflow SHALL r
 #### Scenario: Aggregate issue remains open across partial delivery
 - **WHEN** a bot PR has one standalone non-closing `Refs #499` line plus upstream changelog references
 - **THEN** both gates select #499 without closing it, and reject any distinct explicit closing or non-closing owner
+
+#### Scenario: A PR metadata change also emits an issues event
+- **WHEN** an `issues` event contains an `issue.pull_request` payload
+- **THEN** issue-contract validation and owner-issue refresh skip that payload; the native PR-state job still validates the PR's actual owner and milestone through its `pull_request_target` event
+
+#### Scenario: A real owner issue changes
+- **WHEN** an `issues` event addresses a real owner issue without an `issue.pull_request` payload
+- **THEN** issue-contract validation remains active and owner refresh reruns the eligible native source for current PRs referencing that issue
