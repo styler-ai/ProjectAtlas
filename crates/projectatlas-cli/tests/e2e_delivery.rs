@@ -3814,7 +3814,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "def pull_request_owner_issue(",
         "def trusted_pr_state_binding(",
         "def validate_pr_state_owner(",
-        "PR_STATE_WAKEUP_TITLE_RE",
+        "PR_STATE_NATIVE_TITLE_RE",
         "PR_STATE_CHECK_APP_ID = 15368",
         "def start_pr_state_check(",
         "def complete_pr_state_check(",
@@ -4000,12 +4000,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "types: [closed, reopened, edited, labeled, unlabeled, milestoned, demilestoned]",
         "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
         "cancel-in-progress: false",
-        "format('pr-state-wakeup|{0}|{1}', github.event.pull_request.number, github.event.pull_request.head.sha)",
+        "format('pr-state|{0}|{1}|{2}', github.workflow_sha, github.event.pull_request.number, github.event.pull_request.head.sha)",
         "pull_request_target:",
         "permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
-        "name: pr-state-wakeup",
-        "permissions: {}",
-        "Record trusted PR-state snapshot",
+        "name: pr-state",
+        "ref: ${{ github.workflow_sha }}",
+        "persist-credentials: false",
+        "--validate-pr-state-owner \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
         "name: refresh-pr-state",
         "if: github.event_name == 'issues'",
         "timeout-minutes: 2",
@@ -4024,32 +4025,94 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .split_once("\nconcurrency:")
         .map(|(events, _)| events)
         .ok_or_else(|| io::Error::other("PR-state workflow omitted its concurrency section"))?;
-    let pr_state_jobs = pr_state
-        .split_once("\njobs:")
-        .map(|(_, jobs)| jobs)
-        .ok_or_else(|| io::Error::other("PR-state workflow omitted its jobs section"))?;
     if pr_state_events
         .lines()
         .any(|line| line.trim() == "pull_request:")
-        || pr_state_jobs.lines().any(|line| line.trim() == "pr-state:")
     {
         return Err(io::Error::other(
-            "PR-state workflow retained the temporary pull_request bridge",
+            "protected PR-state workflow retained the legacy pull_request trigger",
         )
         .into());
     }
-    let wakeup_pr_state_job = workflow_job_block(&pr_state, "pr-state-wakeup")?;
+    let native_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
     let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
+    if native_pr_state_job
+        .matches("uses: actions/checkout@")
+        .count()
+        != 1
+        || !native_pr_state_job.contains("ref: ${{ github.workflow_sha }}")
+        || !native_pr_state_job.contains("persist-credentials: false")
+        || !native_pr_state_job.contains(
+            "permissions:\n      contents: read\n      issues: read\n      pull-requests: read",
+        )
+    {
+        return Err(io::Error::other(
+            "native PR-state check must execute only the protected workflow revision",
+        )
+        .into());
+    }
     for forbidden in [
         "cargo ",
+        "npm install",
+        "git fetch",
+        "github.event.pull_request.head.ref",
         "checks: write",
-        "actions/checkout@",
-        "github.event.pull_request.head",
-        "GH_TOKEN",
+        "contents: write",
+        "pull-requests: write",
+        "actions: write",
     ] {
-        if wakeup_pr_state_job.contains(forbidden) {
+        if native_pr_state_job.contains(forbidden) {
             return Err(io::Error::other(format!(
-                "PR-state wakeup must not execute candidate or privileged behavior {forbidden:?}"
+                "native PR-state check must not execute candidate or write behavior {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    let bootstrap_pr_state_job = workflow_job_block(&ci, "pr-state-bootstrap")?;
+    for required in [
+        "name: pr-state",
+        "if: github.event_name == 'pull_request'",
+        "permissions:\n      actions: read\n      checks: read\n      pull-requests: read",
+        "run.get(\"path\") == \".github/workflows/pr-state.yml\"",
+        "run.get(\"event\") == \"pull_request_target\"",
+        "run.get(\"head_sha\") == head",
+        "source_title.fullmatch(run[\"display_title\"])",
+        "check_name=pr-state&filter=all&per_page=100&page={page}",
+        "range(1, 11)",
+        "PR-state check history reached its 1,000-run bound",
+        "projectatlas-pr-state:{number}:{head}",
+        "check.get(\"external_id\") == external_id",
+        "key=lambda row: (row.get(\"created_at\", \"\"), row.get(\"id\", 0))",
+        "check.get(\"head_sha\") != head",
+        "app.get(\"id\") != 15368",
+        "check_created <= source_started",
+        "check.get(\"status\") == \"completed\" and check.get(\"conclusion\") != \"success\"",
+        "check.get(\"status\") != \"completed\"",
+        "pulls/{number}",
+        "current_head_matches()",
+        "range(24)",
+        "time.sleep(5)",
+    ] {
+        if !bootstrap_pr_state_job.contains(required) {
+            return Err(io::Error::other(format!(
+                "temporary PR-state bootstrap omitted bounded current-head check {required:?}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "actions/checkout@",
+        "git fetch",
+        "cargo ",
+        "npm install",
+        "checks: write",
+        "contents: write",
+        "pull-requests: write",
+        "actions: write",
+    ] {
+        if bootstrap_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "temporary PR-state bootstrap must remain read-only and execute no candidate code: {forbidden:?}"
             ))
             .into());
         }
