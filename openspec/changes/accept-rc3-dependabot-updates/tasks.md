@@ -9,8 +9,8 @@
 
 ## 3. JSONC parser dependency (#499)
 
-- [ ] 3.1 Refresh existing Dependabot PR #623 onto accepted main after #639, bind only #499 with a non-closing reference and matching milestone, and verify the exact locked dependency delta.
-- [ ] 3.2 Exercise valid/invalid JSONC configuration behavior and required locked Rust, IssueOps, platform, and current-head hosted checks; resolve review findings before acceptance.
+- [x] 3.1 Refresh existing Dependabot PR #623 onto accepted main after #639, bind only #499 with a non-closing reference and matching milestone, and verify the exact locked dependency delta.
+- [x] 3.2 Exercise valid/invalid JSONC configuration behavior and required locked Rust, IssueOps, platform, and current-head hosted checks; resolve review findings before acceptance.
 
 ## 4. Pinned install action (#499)
 
