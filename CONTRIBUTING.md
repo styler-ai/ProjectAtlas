@@ -13,7 +13,8 @@ If you spot a bug or have a suggestion, please open an issue with clear reproduc
 - Release tags must match the Cargo version, for example `v0.3.1`.
 - Use the `02-Release` workflow for release publication; it validates the Rust workspace, builds Linux/macOS/Windows archives, creates the tag, and uploads the artifacts to the GitHub Release.
 - CI checks must pass before merge.
-- PR titles or bodies must reference exactly one open GitHub issue (for example `#123`), and the PR milestone must match that issue.
+- Give each PR one owning open issue and the same milestone. Prefer one standalone `Closes #123` line for complete delivery or `Refs #123` for partial delivery. Incidental changelog links do not override that explicit owner. Conflicting owners or mixed closing and non-closing declarations are rejected; older PRs without an explicit line retain the single-reference compatibility rule.
+- Before every merge, independently verify the current PR head and the trusted PR-state workflow path, event, revision, and API-published result. The protected-base wakeup and default-branch publisher execute no PR-head code. After removing the temporary legacy `pull_request` job, enforce an event policy permitting only `pull_request_target`, `issues`, and `workflow_run` for these workflows. GitHub branch protection identifies `pr-state` by its check name and the shared GitHub Actions app; another workflow can emit the same name, so a green context alone does not establish trusted provenance.
 - Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 - Apply `type:*`, `priority:*`, and `status:*` labels to every issue.
 - Keep public issues/PRs/release notes free of private or internal-only details.
