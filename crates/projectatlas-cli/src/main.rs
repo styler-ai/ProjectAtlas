@@ -5648,7 +5648,7 @@ mod tests {
     };
     use projectatlas_db::{AtlasStore, DbError, RepositoryGraphRelationQuery};
     use projectatlas_fs::ScanOptions;
-    use rmcp::model::{CallToolRequestParams, ClientInfo};
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
     use rmcp::{ClientHandler, ServiceExt};
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
@@ -5668,8 +5668,8 @@ mod tests {
     struct TestMcpClient;
 
     impl ClientHandler for TestMcpClient {
-        fn get_info(&self) -> ClientInfo {
-            ClientInfo::default()
+        fn get_info(&self) -> ClientConfig {
+            ClientConfig::default()
         }
     }
 

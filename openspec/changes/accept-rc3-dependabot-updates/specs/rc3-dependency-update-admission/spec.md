@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Existing Dependabot updates enter RC3 under the existing aggregate owner
-The existing PRs #623, #635, and #636 SHALL each reference the existing aggregate issue #499 with an explicit ownership line; intermediate PRs MUST use non-closing references and #499 MUST remain open until complete aggregate acceptance and matching v0.5.0-00 milestone. The RC3 release owner SHALL remain the sole direct parent and final blocker consumer. #636 MUST refresh after the accepted #623 Cargo.lock baseline; #635 SHALL remain independent of the Cargo updates. No bot PR SHALL merge until its current head has required affected local and hosted proof plus resolved review feedback.
+The existing PRs #623, #635, and #636 SHALL each reference the existing aggregate issue #499 with an explicit ownership line; intermediate PRs MUST use non-closing references and #499 MUST remain open until complete aggregate acceptance and matching v0.5.0-00 milestone. The RC3 release owner SHALL remain the sole direct parent and final blocker consumer. The grouped update from #636 MUST refresh after the accepted #623 Cargo.lock baseline and be delivered through its same-issue successor with compliant commit subjects; #635 SHALL remain independent of the Cargo updates. No bot PR SHALL merge until its current head has required affected local and hosted proof plus resolved review feedback.
 
 #### Scenario: Independent action update
 - **WHEN** #639 is accepted and PR #635 is refreshed with #499 as its sole owner
@@ -9,7 +9,12 @@ The existing PRs #623, #635, and #636 SHALL each reference the existing aggregat
 
 #### Scenario: Cargo lockfile ordering
 - **WHEN** PR #636 is prepared while PR #623 is not yet accepted on main
-- **THEN** #636 remains blocked; after #623 merges, #636 refreshes onto that baseline and reruns affected proof
+- **THEN** the grouped update remains blocked; after #623 merges, its issue-owned successor uses that accepted baseline and reruns affected proof
+
+#### Scenario: Original bot history cannot satisfy the commit-owner gate
+- **WHEN** the grouped bot branch contains commit subjects that the mandatory pre-push ownership gate refuses
+- **THEN** preserve that branch and deliver its exact reviewed update through one same-issue successor PR based on accepted main with compliant commit subjects, without rewriting bot history or weakening the gate
+- **AND** require complete current-head local, hosted, parser-pack, and independent acceptance before superseding the bot PR and closing #499 through the successor
 
 ### Requirement: Dependency updates preserve active product boundaries
 The jsonc-parser update SHALL preserve supported JSONC configuration parsing and typed invalid-input behavior. The install-action update SHALL preserve pinned toolchain installation on supported CI/release runners. The grouped Cargo update SHALL use supported RMCP server/client configuration APIs without changing MCP initialize, tool, selected-root, or missing-index semantics, and SHALL validate optional parser-pack construction and native loading on supported Windows/Linux hosts plus typed unavailability and unchanged built-in parsing on macOS. All updates MUST retain warnings-as-errors and existing security, release, and installed-product gates.
@@ -19,7 +24,7 @@ The jsonc-parser update SHALL preserve supported JSONC configuration parsing and
 - **THEN** accepted values and typed refusals match the supported contract
 
 #### Scenario: MCP selected-root and missing-index behavior
-- **WHEN** a refreshed #636 runtime receives MCP initialize and tool calls for the selected root, a wrong root, and a root lacking an index
+- **WHEN** the refreshed grouped-update successor runtime receives MCP initialize and tool calls for the selected root, a wrong root, and a root lacking an index
 - **THEN** supported calls preserve their response contracts, while wrong-root and missing-index requests fail with the existing typed state and no implicit project mutation
 
 #### Scenario: Optional parser pack on supported hosts

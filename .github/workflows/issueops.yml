@@ -21,7 +21,7 @@ permissions:
 jobs:
   issue-contract:
     name: issue-contract-validation
-    if: github.event_name == 'workflow_dispatch' || github.event.issue.number != null
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'issues' && github.event.issue.pull_request == null)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
