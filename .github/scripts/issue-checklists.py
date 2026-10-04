@@ -1115,10 +1115,7 @@ def start_pr_state_check(repo: str, number: int, head: str, details_url: str) ->
         (
             check
             for check in checks["check_runs"]
-            if check.get("name") == "pr-state"
-            and check.get("head_sha") == head
-            and isinstance(check.get("app"), dict)
-            and check["app"].get("id") == PR_STATE_CHECK_APP_ID
+            if pr_state_check_matches(check, number, head)
         ),
         None,
     )
@@ -3669,15 +3666,33 @@ Mitigations:
     publisher_number = 603
     publisher_external_id = f"projectatlas-pr-state:{publisher_number}:{publisher_head}"
     publisher_details = "https://github.com/owner/repo/actions/runs/123"
-    existing_check: dict[str, object] = {
+    legacy_job_check: dict[str, object] = {
         "id": 87,
         "name": "pr-state",
         "head_sha": publisher_head,
-        "external_id": "old-check-identity",
+        "details_url": "https://github.com/owner/repo/actions/runs/123/job/87",
+        "external_id": "f3a28c77-dd8d-51b6-9514-9be7a9f2c8d3",
+        "status": "completed",
+        "conclusion": "skipped",
+        "app": {"id": PR_STATE_CHECK_APP_ID},
+    }
+    wrong_app_check: dict[str, object] = {
+        "id": 89,
+        "name": "pr-state",
+        "head_sha": publisher_head,
+        "external_id": publisher_external_id,
+        "status": "completed",
+        "app": {"id": PR_STATE_CHECK_APP_ID + 1},
+    }
+    wrong_head_check: dict[str, object] = {
+        "id": 90,
+        "name": "pr-state",
+        "head_sha": "e" * 40,
+        "external_id": publisher_external_id,
         "status": "completed",
         "app": {"id": PR_STATE_CHECK_APP_ID},
     }
-    existing_checks = [existing_check]
+    existing_checks = [wrong_app_check, wrong_head_check, legacy_job_check]
     created_check: dict[str, object] = {}
     saved_gh_api_json = globals()["gh_api_json"]
 
@@ -3694,16 +3709,8 @@ Mitigations:
         }
         if path == f"repos/owner/repo/commits/{publisher_head}/check-runs":
             return {"check_runs": existing_checks}
-        if path == "repos/owner/repo/check-runs/87" and method == "PATCH":
-            existing_check.update(
-                {
-                    "external_id": values["external_id"],
-                    "status": values["status"],
-                    "details_url": values["details_url"],
-                }
-            )
-            return existing_check
         if path == "repos/owner/repo/check-runs" and method == "POST":
+            assert not created_check
             assert values["name"] == "pr-state"
             assert values["head_sha"] == publisher_head
             assert values["external_id"] == publisher_external_id
@@ -3718,7 +3725,10 @@ Mitigations:
                     "app": {"id": PR_STATE_CHECK_APP_ID},
                 }
             )
+            existing_checks.append(created_check)
             return created_check
+        if path == "repos/owner/repo/check-runs/87":
+            raise AssertionError("the publisher must not update a workflow-owned check")
         if path == "repos/owner/repo/check-runs/88" and method == "GET":
             return created_check
         if path == "repos/owner/repo/check-runs/88" and method == "PATCH":
@@ -3730,25 +3740,29 @@ Mitigations:
 
     try:
         globals()["gh_api_json"] = publisher_api_fixture
-        reused_id = start_pr_state_check(
-            "owner/repo", publisher_number, publisher_head, publisher_details
-        )
-        assert reused_id == 87
-        assert existing_check["external_id"] == publisher_external_id
-        assert existing_check["status"] == "in_progress"
-        existing_checks.clear()
         check_id = start_pr_state_check(
             "owner/repo", publisher_number, publisher_head, publisher_details
         )
         assert check_id == 88
+        assert (
+            legacy_job_check["external_id"]
+            == "f3a28c77-dd8d-51b6-9514-9be7a9f2c8d3"
+        )
+        assert legacy_job_check["status"] == "completed"
+        created_check["status"] = "completed"
+        reused_id = start_pr_state_check(
+            "owner/repo", publisher_number, publisher_head, publisher_details
+        )
+        assert reused_id == check_id
+        assert created_check["status"] == "in_progress"
         complete_pr_state_check(
-            "owner/repo", check_id, publisher_number, publisher_head, "failure"
+            "owner/repo", reused_id, publisher_number, publisher_head, "failure"
         )
         assert created_check["status"] == "completed"
         assert created_check["conclusion"] == "failure"
         try:
             complete_pr_state_check(
-                "owner/repo", check_id, publisher_number, "e" * 40, "success"
+                "owner/repo", reused_id, publisher_number, "e" * 40, "success"
             )
         except SystemExit as error:
             assert "did not match its started check and head" in str(error)
