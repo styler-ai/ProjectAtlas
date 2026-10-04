@@ -230,15 +230,29 @@ fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<()
         }
         fs::set_permissions(shadow_command, permissions)?;
     }
-    let path = std::env::join_paths(std::iter::once(shadow.path().to_path_buf()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))?;
+    let mut path_entries = vec![shadow.path().to_path_buf()];
+    #[cfg(windows)]
+    path_entries.push(
+        PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot unavailable")?)
+            .join(r"System32\WindowsPowerShell\v1.0"),
+    );
+    #[cfg(not(windows))]
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(path_entries)?;
+    let hook_config: Value =
+        serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
     #[cfg(windows)]
     let output = {
-        let mut command = StdCommand::new("cmd.exe");
+        let command_windows = hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?;
+        let mut command = StdCommand::new("powershell.exe");
         command
-            .args(["/d", "/c"])
-            .raw_arg("\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"")
+            .args(["-NoProfile", "-Command"])
+            .arg(command_windows)
+            .current_dir(shadow.path())
             .env("PLUGIN_ROOT", &plugin_root)
             .env("USERPROFILE", shadow.path())
             .env("LOCALAPPDATA", shadow.path().join("isolated-local"))
@@ -262,8 +276,6 @@ fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<()
         .join("skills")
         .join("projectatlas")
         .join("SKILL.md");
-    let hook_config: Value =
-        serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
     if !output.status.success()
         || actual.contains(&expected)
         || actual.contains(&format!(
@@ -449,11 +461,12 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     let workspace = workspace_root()?;
     let fixture = tempfile::tempdir()?;
     let source_plugin = workspace.join("plugins").join("projectatlas");
-    let plugin_root = fixture.path().join("plugin");
+    let plugin_root = fixture.path().join("plugin root");
     for relative in [
         ".codex-plugin/plugin.json",
         "hooks/readiness.ps1",
         "hooks/readiness.sh",
+        "hooks/hooks.json",
         "hooks/agent-instructions.txt",
         "skills/projectatlas/SKILL.md",
         "skills/projectatlas/references/language-support.md",
@@ -463,6 +476,15 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         fs::create_dir_all(destination.parent().ok_or("plugin asset has no parent")?)?;
         fs::copy(source_plugin.join(relative), destination)?;
     }
+    #[cfg(windows)]
+    let command_windows = {
+        let hook_config: Value =
+            serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+        hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?
+            .to_owned()
+    };
     let repo = fixture.path().join("repo '$HOME'`x");
     let atlas_dir = repo.join(ATLAS_DIR_NAME);
     let bin = fixture.path().join("bin");
@@ -577,33 +599,57 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         writeln!(io::stderr(), "readiness receipt: complete")?;
         Ok(())
     };
-    let path = std::env::join_paths(
-        [
-            bin,
-            executable
-                .parent()
-                .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
-                .to_path_buf(),
-        ]
-        .into_iter()
-        .chain(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        )),
-    )?;
+    let mut path_entries = vec![
+        bin,
+        executable
+            .parent()
+            .ok_or_else(|| io::Error::other("test executable has no parent directory"))?
+            .to_path_buf(),
+    ];
+    #[cfg(windows)]
+    path_entries.push(
+        PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot unavailable")?)
+            .join(r"System32\WindowsPowerShell\v1.0"),
+    );
+    #[cfg(not(windows))]
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(path_entries)?;
     let hook_invocations = std::cell::Cell::new(0);
-    let run_hook_raw =
-        |project_root: &Path, process_path: &std::ffi::OsStr| -> Result<String, Box<dyn Error>> {
-            let invocation = hook_invocations.get() + 1;
-            hook_invocations.set(invocation);
-            writeln!(
-                io::stderr(),
-                "readiness hook invocation {invocation}: {}",
-                project_root.display()
-            )?;
-            #[cfg(windows)]
-            let output = StdCommand::new("powershell.exe")
-                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-                .arg(plugin_root.join("hooks/readiness.ps1"))
+    let run_hook_with_shell_raw = |project_root: &Path,
+                                   process_path: &std::ffi::OsStr,
+                                   use_comspec: bool|
+     -> Result<String, Box<dyn Error>> {
+        let invocation = hook_invocations.get() + 1;
+        hook_invocations.set(invocation);
+        writeln!(
+            io::stderr(),
+            "readiness hook invocation {invocation}: {}",
+            project_root.display()
+        )?;
+        #[cfg(windows)]
+        let output = {
+            let mut event = serde_json::to_vec(&json!({
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+                "cwd": project_root,
+            }))?;
+            event.push(b'\n');
+            let mut command = if use_comspec {
+                let mut command = StdCommand::new(
+                    std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()),
+                );
+                command.arg("/C").raw_arg(format!(r#""{command_windows}""#));
+                command
+            } else {
+                let mut command = StdCommand::new("powershell.exe");
+                command
+                    .args(["-NoProfile", "-Command"])
+                    .arg(&command_windows);
+                command
+            };
+            let mut child = command
                 .current_dir(project_root)
                 .env("PLUGIN_ROOT", &plugin_root)
                 .env("CODEX_MCP_FIXTURE", &registry_path)
@@ -613,9 +659,23 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .env("LOCALAPPDATA", fixture.path().join("AppData/Local"))
                 .env("CODEX_HOME", &codex_home)
                 .env("PATH", process_path)
-                .output()?;
-            #[cfg(not(windows))]
-            let output = StdCommand::new("sh")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                if let Err(error) = stdin.write_all(&event) {
+                    if error.kind() != io::ErrorKind::BrokenPipe {
+                        return Err(error.into());
+                    }
+                }
+            }
+            child.wait_with_output()?
+        };
+        #[cfg(not(windows))]
+        let output = {
+            let _ = use_comspec;
+            StdCommand::new("sh")
                 .arg(
                     plugin_root
                         .join(HOOKS_DIR_NAME)
@@ -630,21 +690,29 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .env("XDG_STATE_HOME", xdg_state_home)
                 .env("CODEX_HOME", &codex_home)
                 .env("PATH", process_path)
-                .output()?;
-            if !output.status.success() {
-                return Err(io::Error::other(format!(
-                    "readiness hook exited {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .into());
-            }
-            writeln!(
-                io::stderr(),
-                "readiness hook invocation {invocation}: completed"
-            )?;
-            Ok(String::from_utf8(output.stdout)?)
+                .output()?
         };
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "readiness hook exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        writeln!(
+            io::stderr(),
+            "readiness hook invocation {invocation}: completed"
+        )?;
+        Ok(String::from_utf8(output.stdout)?)
+    };
+    let run_hook_raw = |project_root: &Path, process_path: &std::ffi::OsStr| {
+        run_hook_with_shell_raw(project_root, process_path, false)
+    };
+    #[cfg(windows)]
+    let run_hook_cmd_raw = |project_root: &Path, process_path: &std::ffi::OsStr| {
+        run_hook_with_shell_raw(project_root, process_path, true)
+    };
     let run_hook =
         |project_root: &Path, process_path: &std::ffi::OsStr| -> Result<String, Box<dyn Error>> {
             write_receipt()?;
@@ -662,6 +730,21 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "unbound directory produced unsafe repair guidance: {no_root}"
         ))
         .into());
+    }
+    #[cfg(windows)]
+    {
+        let command_output = run_hook_cmd_raw(&plain_directory, &path)?;
+        if !command_output
+            .contains("ProjectAtlas integration incomplete: no project root was identified")
+            || command_output.contains("Repair command:")
+            || command_output.contains("Read the complete installed ProjectAtlas skill now:")
+            || fs::read(&db)? != original_db
+        {
+            return Err(io::Error::other(format!(
+                "CMD-wrapped hook did not refuse an unbound root without mutation: {command_output}"
+            ))
+            .into());
+        }
     }
     let flat_root = fixture.path().join("flat-config-project");
     let flat_nested = flat_root.join("nested");
@@ -747,6 +830,29 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "matching installed layers were not ready (ready={ready} guidance={guidance} skill_path={skill_path}): {ready_output}"
         ))
         .into());
+    }
+    #[cfg(windows)]
+    {
+        let command_output = run_hook_cmd_raw(&repo, &path)?;
+        let expected_skill = plugin_root.join("skills/projectatlas/SKILL.md");
+        let has_skill_pointer = command_output.lines().any(|line| {
+            line.strip_prefix("Read the complete installed ProjectAtlas skill now: ")
+                .is_some_and(|path| {
+                    require_same_canonical_path(path, &expected_skill, "installed skill").is_ok()
+                })
+        });
+        if !command_output.contains("ProjectAtlas integration ready")
+            || !command_output.starts_with(
+                "Before any ProjectAtlas call, read the complete version-matched ProjectAtlas skill",
+            )
+            || !has_skill_pointer
+            || fs::read(&db)? != original_db
+        {
+            return Err(io::Error::other(format!(
+                "CMD-wrapped packaged hook did not deliver ready guidance without mutation: {command_output}"
+            ))
+            .into());
+        }
     }
     let plugin_manifest = plugin_root.join(".codex-plugin/plugin.json");
     let original_manifest = fs::read(&plugin_manifest)?;
@@ -941,6 +1047,20 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::remove_file(&receipt_path)?;
     if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
         return Err(io::Error::other("missing readiness receipt was accepted").into());
+    }
+    #[cfg(windows)]
+    {
+        let output = run_hook_cmd_raw(&repo, &path)?;
+        if !output.contains("ProjectAtlas integration incomplete")
+            || output.contains("ProjectAtlas integration ready")
+            || output.contains("Read the complete installed ProjectAtlas skill now:")
+            || fs::read(&db)? != original_db
+        {
+            return Err(io::Error::other(format!(
+                "CMD-wrapped hook did not fail closed for a missing receipt without mutation: {output}"
+            ))
+            .into());
+        }
     }
     write_receipt()?;
     let project_codex = repo.join(CODEX_FIXTURE_DIR_NAME);
@@ -1288,6 +1408,25 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         return Err(
             io::Error::other("other-project MCP database identity was not reported").into(),
         );
+    }
+    #[cfg(windows)]
+    {
+        let output = run_hook_cmd_raw(&repo, &path)?;
+        if !output.contains("ProjectAtlas integration incomplete")
+            || !output.contains(
+                &other_repo
+                    .join(ATLAS_DIR_NAME)
+                    .join("projectatlas.db")
+                    .display()
+                    .to_string(),
+            )
+            || fs::read(&db)? != original_db
+        {
+            return Err(io::Error::other(format!(
+                "CMD-wrapped hook did not refuse the wrong root binding without mutation: {output}"
+            ))
+            .into());
+        }
     }
     let flat_config = repo.join("projectatlas.toml");
     fs::rename(&config, &flat_config)?;

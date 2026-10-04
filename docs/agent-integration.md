@@ -531,18 +531,28 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 ## Codex skills
 
 ProjectAtlas ships public agent guidance through repository docs and the packaged plugin skill.
-The packaged Codex plugin also includes `hooks/hooks.json`. At trusted startup, resume, and
-compaction, its read-only command prints the package-bound routing reminder and compares the
-manifest version with the directly resolved runtime, current project host config, and global Codex
-MCP registration. Its read-only database check verifies schema and selected-root binding without
-running a full integrity scan on every session event; `projectatlas root verify` remains the
-explicit integrity check. A stale/missing layer reports `integration incomplete` with a versioned installer
-command; it never repairs, initializes, scans, or rebinds anything itself. On POSIX, the hook
-uses `python3` or `jq` to validate JSON; without either, it reports incomplete. Codex presents bundled hooks for
-review; users must trust the current hook definition before it runs. Disabled or untrusted hooks
-cannot establish readiness, so use `projectatlas --format json runtime-info` and
-`codex mcp get projectatlas --json` manually. A fresh child-process check does not prove an
-already-running Codex parent has refreshed its inherited PATH or MCP child.
+The packaged Codex plugin registers its read-only readiness command for root `SessionStart`
+startup/resume/clear/compaction and `SubagentStart`. On those events, it checks the manifest
+version against the directly resolved runtime, current project host config, and global Codex MCP
+registration. When ready, it prints the package-bound routing reminder. The subagent event reuses the same
+package-bound scripts and instructions; it does not initialize, scan, or rebind project state.
+Codex documents `SessionStart` context for the root session, including compaction, and
+`SubagentStart` for a child session. Delivery from this packaged plugin through a live Codex session
+remains unverified. The documented contract does not guarantee fresh guidance when an already-running
+subagent compacts. After resuming without fresh guidance, re-read the complete version-matched skill
+and reselect the checkout before another Atlas call; hook delivery alone does not prove the skill was
+read.
+
+The read-only database check verifies schema and selected-root binding without running a full
+integrity scan on every event; `projectatlas root verify` remains the explicit integrity check. A
+stale/missing layer reports `integration incomplete` with a versioned installer command; it never
+repairs, initializes, scans, or rebinds anything itself. On POSIX, the hook uses `python3` or `jq`
+to validate JSON; without either, it reports incomplete. Codex presents bundled hooks for review;
+users must trust the current hook definition before it runs. Disabled or untrusted hooks cannot
+establish readiness, so use the installed skill manually, then check
+`projectatlas --format json runtime-info` and `codex mcp get projectatlas --json`. A fresh
+child-process check does not prove an already-running Codex parent has refreshed its inherited PATH
+or MCP child.
 When no project boundary is found, the hook withholds a repair command instead of inferring the
 filesystem or user-profile root; select the intended project directory explicitly first.
 Personal workspace memory is local state and should stay ignored/untracked through `.gitignore`.
@@ -553,7 +563,7 @@ The ProjectAtlas plugin package includes:
 
 - `.codex-plugin/plugin.json` for Codex plugin metadata.
 - `hooks/hooks.json`, `hooks/agent-instructions.txt`, and platform readiness scripts for trusted,
-  package-bound, read-only Codex SessionStart guidance.
+  package-bound, read-only Codex SessionStart and SubagentStart guidance.
 - `.claude-plugin/plugin.json` plus the root `skills/` folder for Claude Code plugin packaging.
 - `opencode/opencode.json` as a disabled OpenCode MCP config template with absolute-path placeholders.
 - Installer scripts that generate project-local Codex-compatible, Claude Code, and OpenCode config files after runtime verification.

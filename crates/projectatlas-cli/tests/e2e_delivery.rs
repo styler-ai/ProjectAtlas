@@ -6759,7 +6759,16 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         env!("CARGO_PKG_VERSION"),
         env!("CARGO_PKG_VERSION"),
         &skill,
-    )?;
+    )
+    .map_err(|error| {
+        io::Error::other(format!(
+            "could not seed the local Codex plugin fixture: {error}"
+        ))
+    })?;
+    let package_root = workspace.join("plugins/projectatlas");
+    for relative in ["hooks/hooks.json", "hooks/readiness.ps1"] {
+        fs::copy(package_root.join(relative), plugin_source.join(relative))?;
+    }
     fs::write(codex_home.join("config.toml"), "# isolated Codex fixture\n")?;
     let plugin_inventory = home.join("plugin-inventory.json");
     fs::write(
@@ -6775,11 +6784,18 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     let config = atlas_dir.join("config.toml");
     let db = atlas_dir.join("projectatlas.db");
     fs::write(&config, "[project]\nroot = \".\"\n")?;
-    let runtime = isolated_installer_runtime(temp.path())?;
+    let runtime = isolated_installer_runtime(temp.path()).map_err(|error| {
+        io::Error::other(format!("could not stage the isolated runtime: {error}"))
+    })?;
     let initialized = StdCommand::new(&runtime)
         .arg("init")
         .current_dir(&repo)
-        .output()?;
+        .output()
+        .map_err(|error| {
+            io::Error::other(format!(
+                "could not launch the isolated runtime init: {error}"
+            ))
+        })?;
     if !initialized.status.success() {
         return Err(io::Error::other(format!(
             "fixture init failed: {}",
@@ -6826,7 +6842,12 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
                 "PROJECTATLAS_FAKE_CODEX_INVALID_LIST",
                 if invalid_list { "1" } else { "0" },
             );
-        let output = require_successful_plugin_installer_output(command.output()?)?;
+        let output =
+            require_successful_plugin_installer_output(command.output().map_err(|error| {
+                io::Error::other(format!(
+                    "could not launch the isolated plugin installer: {error}"
+                ))
+            })?)?;
         Ok(format!(
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
@@ -6851,7 +6872,11 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     } else {
         home.join(".local/state/projectatlas/codex-readiness.json")
     };
-    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).map_err(|error| {
+        io::Error::other(format!(
+            "installer did not create the fixture readiness receipt: {error}"
+        ))
+    })?)?;
     if receipt["version"] != json!(env!("CARGO_PKG_VERSION"))
         || receipt["registry"]["transport"]["command"] != json!(runtime)
         || receipt["agent_guidance_sha256"]
@@ -6887,30 +6912,54 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
             .ok_or("runtime parent missing")?
             .to_path_buf(),
     );
+    #[cfg(windows)]
+    hook_directories.push(
+        PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot unavailable")?)
+            .join(r"System32\WindowsPowerShell\v1.0"),
+    );
+    #[cfg(windows)]
+    let hook_path = std::env::join_paths(hook_directories)?;
+    #[cfg(not(windows))]
     let hook_path = std::env::join_paths(hook_directories.into_iter().chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))?;
-    let mut hook = if cfg!(windows) {
+    #[cfg(windows)]
+    let mut hook = {
+        let hook_config: Value =
+            serde_json::from_slice(&fs::read(plugin_source.join("hooks/hooks.json"))?)?;
+        let command_windows = hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?;
         let mut command = StdCommand::new("powershell.exe");
         command
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(workspace.join("plugins/projectatlas/hooks/readiness.ps1"));
+            .args(["-NoProfile", "-Command"])
+            .arg(command_windows);
         command
-    } else {
+    };
+    #[cfg(not(windows))]
+    let mut hook = {
         let mut command = StdCommand::new("sh");
         command.arg(workspace.join("plugins/projectatlas/hooks/readiness.sh"));
         command
     };
+    #[cfg(windows)]
+    let db_before_hook = fs::read(&db)?;
     let calls_before_hook = fs::read(&log)?;
     let hook_output = hook
         .current_dir(&repo)
+        .env("PLUGIN_ROOT", &plugin_source)
         .env("PATH", hook_path)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
         .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("CODEX_HOME", &codex_home)
-        .output()?;
+        .output()
+        .map_err(|error| {
+            io::Error::other(format!(
+                "could not launch the packaged Windows PowerShell hook: {error}"
+            ))
+        })?;
     if !hook_output.status.success()
         || !String::from_utf8_lossy(&hook_output.stdout).contains("ProjectAtlas integration ready")
         || fs::read(&log)? != calls_before_hook
@@ -6921,6 +6970,34 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
             String::from_utf8_lossy(&hook_output.stderr)
         ))
         .into());
+    }
+    #[cfg(windows)]
+    {
+        let receipt_bytes = fs::read(&receipt_path)?;
+        fs::remove_file(&receipt_path)?;
+        fs::write(&log, "")?;
+        let calls_before_incomplete_hook = fs::read(&log)?;
+        let incomplete_output = hook.output().map_err(|error| {
+            io::Error::other(format!(
+                "could not relaunch the packaged Windows PowerShell hook: {error}"
+            ))
+        })?;
+        let incomplete_stdout = String::from_utf8_lossy(&incomplete_output.stdout);
+        if !incomplete_output.status.success()
+            || !incomplete_stdout.contains("ProjectAtlas integration incomplete:")
+            || incomplete_stdout.contains("ProjectAtlas integration ready:")
+            || !incomplete_stdout.contains("Use the version-matched ProjectAtlas skill.")
+            || fs::read(&log)? != calls_before_incomplete_hook
+            || fs::read(&db)? != db_before_hook
+        {
+            return Err(io::Error::other(format!(
+                "Codex-wrapped packaged hook did not fail closed for a missing receipt: status={} stdout={incomplete_stdout:?} stderr={}",
+                incomplete_output.status,
+                String::from_utf8_lossy(&incomplete_output.stderr),
+            ))
+            .into());
+        }
+        fs::write(&receipt_path, receipt_bytes)?;
     }
     fs::remove_file(&receipt_path)?;
     let prior_db = fs::read(&db)?;
@@ -21800,7 +21877,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "commandWindows"],
-        "\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"",
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& ([System.IO.Path]::Combine([System.Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'hooks', 'readiness.ps1'))\"",
     )?;
     let hook_asset = fs::read_to_string(plugin_root.join(AGENT_INSTRUCTIONS_RELATIVE_PATH))?;
     let posix_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.sh"))?;
@@ -21817,6 +21894,14 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         &["hooks", "SessionStart", "0", "matcher"],
         "startup|resume|clear|compact",
     )?;
+    if json_at(&hooks, &["hooks", "SubagentStart", "0", "hooks", "0"])?
+        != json_at(&hooks, &["hooks", "SessionStart", "0", "hooks", "0"])?
+    {
+        return Err(io::Error::other(
+            "packaged ProjectAtlas subagent hook must reuse the read-only session hook",
+        )
+        .into());
+    }
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "statusMessage"],
