@@ -124,7 +124,7 @@ use projectatlas_service::{
 use rmcp::handler::server::{
     router::tool::ToolRouter, tool::IntoCallToolResult, wrapper::Parameters,
 };
-use rmcp::model::{CallToolResponse, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResponse, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::schemars;
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -10262,8 +10262,8 @@ impl ProjectAtlasMcpServer {
 #[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ProjectAtlasMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 MCP_SERVER_NAME,
                 env!("CARGO_PKG_VERSION"),
