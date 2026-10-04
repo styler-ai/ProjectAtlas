@@ -127,6 +127,10 @@ const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
 const CODEX_FIXTURE_DIR_NAME: &str = ".codex";
 const HOOKS_DIR_NAME: &str = "hooks";
+const CODEX_HOOKS_CONFIG_RELATIVE_PATH: &str = "hooks/hooks.json";
+const PROJECTATLAS_SKILL_RELATIVE_PATH: &str = "skills/projectatlas/SKILL.md";
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_RELATIVE_DIR: &str = r"System32\WindowsPowerShell\v1.0";
 #[cfg(unix)]
 const POSIX_READINESS_HOOK_FILE_NAME: &str = "readiness.sh";
 
@@ -234,15 +238,16 @@ fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<()
     #[cfg(windows)]
     path_entries.push(
         PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot unavailable")?)
-            .join(r"System32\WindowsPowerShell\v1.0"),
+            .join(WINDOWS_POWERSHELL_RELATIVE_DIR),
     );
     #[cfg(not(windows))]
     path_entries.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     let path = std::env::join_paths(path_entries)?;
-    let hook_config: Value =
-        serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+    let hook_config: Value = serde_json::from_slice(&fs::read(
+        plugin_root.join(CODEX_HOOKS_CONFIG_RELATIVE_PATH),
+    )?)?;
     #[cfg(windows)]
     let output = {
         let command_windows = hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
@@ -466,9 +471,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         ".codex-plugin/plugin.json",
         "hooks/readiness.ps1",
         "hooks/readiness.sh",
-        "hooks/hooks.json",
+        CODEX_HOOKS_CONFIG_RELATIVE_PATH,
         "hooks/agent-instructions.txt",
-        "skills/projectatlas/SKILL.md",
+        PROJECTATLAS_SKILL_RELATIVE_PATH,
         "skills/projectatlas/references/language-support.md",
         "skills/projectatlas/references/short-cli.md",
     ] {
@@ -478,8 +483,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     #[cfg(windows)]
     let command_windows = {
-        let hook_config: Value =
-            serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+        let hook_config: Value = serde_json::from_slice(&fs::read(
+            plugin_root.join(CODEX_HOOKS_CONFIG_RELATIVE_PATH),
+        )?)?;
         hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?
@@ -590,7 +596,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "codex_config": codex_config,
             "codex_config_sha256": sha256_hex(&fs::read(&codex_config)?),
             "agent_guidance_sha256": sha256_hex(&fs::read(plugin_root.join("hooks/agent-instructions.txt"))?),
-            "skill_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/SKILL.md"))?),
+            "skill_sha256": sha256_hex(&fs::read(plugin_root.join(PROJECTATLAS_SKILL_RELATIVE_PATH))?),
             "language_support_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/references/language-support.md"))?),
             "short_cli_sha256": sha256_hex(&fs::read(plugin_root.join("skills/projectatlas/references/short-cli.md"))?),
             "registry": projected
@@ -609,7 +615,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     #[cfg(windows)]
     path_entries.push(
         PathBuf::from(std::env::var_os("SystemRoot").ok_or("SystemRoot unavailable")?)
-            .join(r"System32\WindowsPowerShell\v1.0"),
+            .join(WINDOWS_POWERSHELL_RELATIVE_DIR),
     );
     #[cfg(not(windows))]
     path_entries.extend(std::env::split_paths(
@@ -820,7 +826,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         .is_some_and(|path| {
             require_same_canonical_path(
                 path,
-                &plugin_root.join("skills/projectatlas/SKILL.md"),
+                &plugin_root.join(PROJECTATLAS_SKILL_RELATIVE_PATH),
                 "installed skill",
             )
             .is_ok()
@@ -834,7 +840,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     #[cfg(windows)]
     {
         let command_output = run_hook_cmd_raw(&repo, &path)?;
-        let expected_skill = plugin_root.join("skills/projectatlas/SKILL.md");
+        let expected_skill = plugin_root.join(PROJECTATLAS_SKILL_RELATIVE_PATH);
         let has_skill_pointer = command_output.lines().any(|line| {
             line.strip_prefix("Read the complete installed ProjectAtlas skill now: ")
                 .is_some_and(|path| {
@@ -955,7 +961,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     for skill_asset in [
         "hooks/agent-instructions.txt",
-        "skills/projectatlas/SKILL.md",
+        PROJECTATLAS_SKILL_RELATIVE_PATH,
         "skills/projectatlas/references/language-support.md",
     ] {
         let asset_path = plugin_root.join(skill_asset);
@@ -1198,7 +1204,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 }
                 for skill_asset in [
                     "hooks/agent-instructions.txt",
-                    "skills/projectatlas/SKILL.md",
+                    PROJECTATLAS_SKILL_RELATIVE_PATH,
                     "skills/projectatlas/references/language-support.md",
                     "skills/projectatlas/references/short-cli.md",
                 ] {

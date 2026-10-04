@@ -173,6 +173,8 @@ const FILTERED_CUSTOM_HARNESS_COMMAND: &str = "cargo test --locked -p projectatl
 
 const CODEX_CONFIG_DIR: &str = ".codex";
 const AGENT_INSTRUCTIONS_RELATIVE_PATH: &str = "hooks/agent-instructions.txt";
+const CODEX_HOOKS_CONFIG_RELATIVE_PATH: &str = "hooks/hooks.json";
+const PROJECTATLAS_PLUGIN_RELATIVE_PATH: &str = "plugins/projectatlas";
 
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 
@@ -6838,8 +6840,13 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     fs::create_dir_all(&home)?;
     let workspace = workspace_root()?;
     let codex_home = home.join(CODEX_CONFIG_DIR);
-    let skill =
-        fs::read_to_string(workspace.join("plugins/projectatlas/skills/projectatlas/SKILL.md"))?;
+    let skill = fs::read_to_string(
+        workspace
+            .join(PROJECTATLAS_PLUGIN_RELATIVE_PATH)
+            .join(PROJECTATLAS_SKILL_DIR)
+            .join(PROJECTATLAS_SKILL_NAME)
+            .join(SKILL_FILE_NAME),
+    )?;
     let (_, plugin_source, _) = write_fake_codex_projectatlas_integration(
         &codex_home,
         env!("CARGO_PKG_VERSION"),
@@ -6851,8 +6858,8 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
             "could not seed the local Codex plugin fixture: {error}"
         ))
     })?;
-    let package_root = workspace.join("plugins/projectatlas");
-    for relative in ["hooks/hooks.json", "hooks/readiness.ps1"] {
+    let package_root = workspace.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH);
+    for relative in [CODEX_HOOKS_CONFIG_RELATIVE_PATH, "hooks/readiness.ps1"] {
         fs::copy(package_root.join(relative), plugin_source.join(relative))?;
     }
     fs::write(codex_home.join("config.toml"), "# isolated Codex fixture\n")?;
@@ -6971,7 +6978,10 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
             )?))
         || receipt["skill_sha256"]
             != json!(sha256_hex(&fs::read(
-                plugin_source.join("skills/projectatlas/SKILL.md")
+                plugin_source
+                    .join(PROJECTATLAS_SKILL_DIR)
+                    .join(PROJECTATLAS_SKILL_NAME)
+                    .join(SKILL_FILE_NAME)
             )?))
         || receipt["language_support_sha256"]
             != json!(sha256_hex(&fs::read(
@@ -7011,8 +7021,9 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     ))?;
     #[cfg(windows)]
     let mut hook = {
-        let hook_config: Value =
-            serde_json::from_slice(&fs::read(plugin_source.join("hooks/hooks.json"))?)?;
+        let hook_config: Value = serde_json::from_slice(&fs::read(
+            plugin_source.join(CODEX_HOOKS_CONFIG_RELATIVE_PATH),
+        )?)?;
         let command_windows = hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?;
@@ -14720,7 +14731,7 @@ fn plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp() -> Result
         || StdCommand::new("jq").arg("--version").output().is_ok()
         || StdCommand::new("python3").arg("--version").output().is_ok()
     {
-        let plugin_root = workspace_root.join("plugins/projectatlas");
+        let plugin_root = workspace_root.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH);
         let hook = plugin_root.join(if cfg!(windows) {
             "hooks/readiness.ps1"
         } else {
@@ -21954,7 +21965,9 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
         plugin_root.join(".codex-plugin").join("plugin.json"),
     )?)?;
     require_json_string(&manifest, &["version"], env!("CARGO_PKG_VERSION"))?;
-    let hooks: Value = serde_json::from_slice(&fs::read(plugin_root.join("hooks/hooks.json"))?)?;
+    let hooks: Value = serde_json::from_slice(&fs::read(
+        plugin_root.join(CODEX_HOOKS_CONFIG_RELATIVE_PATH),
+    )?)?;
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "command"],
