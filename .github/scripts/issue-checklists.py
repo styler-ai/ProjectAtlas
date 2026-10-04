@@ -146,8 +146,8 @@ MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
 PR_STATE_WORKFLOW_RUNS_PER_PAGE = 100
 MAX_PR_STATE_WORKFLOW_RUN_PAGES = 10
 PR_STATE_CHECK_APP_ID = 15368
-PR_STATE_WAKEUP_TITLE_RE = re.compile(
-    r"^pr-state-wakeup\|([1-9][0-9]*)\|([0-9a-f]{40})$"
+PR_STATE_NATIVE_TITLE_RE = re.compile(
+    r"^pr-state\|[0-9a-f]{40}\|([1-9][0-9]*)\|([0-9a-f]{40})$"
 )
 COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
 COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^)]*)\)")
@@ -880,7 +880,7 @@ def matching_pr_state_run(
         ):
             continue
         title = workflow_run.get("display_title")
-        match = PR_STATE_WAKEUP_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
+        match = PR_STATE_NATIVE_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
         source_head = workflow_run.get("head_sha")
         if (
             match is None
@@ -1029,7 +1029,7 @@ def trusted_pr_state_binding(
     ):
         return None
     title = source_run.get("display_title")
-    match = PR_STATE_WAKEUP_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
+    match = PR_STATE_NATIVE_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
     if match is None:
         return None
     number, head = int(match.group(1)), match.group(2)
@@ -3312,14 +3312,15 @@ Mitigations:
             raise AssertionError("foreign qualified owner reference was accepted")
     pr_head = "a" * 40
     source_head = "b" * 40
+    source_workflow_sha = "c" * 40
     assert source_head != pr_head
     source_run = {
         "id": 77,
-        "name": f"pr-state-wakeup|600|{pr_head}",
+        "name": f"pr-state|{source_workflow_sha}|600|{pr_head}",
         "path": ".github/workflows/pr-state.yml",
         "event": "pull_request_target",
         "head_sha": source_head,
-        "display_title": f"pr-state-wakeup|600|{pr_head}",
+        "display_title": f"pr-state|{source_workflow_sha}|600|{pr_head}",
         "status": "completed",
         "conclusion": "success",
         "run_attempt": 1,
@@ -3414,8 +3415,11 @@ Mitigations:
         source_run["event"] = "pull_request"
         assert trusted_pr_state_binding("owner/repo", source_event) is None
         source_run["event"] = "pull_request_target"
-        source_run["display_title"] = "PR title from an old workflow version"
+        source_run["display_title"] = f"pr-state-wakeup|600|{pr_head}"
         assert trusted_pr_state_binding("owner/repo", source_event) is None
+        source_run["display_title"] = f"pr-state|invalid|600|{pr_head}"
+        assert trusted_pr_state_binding("owner/repo", source_event) is None
+        source_run["display_title"] = f"pr-state|{source_workflow_sha}|600|{pr_head}"
         try:
             trusted_pr_state_binding(
                 "owner/repo",
@@ -3470,11 +3474,11 @@ Mitigations:
     ]
     trusted_refresh_run = {
         "id": 77,
-        "name": f"pr-state-wakeup|600|{'a' * 40}",
+        "name": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
         "path": ".github/workflows/pr-state.yml",
         "event": "pull_request_target",
         "head_sha": source_head,
-        "display_title": f"pr-state-wakeup|600|{'a' * 40}",
+        "display_title": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
         "status": "completed",
         "pull_requests": [],
     }
@@ -3556,7 +3560,7 @@ Mitigations:
         decoy_run = {
             **trusted_refresh_run,
             "id": 78,
-            "display_title": f"pr-state-wakeup|600|{'b' * 40}",
+            "display_title": f"pr-state|{source_workflow_sha}|600|{'b' * 40}",
         }
         refresh_run_pages.clear()
         refresh_run_pages.update(
@@ -3583,7 +3587,7 @@ Mitigations:
         ]
         observed_refresh_api.clear()
         observed_reruns.clear()
-        trusted_refresh_run["display_title"] = f"pr-state-wakeup|600|{'b' * 40}"
+        trusted_refresh_run["display_title"] = f"pr-state|{source_workflow_sha}|600|{'b' * 40}"
         refresh_run_pages.clear()
         refresh_run_pages[1] = [trusted_refresh_run]
         try:
@@ -3600,7 +3604,7 @@ Mitigations:
         ]
         assert missing_page_requests == ["page=1"] * 30
         observed_refresh_api.clear()
-        decoy_run["display_title"] = f"pr-state-wakeup|601|{'b' * 40}"
+        decoy_run["display_title"] = f"pr-state|{source_workflow_sha}|601|{'b' * 40}"
         refresh_run_pages.clear()
         refresh_run_pages.update(
             {

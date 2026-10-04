@@ -1,7 +1,7 @@
-# Purpose: Validate trusted pull-request metadata and wake the exact-head publisher.
+# Purpose: Validate trusted pull-request metadata in the required protected-base check.
 
 name: PR state
-run-name: ${{ github.event_name == 'pull_request_target' && format('pr-state-wakeup|{0}|{1}', github.event.pull_request.number, github.event.pull_request.head.sha) || 'PR state issue refresh' }}
+run-name: ${{ github.event_name == 'pull_request_target' && format('pr-state|{0}|{1}|{2}', github.workflow_sha, github.event.pull_request.number, github.event.pull_request.head.sha) || 'PR state issue refresh' }}
 
 on:
   pull_request_target:
@@ -20,14 +20,31 @@ permissions:
   pull-requests: read
 
 jobs:
-  pr-state-wakeup:
-    name: pr-state-wakeup
+  pr-state:
+    name: pr-state
     if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
-    permissions: {}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
-      - name: Record trusted PR-state snapshot
-        run: echo "Trusted PR-state wakeup received."
+      - name: Check out protected workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Validate current pull-request owner and milestone
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 .github/scripts/issue-checklists.py
+          --repo "$GITHUB_REPOSITORY"
+          --validate-pr-state-owner "$PR_NUMBER" "$PR_HEAD_SHA"
 
   refresh-pr-state:
     name: refresh-pr-state

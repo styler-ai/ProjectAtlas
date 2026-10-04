@@ -26,6 +26,137 @@ permissions:
   pull-requests: read
 
 jobs:
+  pr-state-bootstrap:
+    name: pr-state
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Read the exact-head PR-state result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          number = os.environ["PR_NUMBER"]
+          head = os.environ["PR_HEAD_SHA"]
+          external_id = f"projectatlas-pr-state:{number}:{head}"
+          source_title = re.compile(
+              rf"(?:pr-state-wakeup\|{number}\|{head}|pr-state\|"
+              rf"[0-9a-f]{{40}}\|{number}\|{head})"
+          )
+
+          def api(path):
+              result = subprocess.run(
+                  ["gh", "api", path], check=True, capture_output=True, text=True
+              )
+              return json.loads(result.stdout)
+
+          def matching_source():
+              runs = api(
+                  f"repos/{repository}/actions/workflows/pr-state.yml/runs"
+                  "?event=pull_request_target&per_page=100"
+                  "&sort=created&direction=desc"
+              ).get("workflow_runs", [])
+              matches = [
+                  run
+                  for run in runs
+                  if run.get("path") == ".github/workflows/pr-state.yml"
+                  and run.get("event") == "pull_request_target"
+                  and isinstance(run.get("display_title"), str)
+                  and source_title.fullmatch(run["display_title"])
+              ]
+              return max(
+                  matches,
+                  key=lambda run: (
+                      run.get("created_at", ""),
+                      run.get("run_attempt", 0),
+                      run.get("id", 0),
+                  ),
+                  default=None,
+              )
+
+          def owned_check(source):
+              rows = []
+              for page in range(1, 11):
+                  payload = api(
+                      f"repos/{repository}/commits/{head}/check-runs"
+                      f"?check_name=pr-state&filter=all&per_page=100&page={page}"
+                  )
+                  page_rows = payload.get("check_runs", [])
+                  rows.extend(
+                      check
+                      for check in page_rows
+                      if check.get("external_id") == external_id
+                  )
+                  if len(page_rows) < 100:
+                      break
+              else:
+                  raise SystemExit("PR-state check history reached its 1,000-run bound")
+
+              check = max(rows, key=lambda row: row.get("id", 0), default=None)
+              if check is None:
+                  return None
+              app = check.get("app")
+              if (
+                  check.get("name") != "pr-state"
+                  or check.get("head_sha") != head
+                  or not isinstance(app, dict)
+                  or app.get("id") != 15368
+              ):
+                  raise SystemExit("latest exact-head PR-state result has the wrong app or head")
+              source_started = source.get("run_started_at")
+              if not isinstance(source_started, str):
+                  raise SystemExit("PR-state source omitted its start time")
+              if check.get("status") != "completed":
+                  return None
+              check_started = check.get("started_at")
+              if not isinstance(check_started, str):
+                  raise SystemExit("completed PR-state check omitted its start time")
+              if check_started <= source_started:
+                  return None
+              if check.get("conclusion") != "success":
+                  raise SystemExit("latest exact-head PR-state result failed validation")
+              return check
+
+          def current_head_matches():
+              pull_request = api(f"repos/{repository}/pulls/{number}")
+              return (
+                  pull_request.get("state") == "open"
+                  and pull_request.get("head", {}).get("sha") == head
+              )
+
+          for _ in range(24):
+              source = matching_source()
+              if source is None or source.get("status") != "completed":
+                  time.sleep(5)
+                  continue
+              if source.get("conclusion") != "success":
+                  raise SystemExit("matching protected-base PR-state run failed")
+
+              check = owned_check(source)
+              if check is None:
+                  time.sleep(5)
+                  continue
+              if not current_head_matches():
+                  raise SystemExit("pull request head changed during PR-state verification")
+              raise SystemExit(0)
+
+          raise SystemExit("no fresh trusted PR-state result for this exact head")
+          PY
+
   plan:
     name: plan
     # A base retarget changes the source diff without changing the head; other edits are metadata-only.
