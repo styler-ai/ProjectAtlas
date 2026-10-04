@@ -14,8 +14,8 @@
 
 ## 4. Pinned install action (#499)
 
-- [ ] 4.1 Refresh existing Dependabot PR #635 onto accepted main after #639, bind only #499 with a non-closing reference and matching milestone, and verify the exact action pin delta.
-- [ ] 4.2 Prove pinned toolchain installation in affected CI/release workflows on supported runners, run IssueOps and current-head hosted gates, and resolve review findings before acceptance.
+- [x] 4.1 Refresh existing Dependabot PR #635 onto accepted main after #639, bind only #499 with a non-closing reference and matching milestone, and verify the exact action pin delta.
+- [x] 4.2 Prove pinned toolchain installation in affected CI/release workflows on supported runners, run IssueOps and current-head hosted gates, and resolve review findings before acceptance.
 
 ## 5. Grouped Cargo dependencies (#499)
 
