@@ -876,7 +876,6 @@ def matching_pr_state_run(
             raise SystemExit("PR-state workflow run was not an object")
         if (
             workflow_run.get("event") != "pull_request_target"
-            or workflow_run.get("name") != "PR state"
             or not pr_state_workflow_path(workflow_run.get("path"), default_branch)
         ):
             continue
@@ -1009,8 +1008,7 @@ def trusted_pr_state_binding(
         return None
     default_branch = pr_state_default_branch(repo)
     if (
-        source_run.get("name") != "PR state"
-        or not pr_state_workflow_path(source_run.get("path"), default_branch)
+        not pr_state_workflow_path(source_run.get("path"), default_branch)
         or source_run.get("status") != "completed"
         or source_run.get("conclusion") != "success"
     ):
@@ -3354,7 +3352,7 @@ Mitigations:
     assert source_head != pr_head
     source_run = {
         "id": 77,
-        "name": "PR state",
+        "name": f"pr-state-wakeup|600|{pr_head}",
         "path": ".github/workflows/pr-state.yml",
         "event": "pull_request_target",
         "head_sha": source_head,
@@ -3509,7 +3507,7 @@ Mitigations:
     ]
     trusted_refresh_run = {
         "id": 77,
-        "name": "PR state",
+        "name": f"pr-state-wakeup|600|{'a' * 40}",
         "path": ".github/workflows/pr-state.yml",
         "event": "pull_request_target",
         "head_sha": source_head,
