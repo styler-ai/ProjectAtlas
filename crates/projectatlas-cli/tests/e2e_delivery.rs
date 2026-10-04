@@ -4082,11 +4082,13 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "PR-state check history reached its 1,000-run bound",
         "projectatlas-pr-state:{number}:{head}",
         "check.get(\"external_id\") == external_id",
-        "key=lambda row: (row.get(\"created_at\", \"\"), row.get(\"id\", 0))",
+        "key=lambda row: row.get(\"id\", 0)",
         "check.get(\"head_sha\") != head",
         "app.get(\"id\") != 15368",
-        "check_created <= source_started",
-        "check.get(\"status\") == \"completed\" and check.get(\"conclusion\") != \"success\"",
+        "check.get(\"started_at\")",
+        "check_started <= source_started",
+        "completed PR-state check omitted its start time",
+        "if check.get(\"conclusion\") != \"success\":",
         "check.get(\"status\") != \"completed\"",
         "pulls/{number}",
         "current_head_matches()",
@@ -4116,6 +4118,170 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             ))
             .into());
         }
+    }
+    if cfg!(target_os = "linux") {
+        let bootstrap_step = workflow_job_step(
+            &ci,
+            "pr-state-bootstrap",
+            "Read the exact-head PR-state result",
+        )?;
+        let run = bootstrap_step["run"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("PR-state bootstrap step omitted its run script"))?;
+        let (_, script) = run
+            .split_once("python3 - <<'PY'\n")
+            .ok_or_else(|| io::Error::other("PR-state bootstrap omitted its Python entrypoint"))?;
+        let (script, _) = script
+            .split_once("\nPY")
+            .ok_or_else(|| io::Error::other("PR-state bootstrap omitted its Python terminator"))?;
+        let fixture_dir = tempfile::tempdir()?;
+        let script_path = fixture_dir.path().join("pr-state-bootstrap.py");
+        let driver_path = fixture_dir.path().join("run-bootstrap-fixture.py");
+        let fixture_path = fixture_dir.path().join("github-api.json");
+        fs::write(&script_path, script)?;
+        fs::write(
+            &driver_path,
+            r#"import json
+import subprocess
+import sys
+import time
+
+script_path, fixture_path = sys.argv[1:]
+with open(fixture_path, encoding="utf-8") as fixture_file:
+    fixture = json.load(fixture_file)
+
+def api_response(path):
+    if "/actions/workflows/pr-state.yml/runs?" in path:
+        return {"workflow_runs": [fixture["source"]]}
+    if "/check-runs?" in path:
+        return {"check_runs": fixture["check_runs"]}
+    if "/pulls/" in path:
+        return fixture["pull_request"]
+    raise AssertionError(f"unexpected GitHub API request: {path}")
+
+def fake_run(arguments, **_kwargs):
+    response = api_response(arguments[-1])
+    return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+subprocess.run = fake_run
+time.sleep = lambda _seconds: None
+with open(script_path, encoding="utf-8") as script_file:
+    exec(compile(script_file.read(), script_path, "exec"), {"__name__": "__main__"})
+"#,
+        )?;
+
+        let head = "a".repeat(40);
+        let external_id = format!("projectatlas-pr-state:123:{head}");
+        let run_bridge = |checks: Vec<Value>, live_head: &str| -> Result<_, Box<dyn Error>> {
+            let fixture = json!({
+                "source": {
+                    "id": 456,
+                    "path": ".github/workflows/pr-state.yml",
+                    "event": "pull_request_target",
+                    "head_sha": head,
+                    "display_title": format!("pr-state-wakeup|123|{head}"),
+                    "created_at": "2026-10-04T08:32:08Z",
+                    "run_attempt": 1,
+                    "run_started_at": "2026-10-04T08:32:09Z",
+                    "status": "completed",
+                    "conclusion": "success"
+                },
+                "check_runs": checks,
+                "pull_request": { "state": "open", "head": { "sha": live_head } }
+            });
+            fs::write(&fixture_path, serde_json::to_vec(&fixture)?)?;
+            Ok(StdCommand::new("python3")
+                .arg(&driver_path)
+                .arg(&script_path)
+                .arg(&fixture_path)
+                .env("GITHUB_REPOSITORY", "styler-ai/ProjectAtlas")
+                .env("PR_NUMBER", "123")
+                .env("PR_HEAD_SHA", &head)
+                .output()?)
+        };
+        let check = |id: u64, status: &str, conclusion: Option<&str>, started_at: Option<&str>| {
+            let mut row = json!({
+                "id": id,
+                "external_id": external_id,
+                "name": "pr-state",
+                "head_sha": head,
+                "status": status,
+                "app": { "id": 15368 }
+            });
+            if let Some(conclusion) = conclusion {
+                row["conclusion"] = json!(conclusion);
+            }
+            if let Some(started_at) = started_at {
+                row["started_at"] = json!(started_at);
+            }
+            if status == "completed" {
+                row["completed_at"] = json!("2026-10-04T08:32:11Z");
+            }
+            row
+        };
+
+        let success = check(
+            10,
+            "completed",
+            Some("success"),
+            Some("2026-10-04T08:32:10Z"),
+        );
+        assert!(success.get("created_at").is_none());
+        let accepted = run_bridge(vec![success.clone()], &head)?;
+        assert!(
+            accepted.status.success(),
+            "valid exact-head result without created_at was rejected: {}",
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+
+        let stale = run_bridge(
+            vec![check(
+                10,
+                "completed",
+                Some("success"),
+                Some("2026-10-04T08:32:08Z"),
+            )],
+            &head,
+        )?;
+        assert!(!stale.status.success());
+        assert!(
+            String::from_utf8_lossy(&stale.stderr).contains("no fresh trusted PR-state result")
+        );
+
+        let queued = run_bridge(
+            vec![success.clone(), check(11, "queued", None, None)],
+            &head,
+        )?;
+        assert!(!queued.status.success());
+        assert!(
+            String::from_utf8_lossy(&queued.stderr).contains("no fresh trusted PR-state result")
+        );
+
+        let failed = run_bridge(
+            vec![
+                success.clone(),
+                check(
+                    11,
+                    "completed",
+                    Some("failure"),
+                    Some("2026-10-04T08:32:10Z"),
+                ),
+            ],
+            &head,
+        )?;
+        assert!(!failed.status.success());
+        assert!(
+            String::from_utf8_lossy(&failed.stderr)
+                .contains("latest exact-head PR-state result failed validation")
+        );
+
+        let changed_head = "b".repeat(40);
+        let drifted = run_bridge(vec![success], &changed_head)?;
+        assert!(!drifted.status.success());
+        assert!(
+            String::from_utf8_lossy(&drifted.stderr)
+                .contains("pull request head changed during PR-state verification")
+        );
     }
     for forbidden in [
         "cargo ",

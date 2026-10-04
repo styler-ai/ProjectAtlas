@@ -107,11 +107,7 @@ jobs:
               else:
                   raise SystemExit("PR-state check history reached its 1,000-run bound")
 
-              check = max(
-                  rows,
-                  key=lambda row: (row.get("created_at", ""), row.get("id", 0)),
-                  default=None,
-              )
+              check = max(rows, key=lambda row: row.get("id", 0), default=None)
               if check is None:
                   return None
               app = check.get("app")
@@ -123,15 +119,17 @@ jobs:
               ):
                   raise SystemExit("latest exact-head PR-state result has the wrong app or head")
               source_started = source.get("run_started_at")
-              check_created = check.get("created_at")
-              if not isinstance(source_started, str) or not isinstance(check_created, str):
-                  raise SystemExit("PR-state source or check omitted its start time")
-              if check_created <= source_started:
-                  return None
-              if check.get("status") == "completed" and check.get("conclusion") != "success":
-                  raise SystemExit("latest exact-head PR-state result failed validation")
+              if not isinstance(source_started, str):
+                  raise SystemExit("PR-state source omitted its start time")
               if check.get("status") != "completed":
                   return None
+              check_started = check.get("started_at")
+              if not isinstance(check_started, str):
+                  raise SystemExit("completed PR-state check omitted its start time")
+              if check_started <= source_started:
+                  return None
+              if check.get("conclusion") != "success":
+                  raise SystemExit("latest exact-head PR-state result failed validation")
               return check
 
           def current_head_matches():
