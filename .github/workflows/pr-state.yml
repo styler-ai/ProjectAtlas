@@ -1,9 +1,13 @@
-# Purpose: Validate pull-request issue linkage and milestone without rebuilding source.
+# Purpose: Validate trusted pull-request metadata and wake the exact-head publisher.
 
 name: PR state
+run-name: ${{ github.event_name == 'pull_request_target' && format('pr-state-wakeup|{0}|{1}', github.event.pull_request.number, github.event.pull_request.head.sha) || 'PR state issue refresh' }}
 
 on:
   pull_request:
+    branches: [main, dev]
+    types: [opened, reopened, synchronize, edited, milestoned, demilestoned]
+  pull_request_target:
     branches: [main, dev]
     types: [opened, reopened, synchronize, edited, milestoned, demilestoned]
   issues:
@@ -70,28 +74,14 @@ jobs:
             exit 1
           fi
 
-      - name: Check out exact source for IssueOps
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-
-      - name: Install IssueOps parser
-        run: npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
-
-      - name: Validate IssueOps
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
-          python3 .github/scripts/issue-checklists.py \
-            --repo "$GITHUB_REPOSITORY" \
-            --root . \
-            --issue-map openspec/issue-map.json \
-            --pull-request "$PR_NUMBER" \
-            --base "$PR_BASE_SHA"
+  pr-state-wakeup:
+    name: pr-state-wakeup
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Record trusted PR-state snapshot
+        run: echo "Trusted PR-state wakeup received."
 
   refresh-pr-state:
     name: refresh-pr-state
@@ -106,6 +96,8 @@ jobs:
     steps:
       - name: Check out trusted default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Refresh affected pull-request state
         env:
