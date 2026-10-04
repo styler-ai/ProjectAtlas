@@ -4175,7 +4175,9 @@ with open(script_path, encoding="utf-8") as script_file:
 
         let head = "a".repeat(40);
         let source_head = "c".repeat(40);
-        assert_ne!(head, source_head);
+        if head == source_head {
+            return Err(io::Error::other("source fixture SHA must differ from PR head SHA").into());
+        }
         let external_id = format!("projectatlas-pr-state:123:{head}");
         let run_bridge = |checks: Vec<Value>, live_head: &str| -> Result<_, Box<dyn Error>> {
             let fixture = json!({
@@ -4231,13 +4233,17 @@ with open(script_path, encoding="utf-8") as script_file:
             Some("success"),
             Some("2026-10-04T08:32:10Z"),
         );
-        assert!(success.get("created_at").is_none());
+        if success.get("created_at").is_some() {
+            return Err(io::Error::other("check-run fixture must omit created_at").into());
+        }
         let accepted = run_bridge(vec![success.clone()], &head)?;
-        assert!(
-            accepted.status.success(),
-            "valid exact-head result without created_at was rejected: {}",
-            String::from_utf8_lossy(&accepted.stderr)
-        );
+        if !accepted.status.success() {
+            return Err(io::Error::other(format!(
+                "valid exact-head result without created_at was rejected: {}",
+                String::from_utf8_lossy(&accepted.stderr)
+            ))
+            .into());
+        }
 
         let stale = run_bridge(
             vec![check(
@@ -4248,19 +4254,25 @@ with open(script_path, encoding="utf-8") as script_file:
             )],
             &head,
         )?;
-        assert!(!stale.status.success());
-        assert!(
-            String::from_utf8_lossy(&stale.stderr).contains("no fresh trusted PR-state result")
-        );
+        let stale_error = String::from_utf8_lossy(&stale.stderr);
+        if stale.status.success() || !stale_error.contains("no fresh trusted PR-state result") {
+            return Err(io::Error::other(format!(
+                "stale PR-state success was not refused: {stale_error}"
+            ))
+            .into());
+        }
 
         let queued = run_bridge(
             vec![success.clone(), check(11, "queued", None, None)],
             &head,
         )?;
-        assert!(!queued.status.success());
-        assert!(
-            String::from_utf8_lossy(&queued.stderr).contains("no fresh trusted PR-state result")
-        );
+        let queued_error = String::from_utf8_lossy(&queued.stderr);
+        if queued.status.success() || !queued_error.contains("no fresh trusted PR-state result") {
+            return Err(io::Error::other(format!(
+                "newer queued PR-state check fell back to an older success: {queued_error}"
+            ))
+            .into());
+        }
 
         let failed = run_bridge(
             vec![
@@ -4274,19 +4286,27 @@ with open(script_path, encoding="utf-8") as script_file:
             ],
             &head,
         )?;
-        assert!(!failed.status.success());
-        assert!(
-            String::from_utf8_lossy(&failed.stderr)
-                .contains("latest exact-head PR-state result failed validation")
-        );
+        let failed_error = String::from_utf8_lossy(&failed.stderr);
+        if failed.status.success()
+            || !failed_error.contains("latest exact-head PR-state result failed validation")
+        {
+            return Err(io::Error::other(format!(
+                "newer failed PR-state check fell back to an older success: {failed_error}"
+            ))
+            .into());
+        }
 
         let changed_head = "b".repeat(40);
         let drifted = run_bridge(vec![success], &changed_head)?;
-        assert!(!drifted.status.success());
-        assert!(
-            String::from_utf8_lossy(&drifted.stderr)
-                .contains("pull request head changed during PR-state verification")
-        );
+        let drifted_error = String::from_utf8_lossy(&drifted.stderr);
+        if drifted.status.success()
+            || !drifted_error.contains("pull request head changed during PR-state verification")
+        {
+            return Err(io::Error::other(format!(
+                "PR-state bridge accepted a changed PR head: {drifted_error}"
+            ))
+            .into());
+        }
     }
     for forbidden in [
         "cargo ",
