@@ -17,7 +17,7 @@ ProjectAtlas is an agent orientation layer. It combines reviewed folder/file res
 
 ## Task Startup
 
-At startup and after compaction, every agent reads this complete installed skill before Atlas calls and restores its exact selected project/worktree from its own live checkout, not another agent's remembered database binding. A hook reminder does not prove the skill was read; if a resumed agent has no fresh reminder, follow this recovery step manually before Atlas use.
+At startup and after compaction, read this complete installed skill before Atlas calls. Every agent restores its exact selected project/worktree from its own live checkout, not another agent's remembered database binding. A hook reminder does not prove the skill was read; if a resumed agent has no fresh reminder, follow this recovery step manually before Atlas use.
 
 1. Select the exact checkout. On first use there, run `atlas init` only if project-local state is absent; if an MCP read returns `init_required`, use its exact `atlas_init` next call. For a registered worktree that needs safe control-atlas hydration, use `atlas_init(worktree: "<alias>")`. Never choose a database filename or reuse another root's writable state. Every project root owns its own `.projectatlas/projectatlas.db`, config, generated host configs, and exact index. Do not substitute scan, symbol build, or hand-written MCP config for init.
 2. For ordinary single-checkout work, run `atlas` from that checkout. For registered-worktree MCP use, keep the control checkout selected and pass `worktree` on each root-scoped call; for an unregistered root pass `project_path`. Use `atlas_set_project_path` only as a single-client process default. Never send both selectors.
