@@ -5,7 +5,7 @@
 ## 2. Unambiguous PR ownership (#639)
 
 - [x] 2.1 Resolve one standalone local ownership reference (closing or explicit non-closing Refs) before incidental upstream changelog links in IssueOps and the protected-base PR-state gate; implement a trusted default-branch workflow_run publisher for the exact current PR head, including Dependabot, and migrate issue-event refreshes to that path; preserve unique-reference compatibility, foreign-reference exclusion, multiple-owner refusal, and milestone checks without executing PR-head code in either privileged workflow.
-- [ ] 2.2 Add causal Dependabot-style positive/negative parser and workflow-provenance tests; prove trusted writable current-head publication, invalid metadata and stale-head refusal, and issue-event refresh at the hosted boundary; remove the temporary legacy pull_request job/event before enforcing the narrow event policy; run IssueOps self-test, affected workflow proof, formatting, and required hosted gates, and resolve review findings.
+- [x] 2.2 Add causal Dependabot-style positive/negative parser and workflow-provenance tests; prove trusted writable current-head publication, invalid metadata and stale-head refusal, and issue-event refresh at the hosted boundary; remove the temporary legacy pull_request job/event before enforcing the narrow event policy; run IssueOps self-test, affected workflow proof, formatting, and required hosted gates, and resolve review findings.
 
 ## 3. JSONC parser dependency (#499)
 
