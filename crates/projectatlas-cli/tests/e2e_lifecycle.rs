@@ -669,12 +669,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()?;
-            if let Some(mut stdin) = child.stdin.take() {
-                if let Err(error) = stdin.write_all(&event) {
-                    if error.kind() != io::ErrorKind::BrokenPipe {
-                        return Err(error.into());
-                    }
-                }
+            if let Some(mut stdin) = child.stdin.take()
+                && let Err(error) = stdin.write_all(&event)
+                && error.kind() != io::ErrorKind::BrokenPipe
+            {
+                return Err(error.into());
             }
             child.wait_with_output()?
         };
