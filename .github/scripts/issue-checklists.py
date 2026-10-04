@@ -1094,49 +1094,15 @@ def pr_state_check_matches(check: object, number: int, head: str) -> bool:
 
 
 def start_pr_state_check(repo: str, number: int, head: str, details_url: str) -> int:
-    checks = gh_api_json(
-        [
-            "--method",
-            "GET",
-            f"repos/{repo}/commits/{head}/check-runs",
-            "-f",
-            "check_name=pr-state",
-            "-f",
-            f"app_id={PR_STATE_CHECK_APP_ID}",
-            "-f",
-            "per_page=100",
-        ]
-    )
-    if not isinstance(checks, dict) or not isinstance(checks.get("check_runs"), list):
-        raise SystemExit("PR-state check-run query did not return a check list")
-    if any(not isinstance(check, dict) for check in checks["check_runs"]):
-        raise SystemExit("PR-state check-run query returned a non-object")
-    existing = next(
-        (
-            check
-            for check in checks["check_runs"]
-            if pr_state_check_matches(check, number, head)
-        ),
-        None,
-    )
-    if existing is None:
-        method, endpoint = "POST", f"repos/{repo}/check-runs"
-        fields = ["name=pr-state", f"head_sha={head}"]
-    else:
-        identifier = existing.get("id")
-        if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier < 1:
-            raise SystemExit("existing PR-state check run had an invalid identity")
-        method, endpoint = "PATCH", f"repos/{repo}/check-runs/{identifier}"
-        fields = []
-    fields.extend(
-        [
-            "status=in_progress",
-            f"external_id=projectatlas-pr-state:{number}:{head}",
-            f"details_url={details_url}",
-        ]
-    )
+    fields = [
+        "name=pr-state",
+        f"head_sha={head}",
+        "status=in_progress",
+        f"external_id=projectatlas-pr-state:{number}:{head}",
+        f"details_url={details_url}",
+    ]
     result = gh_api_json(
-        ["--method", method, endpoint]
+        ["--method", "POST", f"repos/{repo}/check-runs"]
         + [argument for field in fields for argument in ("-f", field)]
     )
     if not isinstance(result, dict):
@@ -3666,34 +3632,7 @@ Mitigations:
     publisher_number = 603
     publisher_external_id = f"projectatlas-pr-state:{publisher_number}:{publisher_head}"
     publisher_details = "https://github.com/owner/repo/actions/runs/123"
-    legacy_job_check: dict[str, object] = {
-        "id": 87,
-        "name": "pr-state",
-        "head_sha": publisher_head,
-        "details_url": "https://github.com/owner/repo/actions/runs/123/job/87",
-        "external_id": "f3a28c77-dd8d-51b6-9514-9be7a9f2c8d3",
-        "status": "completed",
-        "conclusion": "skipped",
-        "app": {"id": PR_STATE_CHECK_APP_ID},
-    }
-    wrong_app_check: dict[str, object] = {
-        "id": 89,
-        "name": "pr-state",
-        "head_sha": publisher_head,
-        "external_id": publisher_external_id,
-        "status": "completed",
-        "app": {"id": PR_STATE_CHECK_APP_ID + 1},
-    }
-    wrong_head_check: dict[str, object] = {
-        "id": 90,
-        "name": "pr-state",
-        "head_sha": "e" * 40,
-        "external_id": publisher_external_id,
-        "status": "completed",
-        "app": {"id": PR_STATE_CHECK_APP_ID},
-    }
-    existing_checks = [wrong_app_check, wrong_head_check, legacy_job_check]
-    created_check: dict[str, object] = {}
+    publisher_checks: list[dict[str, object]] = []
     saved_gh_api_json = globals()["gh_api_json"]
 
     def publisher_api_fixture(args: list[str]) -> object:
@@ -3707,67 +3646,108 @@ Mitigations:
             if "=" in item
             for key, value in (item.split("=", 1),)
         }
-        if path == f"repos/owner/repo/commits/{publisher_head}/check-runs":
-            return {"check_runs": existing_checks}
         if path == "repos/owner/repo/check-runs" and method == "POST":
-            assert not created_check
             assert values["name"] == "pr-state"
             assert values["head_sha"] == publisher_head
             assert values["external_id"] == publisher_external_id
             assert values["details_url"] == publisher_details
-            created_check.update(
-                {
-                    "id": 88,
-                    "name": values["name"],
-                    "head_sha": values["head_sha"],
-                    "external_id": values["external_id"],
-                    "status": values["status"],
-                    "app": {"id": PR_STATE_CHECK_APP_ID},
-                }
+            identifier = 88 + len(publisher_checks)
+            check: dict[str, object] = {
+                "id": identifier,
+                "name": values["name"],
+                "head_sha": values["head_sha"],
+                "external_id": values["external_id"],
+                "details_url": f"https://github.com/owner/repo/runs/{identifier}",
+                "status": values["status"],
+                "conclusion": None,
+                "started_at": "2026-10-04T03:12:29Z",
+                "completed_at": None,
+                "app": {"id": PR_STATE_CHECK_APP_ID},
+            }
+            publisher_checks.append(check)
+            return check
+        check_id = path.rsplit("/", 1)[-1]
+        if path.startswith("repos/owner/repo/check-runs/") and check_id.isdigit():
+            check = next(
+                (item for item in publisher_checks if item.get("id") == int(check_id)),
+                None,
             )
-            existing_checks.append(created_check)
-            return created_check
-        if path == "repos/owner/repo/check-runs/87":
-            raise AssertionError("the publisher must not update a workflow-owned check")
-        if path == "repos/owner/repo/check-runs/88" and method == "GET":
-            return created_check
-        if path == "repos/owner/repo/check-runs/88" and method == "PATCH":
-            created_check.update(
-                {"status": values["status"], "conclusion": values.get("conclusion")}
-            )
-            return created_check
+            assert check is not None
+            if method == "GET":
+                return check
+            if method == "PATCH":
+                assert check["status"] == "in_progress"
+                assert values["status"] == "completed"
+                check.update(
+                    {
+                        "status": values["status"],
+                        "conclusion": values["conclusion"],
+                        "completed_at": "2026-10-04T03:12:31Z",
+                    }
+                )
+                return check
         raise AssertionError(f"unexpected publisher API request: {args}")
 
     try:
         globals()["gh_api_json"] = publisher_api_fixture
-        check_id = start_pr_state_check(
+        first_check_id = start_pr_state_check(
             "owner/repo", publisher_number, publisher_head, publisher_details
         )
-        assert check_id == 88
-        assert (
-            legacy_job_check["external_id"]
-            == "f3a28c77-dd8d-51b6-9514-9be7a9f2c8d3"
-        )
-        assert legacy_job_check["status"] == "completed"
-        created_check["status"] = "completed"
-        reused_id = start_pr_state_check(
-            "owner/repo", publisher_number, publisher_head, publisher_details
-        )
-        assert reused_id == check_id
-        assert created_check["status"] == "in_progress"
+        assert first_check_id == 88
+        first_check = publisher_checks[0]
+        assert first_check["details_url"] == "https://github.com/owner/repo/runs/88"
         complete_pr_state_check(
-            "owner/repo", reused_id, publisher_number, publisher_head, "failure"
+            "owner/repo", first_check_id, publisher_number, publisher_head, "failure"
         )
-        assert created_check["status"] == "completed"
-        assert created_check["conclusion"] == "failure"
-        try:
-            complete_pr_state_check(
-                "owner/repo", reused_id, publisher_number, "e" * 40, "success"
-            )
-        except SystemExit as error:
-            assert "did not match its started check and head" in str(error)
-        else:
-            raise AssertionError("a check run for a different head was completed")
+        first_completed = (
+            first_check["status"],
+            first_check["conclusion"],
+            first_check["started_at"],
+            first_check["completed_at"],
+        )
+        publisher_details = "https://github.com/owner/repo/actions/runs/124"
+        second_check_id = start_pr_state_check(
+            "owner/repo", publisher_number, publisher_head, publisher_details
+        )
+        assert second_check_id == 89
+        second_check = publisher_checks[1]
+        assert second_check["details_url"] == "https://github.com/owner/repo/runs/89"
+        assert second_check["status"] == "in_progress"
+        assert second_check["head_sha"] == publisher_head
+        assert second_check["external_id"] == publisher_external_id
+        assert second_check["app"] == {"id": PR_STATE_CHECK_APP_ID}
+        assert first_completed == (
+            first_check["status"],
+            first_check["conclusion"],
+            first_check["started_at"],
+            first_check["completed_at"],
+        )
+        complete_pr_state_check(
+            "owner/repo", second_check_id, publisher_number, publisher_head, "success"
+        )
+        assert second_check["status"] == "completed"
+        assert second_check["conclusion"] == "success"
+        for field, invalid_value in (
+            ("head_sha", "e" * 40),
+            ("external_id", "projectatlas-pr-state:604:" + publisher_head),
+            ("app", {"id": PR_STATE_CHECK_APP_ID + 1}),
+        ):
+            original_value = second_check[field]
+            second_check[field] = invalid_value
+            try:
+                complete_pr_state_check(
+                    "owner/repo",
+                    second_check_id,
+                    publisher_number,
+                    publisher_head,
+                    "success",
+                )
+            except SystemExit as error:
+                assert "did not match its started check and head" in str(error)
+            else:
+                raise AssertionError(f"a check with the wrong {field} was completed")
+            finally:
+                second_check[field] = original_value
     finally:
         globals()["gh_api_json"] = saved_gh_api_json
     assert candidate_owner_issue_from_subjects(
