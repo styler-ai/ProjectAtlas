@@ -4001,10 +4001,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
         "cancel-in-progress: false",
         "format('pr-state-wakeup|{0}|{1}', github.event.pull_request.number, github.event.pull_request.head.sha)",
-        "pull_request:",
         "pull_request_target:",
         "permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
-        "name: pr-state",
         "name: pr-state-wakeup",
         "permissions: {}",
         "Record trusted PR-state snapshot",
@@ -4022,32 +4020,26 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    let direct_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
-    let wakeup_pr_state_job = workflow_job_block(&pr_state, "pr-state-wakeup")?;
-    let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
-    if !direct_pr_state_job.contains("gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"")
-        || direct_pr_state_job.matches("- name: ").count() != 1
+    let pr_state_events = pr_state
+        .split_once("\nconcurrency:")
+        .map(|(events, _)| events)
+        .ok_or_else(|| io::Error::other("PR-state workflow omitted its concurrency section"))?;
+    let pr_state_jobs = pr_state
+        .split_once("\njobs:")
+        .map(|(_, jobs)| jobs)
+        .ok_or_else(|| io::Error::other("PR-state workflow omitted its jobs section"))?;
+    if pr_state_events
+        .lines()
+        .any(|line| line.trim() == "pull_request:")
+        || pr_state_jobs.lines().any(|line| line.trim() == "pr-state:")
     {
         return Err(io::Error::other(
-            "temporary PR-state bridge must contain only accepted-base inline metadata validation",
+            "PR-state workflow retained the temporary pull_request bridge",
         )
         .into());
     }
-    for forbidden in [
-        "cargo ",
-        "codex-pr-review-gate.py",
-        "npm ci",
-        "--pull-request",
-        "checks: write",
-        "actions/checkout@",
-    ] {
-        if direct_pr_state_job.contains(forbidden) {
-            return Err(io::Error::other(format!(
-                "temporary PR-state bridge includes candidate or privileged work {forbidden:?}"
-            ))
-            .into());
-        }
-    }
+    let wakeup_pr_state_job = workflow_job_block(&pr_state, "pr-state-wakeup")?;
+    let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
     for forbidden in [
         "cargo ",
         "checks: write",
