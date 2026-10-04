@@ -145,7 +145,6 @@ EXPLICIT_QUALIFIED_OWNER_RE = re.compile(
 MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
 PR_STATE_WORKFLOW_RUNS_PER_PAGE = 100
 MAX_PR_STATE_WORKFLOW_RUN_PAGES = 10
-PR_STATE_CHECK_APP_ID = 15368
 PR_STATE_NATIVE_TITLE_RE = re.compile(
     r"^pr-state\|[0-9a-f]{40}\|([1-9][0-9]*)\|([0-9a-f]{40})$"
 )
@@ -980,68 +979,6 @@ def pr_state_live_pull_request(
     return payload
 
 
-def trusted_pr_state_binding(
-    repo: str, event_payload: object
-) -> dict[str, object] | None:
-    if not isinstance(event_payload, dict):
-        raise SystemExit("workflow-run event did not return an object")
-    event_repo = event_payload.get("repository")
-    event_repo_name = event_repo.get("full_name") if isinstance(event_repo, dict) else None
-    if not isinstance(event_repo_name, str) or event_repo_name.casefold() != repo.casefold():
-        raise SystemExit("workflow-run event belongs to a different repository")
-    source = event_payload.get("workflow_run")
-    if not isinstance(source, dict):
-        raise SystemExit("workflow-run event omitted its source run")
-    run_id = source.get("id")
-    if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
-        raise SystemExit("workflow-run event had an invalid source identity")
-    source_run = gh_api_json([f"repos/{repo}/actions/runs/{run_id}"])
-    if not isinstance(source_run, dict) or source_run.get("id") != run_id:
-        raise SystemExit("PR-state source run could not be verified")
-    source_repo = source_run.get("repository")
-    source_repo_name = source_repo.get("full_name") if isinstance(source_repo, dict) else None
-    if not isinstance(source_repo_name, str) or source_repo_name.casefold() != repo.casefold():
-        raise SystemExit("PR-state source run belongs to a different repository")
-    if source_run.get("event") != "pull_request_target":
-        return None
-    if event_payload.get("action") != "completed":
-        return None
-    default_branch = pr_state_default_branch(repo)
-    if (
-        not pr_state_workflow_path(source_run.get("path"), default_branch)
-        or source_run.get("status") != "completed"
-        or source_run.get("conclusion") != "success"
-    ):
-        return None
-    event_attempt = source.get("run_attempt")
-    if (
-        not isinstance(event_attempt, int)
-        or isinstance(event_attempt, bool)
-        or event_attempt < 1
-        or source_run.get("run_attempt") != event_attempt
-    ):
-        return None
-    run_head = source_run.get("head_sha")
-    if (
-        not isinstance(run_head, str)
-        or re.fullmatch(r"[0-9a-f]{40}", run_head) is None
-        or source.get("head_sha") != run_head
-    ):
-        return None
-    title = source_run.get("display_title")
-    match = PR_STATE_NATIVE_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
-    if match is None:
-        return None
-    number, head = int(match.group(1)), match.group(2)
-    pull_request = pr_state_live_pull_request(repo, number, head)
-    if pull_request is None:
-        return None
-    return {
-        "number": number,
-        "head": head,
-    }
-
-
 def validate_pr_state_owner(repo: str, number: int, head: str) -> int:
     pull_request = pr_state_live_pull_request(repo, number, head)
     if pull_request is None:
@@ -1078,77 +1015,6 @@ def validate_pr_state_owner(repo: str, number: int, head: str) -> int:
     if issue_milestone_number != pr_milestone_number:
         raise SystemExit("pull request milestone must match its owning issue")
     return owner_issue
-
-
-def pr_state_check_matches(check: object, number: int, head: str) -> bool:
-    if not isinstance(check, dict):
-        return False
-    app = check.get("app")
-    return (
-        check.get("name") == "pr-state"
-        and check.get("head_sha") == head
-        and check.get("external_id") == f"projectatlas-pr-state:{number}:{head}"
-        and isinstance(app, dict)
-        and app.get("id") == PR_STATE_CHECK_APP_ID
-    )
-
-
-def start_pr_state_check(repo: str, number: int, head: str, details_url: str) -> int:
-    fields = [
-        "name=pr-state",
-        f"head_sha={head}",
-        "status=in_progress",
-        f"external_id=projectatlas-pr-state:{number}:{head}",
-        f"details_url={details_url}",
-    ]
-    result = gh_api_json(
-        ["--method", "POST", f"repos/{repo}/check-runs"]
-        + [argument for field in fields for argument in ("-f", field)]
-    )
-    if not isinstance(result, dict):
-        raise SystemExit("GitHub did not return the started PR-state check")
-    identifier = result.get("id")
-    if (
-        not isinstance(identifier, int)
-        or isinstance(identifier, bool)
-        or identifier < 1
-        or not pr_state_check_matches(result, number, head)
-        or result.get("status") != "in_progress"
-    ):
-        raise SystemExit("GitHub returned a PR-state check for the wrong app or head")
-    return identifier
-
-
-def complete_pr_state_check(
-    repo: str, identifier: int, number: int, head: str, conclusion: str
-) -> None:
-    if conclusion not in ("success", "failure", "cancelled"):
-        raise SystemExit("PR-state check conclusion must be success, failure, or cancelled")
-    check = gh_api_json([f"repos/{repo}/check-runs/{identifier}"])
-    if not pr_state_check_matches(check, number, head):
-        raise SystemExit("PR-state completion did not match its started check and head")
-    result = gh_api_json(
-        [
-            "--method",
-            "PATCH",
-            f"repos/{repo}/check-runs/{identifier}",
-            "-f",
-            "status=completed",
-            "-f",
-            f"conclusion={conclusion}",
-            "-f",
-            "output[title]=PR owner validation",
-            "-f",
-            "output[summary]=Owner issue and milestone validation finished for this exact PR head.",
-        ]
-    )
-    if (
-        not pr_state_check_matches(result, number, head)
-        or result.get("id") != identifier
-        or result.get("status") != "completed"
-        or result.get("conclusion") != conclusion
-    ):
-        raise SystemExit("GitHub did not complete the exact PR-state check")
 
 
 def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
@@ -3311,30 +3177,6 @@ Mitigations:
         else:
             raise AssertionError("foreign qualified owner reference was accepted")
     pr_head = "a" * 40
-    source_head = "b" * 40
-    source_workflow_sha = "c" * 40
-    assert source_head != pr_head
-    source_run = {
-        "id": 77,
-        "name": f"pr-state|{source_workflow_sha}|600|{pr_head}",
-        "path": ".github/workflows/pr-state.yml",
-        "event": "pull_request_target",
-        "head_sha": source_head,
-        "display_title": f"pr-state|{source_workflow_sha}|600|{pr_head}",
-        "status": "completed",
-        "conclusion": "success",
-        "run_attempt": 1,
-        "repository": {"full_name": "owner/repo"},
-    }
-    source_event = {
-        "action": "completed",
-        "repository": {"full_name": "owner/repo"},
-        "workflow_run": {
-            "id": 77,
-            "head_sha": source_head,
-            "run_attempt": 1,
-        },
-    }
     live_pull_request: dict[str, object] = {
         "number": 600,
         "state": "open",
@@ -3351,10 +3193,6 @@ Mitigations:
     saved_gh_api_json = globals()["gh_api_json"]
 
     def owner_api_fixture(args: list[str]) -> object:
-        if args == ["repos/owner/repo"]:
-            return {"default_branch": "main"}
-        if args == ["repos/owner/repo/actions/runs/77"]:
-            return source_run
         if args == ["repos/owner/repo/pulls/600"]:
             return live_pull_request
         if args in (
@@ -3366,10 +3204,6 @@ Mitigations:
 
     try:
         globals()["gh_api_json"] = owner_api_fixture
-        assert trusted_pr_state_binding("owner/repo", source_event) == {
-            "number": 600,
-            "head": pr_head,
-        }
         assert validate_pr_state_owner("owner/repo", 600, pr_head) == 517
         live_pull_request["body"] = refs_body
         assert validate_pr_state_owner("owner/repo", 600, pr_head) == 499
@@ -3379,10 +3213,9 @@ Mitigations:
         except SystemExit as error:
             assert "must not mix closing and non-closing owner references" in str(error)
         else:
-            raise AssertionError("the publisher accepted conflicting closing and Refs owners")
+            raise AssertionError("owner validation accepted conflicting closing and Refs owners")
         live_pull_request["body"] = bot_body
         live_pull_request["head"] = {"sha": "c" * 40}
-        assert trusted_pr_state_binding("owner/repo", source_event) is None
         try:
             validate_pr_state_owner("owner/repo", 600, pr_head)
         except SystemExit as error:
@@ -3390,9 +3223,6 @@ Mitigations:
         else:
             raise AssertionError("a stale pull-request head passed owner validation")
         live_pull_request["head"] = {"sha": pr_head}
-        source_event["workflow_run"]["head_sha"] = "c" * 40
-        assert trusted_pr_state_binding("owner/repo", source_event) is None
-        source_event["workflow_run"]["head_sha"] = source_head
         live_issue["milestone"] = {"number": 2}
         try:
             validate_pr_state_owner("owner/repo", 600, pr_head)
@@ -3408,30 +3238,6 @@ Mitigations:
             assert "must be an open issue" in str(error)
         else:
             raise AssertionError("a closed owning issue was accepted")
-        live_issue["state"] = "open"
-        source_run["path"] = ".github/workflows/pr-state.yml@refs/heads/dev"
-        assert trusted_pr_state_binding("owner/repo", source_event) is None
-        source_run["path"] = ".github/workflows/pr-state.yml"
-        source_run["event"] = "pull_request"
-        assert trusted_pr_state_binding("owner/repo", source_event) is None
-        source_run["event"] = "pull_request_target"
-        source_run["display_title"] = f"pr-state-wakeup|600|{pr_head}"
-        assert trusted_pr_state_binding("owner/repo", source_event) is None
-        source_run["display_title"] = f"pr-state|invalid|600|{pr_head}"
-        assert trusted_pr_state_binding("owner/repo", source_event) is None
-        source_run["display_title"] = f"pr-state|{source_workflow_sha}|600|{pr_head}"
-        try:
-            trusted_pr_state_binding(
-                "owner/repo",
-                {
-                    **source_event,
-                    "repository": {"full_name": "attacker/repo"},
-                },
-            )
-        except SystemExit as error:
-            assert "different repository" in str(error)
-        else:
-            raise AssertionError("a workflow-run event from another repository was accepted")
     finally:
         globals()["gh_api_json"] = saved_gh_api_json
     refresh_pr = {
@@ -3472,6 +3278,8 @@ Mitigations:
         {"number": 600, "head": "a" * 40},
         {"number": 603, "head": "d" * 40},
     ]
+    source_head = "b" * 40
+    source_workflow_sha = "c" * 40
     trusted_refresh_run = {
         "id": 77,
         "name": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
@@ -3632,128 +3440,6 @@ Mitigations:
         for name, function in saved_refresh_functions.items():
             globals()[name] = function
         time.sleep = saved_sleep
-    publisher_head = "d" * 40
-    publisher_number = 603
-    publisher_external_id = f"projectatlas-pr-state:{publisher_number}:{publisher_head}"
-    publisher_details = "https://github.com/owner/repo/actions/runs/123"
-    publisher_checks: list[dict[str, object]] = []
-    saved_gh_api_json = globals()["gh_api_json"]
-
-    def publisher_api_fixture(args: list[str]) -> object:
-        path = next(
-            (item for item in args if item.startswith("repos/owner/repo/")), ""
-        )
-        method = args[args.index("--method") + 1] if "--method" in args else "GET"
-        values = {
-            key: value
-            for item in args
-            if "=" in item
-            for key, value in (item.split("=", 1),)
-        }
-        if path == "repos/owner/repo/check-runs" and method == "POST":
-            assert values["name"] == "pr-state"
-            assert values["head_sha"] == publisher_head
-            assert values["external_id"] == publisher_external_id
-            assert values["details_url"] == publisher_details
-            identifier = 88 + len(publisher_checks)
-            check: dict[str, object] = {
-                "id": identifier,
-                "name": values["name"],
-                "head_sha": values["head_sha"],
-                "external_id": values["external_id"],
-                "details_url": f"https://github.com/owner/repo/runs/{identifier}",
-                "status": values["status"],
-                "conclusion": None,
-                "started_at": "2026-10-04T03:12:29Z",
-                "completed_at": None,
-                "app": {"id": PR_STATE_CHECK_APP_ID},
-            }
-            publisher_checks.append(check)
-            return check
-        check_id = path.rsplit("/", 1)[-1]
-        if path.startswith("repos/owner/repo/check-runs/") and check_id.isdigit():
-            check = next(
-                (item for item in publisher_checks if item.get("id") == int(check_id)),
-                None,
-            )
-            assert check is not None
-            if method == "GET":
-                return check
-            if method == "PATCH":
-                assert check["status"] == "in_progress"
-                assert values["status"] == "completed"
-                check.update(
-                    {
-                        "status": values["status"],
-                        "conclusion": values["conclusion"],
-                        "completed_at": "2026-10-04T03:12:31Z",
-                    }
-                )
-                return check
-        raise AssertionError(f"unexpected publisher API request: {args}")
-
-    try:
-        globals()["gh_api_json"] = publisher_api_fixture
-        first_check_id = start_pr_state_check(
-            "owner/repo", publisher_number, publisher_head, publisher_details
-        )
-        assert first_check_id == 88
-        first_check = publisher_checks[0]
-        assert first_check["details_url"] == "https://github.com/owner/repo/runs/88"
-        complete_pr_state_check(
-            "owner/repo", first_check_id, publisher_number, publisher_head, "failure"
-        )
-        first_completed = (
-            first_check["status"],
-            first_check["conclusion"],
-            first_check["started_at"],
-            first_check["completed_at"],
-        )
-        publisher_details = "https://github.com/owner/repo/actions/runs/124"
-        second_check_id = start_pr_state_check(
-            "owner/repo", publisher_number, publisher_head, publisher_details
-        )
-        assert second_check_id == 89
-        second_check = publisher_checks[1]
-        assert second_check["details_url"] == "https://github.com/owner/repo/runs/89"
-        assert second_check["status"] == "in_progress"
-        assert second_check["head_sha"] == publisher_head
-        assert second_check["external_id"] == publisher_external_id
-        assert second_check["app"] == {"id": PR_STATE_CHECK_APP_ID}
-        assert first_completed == (
-            first_check["status"],
-            first_check["conclusion"],
-            first_check["started_at"],
-            first_check["completed_at"],
-        )
-        complete_pr_state_check(
-            "owner/repo", second_check_id, publisher_number, publisher_head, "success"
-        )
-        assert second_check["status"] == "completed"
-        assert second_check["conclusion"] == "success"
-        for field, invalid_value in (
-            ("head_sha", "e" * 40),
-            ("external_id", "projectatlas-pr-state:604:" + publisher_head),
-            ("app", {"id": PR_STATE_CHECK_APP_ID + 1}),
-        ):
-            original_value = second_check[field]
-            second_check[field] = invalid_value
-            try:
-                complete_pr_state_check(
-                    "owner/repo",
-                    second_check_id,
-                    publisher_number,
-                    publisher_head,
-                    "success",
-                )
-            except SystemExit as error:
-                assert "did not match its started check and head" in str(error)
-            else:
-                raise AssertionError(f"a check with the wrong {field} was completed")
-            finally:
-                second_check[field] = original_value
-    finally:
-        globals()["gh_api_json"] = saved_gh_api_json
     assert candidate_owner_issue_from_subjects(
         "Implement candidate (#517)\nFollow-up candidate (#517)"
     ) == 517
@@ -5934,10 +5620,7 @@ def pr_state_identity(number: str, head: str, command: str) -> tuple[int, str]:
 
 def dispatch_pr_state_command(args: argparse.Namespace) -> bool:
     commands = (
-        ("--trusted-pr-state-event", args.trusted_pr_state_event),
         ("--validate-pr-state-owner", args.validate_pr_state_owner),
-        ("--start-pr-state-check", args.start_pr_state_check),
-        ("--complete-pr-state-check", args.complete_pr_state_check),
         ("--refresh-pr-state-for-issue", args.refresh_pr_state_for_issue),
     )
     selected = [(name, value) for name, value in commands if value is not None]
@@ -5968,43 +5651,10 @@ def dispatch_pr_state_command(args: argparse.Namespace) -> bool:
     ):
         raise SystemExit(f"{command} accepts only --repo and its PR-state arguments")
 
-    if command == "--trusted-pr-state-event":
-        try:
-            event_payload = json.loads(Path(value).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise SystemExit(f"cannot read workflow-run event: {error}") from error
-        binding = trusted_pr_state_binding(args.repo, event_payload)
-        if binding is None:
-            print("publish=false")
-        else:
-            print("publish=true")
-            print(f"number={binding['number']}")
-            print(f"head={binding['head']}")
-    elif command == "--validate-pr-state-owner":
+    if command == "--validate-pr-state-owner":
         number_text, head_text = value
         number, head = pr_state_identity(number_text, head_text, command)
         print(f"owner_issue={validate_pr_state_owner(args.repo, number, head)}")
-    elif command == "--start-pr-state-check":
-        number_text, head_text = value
-        number, head = pr_state_identity(number_text, head_text, command)
-        server = os.environ.get("GITHUB_SERVER_URL", "")
-        run_id = os.environ.get("GITHUB_RUN_ID", "")
-        if (
-            os.environ.get("GITHUB_REPOSITORY", "").casefold() != args.repo.casefold()
-            or re.fullmatch(r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?", server) is None
-            or re.fullmatch(r"[1-9][0-9]*", run_id) is None
-        ):
-            raise SystemExit("PR-state check requires the current GitHub Actions run identity")
-        details_url = f"{server}/{args.repo}/actions/runs/{run_id}"
-        print(f"check_id={start_pr_state_check(args.repo, number, head, details_url)}")
-    elif command == "--complete-pr-state-check":
-        identifier_text, number_text, head, conclusion = value
-        if re.fullmatch(r"[1-9][0-9]*", identifier_text) is None:
-            raise SystemExit("PR-state check completion requires a positive check-run ID")
-        number, head = pr_state_identity(number_text, head, command)
-        complete_pr_state_check(
-            args.repo, int(identifier_text), number, head, conclusion
-        )
     else:
         refresh_pr_state_for_issue(args.repo, value)
     return True
@@ -6022,14 +5672,7 @@ def main() -> None:
     parser.add_argument("--candidate-issue", type=int)
     parser.add_argument("--candidate-local-oid")
     parser.add_argument("--refresh-pr-state-for-issue", type=int)
-    parser.add_argument("--trusted-pr-state-event")
     parser.add_argument("--validate-pr-state-owner", nargs=2, metavar=("NUMBER", "HEAD"))
-    parser.add_argument("--start-pr-state-check", nargs=2, metavar=("NUMBER", "HEAD"))
-    parser.add_argument(
-        "--complete-pr-state-check",
-        nargs=4,
-        metavar=("ID", "NUMBER", "HEAD", "CONCLUSION"),
-    )
     parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--owner-from-commits", action="store_true")
