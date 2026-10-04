@@ -1,0 +1,75 @@
+name: PR state publisher
+run-name: PR state publisher | ${{ github.workflow_sha }} | ${{ github.event.workflow_run.id }}
+
+on:
+  workflow_run:
+    workflows: [PR state]
+    types: [completed]
+
+concurrency:
+  group: projectatlas-pr-state-publish-${{ github.event.workflow_run.display_title || github.event.workflow_run.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.workflow_run.event == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+
+      - name: Verify trusted source and current pull-request head
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 .github/scripts/issue-checklists.py
+          --repo "$GITHUB_REPOSITORY"
+          --trusted-pr-state-event "$GITHUB_EVENT_PATH"
+          >> "$GITHUB_OUTPUT"
+
+      - name: Start exact-head owner check
+        id: owner-check
+        if: steps.source.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.source.outputs.number }}
+          PR_HEAD_SHA: ${{ steps.source.outputs.head }}
+        run: >-
+          python3 .github/scripts/issue-checklists.py
+          --repo "$GITHUB_REPOSITORY"
+          --start-pr-state-check "$PR_NUMBER" "$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Validate current owner and milestone
+        id: validate-owner
+        if: steps.source.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.source.outputs.number }}
+          PR_HEAD_SHA: ${{ steps.source.outputs.head }}
+        run: >-
+          python3 .github/scripts/issue-checklists.py
+          --repo "$GITHUB_REPOSITORY"
+          --validate-pr-state-owner "$PR_NUMBER" "$PR_HEAD_SHA"
+
+      - name: Complete exact-head owner check
+        if: always() && steps.owner-check.outputs.check_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_ID: ${{ steps.owner-check.outputs.check_id }}
+          PR_NUMBER: ${{ steps.source.outputs.number }}
+          PR_HEAD_SHA: ${{ steps.source.outputs.head }}
+          CHECK_CONCLUSION: ${{ steps.validate-owner.outcome == 'success' && 'success' || (job.status == 'cancelled' && 'cancelled' || 'failure') }}
+        run: >-
+          python3 .github/scripts/issue-checklists.py
+          --repo "$GITHUB_REPOSITORY"
+          --complete-pr-state-check "$CHECK_ID" "$PR_NUMBER" "$PR_HEAD_SHA" "$CHECK_CONCLUSION"
