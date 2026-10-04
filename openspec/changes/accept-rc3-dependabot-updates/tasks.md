@@ -4,8 +4,8 @@
 
 ## 2. Unambiguous PR ownership (#639)
 
-- [ ] 2.1 Resolve one standalone local ownership reference (closing or explicit non-closing Refs) before incidental upstream changelog links in IssueOps and a native protected-base pull_request_target PR-state job for the exact current PR head, including Dependabot; refresh issue changes by rerunning that eligible source; preserve unique-reference compatibility, foreign-reference exclusion, multiple-owner refusal, and milestone checks with read-only metadata validation and no PR-head code execution.
-- [ ] 2.2 Add causal Dependabot-style positive/negative parser and workflow-provenance tests; prove the native eligible job's current-head result and actual required-gate readiness, invalid metadata and stale-head refusal, and issue-event refresh at the hosted boundary; remove the temporary legacy pull_request job/event and bootstrap bridge, retire the obsolete custom publisher, and enforce the final narrow event policy; run IssueOps self-test, affected workflow proof, formatting, and required hosted gates, and resolve review findings.
+- [x] 2.1 Resolve one standalone local ownership reference (closing or explicit non-closing Refs) before incidental upstream changelog links in IssueOps and a native protected-base pull_request_target PR-state job for the exact current PR head, including Dependabot; refresh issue changes by rerunning that eligible source; preserve unique-reference compatibility, foreign-reference exclusion, multiple-owner refusal, and milestone checks with read-only metadata validation and no PR-head code execution.
+- [x] 2.2 Add causal Dependabot-style positive/negative parser and workflow-provenance tests; prove the native eligible job's current-head result and actual required-gate readiness, invalid metadata and stale-head refusal, and issue-event refresh at the hosted boundary; remove the temporary legacy pull_request job/event and bootstrap bridge, retire the obsolete custom publisher, and enforce the final narrow event policy; run IssueOps self-test, affected workflow proof, formatting, and required hosted gates, and resolve review findings.
 
 ## 3. JSONC parser dependency (#499)
 
