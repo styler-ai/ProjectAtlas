@@ -3810,13 +3810,16 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         }
     }
     for required in [
+        "def pull_request_owner_issue(",
+        "def validate_pr_state_owner(",
+        "PR_STATE_NATIVE_TITLE_RE",
         "pull request must reference exactly one owning issue",
         "pull request owner must be an open issue",
-        "Pull request milestone must match owning issue",
+        "pull request milestone must match its owning issue",
     ] {
-        if !pr_state.contains(required) {
+        if !issueops.contains(required) {
             return Err(io::Error::other(format!(
-                "pr-state omitted ownership boundary {required:?}"
+                "IssueOps PR-state implementation omitted ownership boundary {required:?}"
             ))
             .into());
         }
@@ -3992,46 +3995,93 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "types: [closed, reopened, edited, labeled, unlabeled, milestoned, demilestoned]",
         "group: projectatlas-pr-state-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}",
         "cancel-in-progress: false",
+        "format('pr-state|{0}|{1}|{2}', github.workflow_sha, github.event.pull_request.number, github.event.pull_request.head.sha)",
+        "pull_request_target:",
+        "permissions:\n  contents: read\n  issues: read\n  pull-requests: read",
         "name: pr-state",
-        "if: github.event_name == 'pull_request'",
+        "ref: ${{ github.workflow_sha }}",
+        "persist-credentials: false",
+        "--validate-pr-state-owner \"$PR_NUMBER\" \"$PR_HEAD_SHA\"",
         "name: refresh-pr-state",
-        "if: github.event_name == 'issues'",
+        "if: github.event_name == 'issues' && github.event.issue.pull_request == null",
         "timeout-minutes: 2",
         "actions: write",
         "--refresh-pr-state-for-issue",
-        "Validate issue reference and milestone",
-        "gh api \"repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER\"",
-        "name: Validate IssueOps",
-        "ref: ${{ github.event.pull_request.head.sha }}",
-        "--pull-request \"$PR_NUMBER\"",
-        "--base \"$PR_BASE_SHA\"",
+        "ref: ${{ github.event.repository.default_branch }}",
     ] {
         if !pr_state.contains(required) {
             return Err(io::Error::other(format!(
-                "PR-state workflow omitted live metadata contract {required:?}"
+                "PR-state wakeup or refresh workflow omitted contract {required:?}"
             ))
             .into());
         }
     }
-    let direct_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
-    let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
-    for forbidden in ["cargo ", "codex-pr-review-gate.py"] {
-        if direct_pr_state_job.contains(forbidden) {
-            return Err(io::Error::other(format!(
-                "direct PR-state validation retained unrelated source work {forbidden:?}"
-            ))
-            .into());
-        }
-    }
-    if direct_pr_state_job.contains("github.event.action == 'edited'") {
+    let pr_state_events = pr_state
+        .split_once("\nconcurrency:")
+        .map(|(events, _)| events)
+        .ok_or_else(|| io::Error::other("PR-state workflow omitted its concurrency section"))?;
+    if pr_state_events
+        .lines()
+        .any(|line| line.trim() == "pull_request:")
+    {
         return Err(io::Error::other(
-            "PR-state IssueOps validation must run for every pull-request event",
+            "protected PR-state workflow retained the legacy pull_request trigger",
+        )
+        .into());
+    }
+    let native_pr_state_job = workflow_job_block(&pr_state, "pr-state")?;
+    let refresh_pr_state_job = workflow_job_block(&pr_state, "refresh-pr-state")?;
+    if native_pr_state_job
+        .matches("uses: actions/checkout@")
+        .count()
+        != 1
+        || !native_pr_state_job.contains("ref: ${{ github.workflow_sha }}")
+        || !native_pr_state_job.contains("persist-credentials: false")
+        || !native_pr_state_job.contains(
+            "permissions:\n      contents: read\n      issues: read\n      pull-requests: read",
+        )
+    {
+        return Err(io::Error::other(
+            "native PR-state check must execute only the protected workflow revision",
         )
         .into());
     }
     for forbidden in [
         "cargo ",
+        "npm install",
+        "git fetch",
+        "github.event.pull_request.head.ref",
+        "checks: write",
+        "contents: write",
+        "pull-requests: write",
+        "actions: write",
+    ] {
+        if native_pr_state_job.contains(forbidden) {
+            return Err(io::Error::other(format!(
+                "native PR-state check must not execute candidate or write behavior {forbidden:?}"
+            ))
+            .into());
+        }
+    }
+    if ci.contains("pr-state-bootstrap:") || workflows.join("pr-state-publish.yml").exists() {
+        return Err(io::Error::other("retired PR-state bootstrap or publisher remains").into());
+    }
+    for retired in [
+        "--trusted-pr-state-event",
+        "--start-pr-state-check",
+        "--complete-pr-state-check",
+    ] {
+        if issueops.contains(retired) {
+            return Err(io::Error::other(format!(
+                "retired PR-state publisher command remains: {retired}"
+            ))
+            .into());
+        }
+    }
+    for forbidden in [
+        "cargo ",
         "github.event.pull_request.head",
+        "checks: write",
         "continue-on-error: true",
     ] {
         if refresh_pr_state_job.contains(forbidden) {
@@ -4055,6 +4105,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "not in (\"main\", \"dev\")",
         "open pull-request inventory reached the refresh bound",
         "actions/workflows/pr-state.yml/runs",
+        "event=pull_request_target",
+        "display_title",
+        "pr_state_workflow_path",
         "actions/runs/{workflow_run['id']}/rerun",
         "no PR-state workflow run found",
     ] {
@@ -4217,6 +4270,7 @@ gate_status={gate_status}
         "timeout-minutes: 5",
         "contents: read",
         "issues: read",
+        "if: github.event_name == 'workflow_dispatch' || (github.event_name == 'issues' && github.event.issue.pull_request == null)",
     ] {
         if !issueops_workflow.contains(required) {
             return Err(io::Error::other(format!(
@@ -4224,6 +4278,10 @@ gate_status={gate_status}
             ))
             .into());
         }
+    }
+    let issue_contract_job = workflow_job_block(&issueops_workflow, "issue-contract")?;
+    if !issue_contract_job.contains("github.event.issue.pull_request == null") {
+        return Err(io::Error::other("IssueOps job must ignore pull-request issue events").into());
     }
     let prepublish_input = release
         .split("      prepublish_only:")
@@ -6938,12 +6996,13 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         fs::write(&log, "")?;
         let skip_registry_update = field == "env";
         let rejected = run(false, skip_registry_update)?;
+        let normalized_rejected = rejected.split_whitespace().collect::<Vec<_>>().join(" ");
         let calls = fs::read_to_string(&log)?;
         if receipt_path.exists()
             || calls.contains("mcp remove projectatlas") == skip_registry_update
             || calls.contains("mcp add projectatlas")
             || fs::read(&db)? != prior_db
-            || !rejected.contains(if skip_registry_update {
+            || !normalized_rejected.contains(if skip_registry_update {
                 "Codex MCP registry update skipped"
             } else {
                 "could not remove stale global projectatlas server"
@@ -6958,12 +7017,14 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
     fs::remove_file(&state)?;
     fs::write(&log, "")?;
     let ambiguous = run(true, false)?;
+    let normalized_ambiguous = ambiguous.split_whitespace().collect::<Vec<_>>().join(" ");
     let calls = fs::read_to_string(&log)?;
     if state.exists()
         || calls.contains("mcp add projectatlas")
         || calls.contains("mcp remove projectatlas")
         || fs::read(&db)? != prior_db
-        || !ambiguous.contains("could not confirm that the global projectatlas entry is absent")
+        || !normalized_ambiguous
+            .contains("could not confirm that the global projectatlas entry is absent")
     {
         return Err(io::Error::other(format!(
             "ambiguous registry inventory did not fail closed: {ambiguous}\n{calls}"
@@ -15558,10 +15619,14 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         String::from_utf8_lossy(&installer_output.stderr)
     );
     let fake_codex_calls = fs::read_to_string(isolated_home.join(FAKE_CODEX_LOG_FILE))?;
-    if installer_output_text.contains("Codex ProjectAtlas plugin marketplace updated")
-        || installer_output_text.contains("Codex ProjectAtlas plugin skill verified")
-        || !installer_output_text.contains("Codex ProjectAtlas plugin update failed")
-        || !installer_output_text.contains(
+    let normalized_installer_output = installer_output_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized_installer_output.contains("Codex ProjectAtlas plugin marketplace updated")
+        || normalized_installer_output.contains("Codex ProjectAtlas plugin skill verified")
+        || !normalized_installer_output.contains("Codex ProjectAtlas plugin update failed")
+        || !normalized_installer_output.contains(
             "Codex MCP registry update skipped: could not confirm that the global projectatlas entry is absent",
         )
     {
@@ -31607,6 +31672,39 @@ fn require_schema_version_mismatch(
 
 #[test]
 fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), Box<dyn Error>> {
+    macro_rules! fixture_file_operation {
+        (remove $path:expr) => {{
+            let path = $path;
+            std::fs::remove_file(&path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "fixture fs::remove_file failed at {}:{} for {}: {error}",
+                        file!(),
+                        line!(),
+                        path.display()
+                    ),
+                )
+            })
+        }};
+        (rename $from:expr, $to:expr) => {{
+            let from = $from;
+            let to = $to;
+            std::fs::rename(&from, &to).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "fixture fs::rename failed at {}:{} from {} to {}: {error}",
+                        file!(),
+                        line!(),
+                        from.display(),
+                        to.display()
+                    ),
+                )
+            })
+        }};
+    }
+
     let temp = tempfile::tempdir()?;
     #[cfg(unix)]
     let fixture_root = temp.path().canonicalize()?;
@@ -31856,7 +31954,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 .iter()
                 .any(|prefix| entry.file_name().to_string_lossy().starts_with(prefix))
             {
-                fs::remove_file(entry.path())?;
+                fixture_file_operation!(remove entry.path())?;
             }
         }
         Ok(())
@@ -31944,7 +32042,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "unmanaged atlas collision was not rejected before installer mutation:\n{collision_text}"
         ),
     )?;
-    fs::remove_file(&forwarder)?;
+    fixture_file_operation!(remove & forwarder)?;
 
     #[cfg(unix)]
     require(
@@ -32049,7 +32147,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     let retained_state = fs::read(&installer_state)?;
     let retained_forwarder = forwarder.with_extension("retained");
-    fs::rename(&forwarder, &retained_forwarder)?;
+    fixture_file_operation!(rename & forwarder, &retained_forwarder)?;
     fs::write(&provenance, "unmanaged provenance\n")?;
     require(
         !run_install()?.status.success()
@@ -32059,7 +32157,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         "missing-forwarder repair changed retained ownership after rejecting malformed provenance",
     )?;
     fs::write(&provenance, &expected_provenance)?;
-    fs::rename(&retained_forwarder, &forwarder)?;
+    fixture_file_operation!(rename & retained_forwarder, &forwarder)?;
 
     #[cfg(unix)]
     {
@@ -32192,7 +32290,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 String::from_utf8_lossy(&update.stderr)
             ),
         )?;
-        fs::remove_file(&forwarder)?;
+        fixture_file_operation!(remove & forwarder)?;
         require(
             run_with_runtime_casing(false)?.status.success()
                 && fs::read(&forwarder)? == expected_forwarder_bytes
@@ -32222,7 +32320,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 && fs::read(&installer_state)? == retained_state,
             "native alias collision changed authenticated ownership",
         )?;
-        fs::remove_file(&forwarder)?;
+        fixture_file_operation!(remove & forwarder)?;
         fs::write(&forwarder, &expected_forwarder_bytes)?;
     }
 
@@ -32278,9 +32376,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     // state while that owner is between state and provenance publication. Kill
     // the exact paused owner to prove the native lifecycle lock is released by
     // interruption before the contender safely repairs and completes the pair.
-    fs::remove_file(&forwarder)?;
-    fs::remove_file(&provenance)?;
-    fs::remove_file(&installer_state)?;
+    fixture_file_operation!(remove & forwarder)?;
+    fixture_file_operation!(remove & provenance)?;
+    fixture_file_operation!(remove & installer_state)?;
     let lifecycle_gate = fixture_root.join("atlas-forwarder-lifecycle.gate");
     let lifecycle_ready = PathBuf::from(format!("{}.ready", lifecycle_gate.display()));
     fs::write(&lifecycle_gate, b"hold\n")?;
@@ -32370,8 +32468,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     )?;
     paused_install.kill()?;
     let paused_output = paused_install.wait_with_output()?;
-    fs::remove_file(&lifecycle_gate)?;
-    fs::remove_file(&lifecycle_ready)?;
+    fixture_file_operation!(remove & lifecycle_gate)?;
+    fixture_file_operation!(remove & lifecycle_ready)?;
     let contending_output = wait_for_plugin_installer_output(
         contending_install,
         "contending forwarder lifecycle",
@@ -32397,9 +32495,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     #[cfg(unix)]
     {
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         let early_collision = run_install_with_env(
             "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_CHECK_RACE_PATH",
             &provenance,
@@ -32428,7 +32526,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "early provenance collision retained orphaned or unrelated state:\n{early_collision_text}"
             ),
         )?;
-        fs::remove_file(&provenance)?;
+        fixture_file_operation!(remove & provenance)?;
         let repaired_output = run_install()?;
         require(
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
@@ -32439,9 +32537,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             ),
         )?;
 
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         let publication_collision = run_install_with_env(
             "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
             &provenance,
@@ -32462,7 +32560,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "provenance publication collision retained orphaned or unrelated state:\n{publication_collision_text}"
             ),
         )?;
-        fs::remove_file(&provenance)?;
+        fixture_file_operation!(remove & provenance)?;
         let repaired_output = run_install()?;
         require(
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
@@ -32473,9 +32571,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             ),
         )?;
 
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         let cleanup_failure = run_install_with_provenance_and_state_failure(&provenance)?;
         let cleanup_failure_text = format!(
             "{}\n{}",
@@ -32495,7 +32593,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             ),
         )?;
         let retained_state_content = fs::read(&installer_state)?;
-        fs::remove_file(&provenance)?;
+        fixture_file_operation!(remove & provenance)?;
         let retained_state = run_install_with_state_failure()?;
         let retained_state_text = format!(
             "{}\n{}",
@@ -32512,7 +32610,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 && fs::read(&unrelated_state)? == unrelated_state_content,
             format!("retained state was reused after cleanup failure:\n{retained_state_text}"),
         )?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & installer_state)?;
         let repaired_output = run_install()?;
         require(
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
@@ -32526,9 +32624,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
     #[cfg(windows)]
     {
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         let publication_collision = run_install_with_env(
             "PROJECTATLAS_TEST_ATLAS_FORWARDER_PROVENANCE_RACE_PATH",
             &provenance,
@@ -32554,7 +32652,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "Windows provenance publication collision retained orphaned or unrelated state:\n{publication_collision_text}"
             ),
         )?;
-        fs::remove_file(&provenance)?;
+        fixture_file_operation!(remove & provenance)?;
         let repaired_output = run_install()?;
         require(
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
@@ -32565,9 +32663,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             ),
         )?;
 
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         let cleanup_failure = run_install_with_provenance_and_state_failure(&provenance)?;
         let cleanup_failure_text = format!(
             "{}\n{}",
@@ -32597,7 +32695,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             ),
         )?;
         let retained_state_content = fs::read(&installer_state)?;
-        fs::remove_file(&provenance)?;
+        fixture_file_operation!(remove & provenance)?;
         let retained_state = run_install_with_state_failure()?;
         let retained_state_text = format!(
             "{}\n{}",
@@ -32616,7 +32714,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "Windows retained state was reused after cleanup failure:\n{retained_state_text}"
             ),
         )?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & installer_state)?;
         let repaired_output = run_install()?;
         require(
             repaired_output.status.success() && forwarder.is_file() && provenance.is_file(),
@@ -32628,7 +32726,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         )?;
     }
 
-    fs::remove_file(&unrelated_state)?;
+    fixture_file_operation!(remove & unrelated_state)?;
 
     let direct_database = fixture_root.join("direct database with spaces.db");
     let alias_database = fixture_root.join("alias database with spaces.db");
@@ -32964,7 +33062,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         "atlas-hardlink-source"
     });
     fs::copy(&forwarder, &hardlink_source)?;
-    fs::remove_file(&forwarder)?;
+    fixture_file_operation!(remove & forwarder)?;
     fs::hard_link(&hardlink_source, &forwarder)?;
     let hardlink_output = run_install()?;
     let hardlink_text = format!(
@@ -32979,8 +33077,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             && fs::read_to_string(&provenance)? == expected_provenance,
         format!("installer accepted or modified a hard-linked atlas forwarder:\n{hardlink_text}"),
     )?;
-    fs::remove_file(&forwarder)?;
-    fs::remove_file(&hardlink_source)?;
+    fixture_file_operation!(remove & forwarder)?;
+    fixture_file_operation!(remove & hardlink_source)?;
     require(
         run_install()?.status.success() && forwarder.is_file() && provenance.is_file(),
         "installer could not repair the hard-link collision without losing provenance",
@@ -32992,7 +33090,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
 
         let symlink_source = fixture_root.join("atlas-symlink-source");
         fs::copy(&forwarder, &symlink_source)?;
-        fs::remove_file(&forwarder)?;
+        fixture_file_operation!(remove & forwarder)?;
         symlink(&symlink_source, &forwarder)?;
         let symlink_output = run_install()?;
         let symlink_text = format!(
@@ -33007,8 +33105,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 && fs::read_to_string(&provenance)? == expected_provenance,
             format!("installer accepted or modified a symlinked atlas forwarder:\n{symlink_text}"),
         )?;
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&symlink_source)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & symlink_source)?;
         require(
             run_install()?.status.success() && forwarder.is_file() && provenance.is_file(),
             "installer could not repair the symlink collision without losing provenance",
@@ -33068,7 +33166,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "installer shadowed an effective PATH atlas collision:\n{effective_collision_text}"
         ),
     )?;
-    fs::remove_file(&effective_collision_path)?;
+    fixture_file_operation!(remove & effective_collision_path)?;
 
     #[cfg(windows)]
     {
@@ -33079,7 +33177,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         let native_before_invalid_runtime = fs::read(&forwarder)?;
         let provenance_before_invalid_runtime = fs::read(&provenance)?;
         let state_before_invalid_runtime = fs::read(&installer_state)?;
-        fs::rename(&runtime, &retained_runtime)?;
+        fixture_file_operation!(rename & runtime, &retained_runtime)?;
         fs::write(&runtime, b"unrelated invalid runtime")?;
         fs::write(&forwarder, b"foreign native alias")?;
         let invalid_runtime_uninstall = run_uninstall()?;
@@ -33098,8 +33196,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "uninstall accepted a foreign native alias after runtime invalidation:\n{invalid_runtime_uninstall_text}"
             ),
         )?;
-        fs::remove_file(&runtime)?;
-        fs::rename(&retained_runtime, &runtime)?;
+        fixture_file_operation!(remove & runtime)?;
+        fixture_file_operation!(rename & retained_runtime, &runtime)?;
         fs::write(&forwarder, &native_before_invalid_runtime)?;
 
         let sibling = runtime
@@ -33145,12 +33243,12 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "uninstall partially removed the native alias before rejecting atlas.cmd:\n{sibling_uninstall_text}"
             ),
         )?;
-        fs::remove_file(sibling)?;
+        fixture_file_operation!(remove sibling)?;
     }
 
-    fs::remove_file(&forwarder)?;
-    fs::remove_file(&provenance)?;
-    fs::remove_file(&installer_state)?;
+    fixture_file_operation!(remove & forwarder)?;
+    fixture_file_operation!(remove & provenance)?;
+    fixture_file_operation!(remove & installer_state)?;
     let valid_foreign_forwarder = if cfg!(windows) {
         format!(
             "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem ProjectAtlas managed atlas forwarder.\r\nrem target: {}\r\n\"{}\" %*\r\nset \"exit_code=%ERRORLEVEL%\"\r\nendlocal & exit /b %exit_code%\r\n",
@@ -33197,8 +33295,8 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "installer uninstall accepted a foreign marker forwarder:\n{rejected_uninstall_text}"
         ),
     )?;
-    fs::remove_file(&forwarder)?;
-    fs::remove_file(&provenance)?;
+    fixture_file_operation!(remove & forwarder)?;
+    fixture_file_operation!(remove & provenance)?;
     require(
         run_install()?.status.success(),
         "installer could not repair the removed managed atlas forwarder",
@@ -33222,7 +33320,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "uninstall deleted or failed to preserve a concurrent forwarder replacement:\n{forwarder_retirement_race_text}"
         ),
     )?;
-    fs::remove_file(&forwarder)?;
+    fixture_file_operation!(remove & forwarder)?;
     fs::write(&forwarder, &forwarder_bytes)?;
     clear_retirement_quarantine(
         runtime
@@ -33248,7 +33346,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             "uninstall deleted or failed to preserve a concurrent provenance replacement:\n{provenance_retirement_race_text}"
         ),
     )?;
-    fs::remove_file(&provenance)?;
+    fixture_file_operation!(remove & provenance)?;
     fs::write(&provenance, &expected_provenance)?;
     clear_retirement_quarantine(
         runtime
@@ -33256,7 +33354,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?,
     )?;
 
-    fs::remove_file(&forwarder)?;
+    fixture_file_operation!(remove & forwarder)?;
     let retained_provenance = fs::read(&provenance)?;
     let retained_capability = fs::read(&installer_state)?;
     fs::write(&provenance, b"unrelated provenance")?;
@@ -33280,7 +33378,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             && fs::read(&installer_state)? == retained_capability,
         "missing-forwarder uninstall failed to restore owned metadata after retirement failure",
     )?;
-    fs::remove_file(&provenance)?;
+    fixture_file_operation!(remove & provenance)?;
     require(
         !run_uninstall()?.status.success()
             && !forwarder.exists()
@@ -33292,9 +33390,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         .parent()
         .ok_or_else(|| io::Error::other("runtime fixture directory missing"))?;
     let retained_runtime_directory = fixture_root.join("retained runtime directory");
-    fs::rename(runtime_directory, &retained_runtime_directory)?;
+    fixture_file_operation!(rename runtime_directory, &retained_runtime_directory)?;
     let missing_runtime_uninstall = run_uninstall()?;
-    fs::rename(&retained_runtime_directory, runtime_directory)?;
+    fixture_file_operation!(rename & retained_runtime_directory, runtime_directory)?;
     require(
         !missing_runtime_uninstall.status.success()
             && !forwarder.exists()
@@ -33334,12 +33432,12 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         [(false, true), (false, false), (true, true), (true, false)]
     {
         let retained_runtime = fixture_root.join("retained uninstall runtime");
-        fs::rename(&runtime, &retained_runtime)?;
+        fixture_file_operation!(rename & runtime, &retained_runtime)?;
         if invalid_runtime_file {
             fs::write(&runtime, b"unrelated non-executable runtime content")?;
         }
         if !forwarder_present {
-            fs::remove_file(&forwarder)?;
+            fixture_file_operation!(remove & forwarder)?;
         }
         let owned_provenance = fs::read(&provenance)?;
         let owned_state = fs::read(&installer_state)?;
@@ -33355,10 +33453,10 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
         #[cfg(target_os = "macos")]
         {
             let unavailable_helper = home.join("retained lifecycle helper");
-            fs::rename(&retirement_helper, &unavailable_helper)?;
+            fixture_file_operation!(rename & retirement_helper, &unavailable_helper)?;
             let no_helper =
                 run_uninstall_with_env("PATH", Path::new("/usr/bin:/bin:/usr/sbin:/sbin"))?;
-            fs::rename(&unavailable_helper, &retirement_helper)?;
+            fixture_file_operation!(rename & unavailable_helper, &retirement_helper)?;
             require(
                 !no_helper.status.success()
                     && String::from_utf8_lossy(&no_helper.stderr)
@@ -33391,22 +33489,22 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 fs::read(&runtime)? == b"unrelated non-executable runtime content",
                 "forwarder retirement changed the unrelated runtime file",
             )?;
-            fs::remove_file(&runtime)?;
+            fixture_file_operation!(remove & runtime)?;
         }
-        fs::rename(&retained_runtime, &runtime)?;
+        fixture_file_operation!(rename & retained_runtime, &runtime)?;
         require(
             run_install()?.status.success(),
             "runtime restoration did not permit forwarder reinstall",
         )?;
     }
     #[cfg(unix)]
-    fs::remove_file(&retirement_helper)?;
+    fixture_file_operation!(remove & retirement_helper)?;
 
     #[cfg(windows)]
     for forwarder_present in [true, false] {
         clear_retirement_quarantine(runtime_directory)?;
         if !forwarder_present {
-            fs::remove_file(&forwarder)?;
+            fixture_file_operation!(remove & forwarder)?;
         }
         let committed_cleanup = run_uninstall_with_env(
             "PROJECTATLAS_TEST_ATLAS_FORWARDER_QUARANTINE_CLEANUP_FAILURE",
@@ -33531,7 +33629,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
                 "alternate runtime install failed",
             )?;
             if missing_forwarder {
-                fs::remove_file(&alternate_forwarder)?;
+                fixture_file_operation!(remove & alternate_forwarder)?;
             }
             let mut uninstall = if cfg!(windows) {
                 let mut command = StdCommand::new("powershell");
@@ -33643,9 +33741,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             legacy_forwarder.display(),
             runtime.display(),
         );
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         fs::write(&legacy_forwarder, &legacy_body)?;
         fs::write(&legacy_provenance, &legacy_provenance_content)?;
         fs::write(&legacy_state_path, &legacy_state_content)?;
@@ -33666,9 +33764,9 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
             run_install()?.status.success(),
             "legacy migration fixture could not reinstall the native alias after explicit RC1 uninstall",
         )?;
-        fs::remove_file(&forwarder)?;
-        fs::remove_file(&provenance)?;
-        fs::remove_file(&installer_state)?;
+        fixture_file_operation!(remove & forwarder)?;
+        fixture_file_operation!(remove & provenance)?;
+        fixture_file_operation!(remove & installer_state)?;
         fs::write(&legacy_forwarder, &legacy_body)?;
         fs::write(&legacy_provenance, &legacy_provenance_content)?;
         fs::write(&legacy_state_path, &legacy_state_content)?;

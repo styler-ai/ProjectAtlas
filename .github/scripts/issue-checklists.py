@@ -133,7 +133,21 @@ REQUIRED_DESIGN_HEADINGS = {
 ISSUE_REFERENCE_RE = re.compile(
     r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
 )
+EXPLICIT_OWNER_RE = re.compile(
+    r"^(Fixes|Closes|Resolves|Refs) #([1-9][0-9]*)[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+EXPLICIT_QUALIFIED_OWNER_RE = re.compile(
+    r"^(?:Fixes|Closes|Resolves|Refs)[ \t]+"
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[1-9][0-9]*[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
 MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
+PR_STATE_WORKFLOW_RUNS_PER_PAGE = 100
+MAX_PR_STATE_WORKFLOW_RUN_PAGES = 10
+PR_STATE_NATIVE_TITLE_RE = re.compile(
+    r"^pr-state\|[0-9a-f]{40}\|([1-9][0-9]*)\|([0-9a-f]{40})$"
+)
 COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
 COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^)]*)\)")
 ISSUE_STATE_QUERY = """
@@ -765,10 +779,38 @@ def referenced_issue_numbers(
     return sorted(numbers)
 
 
+def explicit_owner_numbers(repo: str, body: str) -> list[int]:
+    """Prefer one local owner-reference kind over incidental changelog links."""
+
+    body = visible_markdown(body)
+    if any(
+        qualified_repo.casefold() != repo.casefold()
+        for qualified_repo in EXPLICIT_QUALIFIED_OWNER_RE.findall(body)
+    ):
+        raise SystemExit("pull request ownership reference must name this repository")
+    owners = EXPLICIT_OWNER_RE.findall(body)
+    closing = {int(number) for kind, number in owners if kind.casefold() != "refs"}
+    non_closing = {int(number) for kind, number in owners if kind.casefold() == "refs"}
+    if closing and non_closing:
+        raise SystemExit("pull request must not mix closing and non-closing owner references")
+    return sorted(closing | non_closing)
+
+
+def pull_request_body(payload: dict[str, object]) -> str:
+    body = payload.get("body")
+    if body is None:
+        return ""
+    if not isinstance(body, str):
+        raise SystemExit("GitHub pull request body must be text")
+    return body
+
+
 def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
     """Resolve exactly one owner from the established PR issue-reference contract."""
 
-    candidates = referenced_issue_numbers(repo, payload.get("title"), payload.get("body"))
+    body = pull_request_body(payload)
+    candidates = referenced_issue_numbers(repo, payload.get("title"), body)
+    candidates = explicit_owner_numbers(repo, body) or candidates
     if len(candidates) != 1:
         raise SystemExit(
             "pull request must reference exactly one owning issue; "
@@ -786,9 +828,14 @@ def pr_state_refreshes(
         raise SystemExit("open pull-request inventory reached the refresh bound")
     refreshes = []
     for pull_request in pull_requests:
-        owners = referenced_issue_numbers(
-            repo, pull_request.get("title"), pull_request.get("body")
-        )
+        body = pull_request_body(pull_request)
+        owners = referenced_issue_numbers(repo, pull_request.get("title"), body)
+        try:
+            explicit_owners = explicit_owner_numbers(repo, body)
+        except SystemExit:
+            # Local refs can still trigger failure publication for malformed owners.
+            explicit_owners = []
+        owners = explicit_owners or owners
         if issue_number not in owners:
             continue
         base = pull_request.get("baseRefName")
@@ -816,22 +863,30 @@ def pr_state_refreshes(
 
 
 def matching_pr_state_run(
-    pull_request: int, head: str, workflow_runs: object
-) -> dict[str, object]:
+    pull_request: int,
+    head: str,
+    default_branch: str,
+    workflow_runs: object,
+) -> dict[str, object] | None:
     if not isinstance(workflow_runs, list):
         raise SystemExit("PR-state workflow runs did not return a list")
     for workflow_run in workflow_runs:
         if not isinstance(workflow_run, dict):
             raise SystemExit("PR-state workflow run was not an object")
-        pull_requests = workflow_run.get("pull_requests")
         if (
-            workflow_run.get("event") != "pull_request"
-            or workflow_run.get("head_sha") != head
-            or not isinstance(pull_requests, list)
-            or not any(
-                isinstance(item, dict) and item.get("number") == pull_request
-                for item in pull_requests
-            )
+            workflow_run.get("event") != "pull_request_target"
+            or not pr_state_workflow_path(workflow_run.get("path"), default_branch)
+        ):
+            continue
+        title = workflow_run.get("display_title")
+        match = PR_STATE_NATIVE_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
+        source_head = workflow_run.get("head_sha")
+        if (
+            match is None
+            or int(match.group(1)) != pull_request
+            or match.group(2) != head
+            or not isinstance(source_head, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_head) is None
         ):
             continue
         identifier = workflow_run.get("id")
@@ -840,8 +895,126 @@ def matching_pr_state_run(
             raise SystemExit("PR-state workflow run had an invalid identity")
         if not isinstance(status, str):
             raise SystemExit("PR-state workflow run had an invalid status")
-        return {"id": identifier, "status": status}
-    raise SystemExit(f"no PR-state workflow run found for pull request #{pull_request}")
+        return {
+            "id": identifier,
+            "status": status,
+            "run_attempt": workflow_run.get("run_attempt"),
+        }
+    return None
+
+
+def pr_state_workflow_run_page(repo: str, page: int) -> list[object]:
+    payload = gh_api_json(
+        [
+            "--method",
+            "GET",
+            f"repos/{repo}/actions/workflows/pr-state.yml/runs",
+            "-f",
+            "event=pull_request_target",
+            "-f",
+            f"per_page={PR_STATE_WORKFLOW_RUNS_PER_PAGE}",
+            "-f",
+            f"page={page}",
+            "-f",
+            "sort=created",
+            "-f",
+            "direction=desc",
+        ]
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
+        raise SystemExit("PR-state workflow-run query did not return a run list")
+    return payload["workflow_runs"]
+
+
+def find_pr_state_workflow_run(
+    repo: str, pull_request: int, head: str, default_branch: str
+) -> tuple[dict[str, object] | None, bool]:
+    for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1):
+        runs = pr_state_workflow_run_page(repo, page)
+        workflow_run = matching_pr_state_run(pull_request, head, default_branch, runs)
+        if workflow_run is not None:
+            return workflow_run, False
+        if len(runs) < PR_STATE_WORKFLOW_RUNS_PER_PAGE:
+            return None, False
+    return None, True
+
+
+def pr_state_workflow_path(path: object, default_branch: str) -> bool:
+    if not isinstance(path, str):
+        return False
+    workflow = ".github/workflows/pr-state.yml"
+    return path == workflow or path in (
+        f"{workflow}@{default_branch}",
+        f"{workflow}@refs/heads/{default_branch}",
+    )
+
+
+def pr_state_default_branch(repo: str) -> str:
+    payload = gh_api_json(["repos/" + repo])
+    if not isinstance(payload, dict):
+        raise SystemExit("GitHub repository did not return an object")
+    branch = payload.get("default_branch")
+    if not isinstance(branch, str) or not branch:
+        raise SystemExit("GitHub repository returned an invalid default branch")
+    return branch
+
+
+def pr_state_live_pull_request(
+    repo: str, number: int, expected_head: str
+) -> dict[str, object] | None:
+    payload = gh_api_json([f"repos/{repo}/pulls/{number}"])
+    if not isinstance(payload, dict):
+        raise SystemExit("GitHub pull request did not return an object")
+    base = payload.get("base")
+    head = payload.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise SystemExit("GitHub pull request returned an invalid head or base")
+    if (
+        payload.get("number") != number
+        or payload.get("state") != "open"
+        or base.get("ref") not in ("main", "dev")
+        or head.get("sha") != expected_head
+    ):
+        return None
+    return payload
+
+
+def validate_pr_state_owner(repo: str, number: int, head: str) -> int:
+    pull_request = pr_state_live_pull_request(repo, number, head)
+    if pull_request is None:
+        raise SystemExit("pull request is no longer open at the trusted source head")
+    owner_issue = pull_request_owner_issue(
+        repo,
+        {"title": pull_request.get("title"), "body": pull_request.get("body")},
+    )
+    pr_milestone = pull_request.get("milestone")
+    pr_milestone_number = (
+        pr_milestone.get("number") if isinstance(pr_milestone, dict) else None
+    )
+    if (
+        not isinstance(pr_milestone_number, int)
+        or isinstance(pr_milestone_number, bool)
+        or pr_milestone_number < 1
+    ):
+        raise SystemExit("pull request must be assigned to a milestone")
+    issue = gh_api_json([f"repos/{repo}/issues/{owner_issue}"])
+    if not isinstance(issue, dict):
+        raise SystemExit("owning issue did not return an object")
+    if "pull_request" in issue or issue.get("state") != "open":
+        raise SystemExit("pull request owner must be an open issue")
+    issue_milestone = issue.get("milestone")
+    issue_milestone_number = (
+        issue_milestone.get("number") if isinstance(issue_milestone, dict) else None
+    )
+    if (
+        not isinstance(issue_milestone_number, int)
+        or isinstance(issue_milestone_number, bool)
+        or issue_milestone_number < 1
+    ):
+        raise SystemExit("owning issue must be assigned to a milestone")
+    if issue_milestone_number != pr_milestone_number:
+        raise SystemExit("pull request milestone must match its owning issue")
+    return owner_issue
 
 
 def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
@@ -862,33 +1035,48 @@ def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
     if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
         raise SystemExit("GitHub open pull requests did not return an object list")
     refreshes = pr_state_refreshes(repo, issue_number, payload)
+    default_branch = pr_state_default_branch(repo)
     for refresh in refreshes:
+        pull_request = int(refresh["number"])
+        head = str(refresh["head"])
+        workflow_run, search_truncated = find_pr_state_workflow_run(
+            repo, pull_request, head, default_branch
+        )
         for attempt in range(30):
-            runs_payload = gh_api_json(
-                [
-                    "--method",
-                    "GET",
-                    f"repos/{repo}/actions/workflows/pr-state.yml/runs",
-                    "-f",
-                    "event=pull_request",
-                    "-f",
-                    f"head_sha={refresh['head']}",
-                    "-f",
-                    "per_page=100",
-                ]
-            )
-            if not isinstance(runs_payload, dict):
-                raise SystemExit("PR-state workflow-run query did not return an object")
-            workflow_run = matching_pr_state_run(
-                int(refresh["number"]),
-                str(refresh["head"]),
-                runs_payload.get("workflow_runs"),
-            )
-            if workflow_run["status"] == "completed":
+            if attempt > 0 and workflow_run is None:
+                workflow_run = matching_pr_state_run(
+                    pull_request,
+                    head,
+                    default_branch,
+                    pr_state_workflow_run_page(repo, 1),
+                )
+            elif attempt > 0 and workflow_run["status"] != "completed":
+                selected_run_id = workflow_run["id"]
+                latest_run = gh_api_json(
+                    [f"repos/{repo}/actions/runs/{selected_run_id}"]
+                )
+                if not isinstance(latest_run, dict) or latest_run.get("id") != selected_run_id:
+                    raise SystemExit("PR-state workflow-run lookup returned the wrong identity")
+                workflow_run = matching_pr_state_run(
+                    pull_request, head, default_branch, [latest_run]
+                )
+                if workflow_run is None:
+                    raise SystemExit("PR-state workflow run changed identity during refresh")
+            if workflow_run is not None and workflow_run["status"] == "completed":
                 break
             if attempt == 29:
+                if workflow_run is None:
+                    if search_truncated:
+                        raise SystemExit(
+                            "PR-state workflow-run search reached its "
+                            f"{MAX_PR_STATE_WORKFLOW_RUN_PAGES}-page bound without "
+                            f"finding a current-head run for pull request #{pull_request}"
+                        )
+                    raise SystemExit(
+                        f"no PR-state workflow run found for pull request #{pull_request}"
+                    )
                 raise SystemExit(
-                    f"latest PR-state workflow run for pull request #{refresh['number']} "
+                    f"latest PR-state workflow run for pull request #{pull_request} "
                     "did not complete within the refresh bound"
                 )
             time.sleep(2)
@@ -2916,58 +3104,342 @@ Mitigations:
     assert pull_request_owner_issue(
         "owner/repo", {"title": "Work for OWNER/rePO#517", "body": ""}
     ) == 517
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Work for #517", "body": None}
+    ) == 517
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Older PR", "body": "Related issue #517"}
+    ) == 517
+    bot_body = (
+        "<a href='https://github.com/upstream/tool/issues/17'>#17</a>\n"
+        "- Fixes #18\n"
+        "Inline Fixes #19\n"
+        "Fixes #517\r\n"
+    )
+    refs_body = (
+        "<a href='https://github.com/upstream/tool/issues/17'>#17</a>\n"
+        "refs #499\r\n"
+    )
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Update #20", "body": bot_body}
+    ) == 517
+    assert explicit_owner_numbers("owner/repo", refs_body) == [499]
+    assert explicit_owner_numbers("owner/repo", "Fixes #517\nCloses #517") == [517]
+    assert explicit_owner_numbers("owner/repo", "Refs #499\nrefs #499") == [499]
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Update #20", "body": refs_body}
+    ) == 499
+    assert explicit_owner_numbers(
+        "owner/repo", "- Fixes #18\nInline Fixes #19\n"
+    ) == []
+    assert explicit_owner_numbers(
+        "owner/repo",
+        "- Refs #518\nInline Refs #519\n"
+        "```\nRefs #520\n```\n<!-- Refs #521 -->\n",
+    ) == []
+    assert explicit_owner_numbers(
+        "owner/repo",
+        "```\nCloses #518\nFixes other/repo#519\n```\n"
+        "<!-- Resolves #520 -->\nFixes #517\n",
+    ) == [517]
+    for body in (
+        "Fixes #517\nCloses #518",
+        "Fixes #517\nResolves #518",
+    ):
+        try:
+            pull_request_owner_issue("owner/repo", {"title": "Update", "body": body})
+        except SystemExit as error:
+            assert "found 2 candidates" in str(error)
+        else:
+            raise AssertionError("conflicting explicit PR owners were accepted")
+    for body in (
+        "Closes #517\nRefs #518",
+        "Refs #517\nFixes #518",
+        "Closes #499\nRefs #499",
+        "Refs #499\nFixes #499",
+    ):
+        try:
+            pull_request_owner_issue("owner/repo", {"title": "Update", "body": body})
+        except SystemExit as error:
+            assert "must not mix closing and non-closing owner references" in str(error)
+        else:
+            raise AssertionError("mixed closing and non-closing PR owners were accepted")
+    for body in (
+        "Fixes #517\nCloses other/repo#518",
+        "Refs other/repo#518",
+    ):
+        try:
+            pull_request_owner_issue(
+                "owner/repo", {"title": "Update #20", "body": body}
+            )
+        except SystemExit as error:
+            assert "must name this repository" in str(error)
+        else:
+            raise AssertionError("foreign qualified owner reference was accepted")
+    pr_head = "a" * 40
+    live_pull_request: dict[str, object] = {
+        "number": 600,
+        "state": "open",
+        "title": "Update #20",
+        "body": bot_body,
+        "base": {"ref": "main"},
+        "head": {"sha": pr_head},
+        "milestone": {"number": 1},
+    }
+    live_issue: dict[str, object] = {
+        "state": "open",
+        "milestone": {"number": 1},
+    }
+    saved_gh_api_json = globals()["gh_api_json"]
+
+    def owner_api_fixture(args: list[str]) -> object:
+        if args == ["repos/owner/repo/pulls/600"]:
+            return live_pull_request
+        if args in (
+            ["repos/owner/repo/issues/517"],
+            ["repos/owner/repo/issues/499"],
+        ):
+            return live_issue
+        raise AssertionError(f"unexpected PR-state API request: {args}")
+
+    try:
+        globals()["gh_api_json"] = owner_api_fixture
+        assert validate_pr_state_owner("owner/repo", 600, pr_head) == 517
+        live_pull_request["body"] = refs_body
+        assert validate_pr_state_owner("owner/repo", 600, pr_head) == 499
+        live_pull_request["body"] = "Closes #499\nRefs #499"
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "must not mix closing and non-closing owner references" in str(error)
+        else:
+            raise AssertionError("owner validation accepted conflicting closing and Refs owners")
+        live_pull_request["body"] = bot_body
+        live_pull_request["head"] = {"sha": "c" * 40}
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "no longer open at the trusted source head" in str(error)
+        else:
+            raise AssertionError("a stale pull-request head passed owner validation")
+        live_pull_request["head"] = {"sha": pr_head}
+        live_issue["milestone"] = {"number": 2}
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "must match" in str(error)
+        else:
+            raise AssertionError("a mismatched owner milestone was accepted")
+        live_issue["milestone"] = {"number": 1}
+        live_issue["state"] = "closed"
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "must be an open issue" in str(error)
+        else:
+            raise AssertionError("a closed owning issue was accepted")
+    finally:
+        globals()["gh_api_json"] = saved_gh_api_json
     refresh_pr = {
         "number": 600,
-        "title": "Implement owner metadata",
-        "body": "Refs #517",
+        "title": "Update #20",
+        "body": bot_body,
         "headRefOid": "a" * 40,
         "baseRefName": "main",
     }
-    valid_refresh = pr_state_refreshes(
+    unrelated_foreign_owner_pr = {
+        **refresh_pr,
+        "number": 601,
+        "headRefOid": "b" * 40,
+        "body": "Fixes other/repo#499",
+    }
+    unrelated_mixed_owner_pr = {
+        **refresh_pr,
+        "number": 602,
+        "headRefOid": "c" * 40,
+        "body": "Refs #518\nCloses #519",
+    }
+    malformed_affected_owner_pr = {
+        **refresh_pr,
+        "number": 603,
+        "headRefOid": "d" * 40,
+        "body": "Closes #499\nRefs #499",
+    }
+    assert pr_state_refreshes(
         "owner/repo",
-        517,
+        499,
         [
-            refresh_pr,
-            {**refresh_pr, "number": 601, "body": "Refs #518"},
-            {**refresh_pr, "number": 602, "body": "Refs #517 and #518"},
-            {**refresh_pr, "number": 603, "baseRefName": "release", "body": "Refs #517"},
-            {**refresh_pr, "number": "invalid", "baseRefName": "release", "body": "Refs #517"},
+            {**refresh_pr, "body": refs_body},
+            unrelated_foreign_owner_pr,
+            unrelated_mixed_owner_pr,
+            malformed_affected_owner_pr,
         ],
-    )
-    assert valid_refresh == [
+    ) == [
         {"number": 600, "head": "a" * 40},
-        {"number": 602, "head": "a" * 40},
+        {"number": 603, "head": "d" * 40},
     ]
-    for invalid_base in (None, 3, ""):
-        try:
-            pr_state_refreshes(
-                "owner/repo",
-                517,
-                [{**refresh_pr, "baseRefName": invalid_base}],
+    source_head = "b" * 40
+    source_workflow_sha = "c" * 40
+    trusted_refresh_run = {
+        "id": 77,
+        "name": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
+        "path": ".github/workflows/pr-state.yml",
+        "event": "pull_request_target",
+        "head_sha": source_head,
+        "display_title": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
+        "status": "completed",
+        "pull_requests": [],
+    }
+    assert trusted_refresh_run["head_sha"] != refresh_pr["headRefOid"]
+    refresh_run_pages: dict[int, list[object]] = {1: [trusted_refresh_run]}
+    observed_refresh_api: list[list[str]] = []
+    observed_reruns: list[list[str]] = []
+    saved_refresh_functions = {
+        name: globals()[name]
+        for name in ("gh_json", "gh_api_json", "run")
+    }
+    saved_sleep = time.sleep
+
+    def refresh_gh_json(args: list[str]) -> object:
+        assert args[:3] == ["pr", "list", "-R"]
+        return [refresh_pr]
+
+    def refresh_api_fixture(args: list[str]) -> object:
+        observed_refresh_api.append(args)
+        if args == ["repos/owner/repo"]:
+            return {"default_branch": "main"}
+        if args[0] == "--method" and args[2] == (
+            "repos/owner/repo/actions/workflows/pr-state.yml/runs"
+        ):
+            page = next(
+                int(item.removeprefix("page="))
+                for item in args
+                if item.startswith("page=")
             )
-        except SystemExit as error:
-            assert "invalid pull-request base branch" in str(error)
-        else:
-            raise AssertionError("an invalid pull-request base branch was skipped")
-    assert matching_pr_state_run(
-        600,
-        "a" * 40,
-        [
-            {
-                "id": 77,
-                "status": "completed",
-                "event": "pull_request",
-                "head_sha": "a" * 40,
-                "pull_requests": [{"number": 600}],
-            }
-        ],
-    ) == {"id": 77, "status": "completed"}
+            return {"workflow_runs": refresh_run_pages.get(page, [])}
+        if args == ["repos/owner/repo/actions/runs/77"]:
+            return {**trusted_refresh_run, "status": "completed"}
+        raise AssertionError(f"unexpected issue-refresh API request: {args}")
+
+    def refresh_run(args: list[str], *, raw_output: bool = False) -> str:
+        assert not raw_output
+        observed_reruns.append(args)
+        return ""
+
     try:
-        matching_pr_state_run(601, "a" * 40, [])
-    except SystemExit as error:
-        assert "no PR-state workflow run found" in str(error)
-    else:
-        raise AssertionError("a missing PR-state workflow run was accepted")
+        globals()["gh_json"] = refresh_gh_json
+        globals()["gh_api_json"] = refresh_api_fixture
+        globals()["run"] = refresh_run
+        time.sleep = lambda _seconds: None
+        refresh_pr_state_for_issue("owner/repo", 517)
+        assert observed_refresh_api[1][0:3] == ["--method", "GET", "repos/owner/repo/actions/workflows/pr-state.yml/runs"]
+        assert "event=pull_request_target" in observed_refresh_api[1]
+        assert "per_page=100" in observed_refresh_api[1]
+        assert "page=1" in observed_refresh_api[1]
+        assert not any(item.startswith("head_sha=") for item in observed_refresh_api[1])
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        trusted_refresh_run["status"] = "in_progress"
+        refresh_run_pages.clear()
+        refresh_run_pages[1] = [trusted_refresh_run]
+        refresh_pr_state_for_issue("owner/repo", 517)
+        assert observed_refresh_api[-1] == ["repos/owner/repo/actions/runs/77"]
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        trusted_refresh_run["status"] = "completed"
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        decoy_run = {
+            **trusted_refresh_run,
+            "id": 78,
+            "display_title": f"pr-state|{source_workflow_sha}|600|{'b' * 40}",
+        }
+        refresh_run_pages.clear()
+        refresh_run_pages.update(
+            {
+                1: [decoy_run] * PR_STATE_WORKFLOW_RUNS_PER_PAGE,
+                2: [trusted_refresh_run],
+            }
+        )
+        refresh_pr_state_for_issue("owner/repo", 517)
+        page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert page_requests == ["page=1", "page=2"]
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        trusted_refresh_run["display_title"] = f"pr-state|{source_workflow_sha}|600|{'b' * 40}"
+        refresh_run_pages.clear()
+        refresh_run_pages[1] = [trusted_refresh_run]
+        try:
+            refresh_pr_state_for_issue("owner/repo", 517)
+        except SystemExit as error:
+            assert "no PR-state workflow run found" in str(error)
+        else:
+            raise AssertionError("issue refresh reran a stale-head PR-state workflow")
+        assert observed_reruns == []
+        missing_page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert missing_page_requests == ["page=1"] * 30
+        observed_refresh_api.clear()
+        decoy_run["display_title"] = f"pr-state|{source_workflow_sha}|601|{'b' * 40}"
+        refresh_run_pages.clear()
+        refresh_run_pages.update(
+            {
+                page: [decoy_run] * PR_STATE_WORKFLOW_RUNS_PER_PAGE
+                for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1)
+            }
+        )
+        try:
+            refresh_pr_state_for_issue("owner/repo", 517)
+        except SystemExit as error:
+            assert f"{MAX_PR_STATE_WORKFLOW_RUN_PAGES}-page bound" in str(error)
+        else:
+            raise AssertionError("issue refresh did not refuse a truncated run search")
+        exhausted_page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert exhausted_page_requests == [
+            *(f"page={page}" for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1)),
+            *("page=1" for _ in range(29)),
+        ]
+        assert observed_reruns == []
+    finally:
+        for name, function in saved_refresh_functions.items():
+            globals()[name] = function
+        time.sleep = saved_sleep
     assert candidate_owner_issue_from_subjects(
         "Implement candidate (#517)\nFollow-up candidate (#517)"
     ) == 517
@@ -5138,6 +5610,56 @@ Timeout --> Recovery
     print("issue checklist self-test passed")
 
 
+def pr_state_identity(number: str, head: str, command: str) -> tuple[int, str]:
+    if re.fullmatch(r"[1-9][0-9]*", number) is None:
+        raise SystemExit(f"{command} requires a positive pull-request number")
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise SystemExit(f"{command} requires a 40-character head SHA")
+    return int(number), head
+
+
+def dispatch_pr_state_command(args: argparse.Namespace) -> bool:
+    commands = (
+        ("--validate-pr-state-owner", args.validate_pr_state_owner),
+        ("--refresh-pr-state-for-issue", args.refresh_pr_state_for_issue),
+    )
+    selected = [(name, value) for name, value in commands if value is not None]
+    if not selected:
+        return False
+    if len(selected) != 1:
+        raise SystemExit("PR-state commands cannot be combined")
+    command, value = selected[0]
+    if (
+        not args.repo
+        or args.root != "."
+        or args.issue_map != "openspec/issue-map.json"
+        or args.milestone
+        or args.publication_version is not None
+        or args.skip_openspec
+        or args.owner_from_commits
+        or args.self_test
+        or args.base
+        or any(
+            item is not None
+            for item in (
+                args.planned_issue,
+                args.pull_request,
+                args.candidate_issue,
+                args.candidate_local_oid,
+            )
+        )
+    ):
+        raise SystemExit(f"{command} accepts only --repo and its PR-state arguments")
+
+    if command == "--validate-pr-state-owner":
+        number_text, head_text = value
+        number, head = pr_state_identity(number_text, head_text, command)
+        print(f"owner_issue={validate_pr_state_owner(args.repo, number, head)}")
+    else:
+        refresh_pr_state_for_issue(args.repo, value)
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default="")
@@ -5150,45 +5672,23 @@ def main() -> None:
     parser.add_argument("--candidate-issue", type=int)
     parser.add_argument("--candidate-local-oid")
     parser.add_argument("--refresh-pr-state-for-issue", type=int)
+    parser.add_argument("--validate-pr-state-owner", nargs=2, metavar=("NUMBER", "HEAD"))
     parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
     parser.add_argument("--owner-from-commits", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
+    if dispatch_pr_state_command(args):
+        return
+
     if args.publication_version is not None and (
         args.milestone or args.skip_openspec or args.self_test or args.owner_from_commits
-        or args.refresh_pr_state_for_issue is not None or args.planned_issue is not None
+        or args.planned_issue is not None
         or args.pull_request is not None or args.candidate_issue is not None
         or args.candidate_local_oid or args.base
     ):
         raise SystemExit("--publication-version cannot be combined with another validation mode")
-
-    if args.refresh_pr_state_for_issue is not None:
-        if (
-            not args.repo
-            or args.root != "."
-            or args.issue_map != "openspec/issue-map.json"
-            or args.skip_openspec
-            or args.self_test
-            or args.owner_from_commits
-            or any(
-                value is not None
-                for value in (
-                    args.planned_issue,
-                    args.pull_request,
-                    args.candidate_issue,
-                    args.candidate_local_oid,
-                )
-            )
-            or args.base
-            or args.milestone
-        ):
-            raise SystemExit(
-                "--refresh-pr-state-for-issue accepts only --repo and an issue number"
-            )
-        refresh_pr_state_for_issue(args.repo, args.refresh_pr_state_for_issue)
-        return
 
     if args.owner_from_commits:
         if (
