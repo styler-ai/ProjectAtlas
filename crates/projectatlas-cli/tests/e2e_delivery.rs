@@ -4075,7 +4075,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         "permissions:\n      actions: read\n      checks: read\n      pull-requests: read",
         "run.get(\"path\") == \".github/workflows/pr-state.yml\"",
         "run.get(\"event\") == \"pull_request_target\"",
-        "run.get(\"head_sha\") == head",
+        "event=pull_request_target&per_page=100",
         "source_title.fullmatch(run[\"display_title\"])",
         "check_name=pr-state&filter=all&per_page=100&page={page}",
         "range(1, 11)",
@@ -4152,6 +4152,9 @@ with open(fixture_path, encoding="utf-8") as fixture_file:
 
 def api_response(path):
     if "/actions/workflows/pr-state.yml/runs?" in path:
+        source = fixture["source"]
+        if "head_sha=" in path and path.split("head_sha=", 1)[1].split("&", 1)[0] != source["head_sha"]:
+            return {"workflow_runs": []}
         return {"workflow_runs": [fixture["source"]]}
     if "/check-runs?" in path:
         return {"check_runs": fixture["check_runs"]}
@@ -4171,6 +4174,8 @@ with open(script_path, encoding="utf-8") as script_file:
         )?;
 
         let head = "a".repeat(40);
+        let source_head = "c".repeat(40);
+        assert_ne!(head, source_head);
         let external_id = format!("projectatlas-pr-state:123:{head}");
         let run_bridge = |checks: Vec<Value>, live_head: &str| -> Result<_, Box<dyn Error>> {
             let fixture = json!({
@@ -4178,7 +4183,7 @@ with open(script_path, encoding="utf-8") as script_file:
                     "id": 456,
                     "path": ".github/workflows/pr-state.yml",
                     "event": "pull_request_target",
-                    "head_sha": head,
+                    "head_sha": source_head.clone(),
                     "display_title": format!("pr-state-wakeup|123|{head}"),
                     "created_at": "2026-10-04T08:32:08Z",
                     "run_attempt": 1,

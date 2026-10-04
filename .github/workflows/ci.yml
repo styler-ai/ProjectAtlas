@@ -67,7 +67,7 @@ jobs:
           def matching_source():
               runs = api(
                   f"repos/{repository}/actions/workflows/pr-state.yml/runs"
-                  f"?event=pull_request_target&head_sha={head}&per_page=100"
+                  "?event=pull_request_target&per_page=100"
                   "&sort=created&direction=desc"
               ).get("workflow_runs", [])
               matches = [
@@ -75,7 +75,6 @@ jobs:
                   for run in runs
                   if run.get("path") == ".github/workflows/pr-state.yml"
                   and run.get("event") == "pull_request_target"
-                  and run.get("head_sha") == head
                   and isinstance(run.get("display_title"), str)
                   and source_title.fullmatch(run["display_title"])
               ]
