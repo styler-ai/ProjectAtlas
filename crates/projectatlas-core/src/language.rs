@@ -17,7 +17,7 @@ pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 5;
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 16;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 17;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -128,6 +128,13 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST: &str =
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST: &str =
     "75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a";
 
+/// Historical acceptance seal for capability-set version 17.
+///
+/// Version 17 preserves version 16 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc3 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V17_DIGEST: &str =
+    "7aa4b331c6cb96f9d4742763bcaed5d8fc23c8e1bd8a6f472d0d7f55e262abff";
+
 /// Historical digest seals indexed by accepted capability-set version.
 const HISTORICAL_ACCEPTED_LANGUAGE_CAPABILITY_DIGESTS: [&str;
     ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION as usize] = [
@@ -147,6 +154,7 @@ const HISTORICAL_ACCEPTED_LANGUAGE_CAPABILITY_DIGESTS: [&str;
     ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST,
     ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST,
     ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V17_DIGEST,
 ];
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.

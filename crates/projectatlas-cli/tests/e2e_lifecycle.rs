@@ -514,7 +514,47 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     assert_bundled_hook_sanitizes_control_paths_without_python()?;
     let workspace = workspace_root()?;
     let fixture = tempfile::tempdir()?;
-    let source_plugin = workspace.join("plugins").join("projectatlas");
+    let (executable, source_plugin) = match (
+        std::env::var_os(MCP_CONTRACT_EXECUTABLE_ENV),
+        std::env::var_os("PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT"),
+    ) {
+        (Some(_), Some(plugin_root)) => {
+            let executable = mcp_contract_executable();
+            if !executable.is_file() {
+                return Err(
+                    io::Error::other("packaged hook contract executable is not a file").into(),
+                );
+            }
+            let plugin_root = fs::canonicalize(plugin_root)?;
+            if !plugin_root.is_dir() {
+                return Err(io::Error::other(
+                    "packaged hook contract plugin root is not a directory",
+                )
+                .into());
+            }
+            (executable, plugin_root)
+        }
+        (None, None) => (
+            assert_cmd::cargo::cargo_bin("projectatlas"),
+            workspace.join("plugins").join("projectatlas"),
+        ),
+        _ => {
+            return Err(io::Error::other(format!(
+                "{MCP_CONTRACT_EXECUTABLE_ENV} and PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT must be supplied together"
+            ))
+            .into());
+        }
+    };
+    let source_manifest: Value =
+        serde_json::from_slice(&fs::read(source_plugin.join(".codex-plugin/plugin.json"))?)?;
+    if source_manifest["name"].as_str() != Some("projectatlas")
+        || source_manifest["version"].as_str() != Some(env!("CARGO_PKG_VERSION"))
+    {
+        return Err(io::Error::other(
+            "bundled hook source is not the current ProjectAtlas candidate plugin",
+        )
+        .into());
+    }
     let plugin_root = fixture.path().join("plugin root");
     for relative in [
         ".codex-plugin/plugin.json",
@@ -547,7 +587,6 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::create_dir_all(&bin)?;
     let db = atlas_dir.join("projectatlas.db");
     let config = atlas_dir.join("config.toml");
-    let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let initialized = StdCommand::new(&executable)
         .arg("init")
         .current_dir(&repo)

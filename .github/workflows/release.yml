@@ -285,13 +285,13 @@ jobs:
           case "${1:-}" in
             mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
               binary=e2e_delivery ;;
-            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*)
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*|pdf_rendering_resource_stop_preserves_source_and_repairs|pdf_parser_limits_preserve_cli_and_mcp_publication|bounded_pdf_and_docx_reach_cli_and_mcp_navigation)
               binary=e2e_navigation ;;
             lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
               binary=e2e_maintenance ;;
             holistic_agent_worktree_*|*watch*|*federation*)
               binary=e2e_worktrees ;;
-            init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*)
+            init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*|bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation)
               binary=e2e_lifecycle ;;
             *)
               echo "unknown packaged contract test: ${1:-<missing>}" >&2
@@ -420,6 +420,9 @@ jobs:
               "map_response_*" { return "e2e_navigation.exe" }
               "installed_candidate_without_git_*" { return "e2e_navigation.exe" }
               "compiler_config_*" { return "e2e_navigation.exe" }
+              "pdf_rendering_resource_stop_preserves_source_and_repairs" { return "e2e_navigation.exe" }
+              "pdf_parser_limits_preserve_cli_and_mcp_publication" { return "e2e_navigation.exe" }
+              "bounded_pdf_and_docx_reach_cli_and_mcp_navigation" { return "e2e_navigation.exe" }
               "lint_formats_*" { return "e2e_maintenance.exe" }
               "token_tui_*" { return "e2e_maintenance.exe" }
               "conditional_purpose_*" { return "e2e_maintenance.exe" }
@@ -429,6 +432,7 @@ jobs:
               "*federation*" { return "e2e_worktrees.exe" }
               "persistent_mcp_stdin_*" { return "e2e_lifecycle.exe" }
               "supported_predecessor_*" { return "e2e_lifecycle.exe" }
+              "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation" { return "e2e_lifecycle.exe" }
               "implicit_bare_root*" { return "e2e_lifecycle.exe" }
               "generated_mcp_config_*" { return "e2e_lifecycle.exe" }
               "mcp_server_*" { return "e2e_lifecycle.exe" }
@@ -512,12 +516,18 @@ jobs:
           - os: ubuntu-latest
             label: linux-x64-posix
             suffix: x86_64-unknown-linux-gnu
+            codex_package: codex-linux-x64
+            codex_target: x86_64-unknown-linux-musl
           - os: macos-15-intel
             label: macos-x64-posix
             suffix: x86_64-apple-darwin
+            codex_package: codex-darwin-x64
+            codex_target: x86_64-apple-darwin
           - os: macos-14
             label: macos-arm64-posix
             suffix: aarch64-apple-darwin
+            codex_package: codex-darwin-arm64
+            codex_target: aarch64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -541,6 +551,39 @@ jobs:
           python3 .github/scripts/prepare-published-predecessor.py
           --suffix "${{ matrix.suffix }}"
           --destination "$RUNNER_TEMP/projectatlas-published-predecessor"
+
+      - name: Install isolated native Codex for published-predecessor proof
+        if: ${{ !inputs.prepublish_only }}
+        env:
+          CODEX_PACKAGE: ${{ matrix.codex_package }}
+          CODEX_TARGET: ${{ matrix.codex_target }}
+        run: |
+          set -euo pipefail
+          codex_root="$RUNNER_TEMP/projectatlas-native-codex"
+          mkdir -p "$codex_root"
+          : > "$codex_root/npmrc"
+          codex_package_suffix="${CODEX_PACKAGE#codex-}"
+          codex_metadata="$codex_root/codex-optional-dependencies.json"
+          npm view --cache "$codex_root/npm-cache" --userconfig "$codex_root/npmrc" @openai/codex@0.162.1 optionalDependencies --json > "$codex_metadata"
+          codex_install_spec="@openai/$CODEX_PACKAGE@npm:@openai/codex@0.162.1-$codex_package_suffix"
+          node -e 'const fs = require("node:fs"); const [file, alias, expected] = process.argv.slice(1); const dependencies = JSON.parse(fs.readFileSync(file, "utf8")); if (dependencies[alias] !== expected) { throw new Error(`Codex registry alias mismatch for ${alias}`); }' "$codex_metadata" "@openai/$CODEX_PACKAGE" "npm:@openai/codex@0.162.1-$codex_package_suffix"
+          npm install --prefix "$codex_root" --cache "$codex_root/npm-cache" --userconfig "$codex_root/npmrc" --no-save --ignore-scripts "$codex_install_spec"
+          codex_package_manifest="$codex_root/node_modules/@openai/$CODEX_PACKAGE/package.json"
+          node -e 'const fs = require("node:fs"); const [file, suffix] = process.argv.slice(1); const manifest = JSON.parse(fs.readFileSync(file, "utf8")); if (manifest.name !== "@openai/codex" || manifest.version !== `0.162.1-${suffix}`) { throw new Error("Installed Codex alias package metadata mismatch"); }' "$codex_package_manifest" "$codex_package_suffix"
+          codex_command="$codex_root/node_modules/@openai/$CODEX_PACKAGE/vendor/$CODEX_TARGET/bin/codex"
+          if [ ! -x "$codex_command" ]; then
+            echo "Version-pinned native Codex executable is missing: $codex_command" >&2
+            exit 1
+          fi
+          codex_version="$("$codex_command" --version)"
+          if [[ "$codex_version" != "codex-cli 0.162.1" ]]; then
+            echo "Native Codex version mismatch: $codex_version" >&2
+            exit 1
+          fi
+          {
+            echo "PROJECTATLAS_CODEX_COMMAND=$codex_command"
+            echo "PROJECTATLAS_CODEX_VERSION=0.162.1"
+          } >> "$GITHUB_ENV"
 
       - name: Prepare isolated macOS arm64 host state
         if: matrix.label == 'macos-arm64-posix'
@@ -593,9 +636,12 @@ jobs:
           echo "PROJECTATLAS_PARSER_PACK_RELEASE_VERIFIER=$PWD/$verifier" >> "$GITHUB_ENV"
 
       - name: Install packaged runtime through plugin
-        timeout-minutes: 5
+        timeout-minutes: 20
         env:
           PROJECTATLAS_SUFFIX: ${{ matrix.suffix }}
+          PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE: "1"
+          PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE: "1"
+          PROJECTATLAS_RELEASE_PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
         run: |
           archive="release-assets/projectatlas-${RELEASE_VERSION}-${PROJECTATLAS_SUFFIX}.tar.gz"
           mkdir -p "$RUNNER_TEMP/projectatlas-prepublish"
@@ -790,6 +836,10 @@ jobs:
           fi
           for test in \
             installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation \
+            pdf_rendering_resource_stop_preserves_source_and_repairs \
+            pdf_parser_limits_preserve_cli_and_mcp_publication \
+            bounded_pdf_and_docx_reach_cli_and_mcp_navigation \
             csharp_symbol_identity_boundary_preserves_full_and_incremental_publication \
             deep_qualified_symbol_parents_preserve_full_and_incremental_publication \
             partial_markdown_limit_persists_without_losing_complete_publication \
@@ -890,9 +940,56 @@ jobs:
           --suffix x86_64-pc-windows-msvc
           --destination "$env:RUNNER_TEMP/projectatlas-published-predecessor"
 
-      - name: Install packaged runtime through plugin
-        timeout-minutes: 5
+      - name: Install isolated native Codex for published-predecessor proof
+        if: ${{ !inputs.prepublish_only }}
         shell: pwsh
+        run: |
+          $codexRoot = Join-Path $env:RUNNER_TEMP "projectatlas-native-codex"
+          New-Item -ItemType Directory -Force -Path $codexRoot | Out-Null
+          $npmConfig = Join-Path $codexRoot "npmrc"
+          [System.IO.File]::WriteAllText($npmConfig, "")
+          $npmCache = Join-Path $codexRoot "npm-cache"
+          $codexPackage = "codex-win32-x64"
+          $codexPackageSuffix = "win32-x64"
+          $codexMetadataPath = Join-Path $codexRoot "codex-optional-dependencies.json"
+          $codexMetadata = npm --cache $npmCache --userconfig $npmConfig view @openai/codex@0.162.1 optionalDependencies --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned Codex registry metadata lookup failed with exit code $LASTEXITCODE."
+          }
+          [System.IO.File]::WriteAllText($codexMetadataPath, ($codexMetadata -join "`n"))
+          $optionalDependencies = Get-Content -Raw -LiteralPath $codexMetadataPath | ConvertFrom-Json -AsHashtable
+          $codexAlias = "@openai/$codexPackage"
+          $codexInstallSpec = "${codexAlias}@npm:@openai/codex@0.162.1-$codexPackageSuffix"
+          if ($optionalDependencies[$codexAlias] -cne "npm:@openai/codex@0.162.1-$codexPackageSuffix") {
+            throw "Pinned Codex registry alias does not match $codexInstallSpec."
+          }
+          npm install --prefix $codexRoot --cache $npmCache --userconfig $npmConfig --no-save --ignore-scripts $codexInstallSpec
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned native Codex installation failed with exit code $LASTEXITCODE."
+          }
+          $codexPackageManifest = Join-Path $codexRoot "node_modules\@openai\$codexPackage\package.json"
+          $installedCodexPackage = Get-Content -Raw -LiteralPath $codexPackageManifest | ConvertFrom-Json
+          if ($installedCodexPackage.name -cne "@openai/codex" -or $installedCodexPackage.version -cne "0.162.1-$codexPackageSuffix") {
+            throw "Installed Codex alias package metadata does not match the pinned platform package."
+          }
+          $codexCommand = Join-Path $codexRoot "node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe"
+          if (-not (Test-Path -LiteralPath $codexCommand -PathType Leaf)) {
+            throw "Version-pinned native Codex executable is missing: $codexCommand"
+          }
+          $codexVersion = (& $codexCommand --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $codexVersion -cne "codex-cli 0.162.1") {
+            throw "Native Codex version mismatch: $codexVersion"
+          }
+          "PROJECTATLAS_CODEX_COMMAND=$codexCommand" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "PROJECTATLAS_CODEX_VERSION=0.162.1" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Install packaged runtime through plugin
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE: "1"
+          PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE: "1"
+          PROJECTATLAS_RELEASE_PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
         run: |
           $archive = Join-Path "release-assets" "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
           $archiveName = [System.IO.Path]::GetFileName($archive)
@@ -1018,6 +1115,10 @@ jobs:
           }
           foreach ($test in @(
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+            "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation",
+            "pdf_rendering_resource_stop_preserves_source_and_repairs",
+            "pdf_parser_limits_preserve_cli_and_mcp_publication",
+            "bounded_pdf_and_docx_reach_cli_and_mcp_navigation",
             "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
             "deep_qualified_symbol_parents_preserve_full_and_incremental_publication",
             "partial_markdown_limit_persists_without_losing_complete_publication",
