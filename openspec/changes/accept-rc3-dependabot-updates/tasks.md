@@ -23,3 +23,8 @@
 - [x] 5.2 Replace deprecated RMCP server/client info aliases with supported configuration types at existing adapters; preserve initialize, tool, selected-root, and missing-index behavior with positive and failure MCP tests.
 - [x] 5.3 Build and exercise the updated optional parser pack's native grammar lifecycle on supported Windows and Linux hosts, including contained failure and active-index preservation; on macOS x64 and arm64, prove typed unsupported containment before worker launch and unchanged built-in parsing.
 - [x] 5.4 Run cargo fmt --check, locked workspace check/clippy/test/doc, dependency/security policy, OpenSpec, IssueOps, and required current-head four-platform/installed gates; resolve review findings before acceptance.
+
+## 6. Mermaid sanitizer security patch (#499)
+
+- [x] 6.1 Resolve the existing dependency ranges to patched DOMPurify 3.4.16 and source-map-js 1.2.2 in the Mermaid lockfile for GHSA-p98j-92pf-mc4p and GHSA-68fv-2mgg-jv7q; preserve the manifest and unrelated dependency versions, and verify the exact locked delta under aggregate #499.
+- [ ] 6.2 Prove lockfile installation and valid and invalid Mermaid parsing, inspect the low-severity dependency audit, remediate compatible findings and document the remaining KaTeX compatibility and parser-only reachability disposition while retaining the repository audit gate; run OpenSpec, IssueOps, required affected local and current-head hosted checks, and resolve independent and automated review findings before acceptance.

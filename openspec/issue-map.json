@@ -193,7 +193,7 @@
       "primary_issue": 639,
       "owners": [
         { "issue": 639, "first_task": "1.1", "last_task": "2.2" },
-        { "issue": 499, "first_task": "3.1", "last_task": "5.4" }
+        { "issue": 499, "first_task": "3.1", "last_task": "6.2" }
       ]
     },
     "complete-v060-release-acceptance": {
