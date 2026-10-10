@@ -776,16 +776,36 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             write_receipt()?;
             run_hook_raw(project_root, process_path)
         };
+    let has_trusted_package_context = |output: &str| {
+        output.starts_with(
+            "Before any ProjectAtlas call, read the complete version-matched ProjectAtlas skill",
+        ) && output
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Read the complete installed ProjectAtlas skill now: ")
+            })
+            .is_some_and(|path| {
+                require_same_canonical_path(
+                    path,
+                    &plugin_root.join(PROJECTATLAS_SKILL_RELATIVE_PATH),
+                    "installed skill",
+                )
+                .is_ok()
+            })
+    };
     fs::create_dir(fixture.path().join(ATLAS_DIR_NAME))?;
     let plain_directory = fixture.path().join("plain").join("nested");
     fs::create_dir_all(&plain_directory)?;
     let no_root = run_hook(&plain_directory, &path)?;
     if !no_root.contains("ProjectAtlas integration incomplete: no project root was identified")
+        || !has_trusted_package_context(&no_root)
+        || no_root.contains("ProjectAtlas integration ready")
         || no_root.contains("Repair command:")
         || fs::read(&db)? != original_db
+        || codex_marker.exists()
     {
         return Err(io::Error::other(format!(
-            "unbound directory produced unsafe repair guidance: {no_root}"
+            "unbound directory did not retain trusted package guidance without claiming readiness or executing a command: {no_root}"
         ))
         .into());
     }
@@ -800,12 +820,19 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             .map(|(root, _)| root)
     });
     if !flat_uninitialized.contains("ProjectAtlas integration incomplete")
+        || !has_trusted_package_context(&flat_uninitialized)
+        || flat_uninitialized.contains("ProjectAtlas integration ready")
         || !flat_uninitialized.contains("Repair command:")
         || reported_root.and_then(|root| fs::canonicalize(root).ok())
             != Some(fs::canonicalize(&flat_root)?)
+        || codex_marker.exists()
+        || fs::read(&db)? != original_db
+        || flat_root.join(ATLAS_DIR_NAME).exists()
+        || flat_nested.join(ATLAS_DIR_NAME).exists()
+        || !fs::read(flat_root.join("projectatlas.toml"))?.is_empty()
     {
         return Err(io::Error::other(format!(
-            "flat config did not identify its project root {}: {flat_uninitialized}",
+            "wrong-root or missing-index guidance was not trusted, explicit, and read-only for {}: {flat_uninitialized}",
             flat_root.display()
         ))
         .into());
@@ -927,6 +954,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "Repair command unavailable: reinstall the version-matched ProjectAtlas plugin",
         ) || output.contains("Repair command:")
             || output.contains("ProjectAtlas integration ready")
+            || has_trusted_package_context(&output)
         {
             return Err(io::Error::other(format!(
                 "damaged plugin manifest did not fail closed with repair guidance: {output}"
@@ -956,6 +984,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "ProjectAtlas integration incomplete: bundled agent instructions are missing or invalid",
         ) || !output.contains("reinstall the version-matched plugin before Atlas use")
             || output.contains("ProjectAtlas integration ready")
+            || has_trusted_package_context(&output)
         {
             return Err(io::Error::other(format!(
                 "damaged hook guidance did not fail closed: {output}"
@@ -978,6 +1007,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         let output = run_hook_raw(&repo, &path)?;
         if !output.contains("ProjectAtlas integration incomplete")
             || output.contains("ProjectAtlas integration ready")
+            || has_trusted_package_context(&output)
         {
             return Err(io::Error::other(format!(
                 "missing or stale short CLI guide kept integration ready: {output}"
@@ -1009,6 +1039,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             let output = run_hook_raw(&repo, &path)?;
             if !output.contains("ProjectAtlas integration incomplete")
                 || output.contains("ProjectAtlas integration ready")
+                || has_trusted_package_context(&output)
                 || (skill_asset == "hooks/agent-instructions.txt"
                     && output.contains("stale skill guidance"))
             {
@@ -1072,16 +1103,25 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         write_receipt()?;
     }
     fs::write(&codex_config, "changed host config")?;
-    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+    let changed_codex_config = run_hook_raw(&repo, &path)?;
+    if !changed_codex_config.contains("ProjectAtlas integration incomplete")
+        || !has_trusted_package_context(&changed_codex_config)
+    {
         return Err(io::Error::other("changed Codex config kept stale receipt ready").into());
     }
     write_receipt()?;
     fs::write(&receipt_path, "{")?;
-    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+    let malformed_receipt = run_hook_raw(&repo, &path)?;
+    if !malformed_receipt.contains("ProjectAtlas integration incomplete")
+        || has_trusted_package_context(&malformed_receipt)
+    {
         return Err(io::Error::other("malformed readiness receipt was accepted").into());
     }
     fs::remove_file(&receipt_path)?;
-    if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+    let missing_receipt = run_hook_raw(&repo, &path)?;
+    if !missing_receipt.contains("ProjectAtlas integration incomplete")
+        || has_trusted_package_context(&missing_receipt)
+    {
         return Err(io::Error::other("missing readiness receipt was accepted").into());
     }
     write_receipt()?;
@@ -1218,6 +1258,20 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     ))
                     .into());
                 }
+                let jq_no_root = run_hook_raw(&plain_directory, &jq_only_path)?;
+                if !jq_no_root
+                    .contains("ProjectAtlas integration incomplete: no project root was identified")
+                    || !has_trusted_package_context(&jq_no_root)
+                    || jq_no_root.contains("ProjectAtlas integration ready")
+                    || jq_no_root.contains("Repair command:")
+                    || codex_marker.exists()
+                    || fs::read(&db)? != original_db
+                {
+                    return Err(io::Error::other(format!(
+                        "jq-only hook did not provide trusted package context without project readiness or mutation: {jq_no_root}"
+                    ))
+                    .into());
+                }
                 for skill_asset in [
                     "hooks/agent-instructions.txt",
                     PROJECTATLAS_SKILL_RELATIVE_PATH,
@@ -1230,6 +1284,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     let output = run_hook_raw(&repo, &jq_only_path)?;
                     if !output.contains("ProjectAtlas integration incomplete")
                         || output.contains("ProjectAtlas integration ready")
+                        || has_trusted_package_context(&output)
                         || (skill_asset == "hooks/agent-instructions.txt"
                             && output.contains("stale but nonempty skill asset"))
                     {

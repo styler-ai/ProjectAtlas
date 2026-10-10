@@ -533,9 +533,13 @@ but their line ranges come from the deep symbol index and should be kept fresh b
 ProjectAtlas ships public agent guidance through repository docs and the packaged plugin skill.
 The packaged Codex plugin registers its read-only readiness command for root `SessionStart`
 startup/resume/clear/compaction and `SubagentStart`. On those events, it checks the manifest
-version against the directly resolved runtime, current project host config, and global Codex MCP
-registration. When ready, it prints the package-bound routing reminder. The subagent event reuses the same
-package-bound scripts and instructions; it does not initialize, scan, or rebind project state.
+version and a safe readiness receipt against the installed package guidance and skill asset hashes.
+When that package check passes, it prints the package-bound routing reminder and skill path. Project
+readiness remains incomplete until the separate project-root, runtime, database, generated config,
+and Codex registration checks pass; the hook does not run Atlas commands during this check. Missing
+or invalid receipts, or damaged package assets, suppress the guidance and path. The subagent event
+reuses the same package-bound scripts and instructions; it does not initialize, scan, or rebind
+project state.
 The current Codex 0.162.1 hook contract supports root `SessionStart` context on startup and
 compaction, and `SubagentStart` context when a child starts. The packaged Windows command explicitly
 uses the Windows PowerShell executable under `SystemRoot`; it does not resolve a bare executable from

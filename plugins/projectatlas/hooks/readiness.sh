@@ -57,20 +57,6 @@ PY
 fi
 reason='runtime unavailable, mismatched, or JSON validator unavailable'
 starting_root=$(pwd -P)
-project_root=$starting_root
-home_root=
-[ -z "${HOME:-}" ] || home_root=$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd -P) || true
-while :; do
-  if [ "$project_root" != "$starting_root" ] && [ "$project_root" = "$home_root" ]; then
-    project_root=$starting_root
-    break
-  fi
-  [ -f "$project_root/.projectatlas/projectatlas.db" ] && break
-  [ "$project_root" = / ] && break
-  { [ -e "$project_root/.git" ] || [ -d "$project_root/.projectatlas" ] ||
-    [ -f "$project_root/projectatlas.toml" ]; } && break
-  project_root=$(dirname -- "$project_root")
-done
 guidance_path=$plugin_root/hooks/agent-instructions.txt
 guidance_size=
 if [ -f "$guidance_path" ]; then
@@ -99,6 +85,95 @@ for skill_asset in "$skill" "$language_support" "$short_cli"; do
   fi
 done
 
+state_base=${XDG_STATE_HOME:-${HOME:-}/.local/state}
+if [ -d "$state_base" ]; then
+  state_base=$(CDPATH= cd -P -- "$state_base" 2>/dev/null && pwd -P) || state_base=
+else
+  state_base=
+fi
+receipt=${state_base:+$state_base/projectatlas/codex-readiness.json}
+codex_config=${CODEX_HOME:-${HOME:-}/.codex}/config.toml
+receipt_file_safe() {
+  [ -n "$receipt" ] && [ -n "$state_base" ] && [ -d "$state_base/projectatlas" ] &&
+    [ ! -L "$state_base/projectatlas" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
+    [ "$(wc -c < "$receipt")" -le 65536 ]
+}
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+package_receipt_valid() {
+  receipt_file_safe || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$receipt" "$expected" "$guidance_path" "$skill" "$language_support" "$short_cli" <<'PY'
+import hashlib, json, sys
+receipt_path, version, guidance, skill, language_support, short_cli = sys.argv[1:]
+def digest(path):
+    value = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1048576), b""):
+            value.update(chunk)
+    return value.hexdigest()
+try:
+    with open(receipt_path, encoding="utf-8") as source:
+        receipt = json.load(source)
+    valid = (isinstance(receipt, dict) and receipt.get("version") == version and
+             receipt.get("agent_guidance_sha256") == digest(guidance) and
+             receipt.get("skill_sha256") == digest(skill) and
+             receipt.get("language_support_sha256") == digest(language_support) and
+             receipt.get("short_cli_sha256") == digest(short_cli))
+    sys.exit(0 if valid else 1)
+except (OSError, ValueError, TypeError, KeyError):
+    sys.exit(1)
+PY
+  elif command -v jq >/dev/null 2>&1; then
+    agent_guidance_hash=$(hash_file "$guidance_path") || return 1
+    skill_hash=$(hash_file "$skill") || return 1
+    language_support_hash=$(hash_file "$language_support") || return 1
+    short_cli_hash=$(hash_file "$short_cli") || return 1
+    receipt_json=$(cat "$receipt") || return 1
+    printf '%s\n' "$receipt_json" | jq -se \
+      --arg version "$expected" \
+      --arg agent_guidance_hash "$agent_guidance_hash" \
+      --arg skill_hash "$skill_hash" \
+      --arg language_support_hash "$language_support_hash" \
+      --arg short_cli_hash "$short_cli_hash" '
+      length == 1 and (.[0] |
+        .version == $version and
+        .agent_guidance_sha256 == $agent_guidance_hash and
+        .skill_sha256 == $skill_hash and
+        .language_support_sha256 == $language_support_hash and
+        .short_cli_sha256 == $short_cli_hash)
+    ' >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+if [ -n "$expected" ] && package_receipt_valid; then
+  printf '%s\n' "$guidance"
+  printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$(safe_text "$skill")"
+fi
+
+project_root=$starting_root
+home_root=
+[ -z "${HOME:-}" ] || home_root=$(CDPATH= cd -P -- "$HOME" 2>/dev/null && pwd -P) || true
+while :; do
+  if [ "$project_root" != "$starting_root" ] && [ "$project_root" = "$home_root" ]; then
+    project_root=$starting_root
+    break
+  fi
+  [ -f "$project_root/.projectatlas/projectatlas.db" ] && break
+  [ "$project_root" = / ] && break
+  { [ -e "$project_root/.git" ] || [ -d "$project_root/.projectatlas" ] ||
+    [ -f "$project_root/projectatlas.toml" ]; } && break
+  project_root=$(dirname -- "$project_root")
+done
+
 if [ "$project_root" = / ] ||
   { [ ! -e "$project_root/.git" ] && [ ! -d "$project_root/.projectatlas" ] &&
     [ ! -f "$project_root/projectatlas.toml" ]; }; then
@@ -124,17 +199,7 @@ generated=
 if [ -f "$host_config" ] && [ "$(wc -c < "$host_config")" -le 1048576 ]; then
   generated=$(cat "$host_config" 2>/dev/null || true)
 fi
-state_base=${XDG_STATE_HOME:-${HOME:-}/.local/state}
-if [ -d "$state_base" ]; then
-  state_base=$(CDPATH= cd -P -- "$state_base" 2>/dev/null && pwd -P) || state_base=
-else
-  state_base=
-fi
-receipt=${state_base:+$state_base/projectatlas/codex-readiness.json}
-codex_config=${CODEX_HOME:-${HOME:-}/.codex}/config.toml
-if [ -n "$receipt" ] && [ -d "$state_base/projectatlas" ] &&
-  [ ! -L "$state_base/projectatlas" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
-  [ "$(wc -c < "$receipt")" -le 65536 ] && [ -f "$codex_config" ] &&
+if receipt_file_safe && [ -f "$codex_config" ] &&
   [ "$(wc -c < "$codex_config")" -le 1048576 ]; then
   if command -v python3 >/dev/null 2>&1; then
     registry=$(python3 -c '
@@ -173,11 +238,9 @@ except (OSError, ValueError, TypeError, KeyError, AttributeError):
   fi
 fi
 receipt_valid() {
-  [ -n "$receipt" ] && [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
-    [ -d "$state_base/projectatlas" ] && [ ! -L "$state_base/projectatlas" ] &&
-    [ -f "$db" ] && [ -f "$host_config" ] && [ -f "$codex_config" ] &&
+  package_receipt_valid || return 1
+  [ -f "$db" ] && [ -f "$host_config" ] && [ -f "$codex_config" ] &&
     [ -n "$direct_path" ] && [ -f "$direct_path" ] || return 1
-  [ "$(wc -c < "$receipt")" -le 65536 ] || return 1
   [ "$(wc -c < "$host_config")" -le 1048576 ] &&
     [ "$(wc -c < "$codex_config")" -le 1048576 ] || return 1
   cursor=$starting_root
@@ -187,9 +250,9 @@ receipt_valid() {
     cursor=$(dirname -- "$cursor")
   done
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$receipt" "$host_config" "$expected" "$project_root" "$direct_path" "$db" "$config" "$codex_config" "$guidance_path" "$skill" "$language_support" "$short_cli" <<'PY'
+    python3 - "$receipt" "$host_config" "$expected" "$project_root" "$direct_path" "$db" "$config" "$codex_config" <<'PY'
 import hashlib, json, os, sys
-receipt_path, generated_path, version, root, runtime, database, config, codex_config, guidance, skill, language_support, short_cli = sys.argv[1:]
+receipt_path, generated_path, version, root, runtime, database, config, codex_config = sys.argv[1:]
 def same_path(actual, wanted):
     return isinstance(actual, str) and os.path.isabs(actual) and os.path.realpath(actual) == os.path.realpath(wanted)
 def digest(path):
@@ -221,10 +284,6 @@ try:
              receipt["direct_cli_sha256"] == receipt["runtime_sha256"] and
              receipt["generated_sha256"] == digest(generated_path) and
              receipt["codex_config_sha256"] == digest(codex_config) and
-             receipt["agent_guidance_sha256"] == digest(guidance) and
-             receipt["skill_sha256"] == digest(skill) and
-             receipt["language_support_sha256"] == digest(language_support) and
-             receipt["short_cli_sha256"] == digest(short_cli) and
              registry["name"] == "projectatlas" and registry["enabled"] is True and
              transport["type"] == "stdio" and same_path(transport["command"], runtime) and
              same_args(transport["args"]) and same_path(generated["command"], runtime) and
@@ -234,30 +293,15 @@ except (OSError, ValueError, TypeError, KeyError, IndexError):
     sys.exit(1)
 PY
   elif command -v jq >/dev/null 2>&1; then
-    if command -v sha256sum >/dev/null 2>&1; then
-      hash_file() { sha256sum "$1" | awk '{print $1}'; }
-    elif command -v shasum >/dev/null 2>&1; then
-      hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
-    else
-      return 1
-    fi
     receipt_json=$(cat "$receipt") || return 1
     printf '%s\n' "$receipt_json" | jq -se --arg v "$expected" \
       --arg runtime_hash "$(hash_file "$direct_path")" \
       --arg generated_hash "$(hash_file "$host_config")" \
       --arg codex_hash "$(hash_file "$codex_config")" \
-      --arg agent_guidance_hash "$(hash_file "$guidance_path")" \
-      --arg skill_hash "$(hash_file "$skill")" \
-      --arg language_support_hash "$(hash_file "$language_support")" \
-      --arg short_cli_hash "$(hash_file "$short_cli")" '
-      length == 1 and (.[0] |
+      'length == 1 and (.[0] |
         .version == $v and .runtime_sha256 == $runtime_hash and
         .direct_cli_sha256 == $runtime_hash and
         .generated_sha256 == $generated_hash and .codex_config_sha256 == $codex_hash and
-        .agent_guidance_sha256 == $agent_guidance_hash and
-        .skill_sha256 == $skill_hash and
-        .language_support_sha256 == $language_support_hash and
-        .short_cli_sha256 == $short_cli_hash and
         .registry.name == "projectatlas" and .registry.enabled == true and
         .registry.transport.type == "stdio" and
         (.registry.transport.args | type) == "array")
@@ -320,8 +364,6 @@ if [ -n "$expected" ] && receipt_valid; then
     if (cd "$project_root" && "$@" >/dev/null 2>&1); then
       reason='installer readiness receipt or host files changed; rerun the installer'
       if receipt_valid; then
-        printf '%s\n' "$guidance"
-        printf 'Read the complete installed ProjectAtlas skill now: %s\n' "$(safe_text "$skill")"
         printf 'ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match %s for this project. Use the version-matched ProjectAtlas skill and repository instructions.\n' "$(safe_text "$expected")"
         exit 0
       fi
