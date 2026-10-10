@@ -31,20 +31,6 @@ function IdentityValue($value) {
 $startingRoot = (Get-Location).Path
 $projectRoot = $startingRoot
 $homeRoot = if ($env:USERPROFILE) { [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\') } else { $null }
-while ($true) {
-    if ($projectRoot -ne $startingRoot -and $homeRoot -and
-        [IO.Path]::GetFullPath($projectRoot).TrimEnd('\') -ieq $homeRoot) {
-        $projectRoot = $startingRoot
-        break
-    }
-    if (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas/projectatlas.db') -PathType Leaf) { break }
-    if ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -or
-        (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container) -or
-        (Test-Path -LiteralPath (Join-Path $projectRoot 'projectatlas.toml') -PathType Leaf)) { break }
-    $parent = Split-Path -Parent $projectRoot
-    if (-not $parent -or $parent -eq $projectRoot) { break }
-    $projectRoot = $parent
-}
 try {
     $guidancePath = Join-Path $pluginRoot 'hooks/agent-instructions.txt'
     $guidanceFile = Get-Item -LiteralPath $guidancePath -ErrorAction Stop
@@ -67,6 +53,57 @@ foreach ($skillAsset in @($skill, $languageSupport, $shortCli)) {
     }
 }
 
+$stateBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $env:USERPROFILE }
+$receiptPath = if ($stateBase) { Join-Path $stateBase 'ProjectAtlas/state/codex-readiness.json' } else { $null }
+$codexConfig = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'config.toml' } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.codex/config.toml' } else { $null }
+function FileSha256([string]$path) {
+    $stream = [IO.File]::OpenRead($path)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $hash.Dispose(); $stream.Dispose() }
+}
+function PackageReceiptValid {
+    try {
+        if (-not $expected -or -not $receiptPath) { return $false }
+        $receiptDir = Get-Item -Force -LiteralPath (Split-Path -Parent $receiptPath) -ErrorAction Stop
+        $receiptFile = Get-Item -Force -LiteralPath $receiptPath -ErrorAction Stop
+        if (($receiptDir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $receiptFile.Length -gt 65536 -or
+            (($receiptFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            ($receiptFile.PSObject.Properties.Name -contains 'LinkType' -and $receiptFile.LinkType -eq 'HardLink')) {
+            return $false
+        }
+        $packageReceipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $receiptPath | ConvertFrom-Json
+        return $packageReceipt.version -ceq $expected -and
+            $packageReceipt.agent_guidance_sha256 -ceq (FileSha256 $guidancePath) -and
+            $packageReceipt.skill_sha256 -ceq (FileSha256 $skill) -and
+            $packageReceipt.language_support_sha256 -ceq (FileSha256 $languageSupport) -and
+            $packageReceipt.short_cli_sha256 -ceq (FileSha256 $shortCli)
+    } catch {
+        return $false
+    }
+}
+$packageTrusted = PackageReceiptValid
+if ($packageTrusted) {
+    Write-Output $guidance.TrimEnd()
+    Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
+}
+
+while ($true) {
+    if ($projectRoot -ne $startingRoot -and $homeRoot -and
+        [IO.Path]::GetFullPath($projectRoot).TrimEnd('\') -ieq $homeRoot) {
+        $projectRoot = $startingRoot
+        break
+    }
+    if (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas/projectatlas.db') -PathType Leaf) { break }
+    if ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -or
+        (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container) -or
+        (Test-Path -LiteralPath (Join-Path $projectRoot 'projectatlas.toml') -PathType Leaf)) { break }
+    $parent = Split-Path -Parent $projectRoot
+    if (-not $parent -or $parent -eq $projectRoot) { break }
+    $projectRoot = $parent
+}
+
 if ($projectRoot -ieq [IO.Path]::GetPathRoot($projectRoot) -or
     -not (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -and
     -not (Test-Path -LiteralPath (Join-Path $projectRoot '.projectatlas') -PathType Container) -and
@@ -86,15 +123,6 @@ $registry = $null
 $generated = $null
 $atlasDir = Join-Path $projectRoot '.projectatlas'
 $hostConfig = Join-Path $atlasDir 'projectatlas.mcp.json'
-$stateBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $env:USERPROFILE }
-$receiptPath = if ($stateBase) { Join-Path $stateBase 'ProjectAtlas/state/codex-readiness.json' } else { $null }
-$codexConfig = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'config.toml' } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.codex/config.toml' } else { $null }
-function FileSha256([string]$path) {
-    $stream = [IO.File]::OpenRead($path)
-    $hash = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($hash.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
-    finally { $hash.Dispose(); $stream.Dispose() }
-}
 $argsExpected = @('--require-version', $expected, '--db', $db)
 if ($config) { $argsExpected += @('--config', $config) }
 $argsExpected += 'mcp'
@@ -133,6 +161,10 @@ try {
         $reason = 'bundled plugin manifest is missing or invalid'
         throw 'not ready'
     }
+    if (-not (PackageReceiptValid)) {
+        $reason = 'installer readiness receipt or host files changed; rerun the installer'
+        throw 'not ready'
+    }
     $directCommand = Get-Command projectatlas -ErrorAction SilentlyContinue
     $directPath = if ($directCommand -and $directCommand.CommandType -eq 'Application') { $directCommand.Source } else { $null }
     $runtime = [pscustomobject]@{ version = $null; executable = $directPath }
@@ -166,11 +198,7 @@ try {
         $receipt.direct_cli_sha256 -cne $receipt.runtime_sha256 -or
         $receipt.runtime_sha256 -cne (FileSha256 $directPath) -or
         $receipt.codex_config_sha256 -cne (FileSha256 $codexConfig) -or
-        $receipt.generated_sha256 -cne (FileSha256 $hostConfig) -or
-        $receipt.agent_guidance_sha256 -cne (FileSha256 $guidancePath) -or
-        $receipt.skill_sha256 -cne (FileSha256 $skill) -or
-        $receipt.language_support_sha256 -cne (FileSha256 $languageSupport) -or
-        $receipt.short_cli_sha256 -cne (FileSha256 $shortCli)) {
+        $receipt.generated_sha256 -cne (FileSha256 $hostConfig)) {
         $reason = 'installer readiness receipt or host files changed; rerun the installer'
         throw 'not ready'
     }
@@ -204,13 +232,8 @@ try {
                     $receipt.direct_cli_sha256 -ceq (FileSha256 $directPath) -and
                     $receipt.codex_config_sha256 -ceq (FileSha256 $codexConfig) -and
                     $receipt.generated_sha256 -ceq (FileSha256 $hostConfig) -and
-                    $receipt.agent_guidance_sha256 -ceq (FileSha256 $guidancePath) -and
-                    $receipt.skill_sha256 -ceq (FileSha256 $skill) -and
-                    $receipt.language_support_sha256 -ceq (FileSha256 $languageSupport) -and
-                    $receipt.short_cli_sha256 -ceq (FileSha256 $shortCli) -and
+                    (PackageReceiptValid) -and
                     (& $bindingReady $registry $generated)) {
-                    Write-Output $guidance.TrimEnd()
-                    Write-Output ('Read the complete installed ProjectAtlas skill now: {0}' -f (IdentityValue $skill))
                     Write-Output ('ProjectAtlas integration ready: plugin, direct CLI, generated config, and Codex MCP match {0} for this project. Use the version-matched ProjectAtlas skill and repository instructions.' -f (IdentityValue $expected))
                     exit 0
                 }

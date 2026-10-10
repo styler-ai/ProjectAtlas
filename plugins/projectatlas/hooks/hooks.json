@@ -1,5 +1,19 @@
 {
   "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
+            "commandWindows": "& \"${env:SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${env:PLUGIN_ROOT}\\hooks\\readiness.ps1\"",
+            "statusMessage": "Checking ProjectAtlas integration",
+            "timeout": 30,
+            "additionalContextLimit": 800
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup|resume|clear|compact",
@@ -7,7 +21,7 @@
           {
             "type": "command",
             "command": "/bin/sh \"$PLUGIN_ROOT/hooks/readiness.sh\"",
-            "commandWindows": "\"\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\hooks\\readiness.ps1\"\"",
+            "commandWindows": "& \"${env:SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${env:PLUGIN_ROOT}\\hooks\\readiness.ps1\"",
             "statusMessage": "Checking ProjectAtlas integration",
             "timeout": 30,
             "additionalContextLimit": 800
