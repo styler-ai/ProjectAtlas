@@ -136,6 +136,75 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 - Keep exact hosted tag/release/Latest verification in the release operation after all mapped milestone implementation issues are closed. Implementation checklists prove generic policy and prepublication packages; they must not require the hosted release whose prepublication milestone gate they block.
 - Release notes for every RC and the final stable promotion use the preceding stable tag as their baseline. Later candidates and the final notes therefore remain cumulative across the entire release series without duplicating an RC as the history baseline.
 - Release archives are published with a `SHA256SUMS` asset. If the clean-main seed producer supplies the optional exact-tag `projectatlas-main-atlas-seed-<tag>-<snapshot-digest>.tar.zst` and matching `.manifest.json`, release staging validates the pair and checksums both without opening or modifying the seed. Verify downloaded assets with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS`.
+
+### First RC run with tag-dependent native proof
+
+The automatic `03-auto-release.yml` dispatch uses `prepublish_only=false`. For a new candidate, its native Codex plugin-convergence proof needs a marketplace tag that does not yet exist. Do not count that dispatch as release acceptance. Bootstrap a tag-only ref before the normal release run. For example:
+
+```bash
+RELEASE_VERSION=v0.5.0-rc3
+```
+
+1. Keep the exact reviewed, merged `main` commit fixed, with its child issues accepted. Dispatch a clean parser-pack build:
+
+   ```bash
+   gh workflow run optional-parser-pack.yml --ref main \
+     --field clean_construction=true --field target=all
+   ```
+
+   Record the successful run ID and confirm its `headSha` matches the reviewed `main` SHA. Set `PARSER_PACK_RUN_ID` to that run ID.
+
+2. Run the package diagnostic on `main` with `prepublish_only=true`:
+
+   ```bash
+   gh workflow run release.yml --ref main \
+     --field version="$RELEASE_VERSION" \
+     --field prepublish_only=true \
+     --field parser_pack_run_id="$PARSER_PACK_RUN_ID"
+   ```
+
+   This builds and checks packages but skips native Codex installation, the publication checklist, and the publish job. It is diagnostic only, not native acceptance.
+
+3. Before any ref mutation, require the publication checklist to pass and verify `main` still points at the reviewed SHA:
+
+   ```bash
+   python3 .github/scripts/issue-checklists.py \
+     --repo styler-ai/ProjectAtlas \
+     --publication-version "$RELEASE_VERSION"
+   ```
+
+   Also check that both the tag-ref and release-by-tag API reads return HTTP 404:
+
+   ```bash
+   gh api --include "repos/styler-ai/ProjectAtlas/git/ref/tags/$RELEASE_VERSION"
+   gh api --include "repos/styler-ai/ProjectAtlas/releases/tags/$RELEASE_VERSION"
+   ```
+
+   `gh api` exits nonzero for the expected 404 responses; inspect the HTTP status itself. A 404 confirms absence. If the tag exists, skip step 4 only when it points to the exact reviewed commit. Use release repair only when that exact tag and the release classification match the derived RC policy. Stop if a tag points elsewhere, a release lacks its matching tag, or release metadata is invalid; never move the tag to repair those states. Stop on every other status or error.
+
+4. Create only the lightweight tag ref through the authenticated GitHub API; the repository pre-push hook accepts branch updates, so do not use `git push` to create a tag. Keep the exact SHA check and ref readback in a fail-fast shell:
+
+   ```bash
+   set -euo pipefail
+   MAIN_SHA="$(gh run view "$PARSER_PACK_RUN_ID" --json headSha --jq .headSha)"
+   test "$(gh api repos/styler-ai/ProjectAtlas/commits/main --jq .sha)" = "$MAIN_SHA"
+   gh api repos/styler-ai/ProjectAtlas/git/refs --method POST \
+     -f ref="refs/tags/$RELEASE_VERSION" -f sha="$MAIN_SHA"
+   test "$(gh api "repos/styler-ai/ProjectAtlas/git/ref/tags/$RELEASE_VERSION" --jq .object.type)" = commit
+   test "$(gh api "repos/styler-ai/ProjectAtlas/git/ref/tags/$RELEASE_VERSION" --jq .object.sha)" = "$MAIN_SHA"
+   ```
+
+5. Rerun `release.yml` on `main` with `prepublish_only=false` and the same parser-pack run ID:
+
+   ```bash
+   gh workflow run release.yml --ref main \
+     --field version="$RELEASE_VERSION" \
+     --field prepublish_only=false \
+     --field parser_pack_run_id="$PARSER_PACK_RUN_ID"
+   ```
+
+   This verifies native Codex marketplace convergence on Linux, Windows, macOS Intel, and macOS ARM before publishing. The workflow requires the tag to match the exact `main` head. When that matching tag exists without a release, its existing recovery path creates the candidate prerelease with Latest disabled.
+
 - If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same exact version. Repair is accepted only when the existing non-draft release classification and tag head match the derived stable/RC policy; replaceable assets may then be repaired without moving the tag or changing classification, while validated immutable seed assets are never clobbered. If interruption left exactly one seed-pair member, recovery also requires the complete staged pair and exact byte equality, then uploads only the missing companion. The workflow rechecks release metadata, exact head, and requires the previously captured Latest release to remain unchanged during repair.
 
 ## CI behavior

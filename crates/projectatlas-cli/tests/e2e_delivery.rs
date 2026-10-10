@@ -108,6 +108,10 @@ const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
 const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
 const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
 const TEST_WINDOWS_RUNTIME_MIRROR_DIR: &str = "AppData/Local/ProjectAtlas/bin";
+const TEST_XDG_DATA_DIR: &str = ".local/share";
+const TEST_XDG_CONFIG_DIR: &str = ".config";
+const TEST_XDG_CACHE_DIR: &str = ".cache";
+const TEST_XDG_STATE_DIR: &str = ".local/state";
 #[cfg(windows)]
 const TEST_WINDOWS_LEGACY_ATLAS_FORWARDER_FILE_NAME: &str = "atlas.cmd";
 const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
@@ -3242,6 +3246,7 @@ fn git_success(root: &Path, arguments: &[&str]) -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box<dyn Error>> {
+    let release_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     #[cfg(windows)]
     assert_windows_packaged_digest_admission()?;
     #[cfg(not(windows))]
@@ -4199,7 +4204,7 @@ gate_status=0
 python3() {{
   case "$1" in
     .github/scripts/issue-checklists.py)
-      [[ "$*" == *'--publication-version v0.5.0-rc2'* ]] || return 42
+      [[ "$*" == *'--publication-version {release_version}'* ]] || return 42
       echo gate >> calls
       return "$gate_status" ;;
     .github/scripts/verify-main-atlas-seed-release-assets.py) return 0 ;;
@@ -4213,6 +4218,7 @@ gate_status={gate_status}
 {publication}
 "#,
                 gate_status = if ready { 0 } else { 41 },
+                release_version = release_version,
             );
             fs::write(&calls_path, "")?;
             fs::write(&mutations_path, "")?;
@@ -4221,7 +4227,7 @@ gate_status={gate_status}
                 .current_dir(fixture.path())
                 .env("GITHUB_REPOSITORY", "fixture/repository")
                 .env("GITHUB_SHA", "1111111111111111111111111111111111111111")
-                .env("RELEASE_VERSION", "v0.5.0-rc2")
+                .env("RELEASE_VERSION", &release_version)
                 .env("EXPECTED_RELEASE_PRERELEASE", "true")
                 .env("EXPECTED_STABLE_TAG", "v0.5.0")
                 .env("PROJECTATLAS_RELEASE_EXISTS", repair.to_string())
@@ -4381,10 +4387,10 @@ gate_status={gate_status}
         .split("    steps:")
         .next()
         .ok_or_else(|| io::Error::other("release publish job omitted its header"))?;
-    if !publish_header.contains(prepublish_guard) || release.matches(prepublish_guard).count() != 4
+    if !publish_header.contains(prepublish_guard) || release.matches(prepublish_guard).count() != 6
     {
         return Err(io::Error::other(
-            "prepublish-only guard must own exactly the RC-first, exact-main, checklist, and publish boundaries",
+            "prepublish-only guard must own the RC-first, exact-main, checklist, publish, and native Codex proof boundaries",
         )
         .into());
     }
@@ -4542,18 +4548,97 @@ gate_status={gate_status}
         let packaged_step_name = "- name: Install packaged runtime through plugin";
         let installed_candidate_step_name =
             "- name: Installed-candidate regression and upgrade contracts";
+        let native_codex_step_name =
+            "- name: Install isolated native Codex for published-predecessor proof";
         for (step_name, label) in [
             (packaged_step_name, "packaged contract"),
             (
                 installed_candidate_step_name,
                 "installed-candidate contract",
             ),
+            (native_codex_step_name, "native Codex predecessor proof"),
         ] {
             if body.matches(step_name).count() != 1 {
                 return Err(io::Error::other(format!(
                     "{job} prepublish must own exactly one {label} step"
                 ))
                 .into());
+            }
+        }
+        let native_codex_step = body
+            .split(native_codex_step_name)
+            .nth(1)
+            .and_then(|tail| tail.split("\n      - name:").next())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{job} prepublish omitted its native Codex predecessor proof setup"
+                ))
+            })?;
+        for required in [
+            "if: ${{ !inputs.prepublish_only }}",
+            "0.162.1",
+            "--version",
+            "--cache",
+            "--userconfig",
+            "--no-save",
+            "--ignore-scripts",
+            "PROJECTATLAS_CODEX_COMMAND=",
+            "PROJECTATLAS_CODEX_VERSION=0.162.1",
+        ] {
+            if !native_codex_step.contains(required) {
+                return Err(io::Error::other(format!(
+                    "{job} native Codex proof setup omitted {required:?}"
+                ))
+                .into());
+            }
+        }
+        if job == "Unix" {
+            for required in [
+                "codex_package: codex-linux-x64",
+                "codex_target: x86_64-unknown-linux-musl",
+                "codex_package: codex-darwin-x64",
+                "codex_target: x86_64-apple-darwin",
+                "codex_package: codex-darwin-arm64",
+                "codex_target: aarch64-apple-darwin",
+                "npm view --cache \"$codex_root/npm-cache\" --userconfig \"$codex_root/npmrc\" @openai/codex@0.162.1 optionalDependencies --json",
+                "codex_package_suffix=\"${CODEX_PACKAGE#codex-}\"",
+                "@openai/$CODEX_PACKAGE@npm:@openai/codex@0.162.1-$codex_package_suffix",
+                "dependencies[alias] !== expected",
+                "manifest.name !== \"@openai/codex\"",
+                "manifest.version !== `0.162.1-${suffix}`",
+                "node_modules/@openai/$CODEX_PACKAGE/package.json",
+                "vendor/$CODEX_TARGET/bin/codex",
+                "--cache \"$codex_root/npm-cache\"",
+                "--userconfig \"$codex_root/npmrc\"",
+            ] {
+                if !body.contains(required) {
+                    return Err(io::Error::other(format!(
+                        "Unix native Codex proof omitted platform selector {required:?}"
+                    ))
+                    .into());
+                }
+            }
+        } else {
+            for required in [
+                "npm --cache $npmCache --userconfig $npmConfig view @openai/codex@0.162.1 optionalDependencies --json",
+                "$codexPackage = \"codex-win32-x64\"",
+                "$codexPackageSuffix = \"win32-x64\"",
+                "${codexAlias}@npm:@openai/codex@0.162.1-$codexPackageSuffix",
+                "$optionalDependencies[$codexAlias] -cne \"npm:@openai/codex@0.162.1-$codexPackageSuffix\"",
+                "$installedCodexPackage.name -cne \"@openai/codex\"",
+                "$installedCodexPackage.version -cne \"0.162.1-$codexPackageSuffix\"",
+                "vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+                "$npmCache = Join-Path $codexRoot \"npm-cache\"",
+                "$npmConfig = Join-Path $codexRoot \"npmrc\"",
+                "--cache $npmCache",
+                "--userconfig $npmConfig",
+            ] {
+                if !native_codex_step.contains(required) {
+                    return Err(io::Error::other(format!(
+                        "Windows native Codex proof omitted platform selector {required:?}"
+                    ))
+                    .into());
+                }
             }
         }
         let packaged_step = body
@@ -4572,6 +4657,9 @@ gate_status={gate_status}
             "packaged_cli_commands_own_their_real_sqlite_effects",
             "map_response_preserves_legacy_file_and_separates_format_from_json_sidecar",
             "packaged_cli_upgrades_published_predecessor_without_losing_state",
+            "PROJECTATLAS_RELEASE_PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}",
+            "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE: \"1\"",
+            "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE: \"1\"",
         ] {
             if !packaged_step.contains(contract) {
                 return Err(io::Error::other(format!(
@@ -4604,6 +4692,10 @@ gate_status={gate_status}
             })?;
         for contract in [
             "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+            "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation",
+            "pdf_rendering_resource_stop_preserves_source_and_repairs",
+            "pdf_parser_limits_preserve_cli_and_mcp_publication",
+            "bounded_pdf_and_docx_reach_cli_and_mcp_navigation",
             "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
             "deep_qualified_symbol_parents_preserve_full_and_incremental_publication",
             "partial_markdown_limit_persists_without_losing_complete_publication",
@@ -4629,6 +4721,23 @@ gate_status={gate_status}
                 .into());
             }
         }
+        let installer_step = body
+            .split(packaged_step_name)
+            .nth(1)
+            .and_then(|tail| tail.split("\n      - name:").next())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{job} prepublish omitted the packaged runtime installer step"
+                ))
+            })?;
+        if installer_step.matches("timeout-minutes:").count() != 1
+            || !installer_step.contains("timeout-minutes: 20")
+        {
+            return Err(io::Error::other(format!(
+                "{job} packaged runtime installer step must retain one 20-minute outer budget"
+            ))
+            .into());
+        }
         let platform_contracts: &[&str] = if job == "Unix" {
             &[
                 "posix_plugin_inventory_without_jq_rejects_split_object_fields",
@@ -4652,10 +4761,7 @@ gate_status={gate_status}
                 .into());
             }
         }
-        for required in [
-            "timeout-minutes: 5",
-            "--exact --include-ignored --nocapture",
-        ] {
+        for required in ["--exact --include-ignored --nocapture"] {
             if !packaged_step.contains(required) {
                 return Err(io::Error::other(format!(
                     "{job} packaged contract step omitted fail-closed contract {required:?}"
@@ -4743,9 +4849,14 @@ gate_status={gate_status}
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
     ] {
-        if unix_prepublish.matches(suffix).count() != 1 {
+        let expected_occurrences = if suffix == "x86_64-unknown-linux-gnu" {
+            1
+        } else {
+            2
+        };
+        if unix_prepublish.matches(suffix).count() != expected_occurrences {
             return Err(io::Error::other(format!(
-                "Unix prepublish must own exactly one {suffix:?} target"
+                "Unix prepublish must own the artifact and native Codex selectors for {suffix:?}"
             ))
             .into());
         }
@@ -4755,6 +4866,22 @@ gate_status={gate_status}
             "Windows prepublish omitted the x86_64-pc-windows-msvc target",
         )
         .into());
+    }
+
+    for required in [
+        "pdf_rendering_resource_stop_preserves_source_and_repairs|pdf_parser_limits_preserve_cli_and_mcp_publication|bounded_pdf_and_docx_reach_cli_and_mcp_navigation)\n              binary=e2e_navigation ;;",
+        "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation)\n              binary=e2e_lifecycle ;;",
+        "\"pdf_rendering_resource_stop_preserves_source_and_repairs\" { return \"e2e_navigation.exe\" }",
+        "\"pdf_parser_limits_preserve_cli_and_mcp_publication\" { return \"e2e_navigation.exe\" }",
+        "\"bounded_pdf_and_docx_reach_cli_and_mcp_navigation\" { return \"e2e_navigation.exe\" }",
+        "\"bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation\" { return \"e2e_lifecycle.exe\" }",
+    ] {
+        if !release.contains(required) {
+            return Err(io::Error::other(format!(
+                "packaged test dispatcher omitted exact binary route {required:?}"
+            ))
+            .into());
+        }
     }
 
     for (job, runtime_binding) in [
@@ -4884,6 +5011,10 @@ gate_status={gate_status}
             "mcp_server_stays_bound_to_one_project_database",
         ),
         (
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation",
+        ),
+        (
             "crates/projectatlas-cli/tests/e2e_navigation.rs",
             "full_repository_intelligence_flow_indexes_database_and_commands",
         ),
@@ -4914,7 +5045,18 @@ gate_status={gate_status}
             .nth(1)
             .and_then(|tail| tail.split("\nfn ").next())
             .ok_or_else(|| io::Error::other(format!("missing packaged contract {function}")))?;
-        if body.contains("cargo_bin(\"projectatlas\")") || !body.contains("mcp_contract_executable")
+        let uses_contract_runtime = body.contains("mcp_contract_executable");
+        let is_bundled_hook_contract =
+            function == "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation";
+        let has_fail_closed_source_fallback = is_bundled_hook_contract
+            && body.contains("assert_cmd::cargo::cargo_bin(\"projectatlas\")")
+            && body.contains("MCP_CONTRACT_EXECUTABLE_ENV")
+            && body.contains("PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT")
+            && body.contains("(Some(_), Some(plugin_root))")
+            && body.contains("(None, None)")
+            && body.contains("must be supplied together");
+        if !uses_contract_runtime
+            || (body.contains("cargo_bin(\"projectatlas\")") && !has_fail_closed_source_fallback)
         {
             return Err(io::Error::other(format!(
                 "packaged contract {function} does not use the injected runtime owner"
@@ -7029,7 +7171,7 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
-        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
         .env("CODEX_HOME", &codex_home)
         .output()
         .map_err(|error| {
@@ -16944,6 +17086,10 @@ fn assert_plugin_update_refuses_unavailable_or_ambiguous_inventory() -> Result<(
 #[test]
 #[cfg(unix)]
 fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(), Box<dyn Error>> {
+    let candidate_version = env!("CARGO_PKG_VERSION");
+    let candidate_manifest = |name: &str, skills: &str| {
+        format!(r#"{{"name":"{name}","version":"{candidate_version}","skills":"{skills}"}}"#)
+    };
     let installer = workspace_root()?
         .join("plugins")
         .join("projectatlas")
@@ -17006,7 +17152,7 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
         manifest_root
             .join(CODEX_PLUGIN_MANIFEST_DIR)
             .join("plugin.json"),
-        r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./skills/"}"#,
+        candidate_manifest("projectatlas", "./skills/"),
     )?;
     let wrapper = temp.path().join("verify-no-jq.sh");
     fs::write(
@@ -17016,10 +17162,24 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             &installer_source[official_start..official_end],
             &installer_source[inventory_start..inventory_end],
             &installer_source[manifest_start..manifest_end]
-        ),
+        )
+        .replace("0.5.0-rc2", candidate_version),
     )?;
     let invalid_inventory = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.0.1","installed":true,"enabled":true},{"pluginId":"other@other","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"},"source":{"path":"/tmp/projectatlas"}}],"available":[]}"#;
-    let valid_inventory = r#"{"installed":[{"pluginId":"projectatlas@projectatlas","name":"projectatlas","marketplaceName":"projectatlas","version":"0.5.0-rc2","installed":true,"enabled":true,"marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"},"source":{"path":"/tmp/projectatlas"}}],"available":[]}"#;
+    let valid_inventory = serde_json::json!({
+        "installed": [{
+            "pluginId": "projectatlas@projectatlas",
+            "name": "projectatlas",
+            "marketplaceName": "projectatlas",
+            "version": candidate_version,
+            "installed": true,
+            "enabled": true,
+            "marketplaceSource": {"source": "https://github.com/styler-ai/ProjectAtlas.git"},
+            "source": {"path": "/tmp/projectatlas"}
+        }],
+        "available": []
+    })
+    .to_string();
     let run = |case: &str, inventory: &str| {
         StdCommand::new("bash")
             .arg(&wrapper)
@@ -17032,21 +17192,21 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             .output()
     };
     let invalid = run("invalid", invalid_inventory)?;
-    let valid = run("valid", valid_inventory)?;
+    let valid = run("valid", &valid_inventory)?;
     fs::write(
         manifest_root
             .join(CODEX_PLUGIN_MANIFEST_DIR)
             .join("plugin.json"),
-        r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./other-skills/"}"#,
+        candidate_manifest("projectatlas", "./other-skills/"),
     )?;
-    let redirected = run("route-invalid", valid_inventory)?;
+    let redirected = run("route-invalid", &valid_inventory)?;
     fs::write(
         manifest_root
             .join(CODEX_PLUGIN_MANIFEST_DIR)
             .join("plugin.json"),
-        r#"{"name":"other","version":"0.5.0-rc2","skills":"./skills/"}"#,
+        candidate_manifest("other", "./skills/"),
     )?;
-    let wrong_name = run("route-invalid", valid_inventory)?;
+    let wrong_name = run("route-invalid", &valid_inventory)?;
     if !invalid.status.success()
         || !valid.status.success()
         || !redirected.status.success()
@@ -17069,7 +17229,7 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
         manifest_root
             .join(CODEX_PLUGIN_MANIFEST_DIR)
             .join("plugin.json"),
-        r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./skills/"}"#,
+        candidate_manifest("projectatlas", "./skills/"),
     )?;
     let calls = fs::read_to_string(calls)?;
     if calls.lines().collect::<Vec<_>>() != ["plugin list --marketplace projectatlas --json"; 2]
@@ -17156,7 +17316,9 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             malformed_manifest
                 .join(CODEX_PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
-            r#"{"name":"projectatlas","version":"0.5.0-rc2\n","skills":"./skills/"}"#,
+            format!(
+                r#"{{"name":"projectatlas","version":"{candidate_version}\n","skills":"./skills/"}}"#
+            ),
         )?;
         let entry = r#"{"name":"projectatlas","marketplaceSource":{"source":"https://github.com/styler-ai/ProjectAtlas.git"}}"#;
         let jq_calls = temp.path().join("jq-calls.txt");
@@ -17166,7 +17328,7 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             .arg(&fake_codex)
             .arg("valid")
             .arg(&manifest_root)
-            .env("PROJECTATLAS_FAKE_PLUGIN_JSON", valid_inventory)
+            .env("PROJECTATLAS_FAKE_PLUGIN_JSON", &valid_inventory)
             .env("PROJECTATLAS_FAKE_CODEX_LOG", &jq_calls)
             .output()?;
         if !jq_valid.status.success() {
@@ -17183,7 +17345,7 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             redirected_manifest
                 .join(CODEX_PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
-            r#"{"name":"projectatlas","version":"0.5.0-rc2","skills":"./other-skills/"}"#,
+            candidate_manifest("projectatlas", "./other-skills/"),
         )?;
         let jq_redirected = StdCommand::new("bash")
             .arg(&wrapper)
@@ -17204,7 +17366,7 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             redirected_manifest
                 .join(CODEX_PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
-            r#"{"name":"other","version":"0.5.0-rc2","skills":"./skills/"}"#,
+            candidate_manifest("other", "./skills/"),
         )?;
         let jq_wrong_name = StdCommand::new("bash")
             .arg(&wrapper)
@@ -17221,7 +17383,8 @@ fn posix_plugin_inventory_without_jq_rejects_split_object_fields() -> Result<(),
             ))
             .into());
         }
-        let nul_version = valid_inventory.replace("0.5.0-rc2", r"0.5.0-rc2\u0000");
+        let nul_version =
+            valid_inventory.replace(candidate_version, &format!(r"{candidate_version}\u0000"));
         for inventory in [nul_version, format!("{valid_inventory} {valid_inventory}")] {
             let output = StdCommand::new("bash")
                 .arg(&wrapper)
@@ -18821,6 +18984,7 @@ fn posix_release_binary_installer_rejects_checksum_mismatch() -> Result<(), Box<
 #[ignore = "requires checksum-verified published predecessor and explicit packaged candidate"]
 fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<(), Box<dyn Error>>
 {
+    const NATIVE_CODEX_VERSION: &str = "0.162.1";
     let required_path = |name: &str| -> Result<PathBuf, Box<dyn Error>> {
         let path = PathBuf::from(std::env::var_os(name).ok_or_else(|| {
             io::Error::other(format!("required release contract input {name} is missing"))
@@ -18845,6 +19009,21 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     let predecessor_checksums = required_path("PROJECTATLAS_PREDECESSOR_CHECKSUMS")?;
     let executable = required_path(support::MCP_CONTRACT_EXECUTABLE_ENV)?;
     assert_mcp_contract_runtime_and_skill(&executable)?;
+    let prepublish_only = env::var("PROJECTATLAS_RELEASE_PREPUBLISH_ONLY")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    let codex_command = if prepublish_only {
+        None
+    } else {
+        let command = required_path("PROJECTATLAS_CODEX_COMMAND")?;
+        let version = env::var("PROJECTATLAS_CODEX_VERSION")?;
+        if version != NATIVE_CODEX_VERSION {
+            return Err(io::Error::other(format!(
+                "native Codex upgrade proof requires Codex {NATIVE_CODEX_VERSION}, found {version}"
+            ))
+            .into());
+        }
+        Some(command)
+    };
     let archive_name = predecessor_archive
         .file_name()
         .and_then(OsStr::to_str)
@@ -18883,6 +19062,8 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     let home = temp.path().join(ISOLATED_HOME_DIR);
     fs::create_dir_all(repo.join(SRC_DIR_NAME))?;
     fs::create_dir_all(&home)?;
+    let codex_home = home.join(CODEX_CONFIG_DIR);
+    fs::create_dir_all(&codex_home)?;
     fs::write(
         repo.join("src/lib.rs"),
         "pub fn released_upgrade_marker() {}\n",
@@ -18927,9 +19108,77 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
                 .any(|name| directory.join(name).is_file())
         }),
     )?;
-    let xdg_data = home.join(".local/share");
-    let xdg_config = home.join(".config");
-    let xdg_cache = home.join(".cache");
+    let xdg_data = home.join(TEST_XDG_DATA_DIR);
+    let xdg_config = home.join(TEST_XDG_CONFIG_DIR);
+    let xdg_cache = home.join(TEST_XDG_CACHE_DIR);
+    let xdg_state = home.join(TEST_XDG_STATE_DIR);
+    let codex_tmp = home.join("tmp");
+    fs::create_dir_all(&codex_tmp)?;
+    if let Some(codex) = codex_command.as_deref() {
+        let version = StdCommand::new(codex)
+            .arg("--version")
+            .env("PATH", &isolated_path)
+            .env("CODEX_HOME", &codex_home)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+            .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+            .env("XDG_DATA_HOME", &xdg_data)
+            .env("XDG_CONFIG_HOME", &xdg_config)
+            .env("XDG_CACHE_HOME", &xdg_cache)
+            .env("XDG_STATE_HOME", &xdg_state)
+            .env("TMPDIR", &codex_tmp)
+            .env("TEMP", &codex_tmp)
+            .env("TMP", &codex_tmp)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .output()?;
+        let version_text = String::from_utf8_lossy(&version.stdout);
+        if !version.status.success()
+            || version_text.split_whitespace().last() != Some(NATIVE_CODEX_VERSION)
+        {
+            return Err(io::Error::other(format!(
+                "native Codex executable did not report {NATIVE_CODEX_VERSION}: status={} stdout={version_text:?} stderr={:?}",
+                version.status,
+                String::from_utf8_lossy(&version.stderr),
+            ))
+            .into());
+        }
+        run_isolated_codex_command(
+            codex,
+            &home,
+            &isolated_path,
+            &[
+                "plugin",
+                "marketplace",
+                "add",
+                "styler-ai/ProjectAtlas",
+                "--ref",
+                "v0.4.5",
+                "--json",
+            ],
+        )?;
+        run_isolated_codex_command(
+            codex,
+            &home,
+            &isolated_path,
+            &[
+                "plugin",
+                "add",
+                "projectatlas",
+                "--marketplace",
+                "projectatlas",
+                "--json",
+            ],
+        )?;
+        assert_codex_projectatlas_plugin(
+            codex,
+            &home,
+            &isolated_path,
+            "0.4.5",
+            "v0.4.5",
+            &predecessor_source.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
+        )?;
+    }
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &predecessor_source,
         &repo,
@@ -18946,7 +19195,17 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("XDG_DATA_HOME", &xdg_data)
         .env("XDG_CONFIG_HOME", &xdg_config)
-        .env("XDG_CACHE_HOME", &xdg_cache);
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env("XDG_STATE_HOME", &xdg_state)
+        .env("TMPDIR", &codex_tmp)
+        .env("TEMP", &codex_tmp)
+        .env("TMP", &codex_tmp);
+    if let Some(codex) = codex_command.as_deref() {
+        install
+            .env("PROJECTATLAS_CODEX_COMMAND", codex)
+            .env_remove("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE")
+            .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
+    }
     if cfg!(windows) {
         install.args(["-ProjectAtlasVersion", "v0.4.5"]);
     }
@@ -18959,6 +19218,17 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     )?)?;
     let database_relative = Path::new(".projectatlas/projectatlas.db");
     let database = repo.join(database_relative);
+    if let Some(codex) = codex_command.as_deref() {
+        assert_codex_projectatlas_mcp_registry(
+            codex,
+            &home,
+            &isolated_path,
+            &predecessor,
+            "0.4.5",
+            &database,
+            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        )?;
+    }
     for arguments in [
         vec!["init".to_string()],
         vec![
@@ -19168,16 +19438,28 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             .env_remove("PROJECTATLAS_RUNTIME_PATH")
             .env("HOME", &home)
             .env("USERPROFILE", &home)
-            .env("APPDATA", home.join("AppData/Roaming"))
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
             .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
             .env("CODEX_HOME", home.join(CODEX_CONFIG_DIR))
             .env("XDG_DATA_HOME", &xdg_data)
             .env("XDG_CONFIG_HOME", &xdg_config)
             .env("XDG_CACHE_HOME", &xdg_cache)
-            .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
-            .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
+            .env("XDG_STATE_HOME", &xdg_state)
+            .env("TMPDIR", &codex_tmp)
+            .env("TEMP", &codex_tmp)
+            .env("TMP", &codex_tmp)
             .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
             .env("PROJECTATLAS_NO_TELEMETRY", "1");
+        if let Some(codex) = codex_command.as_deref() {
+            command
+                .env("PROJECTATLAS_CODEX_COMMAND", codex)
+                .env_remove("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE")
+                .env_remove("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE");
+        } else {
+            command
+                .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
+                .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1");
+        }
         let result =
             run_release_asset_installer(&server, "published predecessor update", &mut command);
         let output = server.finish_installer(result)?;
@@ -19251,6 +19533,26 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         .as_str()
         .ok_or_else(|| io::Error::other("candidate installer omitted its MCP runtime"))?,
     );
+    if let Some(codex) = codex_command.as_deref() {
+        let candidate_version = env!("CARGO_PKG_VERSION");
+        assert_codex_projectatlas_plugin(
+            codex,
+            &home,
+            &isolated_path,
+            candidate_version,
+            &format!("v{candidate_version}"),
+            &workspace_root()?.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
+        )?;
+        assert_codex_projectatlas_mcp_registry(
+            codex,
+            &home,
+            &isolated_path,
+            &installed,
+            candidate_version,
+            &database,
+            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
+        )?;
+    }
     if sha256_hex(&fs::read(&installed)?) != sha256_hex(&fs::read(&executable)?) {
         return Err(io::Error::other("installer did not publish exact candidate bytes").into());
     }
@@ -19266,6 +19568,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         )
         .into());
     }
+    exercise_released_upgrade_migration_repair(&installed, &backup, &repo, &authority)?;
     let migrated = sqlite_compatibility_snapshot(&database)?;
     let refusal = StdCommand::new(&predecessor)
         .current_dir(&repo)
@@ -19343,7 +19646,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             || fs::canonicalize(&arguments[3])? != fs::canonicalize(&database)?
             || arguments[4] != "--config"
             || fs::canonicalize(&arguments[5])?
-                != fs::canonicalize(repo.join(".projectatlas/config.toml"))?
+                != fs::canonicalize(repo.join(ATLAS_DIR_NAME).join("config.toml"))?
             || arguments[6] != "mcp"
         {
             return Err(io::Error::other(format!(
@@ -19372,6 +19675,458 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             io::Error::other("upgrade changed retained runtime or unrelated canary").into(),
         );
     }
+    Ok(())
+}
+
+/// Run one Codex command with every persistent host directory inside the disposable fixture.
+fn run_isolated_codex_command(
+    codex: &Path,
+    home: &Path,
+    path: &OsStr,
+    arguments: &[&str],
+) -> Result<std::process::Output, Box<dyn Error>> {
+    let codex_home = home.join(CODEX_CONFIG_DIR);
+    let temp = home.join("tmp");
+    fs::create_dir_all(&temp)?;
+    let output = StdCommand::new(codex)
+        .current_dir(home)
+        .args(arguments)
+        .env("PATH", path)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("CODEX_HOME", &codex_home)
+        .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
+        .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
+        .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
+        .env("TMPDIR", &temp)
+        .env("TEMP", &temp)
+        .env("TMP", &temp)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "isolated Codex command {arguments:?} failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ))
+        .into());
+    }
+    Ok(output)
+}
+
+/// Require the native Codex registry to match the generated `ProjectAtlas` config exactly.
+fn assert_codex_projectatlas_mcp_registry(
+    codex: &Path,
+    home: &Path,
+    path: &OsStr,
+    runtime: &Path,
+    version: &str,
+    database: &Path,
+    project_config: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let registration = serde_json::from_slice::<Value>(
+        &run_isolated_codex_command(codex, home, path, &["mcp", "get", "projectatlas", "--json"])?
+            .stdout,
+    )?;
+    require_json_string(&registration, &["name"], "projectatlas")?;
+    require_json_bool(&registration, &["enabled"], true)?;
+    require_json_string(&registration, &["transport", "type"], "stdio")?;
+
+    let config_path = project_config
+        .parent()
+        .ok_or_else(|| io::Error::other("project config has no parent"))?
+        .join("projectatlas.mcp.json");
+    let generated = serde_json::from_slice::<Value>(&fs::read(config_path)?)?;
+    let (expected_command, expected_args) = mcp_command_and_args(&generated)?;
+    let actual_command = json_at(&registration, &["transport", "command"])?
+        .as_str()
+        .ok_or_else(|| io::Error::other("Codex MCP registration omitted its runtime command"))?;
+    let actual_args = json_at(&registration, &["transport", "args"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("Codex MCP registration omitted its argument list"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| io::Error::other("Codex MCP argument was not a string"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_version = version.to_string();
+    let expected_database = database.to_string_lossy();
+    let expected_config = project_config.to_string_lossy();
+    let expected_registry_args = vec![
+        "--require-version".to_string(),
+        expected_version,
+        "--db".to_string(),
+        expected_database.into_owned(),
+        "--config".to_string(),
+        expected_config.into_owned(),
+        "mcp".to_string(),
+    ];
+    if fs::canonicalize(actual_command)? != fs::canonicalize(runtime)?
+        || expected_command != runtime
+        || actual_args != expected_args
+        || expected_args != expected_registry_args
+    {
+        return Err(io::Error::other(format!(
+            "Codex MCP registration did not converge to the selected {version} runtime/database/config: command={actual_command:?} args={actual_args:?} expected={expected_args:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Require Codex to list the exact `ProjectAtlas` marketplace release and its packaged assets.
+fn assert_codex_projectatlas_plugin(
+    codex: &Path,
+    home: &Path,
+    path: &OsStr,
+    version: &str,
+    tag: &str,
+    expected_source: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let codex_home = home.join(CODEX_CONFIG_DIR);
+    let marketplaces = serde_json::from_slice::<Value>(
+        &run_isolated_codex_command(
+            codex,
+            home,
+            path,
+            &["plugin", "marketplace", "list", "--json"],
+        )?
+        .stdout,
+    )?;
+    let marketplace_rows = json_at(&marketplaces, &["marketplaces"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("Codex marketplace inventory was not an array"))?;
+    let projectatlas_marketplaces = marketplace_rows
+        .iter()
+        .filter(|row| json_at(row, &["name"]).ok().and_then(Value::as_str) == Some("projectatlas"))
+        .collect::<Vec<_>>();
+    if projectatlas_marketplaces.len() != 1 {
+        return Err(io::Error::other(format!(
+            "Codex listed {} ProjectAtlas marketplaces instead of exactly one",
+            projectatlas_marketplaces.len()
+        ))
+        .into());
+    }
+    require_json_string(
+        projectatlas_marketplaces[0],
+        &["marketplaceSource", "source"],
+        "https://github.com/styler-ai/ProjectAtlas.git",
+    )?;
+    assert_codex_marketplace_ref(&codex_home.join("config.toml"), tag)?;
+
+    let inventory = serde_json::from_slice::<Value>(
+        &run_isolated_codex_command(
+            codex,
+            home,
+            path,
+            &["plugin", "list", "--marketplace", "projectatlas", "--json"],
+        )?
+        .stdout,
+    )?;
+    let installed_rows = json_at(&inventory, &["installed"])?
+        .as_array()
+        .ok_or_else(|| io::Error::other("Codex installed plugin inventory was not an array"))?;
+    let projectatlas_plugins = installed_rows
+        .iter()
+        .filter(|row| {
+            json_at(row, &["name"]).ok().and_then(Value::as_str) == Some("projectatlas")
+                && json_at(row, &["marketplaceName"])
+                    .ok()
+                    .and_then(Value::as_str)
+                    == Some("projectatlas")
+                && json_at(row, &["installed"]).ok().and_then(Value::as_bool) == Some(true)
+                && json_at(row, &["enabled"]).ok().and_then(Value::as_bool) == Some(true)
+        })
+        .collect::<Vec<_>>();
+    if projectatlas_plugins.len() != 1 {
+        return Err(io::Error::other(format!(
+            "Codex listed {} installed and enabled ProjectAtlas plugins instead of exactly one",
+            projectatlas_plugins.len()
+        ))
+        .into());
+    }
+    let plugin = projectatlas_plugins[0];
+    require_json_string(plugin, &["version"], version)?;
+    require_json_string(
+        plugin,
+        &["marketplaceSource", "source"],
+        "https://github.com/styler-ai/ProjectAtlas.git",
+    )?;
+    let source = PathBuf::from(
+        json_at(plugin, &["source", "path"])?
+            .as_str()
+            .ok_or_else(|| io::Error::other("Codex plugin inventory omitted its source path"))?,
+    );
+    let canonical_codex_home = fs::canonicalize(&codex_home)?;
+    if !fs::canonicalize(&source)?.starts_with(&canonical_codex_home) {
+        return Err(io::Error::other(
+            "Codex installed ProjectAtlas plugin source escaped the isolated profile",
+        )
+        .into());
+    }
+    let cache = codex_home
+        .join("plugins/cache/projectatlas/projectatlas")
+        .join(version);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(source.join(".codex-plugin/plugin.json"))?)?;
+    require_json_string(&manifest, &["version"], version)?;
+    for relative in [
+        ".codex-plugin/plugin.json",
+        "skills/projectatlas/SKILL.md",
+        "skills/projectatlas/references/language-support.md",
+        "skills/projectatlas/references/short-cli.md",
+        "hooks/agent-instructions.txt",
+    ] {
+        let expected = fs::read(expected_source.join(relative))?;
+        if fs::read(source.join(relative))? != expected
+            || fs::read(cache.join(relative))? != expected
+        {
+            return Err(io::Error::other(format!(
+                "Codex ProjectAtlas {version} source/cache asset {relative} does not match its release source"
+            ))
+            .into());
+        }
+    }
+    if version == env!("CARGO_PKG_VERSION") {
+        for relative in [
+            "hooks/hooks.json",
+            "hooks/readiness.ps1",
+            "hooks/readiness.sh",
+        ] {
+            let expected = fs::read(expected_source.join(relative))?;
+            if fs::read(source.join(relative))? != expected
+                || fs::read(cache.join(relative))? != expected
+            {
+                return Err(io::Error::other(format!(
+                    "Codex ProjectAtlas {version} source/cache asset {relative} does not match its release source"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Require the Codex-generated marketplace config to pin exactly one expected `ProjectAtlas` tag.
+fn assert_codex_marketplace_ref(config_path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
+    let config = fs::read_to_string(config_path)?;
+    let mut in_marketplace = false;
+    let mut refs = Vec::new();
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            if in_marketplace {
+                break;
+            }
+            in_marketplace = line == "[marketplaces.projectatlas]";
+        } else if in_marketplace && let Some(value) = line.strip_prefix("ref = ") {
+            refs.push(value.trim_matches('"'));
+        }
+    }
+    if refs.as_slice() != [expected] {
+        return Err(io::Error::other(format!(
+            "Codex ProjectAtlas marketplace ref was {refs:?}, expected exactly {expected:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Prove candidate database migration refusal rolls back, then repair the disposable row and retry.
+fn exercise_released_upgrade_migration_repair(
+    candidate: &Path,
+    compatible_backup: &Path,
+    repo: &Path,
+    expected_authority: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    let database = compatible_backup.with_file_name("released-migration-repair.db");
+    fs::copy(compatible_backup, &database)?;
+    let (registration_id, original_state, original_root, original_retired_at) = {
+        let connection = Connection::open(&database)?;
+        connection.query_row(
+            "SELECT registration_id, state, last_root, retired_at_epoch
+             FROM worktree_registrations WHERE alias = 'released-linked'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )?
+    };
+    if original_state != "active" {
+        return Err(io::Error::other(format!(
+            "migration repair fixture registration was not active: {original_state:?}"
+        ))
+        .into());
+    }
+    let original_authority = released_upgrade_authority(&database)?;
+    let created_at: i64 = Connection::open(&database)?.query_row(
+        "SELECT created_at_epoch FROM worktree_registrations WHERE registration_id = ?1",
+        [&registration_id],
+        |row| row.get(0),
+    )?;
+    {
+        let connection = Connection::open(&database)?;
+        connection.execute(
+            "UPDATE worktree_registrations
+             SET state = 'retired', last_root = 'relative', retired_at_epoch = ?1
+             WHERE registration_id = ?2",
+            (created_at, &registration_id),
+        )?;
+    }
+    let injected = sqlite_compatibility_snapshot(&database)?;
+    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
+    let run_root_set = || {
+        StdCommand::new(candidate)
+            .current_dir(repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["--format", "json", "--db"])
+            .arg(&database)
+            .arg("--config")
+            .arg(&config)
+            .args(["root", "set"])
+            .arg(repo)
+            .args(["--transition", "adopt-legacy"])
+            .output()
+    };
+    let refusal = run_root_set()?;
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refusal.stdout),
+        String::from_utf8_lossy(&refusal.stderr)
+    );
+    if refusal.status.success()
+        || !diagnostic.contains(
+            "worktree registration migration cannot establish native last_root_identity identity",
+        )
+        || !diagnostic.contains("repair the legacy row and retry")
+        || sqlite_compatibility_snapshot(&database)? != injected
+    {
+        return Err(io::Error::other(format!(
+            "candidate migration refusal was not typed and atomic: status={} diagnostic={diagnostic:?}",
+            refusal.status
+        ))
+        .into());
+    }
+    {
+        let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let schema_version: i64 = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        let identity_table: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'project_root_identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        let identity_column: i64 = connection.query_row(
+            "SELECT count(*) FROM pragma_table_info('worktree_registrations') WHERE name = 'last_root_identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        let injected_row: (String, Option<String>, Option<i64>) = connection.query_row(
+            "SELECT state, last_root, retired_at_epoch FROM worktree_registrations
+             WHERE registration_id = ?1",
+            [&registration_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if schema_version != 19
+            || integrity != "ok"
+            || identity_table != 0
+            || identity_column != 0
+            || injected_row.0 != "retired"
+            || injected_row.1.as_deref() != Some("relative")
+            || injected_row.2 != Some(created_at)
+        {
+            return Err(io::Error::other(format!(
+                "failed schema-19 migration left partial or corrupt state: version={schema_version} integrity={integrity:?} table={identity_table} column={identity_column} row={injected_row:?}"
+            ))
+            .into());
+        }
+    }
+    {
+        let connection = Connection::open(&database)?;
+        connection.execute(
+            "UPDATE worktree_registrations
+             SET state = ?1, last_root = ?2, retired_at_epoch = ?3
+             WHERE registration_id = ?4",
+            (
+                &original_state,
+                &original_root,
+                original_retired_at,
+                &registration_id,
+            ),
+        )?;
+        let repaired: (String, Option<String>, Option<i64>) = connection.query_row(
+            "SELECT state, last_root, retired_at_epoch FROM worktree_registrations
+             WHERE registration_id = ?1",
+            [&registration_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if repaired.0 != original_state
+            || repaired.1.as_deref() != original_root.as_deref()
+            || repaired.2 != original_retired_at
+        {
+            return Err(io::Error::other(format!(
+                "migration repair did not restore the original active registration: {repaired:?}"
+            ))
+            .into());
+        }
+    }
+    let retry = run_root_set()?;
+    if !retry.status.success() {
+        return Err(io::Error::other(format!(
+            "candidate migration retry failed after repairing the row: stdout={} stderr={}",
+            String::from_utf8_lossy(&retry.stdout),
+            String::from_utf8_lossy(&retry.stderr),
+        ))
+        .into());
+    }
+    let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    let migrated: i64 = connection.query_row(
+        "SELECT CAST(value AS INTEGER) FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    )?;
+    drop(connection);
+    if migrated != 23
+        || integrity != "ok"
+        || released_upgrade_authority(&database)? != original_authority
+        || &original_authority != expected_authority
+    {
+        return Err(io::Error::other(format!(
+            "candidate migration retry did not publish schema 23 with the original authored authority: schema={migrated}"
+        ))
+        .into());
+    }
+    let summary = run_mcp_contract_json(
+        candidate,
+        repo,
+        &[
+            "--db".to_string(),
+            database.display().to_string(),
+            "summary".to_string(),
+            "src/lib.rs".to_string(),
+        ],
+    )?;
+    require_json_string(
+        &summary,
+        &["file_purpose"],
+        "Preserve the released authored purpose.",
+    )?;
     Ok(())
 }
 
@@ -26402,9 +27157,13 @@ fn assert_json_contract_subset(
 
 fn assert_packaged_readme_command_order(readme: &str) -> io::Result<()> {
     let readme = readme.replace("\r\n", "\n");
+    let release_command = format!(
+        "\nprojectatlas --require-version {} --format json runtime-info\n",
+        env!("CARGO_PKG_VERSION")
+    );
     let mut offset = 0;
     for command in [
-        "\nprojectatlas --require-version 0.5.0-rc2 --format json runtime-info\n",
+        release_command.as_str(),
         "\nprojectatlas init\n",
         "\natlas overview\n",
         "\nprojectatlas overview\n",
@@ -26470,7 +27229,8 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         &script,
         format!("$ErrorActionPreference = 'Stop'\n{producer}"),
     )?;
-    let release_version = "v0.5.0-rc2";
+    let package_version = env!("CARGO_PKG_VERSION");
+    let release_version = format!("v{package_version}");
     let run = |runner: &Path,
                version: &str,
                prerelease: &str|
@@ -26491,7 +27251,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             .env("RUNNER_TEMP", runner)
             .output()?)
     };
-    let output = run(temp.path(), release_version, "true")?;
+    let output = run(temp.path(), &release_version, "true")?;
     if !output.status.success() {
         return Err(io::Error::other(format!("Windows digest producer failed: {output:?}")).into());
     }
@@ -26509,19 +27269,20 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     archive_reader
         .by_name("README.md")?
         .read_to_string(&mut readme)?;
-    for expected in [
-        "ProjectAtlas v0.5.0-rc2",
-        "projectatlas --require-version 0.5.0-rc2 --format json runtime-info",
-        "projectatlas init",
-        "atlas overview",
-        "projectatlas overview",
-        "v0.4.5 (stable)",
-        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
-        "cannot change\nthe environment inherited by an already-running host",
-        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
-        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
-    ] {
-        if !readme.contains(expected) {
+    let expected_guidance = [
+        format!("ProjectAtlas {release_version}"),
+        format!("projectatlas --require-version {package_version} --format json runtime-info"),
+        "projectatlas init".to_string(),
+        "atlas overview".to_string(),
+        "projectatlas overview".to_string(),
+        "v0.4.5 (stable)".to_string(),
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5".to_string(),
+        "cannot change\nthe environment inherited by an already-running host".to_string(),
+        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell".to_string(),
+        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell".to_string(),
+    ];
+    for expected in &expected_guidance {
+        if !readme.contains(expected.as_str()) {
             return Err(io::Error::other(format!(
                 "packaged Windows README omitted required guidance: {expected:?}"
             ))
@@ -26593,7 +27354,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         }
         let runner = temp.path().join(fault);
         fs::create_dir(&runner)?;
-        let output = run(&runner, release_version, "true")?;
+        let output = run(&runner, &release_version, "true")?;
         if output.status.success() != (fault == "valid") {
             return Err(io::Error::other(format!(
                 "Windows {fault} digest admission behaved incorrectly: {output:?}"
@@ -26650,19 +27411,21 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     )?;
     let script = temp.path().join("package.sh");
     fs::write(&script, format!("set -eu\n{producer}"))?;
+    let package_version = env!("CARGO_PKG_VERSION");
+    let release_version = format!("v{package_version}");
     let output = StdCommand::new("bash")
         .current_dir(temp.path())
         .arg(&script)
-        .env("RELEASE_VERSION", "v0.5.0-rc2")
+        .env("RELEASE_VERSION", &release_version)
         .env("RELEASE_IS_PRERELEASE", "true")
         .env("RELEASE_CURRENT_STABLE_TAG", "v0.4.5")
         .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!("Unix package producer failed: {output:?}")).into());
     }
-    let archive = temp
-        .path()
-        .join("release-assets/projectatlas-v0.5.0-rc2-x86_64-unknown-linux-gnu.tar.gz");
+    let archive = temp.path().join(format!(
+        "release-assets/projectatlas-{release_version}-x86_64-unknown-linux-gnu.tar.gz"
+    ));
     let output = StdCommand::new("tar")
         .args(["-xOf"])
         .arg(&archive)
@@ -26674,19 +27437,20 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         );
     }
     let readme = String::from_utf8(output.stdout)?;
-    for expected in [
-        "ProjectAtlas v0.5.0-rc2",
-        "projectatlas --require-version 0.5.0-rc2 --format json runtime-info",
-        "projectatlas init",
-        "atlas overview",
-        "projectatlas overview",
-        "v0.4.5 (stable)",
-        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5",
-        "cannot change\nthe environment inherited by an already-running host",
-        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell",
-        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell",
-    ] {
-        if !readme.contains(expected) {
+    let expected_guidance = [
+        format!("ProjectAtlas {release_version}"),
+        format!("projectatlas --require-version {package_version} --format json runtime-info"),
+        "projectatlas init".to_string(),
+        "atlas overview".to_string(),
+        "projectatlas overview".to_string(),
+        "v0.4.5 (stable)".to_string(),
+        "https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5".to_string(),
+        "cannot change\nthe environment inherited by an already-running host".to_string(),
+        "On Windows, it saves its\nPATH entry for future processes; restart the environment-owning launcher, Codex,\nor shell".to_string(),
+        "On Linux and macOS,\nensure `~/.local/bin` is on your shell PATH, then start a new shell".to_string(),
+    ];
+    for expected in &expected_guidance {
+        if !readme.contains(expected.as_str()) {
             return Err(io::Error::other(format!(
                 "packaged Unix README omitted required guidance: {expected:?}"
             ))
