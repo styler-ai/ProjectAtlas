@@ -544,10 +544,21 @@ The current Codex 0.162.1 hook contract supports root `SessionStart` context on 
 compaction, and `SubagentStart` context when a child starts. The packaged Windows command explicitly
 uses the Windows PowerShell executable under `SystemRoot`; it does not resolve a bare executable from
 the session directory. This command requires PowerShell interpretation. When the hook is launched
-through CMD, it does not provide automatic guidance; read the installed skill manually. Delivery
-from this packaged plugin through a live Codex session remains unverified. Codex's `PostCompact`
-event does not provide the additional developer-context output needed to refresh an already-running
-subagent after compaction. After resuming without fresh guidance, re-read the complete version-matched
+through CMD, it does not provide automatic guidance; read the installed skill manually.
+
+Native Windows proof with Codex 0.162.1 observed package guidance, complete installed skill and
+CLI-guide reads, and correctly rooted navigation for a parent and two subagents at startup. The
+parent also recovered after manual compaction and an observed automatic compaction. In two tested
+child recovery sequences, each subagent reread the complete skill and CLI guide, selected its own
+checkout, and completed CLI navigation after an observed compaction. These sequences verify the
+explicit recovery path; they do not establish automatic reminder delivery after every subagent
+compaction. With hooks explicitly disabled or the `SessionStart` definition modified, native tests
+observed no `SessionStart` guidance and completed the manual full-skill and CLI-guide reads and
+correctly rooted navigation. The modified definition was restored exactly after the host closed;
+a separate fresh host verified the original trusted handlers.
+
+Codex's `PostCompact` event does not provide the additional developer-context output needed to refresh
+an already-running subagent after compaction. After resuming without fresh guidance, re-read the complete version-matched
 skill and reselect the checkout before another Atlas call; hook delivery alone does not prove the
 skill was read.
 
