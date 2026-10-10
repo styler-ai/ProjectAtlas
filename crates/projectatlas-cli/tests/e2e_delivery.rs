@@ -19134,7 +19134,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             .output()?;
         let version_text = String::from_utf8_lossy(&version.stdout);
         if !version.status.success()
-            || version_text.trim().split_whitespace().last() != Some(NATIVE_CODEX_VERSION)
+            || version_text.split_whitespace().last() != Some(NATIVE_CODEX_VERSION)
         {
             return Err(io::Error::other(format!(
                 "native Codex executable did not report {NATIVE_CODEX_VERSION}: status={} stdout={version_text:?} stderr={:?}",
@@ -19718,7 +19718,7 @@ fn run_isolated_codex_command(
     Ok(output)
 }
 
-/// Require the native Codex registry to match the generated ProjectAtlas config exactly.
+/// Require the native Codex registry to match the generated `ProjectAtlas` config exactly.
 fn assert_codex_projectatlas_mcp_registry(
     codex: &Path,
     home: &Path,
@@ -19781,7 +19781,7 @@ fn assert_codex_projectatlas_mcp_registry(
     Ok(())
 }
 
-/// Require Codex to list the exact ProjectAtlas marketplace release and its packaged assets.
+/// Require Codex to list the exact `ProjectAtlas` marketplace release and its packaged assets.
 fn assert_codex_projectatlas_plugin(
     codex: &Path,
     home: &Path,
@@ -19914,7 +19914,7 @@ fn assert_codex_projectatlas_plugin(
     Ok(())
 }
 
-/// Require the Codex-generated marketplace config to pin exactly one expected ProjectAtlas tag.
+/// Require the Codex-generated marketplace config to pin exactly one expected `ProjectAtlas` tag.
 fn assert_codex_marketplace_ref(config_path: &Path, expected: &str) -> Result<(), Box<dyn Error>> {
     let config = fs::read_to_string(config_path)?;
     let mut in_marketplace = false;
