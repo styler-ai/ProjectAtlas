@@ -131,6 +131,8 @@ const CODEX_HOOKS_CONFIG_RELATIVE_PATH: &str = "hooks/hooks.json";
 const PROJECTATLAS_SKILL_RELATIVE_PATH: &str = "skills/projectatlas/SKILL.md";
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_RELATIVE_DIR: &str = r"System32\WindowsPowerShell\v1.0";
+#[cfg(windows)]
+const WINDOWS_POWERSHELL_FILE_NAME: &str = "powershell.exe";
 #[cfg(unix)]
 const POSIX_READINESS_HOOK_FILE_NAME: &str = "readiness.sh";
 
@@ -141,7 +143,7 @@ fn windows_powershell_executable() -> Result<PathBuf, Box<dyn Error>> {
             .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
     )
     .join(WINDOWS_POWERSHELL_RELATIVE_DIR)
-    .join("powershell.exe"))
+    .join(WINDOWS_POWERSHELL_FILE_NAME))
 }
 
 #[cfg(windows)]
@@ -149,7 +151,7 @@ fn create_current_directory_powershell_shadow(
     directory: &Path,
     marker: &Path,
 ) -> Result<PathBuf, Box<dyn Error>> {
-    let executable = directory.join("powershell.exe");
+    let executable = directory.join(WINDOWS_POWERSHELL_FILE_NAME);
     let source = r#"
 using System.IO;
 public static class CwdPowerShellShadow
