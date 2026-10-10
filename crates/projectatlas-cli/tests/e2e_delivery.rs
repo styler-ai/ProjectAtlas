@@ -108,6 +108,10 @@ const TEST_WINDOWS_APPDATA_DIR: &str = "AppData/Roaming";
 const TEST_WINDOWS_LOCAL_APPDATA_DIR: &str = "AppData/Local";
 const TEST_WINDOWS_INSTALLER_STATE_DIR: &str = "AppData/Local/ProjectAtlas/state";
 const TEST_WINDOWS_RUNTIME_MIRROR_DIR: &str = "AppData/Local/ProjectAtlas/bin";
+const TEST_XDG_DATA_DIR: &str = ".local/share";
+const TEST_XDG_CONFIG_DIR: &str = ".config";
+const TEST_XDG_CACHE_DIR: &str = ".cache";
+const TEST_XDG_STATE_DIR: &str = ".local/state";
 #[cfg(windows)]
 const TEST_WINDOWS_LEGACY_ATLAS_FORWARDER_FILE_NAME: &str = "atlas.cmd";
 const TEST_POSIX_INSTALLER_STATE_DIR: &str = ".local/state/projectatlas";
@@ -7167,7 +7171,7 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
-        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
         .env("CODEX_HOME", &codex_home)
         .output()
         .map_err(|error| {
@@ -19104,10 +19108,10 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
                 .any(|name| directory.join(name).is_file())
         }),
     )?;
-    let xdg_data = home.join(".local/share");
-    let xdg_config = home.join(".config");
-    let xdg_cache = home.join(".cache");
-    let xdg_state = home.join(".local/state");
+    let xdg_data = home.join(TEST_XDG_DATA_DIR);
+    let xdg_config = home.join(TEST_XDG_CONFIG_DIR);
+    let xdg_cache = home.join(TEST_XDG_CACHE_DIR);
+    let xdg_state = home.join(TEST_XDG_STATE_DIR);
     let codex_tmp = home.join("tmp");
     fs::create_dir_all(&codex_tmp)?;
     if let Some(codex) = codex_command.as_deref() {
@@ -19117,7 +19121,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             .env("CODEX_HOME", &codex_home)
             .env("HOME", &home)
             .env("USERPROFILE", &home)
-            .env("APPDATA", home.join("AppData/Roaming"))
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
             .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
             .env("XDG_DATA_HOME", &xdg_data)
             .env("XDG_CONFIG_HOME", &xdg_config)
@@ -19172,7 +19176,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &isolated_path,
             "0.4.5",
             "v0.4.5",
-            &predecessor_source.join("plugins/projectatlas"),
+            &predecessor_source.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
         )?;
     }
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
@@ -19222,7 +19226,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &predecessor,
             "0.4.5",
             &database,
-            &repo.join(".projectatlas/config.toml"),
+            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
         )?;
     }
     for arguments in [
@@ -19434,7 +19438,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             .env_remove("PROJECTATLAS_RUNTIME_PATH")
             .env("HOME", &home)
             .env("USERPROFILE", &home)
-            .env("APPDATA", home.join("AppData/Roaming"))
+            .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
             .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
             .env("CODEX_HOME", home.join(CODEX_CONFIG_DIR))
             .env("XDG_DATA_HOME", &xdg_data)
@@ -19537,7 +19541,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &isolated_path,
             candidate_version,
             &format!("v{candidate_version}"),
-            &workspace_root()?.join("plugins/projectatlas"),
+            &workspace_root()?.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
         )?;
         assert_codex_projectatlas_mcp_registry(
             codex,
@@ -19546,7 +19550,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &installed,
             candidate_version,
             &database,
-            &repo.join(".projectatlas/config.toml"),
+            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
         )?;
     }
     if sha256_hex(&fs::read(&installed)?) != sha256_hex(&fs::read(&executable)?) {
@@ -19642,7 +19646,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             || fs::canonicalize(&arguments[3])? != fs::canonicalize(&database)?
             || arguments[4] != "--config"
             || fs::canonicalize(&arguments[5])?
-                != fs::canonicalize(repo.join(".projectatlas/config.toml"))?
+                != fs::canonicalize(repo.join(ATLAS_DIR_NAME).join("config.toml"))?
             || arguments[6] != "mcp"
         {
             return Err(io::Error::other(format!(
@@ -19691,12 +19695,12 @@ fn run_isolated_codex_command(
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("CODEX_HOME", &codex_home)
-        .env("APPDATA", home.join("AppData/Roaming"))
+        .env("APPDATA", home.join(TEST_WINDOWS_APPDATA_DIR))
         .env("LOCALAPPDATA", home.join(TEST_WINDOWS_LOCAL_APPDATA_DIR))
-        .env("XDG_DATA_HOME", home.join(".local/share"))
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_CACHE_HOME", home.join(".cache"))
-        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_DATA_HOME", home.join(TEST_XDG_DATA_DIR))
+        .env("XDG_CONFIG_HOME", home.join(TEST_XDG_CONFIG_DIR))
+        .env("XDG_CACHE_HOME", home.join(TEST_XDG_CACHE_DIR))
+        .env("XDG_STATE_HOME", home.join(TEST_XDG_STATE_DIR))
         .env("TMPDIR", &temp)
         .env("TEMP", &temp)
         .env("TMP", &temp)
@@ -19981,7 +19985,7 @@ fn exercise_released_upgrade_migration_repair(
         )?;
     }
     let injected = sqlite_compatibility_snapshot(&database)?;
-    let config = repo.join(".projectatlas/config.toml");
+    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
     let run_root_set = || {
         StdCommand::new(candidate)
             .current_dir(repo)

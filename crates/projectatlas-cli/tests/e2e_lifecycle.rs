@@ -126,6 +126,7 @@ const PROJECTATLAS_SKILL_DIR: &str = "skills";
 const PROJECTATLAS_SKILL_NAME: &str = "projectatlas";
 
 const CODEX_FIXTURE_DIR_NAME: &str = ".codex";
+const CODEX_PLUGIN_MANIFEST_RELATIVE_PATH: &str = ".codex-plugin/plugin.json";
 const HOOKS_DIR_NAME: &str = "hooks";
 const CODEX_HOOKS_CONFIG_RELATIVE_PATH: &str = "hooks/hooks.json";
 const PROJECTATLAS_SKILL_RELATIVE_PATH: &str = "skills/projectatlas/SKILL.md";
@@ -545,8 +546,9 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             .into());
         }
     };
-    let source_manifest: Value =
-        serde_json::from_slice(&fs::read(source_plugin.join(".codex-plugin/plugin.json"))?)?;
+    let source_manifest: Value = serde_json::from_slice(&fs::read(
+        source_plugin.join(CODEX_PLUGIN_MANIFEST_RELATIVE_PATH),
+    )?)?;
     if source_manifest["name"].as_str() != Some("projectatlas")
         || source_manifest["version"].as_str() != Some(env!("CARGO_PKG_VERSION"))
     {
@@ -557,7 +559,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     let plugin_root = fixture.path().join("plugin root");
     for relative in [
-        ".codex-plugin/plugin.json",
+        CODEX_PLUGIN_MANIFEST_RELATIVE_PATH,
         "hooks/readiness.ps1",
         "hooks/readiness.sh",
         CODEX_HOOKS_CONFIG_RELATIVE_PATH,
@@ -956,7 +958,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         }
         fs::remove_file(shadow_executable)?;
     }
-    let plugin_manifest = plugin_root.join(".codex-plugin/plugin.json");
+    let plugin_manifest = plugin_root.join(CODEX_PLUGIN_MANIFEST_RELATIVE_PATH);
     let original_manifest = fs::read(&plugin_manifest)?;
     let truncated_manifest = format!(r#"{{"name":"projectatlas","version":"{version}""#);
     let array_manifest = format!(r#"[{{"name":"projectatlas","version":"{version}"}}]"#);
