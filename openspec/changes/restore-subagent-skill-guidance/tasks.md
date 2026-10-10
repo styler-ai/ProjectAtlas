@@ -10,4 +10,4 @@
 - [x] 2.2 Reuse the existing trusted read-only reminder for supported subagent startup, with causal hook regression checks and aligned package guidance while preserving root SessionStart behavior.
 - [x] 2.3 Implement verified supported compaction recovery context or explicit persistent/manual fallback, and verify documented skill rereading and root reselection with RC3 CLI-first guidance without claiming unsupported automatic delivery.
 - [x] 2.4 Prove real-host parent and two-subagent skill reads and correctly rooted Atlas navigation across supported startup/recovery, including wrong-root, missing-index, disabled/untrusted hook, and no-implicit-mutation compatibility boundaries.
-- [ ] 2.5 Reconcile changed package source contracts and integration documentation, then pass affected repository-native and hosted platform gates; use cargo fmt --check and affected Rust regression checks if Rust changes.
+- [x] 2.5 Reconcile changed package source contracts and integration documentation, then pass affected repository-native and hosted platform gates; use cargo fmt --check and affected Rust regression checks if Rust changes.
