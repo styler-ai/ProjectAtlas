@@ -38,3 +38,10 @@ The jsonc-parser update SHALL preserve supported JSONC configuration parsing and
 #### Scenario: Incompatible dependency candidate
 - **WHEN** any affected platform, protocol, parser, or installer proof fails
 - **THEN** the owning PR stays unmerged and RC3 release acceptance remains blocked until the owning fix and current-head proof pass
+
+### Requirement: Residual Mermaid dependency alerts use the aggregate owner
+A residual dependency security alert found before RC3 publication SHALL remain under #499 and SHALL block release acceptance until its compatible patch and affected proof are accepted. The Mermaid lockfile patch MUST preserve unrelated dependency versions and its manifest range, prove valid and invalid parsing after locked installation, and inspect all low-severity audit findings, remediate compatible patches or explicitly disposition a remaining low finding against the actual parser boundary and upstream range, while passing the existing repository audit gate and required current-head checks.
+
+#### Scenario: Patched sanitizer is already compatible
+- **WHEN** the locked DOMPurify and source-map-js versions are affected by GHSA-p98j-92pf-mc4p and GHSA-68fv-2mgg-jv7q, and the existing dependency ranges admit patched DOMPurify 3.4.16 and source-map-js 1.2.2
+- **THEN** update only those lockfile packages under reopened #499, preserve completed aggregate tasks, and close the aggregate after accepted merge and default-branch alert readback
