@@ -134,6 +134,53 @@ const WINDOWS_POWERSHELL_RELATIVE_DIR: &str = r"System32\WindowsPowerShell\v1.0"
 #[cfg(unix)]
 const POSIX_READINESS_HOOK_FILE_NAME: &str = "readiness.sh";
 
+#[cfg(windows)]
+fn windows_powershell_executable() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    )
+    .join(WINDOWS_POWERSHELL_RELATIVE_DIR)
+    .join("powershell.exe"))
+}
+
+#[cfg(windows)]
+fn create_current_directory_powershell_shadow(
+    directory: &Path,
+    marker: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let executable = directory.join("powershell.exe");
+    let source = r#"
+using System.IO;
+public static class CwdPowerShellShadow
+{
+    public static void Main()
+    {
+        File.WriteAllText(System.Environment.GetEnvironmentVariable("PROJECTATLAS_SHADOW_MARKER"), "executed");
+    }
+}
+"#;
+    let output = StdCommand::new(windows_powershell_executable()?)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Add-Type -TypeDefinition $env:PROJECTATLAS_SHADOW_SOURCE -OutputType ConsoleApplication -OutputAssembly $env:PROJECTATLAS_SHADOW_EXECUTABLE",
+        ])
+        .env("PROJECTATLAS_SHADOW_SOURCE", source)
+        .env("PROJECTATLAS_SHADOW_EXECUTABLE", &executable)
+        .env("PROJECTATLAS_SHADOW_MARKER", marker)
+        .output()?;
+    if !output.status.success() || !executable.is_file() {
+        return Err(io::Error::other(format!(
+            "could not compile current-directory PowerShell shadow: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+        .into());
+    }
+    Ok(executable)
+}
+
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
 #[cfg(target_os = "linux")]
@@ -253,7 +300,7 @@ fn bundled_hook_without_receipt_omits_guidance_and_path_execution() -> Result<()
         let command_windows = hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?;
-        let mut command = StdCommand::new("powershell.exe");
+        let mut command = StdCommand::new(windows_powershell_executable()?);
         command
             .args(["-NoProfile", "-Command"])
             .arg(command_windows)
@@ -649,7 +696,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 command.arg("/C").raw_arg(format!(r#""{command_windows}""#));
                 command
             } else {
-                let mut command = StdCommand::new("powershell.exe");
+                let mut command = StdCommand::new(windows_powershell_executable()?);
                 command
                     .args(["-NoProfile", "-Command"])
                     .arg(&command_windows);
@@ -697,7 +744,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 .env("PATH", process_path)
                 .output()?
         };
-        if !output.status.success() {
+        if !output.status.success() && !use_comspec {
             return Err(io::Error::other(format!(
                 "readiness hook exited {}: {}",
                 output.status,
@@ -709,7 +756,11 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             io::stderr(),
             "readiness hook invocation {invocation}: completed"
         )?;
-        Ok(String::from_utf8(output.stdout)?)
+        let mut output_text = String::from_utf8(output.stdout)?;
+        if use_comspec {
+            output_text.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        Ok(output_text)
     };
     let run_hook_raw = |project_root: &Path, process_path: &std::ffi::OsStr| {
         run_hook_with_shell_raw(project_root, process_path, false)
@@ -735,21 +786,6 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             "unbound directory produced unsafe repair guidance: {no_root}"
         ))
         .into());
-    }
-    #[cfg(windows)]
-    {
-        let command_output = run_hook_cmd_raw(&plain_directory, &path)?;
-        if !command_output
-            .contains("ProjectAtlas integration incomplete: no project root was identified")
-            || command_output.contains("Repair command:")
-            || command_output.contains("Read the complete installed ProjectAtlas skill now:")
-            || fs::read(&db)? != original_db
-        {
-            return Err(io::Error::other(format!(
-                "CMD-wrapped hook did not refuse an unbound root without mutation: {command_output}"
-            ))
-            .into());
-        }
     }
     let flat_root = fixture.path().join("flat-config-project");
     let flat_nested = flat_root.join("nested");
@@ -838,26 +874,19 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     #[cfg(windows)]
     {
+        let shadow_executable = create_current_directory_powershell_shadow(&repo, &shadow_marker)?;
         let command_output = run_hook_cmd_raw(&repo, &path)?;
-        let expected_skill = plugin_root.join(PROJECTATLAS_SKILL_RELATIVE_PATH);
-        let has_skill_pointer = command_output.lines().any(|line| {
-            line.strip_prefix("Read the complete installed ProjectAtlas skill now: ")
-                .is_some_and(|path| {
-                    require_same_canonical_path(path, &expected_skill, "installed skill").is_ok()
-                })
-        });
-        if !command_output.contains("ProjectAtlas integration ready")
-            || !command_output.starts_with(
-                "Before any ProjectAtlas call, read the complete version-matched ProjectAtlas skill",
-            )
-            || !has_skill_pointer
+        if command_output.contains("ProjectAtlas integration ready")
+            || command_output.contains("Read the complete installed ProjectAtlas skill now:")
+            || shadow_marker.exists()
             || fs::read(&db)? != original_db
         {
             return Err(io::Error::other(format!(
-                "CMD-wrapped packaged hook did not deliver ready guidance without mutation: {command_output}"
+                "CMD fallback delivered automatic guidance or executed the current-directory PowerShell shadow: {command_output}"
             ))
             .into());
         }
+        fs::remove_file(shadow_executable)?;
     }
     let plugin_manifest = plugin_root.join(".codex-plugin/plugin.json");
     let original_manifest = fs::read(&plugin_manifest)?;
@@ -1052,20 +1081,6 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     fs::remove_file(&receipt_path)?;
     if !run_hook_raw(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
         return Err(io::Error::other("missing readiness receipt was accepted").into());
-    }
-    #[cfg(windows)]
-    {
-        let output = run_hook_cmd_raw(&repo, &path)?;
-        if !output.contains("ProjectAtlas integration incomplete")
-            || output.contains("ProjectAtlas integration ready")
-            || output.contains("Read the complete installed ProjectAtlas skill now:")
-            || fs::read(&db)? != original_db
-        {
-            return Err(io::Error::other(format!(
-                "CMD-wrapped hook did not fail closed for a missing receipt without mutation: {output}"
-            ))
-            .into());
-        }
     }
     write_receipt()?;
     let project_codex = repo.join(CODEX_FIXTURE_DIR_NAME);
@@ -1413,25 +1428,6 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         return Err(
             io::Error::other("other-project MCP database identity was not reported").into(),
         );
-    }
-    #[cfg(windows)]
-    {
-        let output = run_hook_cmd_raw(&repo, &path)?;
-        if !output.contains("ProjectAtlas integration incomplete")
-            || !output.contains(
-                &other_repo
-                    .join(ATLAS_DIR_NAME)
-                    .join("projectatlas.db")
-                    .display()
-                    .to_string(),
-            )
-            || fs::read(&db)? != original_db
-        {
-            return Err(io::Error::other(format!(
-                "CMD-wrapped hook did not refuse the wrong root binding without mutation: {output}"
-            ))
-            .into());
-        }
     }
     let flat_config = repo.join("projectatlas.toml");
     fs::rename(&config, &flat_config)?;

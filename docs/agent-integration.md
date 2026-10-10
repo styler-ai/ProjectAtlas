@@ -536,12 +536,16 @@ startup/resume/clear/compaction and `SubagentStart`. On those events, it checks 
 version against the directly resolved runtime, current project host config, and global Codex MCP
 registration. When ready, it prints the package-bound routing reminder. The subagent event reuses the same
 package-bound scripts and instructions; it does not initialize, scan, or rebind project state.
-Codex documents `SessionStart` context for the root session, including compaction, and
-`SubagentStart` for a child session. Delivery from this packaged plugin through a live Codex session
-remains unverified. The documented contract does not guarantee fresh guidance when an already-running
-subagent compacts. After resuming without fresh guidance, re-read the complete version-matched skill
-and reselect the checkout before another Atlas call; hook delivery alone does not prove the skill was
-read.
+The current Codex 0.162.1 hook contract supports root `SessionStart` context on startup and
+compaction, and `SubagentStart` context when a child starts. The packaged Windows command explicitly
+uses the Windows PowerShell executable under `SystemRoot`; it does not resolve a bare executable from
+the session directory. This command requires PowerShell interpretation. When the hook is launched
+through CMD, it does not provide automatic guidance; read the installed skill manually. Delivery
+from this packaged plugin through a live Codex session remains unverified. Codex's `PostCompact`
+event does not provide the additional developer-context output needed to refresh an already-running
+subagent after compaction. After resuming without fresh guidance, re-read the complete version-matched
+skill and reselect the checkout before another Atlas call; hook delivery alone does not prove the
+skill was read.
 
 The read-only database check verifies schema and selected-root binding without running a full
 integrity scan on every event; `projectatlas root verify` remains the explicit integrity check. A

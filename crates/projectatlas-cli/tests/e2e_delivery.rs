@@ -6999,7 +6999,15 @@ fn plugin_installer_adds_only_confirmed_missing_codex_mcp() -> Result<(), Box<dy
         let command_windows = hook_config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .ok_or_else(|| io::Error::other("packaged Windows SessionStart command is missing"))?;
-        let mut command = StdCommand::new("powershell.exe");
+        let powershell = PathBuf::from(
+            std::env::var_os("SystemRoot")
+                .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+        )
+        .join(WINDOWS_SYSTEM32_DIR)
+        .join(WINDOWS_POWERSHELL_DIR)
+        .join(WINDOWS_POWERSHELL_VERSION_DIR)
+        .join(WINDOWS_POWERSHELL_EXECUTABLE);
+        let mut command = StdCommand::new(powershell);
         command
             .args(["-NoProfile", "-Command"])
             .arg(command_windows);
@@ -21948,7 +21956,7 @@ fn assert_mcp_contract_runtime_and_skill(executable: &Path) -> Result<(), Box<dy
     require_json_string(
         &hooks,
         &["hooks", "SessionStart", "0", "hooks", "0", "commandWindows"],
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& ([System.IO.Path]::Combine([System.Environment]::GetEnvironmentVariable('PLUGIN_ROOT'), 'hooks', 'readiness.ps1'))\"",
+        "& \"${env:SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${env:PLUGIN_ROOT}\\hooks\\readiness.ps1\"",
     )?;
     let hook_asset = fs::read_to_string(plugin_root.join(AGENT_INSTRUCTIONS_RELATIVE_PATH))?;
     let posix_readiness = fs::read_to_string(plugin_root.join("hooks/readiness.sh"))?;

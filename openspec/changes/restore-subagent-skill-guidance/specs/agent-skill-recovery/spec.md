@@ -31,6 +31,13 @@ The integration SHALL provide verified supported context delivery or explicit pe
 ### Requirement: Read-only checkout-safe guidance
 Lifecycle guidance SHALL preserve existing databases and require explicit checkout selection. Exact-checkout guidance SHALL prefer the atlas CLI; registered aliases, compact briefs, and federation SHALL retain MCP support.
 
+### Requirement: Safe Windows hook launch
+The Windows readiness hook SHALL invoke PowerShell through an explicit `SystemRoot` executable path and SHALL document CMD as a manual skill-read fallback. Unsupported shell interpretation SHALL fail closed without executing a same-named program from the session directory.
+
+#### Scenario: CMD cannot interpret the PowerShell launcher
+- **WHEN** the packaged Windows hook command is interpreted by CMD
+- **THEN** no automatic readiness context is claimed, a current-directory `powershell.exe` is not executed, and the manual skill-read path applies
+
 #### Scenario: Two subagents in separate checkouts
 - **WHEN** two subagents use different worktrees before and after supported recovery
 - **THEN** each reads the matching skill and navigates its intended root without inheriting the other checkout's selection
