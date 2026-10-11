@@ -14,9 +14,14 @@ Construction canaries SHALL distinguish early child exit, missing or invalid rea
 - **AND** cleanup retires only the owned process tree
 
 #### Scenario: Readiness evidence is missing or invalid
-- **WHEN** the child remains live but readiness evidence is missing at the finite deadline or has invalid contents
+- **WHEN** the child remains live but readiness evidence is missing or has invalid contents at the finite deadline
 - **THEN** the canary reports that specific state and bounded elapsed time
 - **AND** it fails without claiming containment or cleanup proof succeeded
+
+#### Scenario: Created marker becomes valid before the deadline
+- **WHEN** a live child creates an incomplete marker and publishes valid readiness contents before the finite deadline
+- **THEN** marker existence alone does not end readiness observation
+- **AND** the canary accepts only the valid contents from the still-live child within that deadline
 
 ### Requirement: Descendant cleanup proof begins with a live admitted child
 
@@ -30,3 +35,7 @@ The descendant canary SHALL establish a live child with valid containment eviden
 #### Scenario: Marker remains after child exit
 - **WHEN** readiness evidence exists but the corresponding child has already exited
 - **THEN** the canary refuses to count that state as live-descendant cleanup proof
+
+#### Scenario: Live descendant has not written its completion marker
+- **WHEN** the exact descendant remains live after the existing job-close cleanup bound
+- **THEN** the canary fails retirement proof even if the completion marker is absent

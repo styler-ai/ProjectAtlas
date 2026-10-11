@@ -2,6 +2,8 @@
 
 The Windows clean optional-parser construction fails its descendant canary without exposing the causal child outcome, preventing RC3 acceptance. A previous successful run used the same scripts and hosted image; the current failure does not establish whether readiness timing, child launch, token admission, or marker access caused it.
 
+A controlled fixture separately demonstrates that the former existence check can reject an incomplete marker before the live child finishes writing it. The correction waits for valid contents within the existing readiness bound and retains the child handle for live-descendant cleanup proof. The historical failure lacks marker state; this demonstrated defect must not be presented as its uniquely established cause.
+
 ## What Changes
 
 - Report bounded child exit, exact marker state, and elapsed time at the existing canary failure boundary.

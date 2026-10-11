@@ -2,6 +2,10 @@
 
 See proposal.md for the observed failure. The launcher self-test treats every nonzero `LaunchContained(tree)` result as `descendant-parent-canary`. Its parent fixture polls for an AppContainer marker for three seconds; the child checks its token, writes the marker, and sleeps five seconds. The outer launch has a ten-second deadline. The failed job does not reveal which condition failed. The prior successful job used the same launcher, workflow, named-object admission results, and hosted image.
 
+The former parent stopped polling when the marker path existed, then compared its contents once. A synchronized contained-child fixture now demonstrates that an empty marker can exist while the child is live, causing that predicate to reject readiness before the write completes. The retained-handle observer instead waits for valid contents within the same deadline. This demonstrates a readiness defect; the historical failed job did not retain marker state, so it cannot uniquely establish that this defect caused that run.
+
+The prior cleanup assertion waits one second and checks that the completion marker is absent, but the child sleeps five seconds before writing it. A still-live descendant can satisfy that assertion. Cleanup proof must observe the exact descendant's termination within the existing cleanup bound and reject a live sleeping child even when its completion marker is absent.
+
 ## Goals / Non-Goals
 
 **Goals:** Establish the exact failed fixture state, fix its demonstrated cause, and prove admitted live-descendant cleanup through the existing clean Windows construction.
@@ -14,6 +18,7 @@ See proposal.md for the observed failure. The launcher self-test treats every no
 - Establish that the admitted child is still alive when the cleanup assertion begins. A marker from an already exited child cannot prove descendant cleanup. Retain the handle until the existing cleanup owner retires the process tree; do not add an independently managed process lifecycle.
 - Obtain causal proof before changing timing or access. If the readiness window is the demonstrated cause, keep its finite bound below the existing outer launch deadline and keep the child alive through that observation window. A token, creation, or marker-access failure requires fixing that actual owner. Blanket timeout inflation and repeated successful retries do not establish the missing state.
 - Exercise successful readiness, early child failure, missing/invalid marker, deadline, and descendant cleanup with the smallest existing injected/self-test boundary. Use only owned fixtures. Run affected hosted Windows clean construction, then the complete parser-pack verification and runtime lifecycle gates. Linux construction remains a compatibility gate; an isolated Windows diagnostic cannot replace the all-target acceptance run.
+- Synchronize the incomplete-to-valid marker regression through the existing contained descendant fixture. Require the old one-shot predicate to reject the present empty marker while the child is live, then release the child to publish valid contents and require bounded readiness followed by existing job-close retirement. A transient incomplete marker is not a readiness failure unless it remains invalid at the deadline.
 - The fixture-proof specification records the missing causal observation and cleanup state while preserving product containment requirements. If causal evidence requires changing a product containment contract, revise the proposal/specification and scope before that implementation.
 
 ## Risks / Trade-offs

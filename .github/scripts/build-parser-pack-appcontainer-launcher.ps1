@@ -49,6 +49,7 @@ namespace ProjectAtlas.Release
         private const int MaximumEnvironmentBytes = 65534;
         private const int MaximumTimeoutSeconds = 86400;
         private const int DescendantReadinessDeadlineMilliseconds = 3000;
+        private const int DescendantCleanupWaitMilliseconds = 1000;
         private const int ReadinessPollMilliseconds = 25;
         private const int ReadinessSchedulingToleranceMilliseconds = 1000;
         private const int ErrorInsufficientBuffer = 122;
@@ -2065,7 +2066,9 @@ namespace ProjectAtlas.Release
 
                 string descendantStarted = Path.Combine(writeRoot, "descendant-started.txt");
                 string descendantCompleted = Path.Combine(writeRoot, "descendant-completed.txt");
+                string descendantRelease = Path.Combine(writeRoot, "descendant-release.txt");
                 string descendantObservation = Path.Combine(writeRoot, "descendant-observation.txt");
+                string descendantIdentity = Path.Combine(writeRoot, "descendant-identity.txt");
                 LaunchConfiguration tree = new LaunchConfiguration();
                 tree.Executable = canaryExecutable;
                 tree.WorkingDirectory = writeRoot;
@@ -2077,7 +2080,7 @@ namespace ProjectAtlas.Release
                 tree.Arguments.AddRange(new string[]
                 {
                     "canary", "tree-parent", descendantStarted, descendantCompleted,
-                    descendantObservation
+                    descendantObservation, descendantRelease, descendantIdentity
                 });
                 int treeExit = LaunchContained(tree);
                 string treeDiagnostic = ReadCanaryObservation(descendantObservation);
@@ -2088,12 +2091,76 @@ namespace ProjectAtlas.Release
                         "exit=" + treeExit.ToString(CultureInfo.InvariantCulture)
                             + ";" + treeDiagnostic);
                 }
-                Thread.Sleep(1000);
                 if (!File.Exists(descendantStarted)
                     || File.ReadAllText(descendantStarted) != "appcontainer"
                     || File.Exists(descendantCompleted))
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                string[] descendantIdentityParts = File.ReadAllText(descendantIdentity).Split(';');
+                int descendantProcessId;
+                long descendantStartTimeUtcTicks;
+                if (descendantIdentityParts.Length != 2
+                    || !Int32.TryParse(
+                        descendantIdentityParts[0],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out descendantProcessId)
+                    || descendantProcessId <= 0
+                    || !Int64.TryParse(
+                        descendantIdentityParts[1],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out descendantStartTimeUtcTicks)
+                    || descendantStartTimeUtcTicks <= 0)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                RequireCanaryProcessRetired(
+                    descendantProcessId,
+                    descendantStartTimeUtcTicks,
+                    descendantCompleted);
+
+                string sleepingChildCompletion = Path.Combine(
+                    writeRoot,
+                    "cleanup-sleeping-child-completed.txt");
+                Process sleepingChild = StartCanaryProcess(
+                    canaryExecutable,
+                    writeRoot,
+                    new string[] { "canary", "sleep", "30000" });
+                if (sleepingChild == null)
+                {
+                    throw new ContainmentFailure("cleanup-sleeping-child-start");
+                }
+                using (sleepingChild)
+                {
+                    try
+                    {
+                        if (sleepingChild.HasExited)
+                        {
+                            throw new ContainmentFailure("cleanup-sleeping-child-start");
+                        }
+                        int sleepingChildProcessId = sleepingChild.Id;
+                        long sleepingChildStartTimeUtcTicks =
+                            sleepingChild.StartTime.ToUniversalTime().Ticks;
+                        if (File.Exists(sleepingChildCompletion))
+                        {
+                            throw new ContainmentFailure("cleanup-sleeping-child-marker");
+                        }
+                        RequireContainmentFailure(
+                            delegate
+                            {
+                                RequireCanaryProcessRetired(
+                                    sleepingChildProcessId,
+                                    sleepingChildStartTimeUtcTicks,
+                                    sleepingChildCompletion);
+                            },
+                            "descendant-cleanup-canary");
+                    }
+                    finally
+                    {
+                        StopCanaryProcess(sleepingChild);
+                    }
                 }
 
                 LaunchConfiguration duplicateFile = new LaunchConfiguration();
@@ -2249,15 +2316,24 @@ namespace ProjectAtlas.Release
         private static ChildReadinessObservation ObserveChildReadiness(
             Process child,
             string markerPath,
-            int deadlineMilliseconds)
+            int deadlineMilliseconds,
+            Action onInvalidMarkerObserved = null)
         {
             Stopwatch elapsed = Stopwatch.StartNew();
+            bool invalidMarkerNotified = false;
             while (true)
             {
                 ReadinessMarkerState marker = ReadReadinessMarker(markerPath);
                 if (child.HasExited)
                 {
                     return ChildExitedObservation(child, marker, elapsed.ElapsedMilliseconds);
+                }
+                if (marker == ReadinessMarkerState.Invalid
+                    && !invalidMarkerNotified
+                    && onInvalidMarkerObserved != null)
+                {
+                    invalidMarkerNotified = true;
+                    onInvalidMarkerObserved();
                 }
 
                 long elapsedMilliseconds = elapsed.ElapsedMilliseconds;
@@ -2368,6 +2444,68 @@ namespace ProjectAtlas.Release
             }
         }
 
+        private static void RequireCanaryProcessRetired(
+            int processId,
+            long startTimeUtcTicks,
+            string completionMarker)
+        {
+            if (processId <= 0 || startTimeUtcTicks <= 0)
+            {
+                throw new ContainmentFailure("descendant-cleanup-canary");
+            }
+
+            Stopwatch elapsed = Stopwatch.StartNew();
+            while (true)
+            {
+                if (File.Exists(completionMarker))
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                if (!IsExactCanaryProcessAlive(processId, startTimeUtcTicks))
+                {
+                    if (File.Exists(completionMarker))
+                    {
+                        throw new ContainmentFailure("descendant-cleanup-canary");
+                    }
+                    return;
+                }
+
+                long remainingMilliseconds =
+                    DescendantCleanupWaitMilliseconds - elapsed.ElapsedMilliseconds;
+                if (remainingMilliseconds <= 0)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                Thread.Sleep((int)Math.Min(ReadinessPollMilliseconds, remainingMilliseconds));
+            }
+        }
+
+        private static bool IsExactCanaryProcessAlive(int processId, long startTimeUtcTicks)
+        {
+            Process process;
+            try
+            {
+                process = Process.GetProcessById(processId);
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+
+            using (process)
+            {
+                if (process.HasExited)
+                {
+                    return false;
+                }
+                if (process.StartTime.ToUniversalTime().Ticks != startTimeUtcTicks)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                return !process.HasExited;
+            }
+        }
+
         private static string ReadCanaryObservation(string path)
         {
             try
@@ -2434,18 +2572,37 @@ namespace ProjectAtlas.Release
                 Thread.Sleep(milliseconds);
                 return 0;
             }
-            if (arguments.Length == 4 && arguments[1] == "tree-child")
+            if (arguments.Length == 5 && arguments[1] == "tree-child")
             {
                 if (!IsCurrentProcessAppContainer())
                 {
                     return 23;
                 }
-                File.WriteAllText(arguments[2], "appcontainer");
+                using (FileStream marker = new FileStream(
+                    arguments[2],
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete))
+                {
+                    Stopwatch releaseWait = Stopwatch.StartNew();
+                    while (!File.Exists(arguments[4])
+                        && releaseWait.ElapsedMilliseconds < DescendantReadinessDeadlineMilliseconds)
+                    {
+                        Thread.Sleep(ReadinessPollMilliseconds);
+                    }
+                    if (!File.Exists(arguments[4]))
+                    {
+                        return 27;
+                    }
+                    byte[] readyMarker = Encoding.ASCII.GetBytes("appcontainer");
+                    marker.Write(readyMarker, 0, readyMarker.Length);
+                    marker.Flush();
+                }
                 Thread.Sleep(5000);
                 File.WriteAllText(arguments[3], "completed");
                 return 0;
             }
-            if (arguments.Length == 5 && arguments[1] == "tree-parent")
+            if (arguments.Length == 7 && arguments[1] == "tree-parent")
             {
                 Stopwatch elapsed = Stopwatch.StartNew();
                 Process child = null;
@@ -2454,7 +2611,10 @@ namespace ProjectAtlas.Release
                     child = StartCanaryProcess(
                         Process.GetCurrentProcess().MainModule.FileName,
                         Environment.CurrentDirectory,
-                        new string[] { "canary", "tree-child", arguments[2], arguments[3] });
+                        new string[]
+                        {
+                            "canary", "tree-child", arguments[2], arguments[3], arguments[5]
+                        });
                 }
                 catch (Exception)
                 {
@@ -2482,12 +2642,43 @@ namespace ProjectAtlas.Release
                 }
                 using (child)
                 {
+                    File.WriteAllText(
+                        arguments[6],
+                        child.Id.ToString(CultureInfo.InvariantCulture)
+                            + ";"
+                            + child.StartTime.ToUniversalTime().Ticks.ToString(
+                                CultureInfo.InvariantCulture));
+                    bool oldOneShotPredicateRejectedIncompleteMarker = false;
                     ChildReadinessObservation observation = ObserveChildReadiness(
                         child,
                         arguments[2],
-                        DescendantReadinessDeadlineMilliseconds);
+                        DescendantReadinessDeadlineMilliseconds,
+                        delegate
+                        {
+                            bool oldOneShotReady = false;
+                            try
+                            {
+                                oldOneShotReady = File.Exists(arguments[2])
+                                    && File.ReadAllText(arguments[2]) == "appcontainer";
+                            }
+                            catch (IOException)
+                            {
+                                // The old one-shot read also fails if the writer still owns the file.
+                            }
+                            if (!File.Exists(arguments[2])
+                                || child.HasExited
+                                || new FileInfo(arguments[2]).Length != 0
+                                || oldOneShotReady)
+                            {
+                                throw new ContainmentFailure("readiness-transition-incomplete-marker");
+                            }
+                            oldOneShotPredicateRejectedIncompleteMarker = true;
+                            File.WriteAllText(arguments[5], String.Empty);
+                        });
                     File.WriteAllText(arguments[4], observation.ToDiagnostic());
-                    return observation.Outcome == ReadinessOutcome.Ready && observation.ChildAlive
+                    return observation.Outcome == ReadinessOutcome.Ready
+                        && observation.ChildAlive
+                        && oldOneShotPredicateRejectedIncompleteMarker
                         ? 0
                         : 25;
                 }
