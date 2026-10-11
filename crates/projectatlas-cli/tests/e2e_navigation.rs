@@ -11421,7 +11421,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
     fs::write(&config_path, &legacy_config)?;
     let database = atlas.join("projectatlas.db");
     run_scan(&repo, &database)?;
-    let map_output = Command::cargo_bin("projectatlas")?
+    let map_output = Command::new(mcp_contract_executable())
         .current_dir(&repo)
         .args(["map", "--force"])
         .output()?;
@@ -11964,7 +11964,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
 
     let authored_purpose = "Authored document responsibility survives empty replacement.";
     for path in ["docs/guide.pdf", "docs/guide.docx"] {
-        Command::cargo_bin("projectatlas")?
+        Command::new(mcp_contract_executable())
             .current_dir(&repo)
             .arg("--db")
             .arg(&database)
