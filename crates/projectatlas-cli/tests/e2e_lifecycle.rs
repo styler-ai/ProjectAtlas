@@ -1331,7 +1331,10 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
             )?;
             #[cfg(target_os = "macos")]
             {
-                if system_bin.join("sha256sum").exists() || jq_only_bin.join("sha256sum").exists() {
+                const MACOS_SHA256SUM_COMMAND_NAME: &str = "sha256sum";
+                if system_bin.join(MACOS_SHA256SUM_COMMAND_NAME).exists()
+                    || jq_only_bin.join(MACOS_SHA256SUM_COMMAND_NAME).exists()
+                {
                     return Err(io::Error::other(
                         "macOS checksum fixture unexpectedly staged sha256sum",
                     )
