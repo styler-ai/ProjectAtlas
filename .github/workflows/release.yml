@@ -822,7 +822,7 @@ jobs:
           done
 
       - name: Installed-candidate regression and upgrade contracts
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           PROJECTATLAS_NO_TELEMETRY: "1"
         run: |

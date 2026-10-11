@@ -21,7 +21,7 @@ None. Production checksum routing and installed hook behavior remain unchanged.
 
 ## Impact
 
-#669 owns checksum-tool staging in `crates/projectatlas-cli/tests/e2e_lifecycle.rs`, the two existing frozen lifecycle source-hash owners, and causal native macOS proof. Correct the existing issue and OpenSpec contract in the owning change; retain its slug and release mapping. Implementation follows acceptance of the already-started #668 boundary.
+#669 owns checksum-tool staging in `crates/projectatlas-cli/tests/e2e_lifecycle.rs`, the two existing frozen lifecycle source-hash owners, causal native macOS proof, and the existing Unix installed-candidate step budget needed to complete that proof. Correct the existing issue and OpenSpec contract in the owning change; retain its slug and release mapping. Implementation follows acceptance of the already-started #668 boundary.
 
 ## Non-Goals
 
