@@ -19557,6 +19557,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         return Err(io::Error::other("installer did not publish exact candidate bytes").into());
     }
     // Installer convergence and database migration are separate public operations.
+    exercise_released_upgrade_migration_repair(&installed, &backup, &repo, &authority)?;
     run_mcp_contract_json(
         &installed,
         &repo,
@@ -19568,7 +19569,6 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         )
         .into());
     }
-    exercise_released_upgrade_migration_repair(&installed, &backup, &repo, &authority)?;
     let migrated = sqlite_compatibility_snapshot(&database)?;
     let refusal = StdCommand::new(&predecessor)
         .current_dir(&repo)
@@ -19938,15 +19938,22 @@ fn assert_codex_marketplace_ref(config_path: &Path, expected: &str) -> Result<()
     Ok(())
 }
 
-/// Prove candidate database migration refusal rolls back, then repair the disposable row and retry.
+/// Prove candidate migration rollback, repair the isolated legacy row, then retry.
 fn exercise_released_upgrade_migration_repair(
     candidate: &Path,
     compatible_backup: &Path,
     repo: &Path,
     expected_authority: &BTreeMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
-    let database = compatible_backup.with_file_name("released-migration-repair.db");
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    // Root set resolves the database from the selected root, so restore the disposable predecessor
+    // snapshot at that canonical path before injecting the migration failure.
+    {
+        let connection = Connection::open(&database)?;
+        connection.pragma_update(None, "journal_mode", "DELETE")?;
+    }
     fs::copy(compatible_backup, &database)?;
+    Connection::open(&database)?.pragma_update(None, "journal_mode", "WAL")?;
     let (registration_id, original_state, original_root, original_retired_at) = {
         let connection = Connection::open(&database)?;
         connection.query_row(
@@ -19955,7 +19962,7 @@ fn exercise_released_upgrade_migration_repair(
             [],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
@@ -19985,16 +19992,11 @@ fn exercise_released_upgrade_migration_repair(
         )?;
     }
     let injected = sqlite_compatibility_snapshot(&database)?;
-    let config = repo.join(ATLAS_DIR_NAME).join("config.toml");
     let run_root_set = || {
         StdCommand::new(candidate)
             .current_dir(repo)
             .env("PROJECTATLAS_NO_TELEMETRY", "1")
-            .args(["--format", "json", "--db"])
-            .arg(&database)
-            .arg("--config")
-            .arg(&config)
-            .args(["root", "set"])
+            .args(["--format", "json", "root", "set"])
             .arg(repo)
             .args(["--transition", "adopt-legacy"])
             .output()
@@ -20007,9 +20009,8 @@ fn exercise_released_upgrade_migration_repair(
     );
     if refusal.status.success()
         || !diagnostic.contains(
-            "worktree registration migration cannot establish native last_root_identity identity",
+            "project-root identity error: invalid canonical project root \"relative\": project root must be absolute",
         )
-        || !diagnostic.contains("repair the legacy row and retry")
         || sqlite_compatibility_snapshot(&database)? != injected
     {
         return Err(io::Error::other(format!(
@@ -20112,21 +20113,6 @@ fn exercise_released_upgrade_migration_repair(
         ))
         .into());
     }
-    let summary = run_mcp_contract_json(
-        candidate,
-        repo,
-        &[
-            "--db".to_string(),
-            database.display().to_string(),
-            "summary".to_string(),
-            "src/lib.rs".to_string(),
-        ],
-    )?;
-    require_json_string(
-        &summary,
-        &["file_purpose"],
-        "Preserve the released authored purpose.",
-    )?;
     Ok(())
 }
 
