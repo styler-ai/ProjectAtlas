@@ -75,6 +75,11 @@
     }
   },
   "changes": {
+    "bind-packaged-regressions-to-installed-runtime": {
+      "contract": "checklist-v1",
+      "primary_issue": 668,
+      "owners": [{ "issue": 668, "first_task": "1.1", "last_task": "2.2" }]
+    },
     "preserve-upgrade-registration-identity": {
       "contract": "checklist-v1",
       "primary_issue": 666,
