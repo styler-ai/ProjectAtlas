@@ -24,7 +24,7 @@
         "488": { "blocked_by": [] },
         "489": { "blocked_by": [] },
         "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593, 604, 605, 606, 607, 608, 609, 620, 624, 625, 627, 633, 639, 499, 645, 664, 666] },
+        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593, 604, 605, 606, 607, 608, 609, 620, 624, 625, 627, 633, 639, 499, 645, 664, 666, 668, 669] },
         "495": { "blocked_by": [] },
         "517": { "blocked_by": [] },
         "518": { "blocked_by": [547] },
@@ -61,7 +61,9 @@
         "499": { "blocked_by": [639] },
         "645": { "blocked_by": [620] },
         "664": { "blocked_by": [] },
-        "666": { "blocked_by": [] }
+        "666": { "blocked_by": [] },
+        "668": { "blocked_by": [] },
+        "669": { "blocked_by": [] }
       }
     },
     "v0.6.0-00": {
@@ -75,6 +77,16 @@
     }
   },
   "changes": {
+    "preserve-checksum-tool-fixture-companions": {
+      "contract": "checklist-v1",
+      "primary_issue": 669,
+      "owners": [{ "issue": 669, "first_task": "1.1", "last_task": "2.2" }]
+    },
+    "bind-packaged-regressions-to-installed-runtime": {
+      "contract": "checklist-v1",
+      "primary_issue": 668,
+      "owners": [{ "issue": 668, "first_task": "1.1", "last_task": "2.2" }]
+    },
     "preserve-upgrade-registration-identity": {
       "contract": "checklist-v1",
       "primary_issue": 666,
