@@ -1359,11 +1359,15 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                     ))
                     .into());
                 }
-                eprintln!(
+                writeln!(
+                    io::stderr(),
                     "macOS VERSIONER_DEBUG selected shasum target: {}",
                     checksum_source.display()
-                );
-                eprintln!("curated shasum -a 256 known vector SHA256(abc)={actual_sha256}");
+                )?;
+                writeln!(
+                    io::stderr(),
+                    "curated shasum -a 256 known vector SHA256(abc)={actual_sha256}"
+                )?;
             }
             let jq_only_path = std::env::join_paths([
                 jq_only_bin,
