@@ -19,6 +19,7 @@ The curated release fixture SHALL expose the selected real host checksum impleme
 
 - **WHEN** the selected native checksum tool needs no version dispatch
 - **THEN** its existing staged invocation and curated-path behavior remain compatible
+- **AND** on macOS, a successful absolute system known-vector invocation with exactly empty dispatcher diagnostics permits the canonical system path only with an independent staged known-vector check under the curated PATH; nonempty malformed, missing, ambiguous, or unresolved dispatcher mappings remain failures
 
 ### Requirement: Integrity and isolation assertions remain authoritative
 

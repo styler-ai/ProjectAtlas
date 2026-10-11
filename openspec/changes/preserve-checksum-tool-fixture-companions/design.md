@@ -10,7 +10,7 @@ Execute the real host checksum implementation through the existing curated comma
 
 ## Decisions
 
-Repair only the existing fixture's selected target. For the affected macOS `shasum` launcher, discover the active host's real versioned implementation and bind the curated `shasum` name directly to that implementation. Do not derive the script suffix by assuming it equals the full Perl runtime version; inspect the actual native host. Ordinary standalone tools retain their existing staging.
+Repair only the existing fixture's selected target. For the affected macOS `shasum` launcher, discover the active host's real versioned implementation and bind the curated `shasum` name directly to that implementation. Do not derive the script suffix by assuming it equals the full Perl runtime version; inspect the actual native host. After the absolute system command succeeds with the expected known-vector digest, exactly empty dispatcher diagnostics permit its canonical system path as a direct implementation. Nonempty diagnostics still require one valid mapping and reject an unresolved dispatcher. The staged command must then pass the same known vector under the curated PATH. This preserves standalone native tools without treating malformed or ambiguous dispatcher output as a direct implementation.
 
 Keep the curated PATH and real checksum computation. A fake checksum tool or a full ambient PATH would remove the isolation boundary. Reuse the existing fixture and frozen-source owners; no product selector, workflow, dependency, or new harness is required.
 

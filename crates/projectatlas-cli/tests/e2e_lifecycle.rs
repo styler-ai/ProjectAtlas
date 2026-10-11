@@ -513,26 +513,36 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
 const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
 #[cfg(target_os = "macos")]
-fn parse_macos_shasum_target(stderr: &str) -> Result<&str, io::Error> {
+fn parse_macos_shasum_target(stderr: &str) -> Result<Option<&str>, io::Error> {
     const SHASUM: &str = "/usr/bin/shasum";
-    let targets = stderr
+    if stderr.is_empty() {
+        return Ok(None);
+    }
+    let mappings = stderr
         .lines()
         .filter_map(|line| {
             let (source, target) = line.split_once(" -> ")?;
-            let source = source
-                .rsplit_once(": ")
-                .map_or(source, |(_, source)| source);
-            (source == SHASUM).then_some(target.trim())
+            Some((
+                source
+                    .rsplit_once(": ")
+                    .map_or(source, |(_, source)| source),
+                target,
+            ))
         })
         .collect::<Vec<_>>();
-    if targets.len() == 1 && !targets[0].is_empty() {
-        Ok(targets[0])
-    } else {
-        Err(io::Error::other(format!(
+    if mappings.len() != 1 {
+        return Err(io::Error::other(format!(
             "VERSIONER_DEBUG reported {} mappings for {SHASUM}",
-            targets.len()
-        )))
+            mappings.len()
+        )));
     }
+    let (source, target) = mappings[0];
+    if source != SHASUM || target.trim().is_empty() {
+        return Err(io::Error::other(format!(
+            "VERSIONER_DEBUG reported an invalid mapping for {SHASUM}: {source} -> {target}"
+        )));
+    }
+    Ok(Some(target.trim()))
 }
 
 #[cfg(target_os = "macos")]
@@ -540,8 +550,10 @@ fn macos_shasum_target(input: &Path, expected_sha256: &str) -> Result<PathBuf, B
     const SHASUM: &str = "/usr/bin/shasum";
     if !matches!(
         parse_macos_shasum_target("versioner: /usr/bin/shasum -> /usr/bin/shasum-native"),
-        Ok("/usr/bin/shasum-native")
-    ) || parse_macos_shasum_target("").is_ok()
+        Ok(Some("/usr/bin/shasum-native"))
+    ) || !matches!(parse_macos_shasum_target(""), Ok(None))
+        || parse_macos_shasum_target("unexpected versioner diagnostic").is_ok()
+        || parse_macos_shasum_target("versioner: /usr/bin/perl -> /usr/bin/perl5.34").is_ok()
         || parse_macos_shasum_target(concat!(
             "versioner: /usr/bin/shasum -> /usr/bin/shasum-one\n",
             "versioner: /usr/bin/shasum -> /usr/bin/shasum-two"
@@ -568,11 +580,13 @@ fn macos_shasum_target(input: &Path, expected_sha256: &str) -> Result<PathBuf, B
         .into());
     }
 
-    let target = fs::canonicalize(
-        parse_macos_shasum_target(&stderr)
-            .map_err(|error| io::Error::other(format!("{error}: {stderr}")))?,
-    )?;
-    if !target.is_file() || target == Path::new(SHASUM) {
+    let mapping = parse_macos_shasum_target(&stderr)
+        .map_err(|error| io::Error::other(format!("{error}: {stderr}")))?;
+    let target = match mapping {
+        Some(target) => fs::canonicalize(target)?,
+        None => fs::canonicalize(SHASUM)?,
+    };
+    if !target.is_file() || (mapping.is_some() && target == Path::new(SHASUM)) {
         return Err(io::Error::other(format!(
             "VERSIONER_DEBUG selected an invalid {SHASUM} target: {}",
             target.display()
