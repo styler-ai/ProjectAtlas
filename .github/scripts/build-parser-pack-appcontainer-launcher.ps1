@@ -48,6 +48,10 @@ namespace ProjectAtlas.Release
         private const int MaximumEnvironmentCount = 128;
         private const int MaximumEnvironmentBytes = 65534;
         private const int MaximumTimeoutSeconds = 86400;
+        private const int DescendantReadinessDeadlineMilliseconds = 3000;
+        private const int DescendantCleanupWaitMilliseconds = 1000;
+        private const int ReadinessPollMilliseconds = 25;
+        private const int ReadinessSchedulingToleranceMilliseconds = 1000;
         private const int ErrorInsufficientBuffer = 122;
         private const uint TokenQuery = 0x0008;
         private const uint TokenIsAppContainer = 29;
@@ -208,6 +212,61 @@ namespace ProjectAtlas.Release
             internal bool ProcessHandleClosed { get; set; }
             internal bool ThreadHandleOwned { get; set; }
             internal bool ThreadHandleClosed { get; set; }
+        }
+
+        private enum ReadinessMarkerState
+        {
+            Missing,
+            Valid,
+            Invalid,
+            Unreadable
+        }
+
+        private enum ReadinessOutcome
+        {
+            Ready,
+            ChildExited,
+            Deadline,
+            LaunchFailed
+        }
+
+        private sealed class ChildReadinessObservation
+        {
+            internal ChildReadinessObservation(
+                ReadinessOutcome outcome,
+                ReadinessMarkerState marker,
+                bool childAlive,
+                int? childExitCode,
+                long elapsedMilliseconds)
+            {
+                Outcome = outcome;
+                Marker = marker;
+                ChildAlive = childAlive;
+                ChildExitCode = childExitCode;
+                ElapsedMilliseconds = elapsedMilliseconds;
+            }
+
+            internal ReadinessOutcome Outcome { get; private set; }
+            internal ReadinessMarkerState Marker { get; private set; }
+            internal bool ChildAlive { get; private set; }
+            internal int? ChildExitCode { get; private set; }
+            internal long ElapsedMilliseconds { get; private set; }
+
+            internal string ToDiagnostic()
+            {
+                string outcome = Outcome == ReadinessOutcome.ChildExited
+                    ? "child-exited"
+                    : Outcome == ReadinessOutcome.LaunchFailed
+                        ? "launch-failed"
+                        : Outcome.ToString().ToLowerInvariant();
+                return "outcome=" + outcome
+                    + ";marker=" + Marker.ToString().ToLowerInvariant()
+                    + ";child_alive=" + (ChildAlive ? "true" : "false")
+                    + ";child_exit_code=" + (ChildExitCode.HasValue
+                        ? ChildExitCode.Value.ToString(CultureInfo.InvariantCulture)
+                        : "none")
+                    + ";elapsed_ms=" + ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture);
+            }
         }
 
         private sealed class Profile : IDisposable
@@ -1771,6 +1830,108 @@ namespace ProjectAtlas.Release
                         "exit=" + baselineExit.ToString(CultureInfo.InvariantCulture));
                 }
 
+                string earlyExitMarker = Path.Combine(writeRoot, "readiness-early-exit.txt");
+                using (Process earlyExitChild = StartCanaryProcess(
+                    canaryExecutable,
+                    writeRoot,
+                    new string[] { "canary", "sleep", "1" }))
+                {
+                    try
+                    {
+                        ChildReadinessObservation earlyExit = ObserveChildReadiness(
+                            earlyExitChild,
+                            earlyExitMarker,
+                            1000);
+                        if (earlyExit.Outcome != ReadinessOutcome.ChildExited
+                            || earlyExit.Marker != ReadinessMarkerState.Missing
+                            || earlyExit.ChildExitCode != 0
+                            || earlyExit.ChildAlive
+                            || !earlyExit.ToDiagnostic().StartsWith(
+                                "outcome=child-exited;marker=missing;child_alive=false;child_exit_code=0;elapsed_ms=",
+                                StringComparison.Ordinal)
+                            || earlyExit.ElapsedMilliseconds >
+                                1000 + ReadinessSchedulingToleranceMilliseconds)
+                        {
+                            throw new ContainmentFailure(
+                                "readiness-early-exit-self-test",
+                                earlyExit.ToDiagnostic());
+                        }
+                    }
+                    finally
+                    {
+                        StopCanaryProcess(earlyExitChild);
+                    }
+                }
+
+                string invalidMarker = Path.Combine(writeRoot, "readiness-invalid.txt");
+                File.WriteAllText(invalidMarker, "invalid");
+                using (Process invalidMarkerChild = StartCanaryProcess(
+                    canaryExecutable,
+                    writeRoot,
+                    new string[] { "canary", "sleep", "5000" }))
+                {
+                    try
+                    {
+                        ChildReadinessObservation invalid = ObserveChildReadiness(
+                            invalidMarkerChild,
+                            invalidMarker,
+                            200);
+                        if (invalid.Outcome != ReadinessOutcome.Deadline
+                            || invalid.Marker != ReadinessMarkerState.Invalid
+                            || !invalid.ChildAlive
+                            || invalid.ChildExitCode.HasValue
+                            || !invalid.ToDiagnostic().StartsWith(
+                                "outcome=deadline;marker=invalid;child_alive=true;child_exit_code=none;elapsed_ms=",
+                                StringComparison.Ordinal)
+                            || invalid.ElapsedMilliseconds < 200
+                            || invalid.ElapsedMilliseconds >
+                                200 + ReadinessSchedulingToleranceMilliseconds)
+                        {
+                            throw new ContainmentFailure(
+                                "readiness-invalid-marker-self-test",
+                                invalid.ToDiagnostic());
+                        }
+                    }
+                    finally
+                    {
+                        StopCanaryProcess(invalidMarkerChild);
+                    }
+                }
+
+                string missingMarker = Path.Combine(writeRoot, "readiness-missing.txt");
+                using (Process missingMarkerChild = StartCanaryProcess(
+                    canaryExecutable,
+                    writeRoot,
+                    new string[] { "canary", "sleep", "5000" }))
+                {
+                    try
+                    {
+                        ChildReadinessObservation missing = ObserveChildReadiness(
+                            missingMarkerChild,
+                            missingMarker,
+                            200);
+                        if (missing.Outcome != ReadinessOutcome.Deadline
+                            || missing.Marker != ReadinessMarkerState.Missing
+                            || !missing.ChildAlive
+                            || missing.ChildExitCode.HasValue
+                            || !missing.ToDiagnostic().StartsWith(
+                                "outcome=deadline;marker=missing;child_alive=true;child_exit_code=none;elapsed_ms=",
+                                StringComparison.Ordinal)
+                            || missing.ElapsedMilliseconds < 200
+                            || missing.ElapsedMilliseconds >
+                                200 + ReadinessSchedulingToleranceMilliseconds)
+                        {
+                            throw new ContainmentFailure(
+                                "readiness-missing-marker-self-test",
+                                missing.ToDiagnostic());
+                        }
+                    }
+                    finally
+                    {
+                        StopCanaryProcess(missingMarkerChild);
+                    }
+                }
+
                 File.Delete(writeMarker);
                 LaunchConfiguration contained = new LaunchConfiguration();
                 contained.Executable = canaryExecutable;
@@ -1905,6 +2066,9 @@ namespace ProjectAtlas.Release
 
                 string descendantStarted = Path.Combine(writeRoot, "descendant-started.txt");
                 string descendantCompleted = Path.Combine(writeRoot, "descendant-completed.txt");
+                string descendantRelease = Path.Combine(writeRoot, "descendant-release.txt");
+                string descendantObservation = Path.Combine(writeRoot, "descendant-observation.txt");
+                string descendantIdentity = Path.Combine(writeRoot, "descendant-identity.txt");
                 LaunchConfiguration tree = new LaunchConfiguration();
                 tree.Executable = canaryExecutable;
                 tree.WorkingDirectory = writeRoot;
@@ -1915,18 +2079,130 @@ namespace ProjectAtlas.Release
                 tree.ExecuteFiles.Add(canaryExecutable);
                 tree.Arguments.AddRange(new string[]
                 {
-                    "canary", "tree-parent", descendantStarted, descendantCompleted
+                    "canary", "tree-parent", descendantStarted, descendantCompleted,
+                    descendantObservation, descendantRelease, descendantIdentity
                 });
-                if (LaunchContained(tree) != 0)
+                int treeExit = LaunchContained(tree);
+                string treeDiagnostic = ReadCanaryObservation(descendantObservation);
+                if (treeExit != 0 || !IsReadyObservation(treeDiagnostic))
                 {
-                    throw new ContainmentFailure("descendant-parent-canary");
+                    throw new ContainmentFailure(
+                        "descendant-parent-canary",
+                        "exit=" + treeExit.ToString(CultureInfo.InvariantCulture)
+                            + ";" + treeDiagnostic);
                 }
-                Thread.Sleep(1000);
                 if (!File.Exists(descendantStarted)
                     || File.ReadAllText(descendantStarted) != "appcontainer"
                     || File.Exists(descendantCompleted))
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                string[] descendantIdentityParts = File.ReadAllText(descendantIdentity).Split(';');
+                int descendantProcessId;
+                long descendantStartTimeUtcTicks;
+                if (descendantIdentityParts.Length != 2
+                    || !Int32.TryParse(
+                        descendantIdentityParts[0],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out descendantProcessId)
+                    || descendantProcessId <= 0
+                    || !Int64.TryParse(
+                        descendantIdentityParts[1],
+                        NumberStyles.None,
+                        CultureInfo.InvariantCulture,
+                        out descendantStartTimeUtcTicks)
+                    || descendantStartTimeUtcTicks <= 0)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                RequireCanaryProcessRetired(
+                    descendantProcessId,
+                    descendantStartTimeUtcTicks,
+                    descendantCompleted);
+                long descendantCleanupDeadlineTicks =
+                    DescendantCleanupDeadlineTicks();
+                int withinBoundClockReads = 0;
+                RequireCanaryProcessRetired(
+                    descendantProcessId,
+                    descendantStartTimeUtcTicks,
+                    descendantCompleted,
+                    delegate
+                    {
+                        withinBoundClockReads += 1;
+                        return withinBoundClockReads == 1
+                            ? 0L
+                            : descendantCleanupDeadlineTicks;
+                    });
+                if (withinBoundClockReads != 2)
+                {
+                    throw new ContainmentFailure(
+                        "descendant-cleanup-deadline-self-test");
+                }
+
+                int lateObservationClockReads = 0;
+                RequireContainmentFailure(
+                    delegate
+                    {
+                        RequireCanaryProcessRetired(
+                            descendantProcessId,
+                            descendantStartTimeUtcTicks,
+                            descendantCompleted,
+                            delegate
+                            {
+                                lateObservationClockReads += 1;
+                                return lateObservationClockReads == 1
+                                    ? 0L
+                                    : descendantCleanupDeadlineTicks + 1L;
+                            });
+                    },
+                    "descendant-cleanup-canary");
+                if (lateObservationClockReads != 2)
+                {
+                    throw new ContainmentFailure(
+                        "descendant-cleanup-deadline-self-test");
+                }
+
+                string sleepingChildCompletion = Path.Combine(
+                    writeRoot,
+                    "cleanup-sleeping-child-completed.txt");
+                Process sleepingChild = StartCanaryProcess(
+                    canaryExecutable,
+                    writeRoot,
+                    new string[] { "canary", "sleep", "30000" });
+                if (sleepingChild == null)
+                {
+                    throw new ContainmentFailure("cleanup-sleeping-child-start");
+                }
+                using (sleepingChild)
+                {
+                    try
+                    {
+                        if (sleepingChild.HasExited)
+                        {
+                            throw new ContainmentFailure("cleanup-sleeping-child-start");
+                        }
+                        int sleepingChildProcessId = sleepingChild.Id;
+                        long sleepingChildStartTimeUtcTicks =
+                            sleepingChild.StartTime.ToUniversalTime().Ticks;
+                        if (File.Exists(sleepingChildCompletion))
+                        {
+                            throw new ContainmentFailure("cleanup-sleeping-child-marker");
+                        }
+                        RequireContainmentFailure(
+                            delegate
+                            {
+                                RequireCanaryProcessRetired(
+                                    sleepingChildProcessId,
+                                    sleepingChildStartTimeUtcTicks,
+                                    sleepingChildCompletion);
+                            },
+                            "descendant-cleanup-canary");
+                    }
+                    finally
+                    {
+                        StopCanaryProcess(sleepingChild);
+                    }
                 }
 
                 LaunchConfiguration duplicateFile = new LaunchConfiguration();
@@ -2047,7 +2323,10 @@ namespace ProjectAtlas.Release
             }
         }
 
-        private static int RunBaseline(string executable, string[] arguments, string workingDirectory)
+        private static Process StartCanaryProcess(
+            string executable,
+            string workingDirectory,
+            string[] arguments)
         {
             ProcessStartInfo start = new ProcessStartInfo();
             start.FileName = executable;
@@ -2055,7 +2334,12 @@ namespace ProjectAtlas.Release
             start.WorkingDirectory = workingDirectory;
             start.UseShellExecute = false;
             start.CreateNoWindow = true;
-            using (Process process = Process.Start(start))
+            return Process.Start(start);
+        }
+
+        private static int RunBaseline(string executable, string[] arguments, string workingDirectory)
+        {
+            using (Process process = StartCanaryProcess(executable, workingDirectory, arguments))
             {
                 if (process == null)
                 {
@@ -2069,6 +2353,287 @@ namespace ProjectAtlas.Release
                 }
                 return process.ExitCode;
             }
+        }
+
+        private static ChildReadinessObservation ObserveChildReadiness(
+            Process child,
+            string markerPath,
+            int deadlineMilliseconds,
+            Action onInvalidMarkerObserved = null)
+        {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            bool invalidMarkerNotified = false;
+            while (true)
+            {
+                ReadinessMarkerState marker = ReadReadinessMarker(markerPath);
+                if (child.HasExited)
+                {
+                    return ChildExitedObservation(child, marker, elapsed.ElapsedMilliseconds);
+                }
+                if (marker == ReadinessMarkerState.Invalid
+                    && !invalidMarkerNotified
+                    && onInvalidMarkerObserved != null)
+                {
+                    invalidMarkerNotified = true;
+                    onInvalidMarkerObserved();
+                }
+
+                long elapsedMilliseconds = elapsed.ElapsedMilliseconds;
+                long remainingMilliseconds = deadlineMilliseconds - elapsedMilliseconds;
+                if (remainingMilliseconds <= 0)
+                {
+                    if (child.HasExited)
+                    {
+                        return ChildExitedObservation(child, marker, elapsedMilliseconds);
+                    }
+                    return new ChildReadinessObservation(
+                        ReadinessOutcome.Deadline,
+                        marker,
+                        true,
+                        null,
+                        elapsedMilliseconds);
+                }
+
+                if (marker == ReadinessMarkerState.Valid)
+                {
+                    if (child.HasExited)
+                    {
+                        return ChildExitedObservation(child, marker, elapsedMilliseconds);
+                    }
+                    return new ChildReadinessObservation(
+                        ReadinessOutcome.Ready,
+                        marker,
+                        true,
+                        null,
+                        elapsedMilliseconds);
+                }
+
+                Thread.Sleep((int)Math.Min(ReadinessPollMilliseconds, remainingMilliseconds));
+            }
+        }
+
+        private static ChildReadinessObservation ChildExitedObservation(
+            Process child,
+            ReadinessMarkerState marker,
+            long elapsedMilliseconds)
+        {
+            return new ChildReadinessObservation(
+                ReadinessOutcome.ChildExited,
+                marker,
+                false,
+                child.ExitCode,
+                elapsedMilliseconds);
+        }
+
+        private static ReadinessMarkerState ReadReadinessMarker(string path)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                {
+                    byte[] marker = new byte[13];
+                    int length = 0;
+                    while (length < marker.Length)
+                    {
+                        int count = stream.Read(marker, length, marker.Length - length);
+                        if (count == 0)
+                        {
+                            break;
+                        }
+                        length += count;
+                    }
+                    return length == 12
+                        && String.Equals(
+                            Encoding.ASCII.GetString(marker, 0, length),
+                            "appcontainer",
+                            StringComparison.Ordinal)
+                                ? ReadinessMarkerState.Valid
+                                : ReadinessMarkerState.Invalid;
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                return ReadinessMarkerState.Missing;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return ReadinessMarkerState.Missing;
+            }
+            catch (IOException)
+            {
+                return ReadinessMarkerState.Unreadable;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return ReadinessMarkerState.Unreadable;
+            }
+        }
+
+        private static void StopCanaryProcess(Process child)
+        {
+            if (child.HasExited)
+            {
+                return;
+            }
+            child.Kill();
+            if (!child.WaitForExit((int)AdmissionCleanupWaitMilliseconds))
+            {
+                throw new ContainmentFailure("readiness-self-test-child-cleanup");
+            }
+        }
+
+        private static void RequireCanaryProcessRetired(
+            int processId,
+            long startTimeUtcTicks,
+            string completionMarker)
+        {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            RequireCanaryProcessRetired(
+                processId,
+                startTimeUtcTicks,
+                completionMarker,
+                delegate { return elapsed.ElapsedTicks; });
+        }
+
+        private static void RequireCanaryProcessRetired(
+            int processId,
+            long startTimeUtcTicks,
+            string completionMarker,
+            Func<long> elapsedTicks)
+        {
+            if (processId <= 0 || startTimeUtcTicks <= 0)
+            {
+                throw new ContainmentFailure("descendant-cleanup-canary");
+            }
+            if (elapsedTicks == null)
+            {
+                throw new ContainmentFailure("descendant-cleanup-canary");
+            }
+
+            long cleanupDeadlineTicks = DescendantCleanupDeadlineTicks();
+            while (true)
+            {
+                if (elapsedTicks() > cleanupDeadlineTicks)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                if (File.Exists(completionMarker))
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                bool processAlive = IsExactCanaryProcessAlive(
+                    processId,
+                    startTimeUtcTicks);
+                if (File.Exists(completionMarker))
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                long observedElapsedTicks = elapsedTicks();
+                if (observedElapsedTicks > cleanupDeadlineTicks)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                if (!processAlive)
+                {
+                    return;
+                }
+
+                long remainingMilliseconds =
+                    DescendantCleanupWaitMilliseconds
+                    - observedElapsedTicks * 1000L / Stopwatch.Frequency;
+                if (remainingMilliseconds <= 0)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                Thread.Sleep((int)Math.Min(ReadinessPollMilliseconds, remainingMilliseconds));
+            }
+        }
+
+        private static long DescendantCleanupDeadlineTicks()
+        {
+            return DescendantCleanupWaitMilliseconds * Stopwatch.Frequency / 1000L;
+        }
+
+        private static bool IsExactCanaryProcessAlive(int processId, long startTimeUtcTicks)
+        {
+            Process process;
+            try
+            {
+                process = Process.GetProcessById(processId);
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+
+            using (process)
+            {
+                if (process.HasExited)
+                {
+                    return false;
+                }
+                if (process.StartTime.ToUniversalTime().Ticks != startTimeUtcTicks)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                return !process.HasExited;
+            }
+        }
+
+        private static string ReadCanaryObservation(string path)
+        {
+            try
+            {
+                FileInfo file = new FileInfo(path);
+                if (!file.Exists)
+                {
+                    return "observation=missing";
+                }
+                if (file.Length > 256)
+                {
+                    return "observation=oversize";
+                }
+                string contents = File.ReadAllText(path);
+                for (int index = 0; index < contents.Length; index += 1)
+                {
+                    if (contents[index] < 32 || contents[index] > 126)
+                    {
+                        return "observation=invalid";
+                    }
+                }
+                return contents;
+            }
+            catch (IOException)
+            {
+                return "observation=unreadable";
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return "observation=unreadable";
+            }
+        }
+
+        private static bool IsReadyObservation(string diagnostic)
+        {
+            const string prefix =
+                "outcome=ready;marker=valid;child_alive=true;child_exit_code=none;elapsed_ms=";
+            if (!diagnostic.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            long elapsedMilliseconds;
+            string elapsedText = diagnostic.Substring(prefix.Length);
+            return Int64.TryParse(
+                    elapsedText,
+                    NumberStyles.None,
+                    CultureInfo.InvariantCulture,
+                    out elapsedMilliseconds)
+                && elapsedMilliseconds >= 0
+                && elapsedMilliseconds <= DescendantReadinessDeadlineMilliseconds;
         }
 
         private static int RunCanary(string[] arguments)
@@ -2085,39 +2650,116 @@ namespace ProjectAtlas.Release
                 Thread.Sleep(milliseconds);
                 return 0;
             }
-            if (arguments.Length == 4 && arguments[1] == "tree-child")
+            if (arguments.Length == 5 && arguments[1] == "tree-child")
             {
                 if (!IsCurrentProcessAppContainer())
                 {
                     return 23;
                 }
-                File.WriteAllText(arguments[2], "appcontainer");
+                using (FileStream marker = new FileStream(
+                    arguments[2],
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete))
+                {
+                    Stopwatch releaseWait = Stopwatch.StartNew();
+                    while (!File.Exists(arguments[4])
+                        && releaseWait.ElapsedMilliseconds < DescendantReadinessDeadlineMilliseconds)
+                    {
+                        Thread.Sleep(ReadinessPollMilliseconds);
+                    }
+                    if (!File.Exists(arguments[4]))
+                    {
+                        return 27;
+                    }
+                    byte[] readyMarker = Encoding.ASCII.GetBytes("appcontainer");
+                    marker.Write(readyMarker, 0, readyMarker.Length);
+                    marker.Flush();
+                }
                 Thread.Sleep(5000);
                 File.WriteAllText(arguments[3], "completed");
                 return 0;
             }
-            if (arguments.Length == 4 && arguments[1] == "tree-parent")
+            if (arguments.Length == 7 && arguments[1] == "tree-parent")
             {
-                ProcessStartInfo childStart = new ProcessStartInfo();
-                childStart.FileName = Process.GetCurrentProcess().MainModule.FileName;
-                childStart.Arguments = BuildArguments(new string[]
+                Stopwatch elapsed = Stopwatch.StartNew();
+                Process child = null;
+                try
                 {
-                    "canary", "tree-child", arguments[2], arguments[3]
-                });
-                childStart.UseShellExecute = false;
-                childStart.CreateNoWindow = true;
-                Process child = Process.Start(childStart);
-                if (child == null)
+                    child = StartCanaryProcess(
+                        Process.GetCurrentProcess().MainModule.FileName,
+                        Environment.CurrentDirectory,
+                        new string[]
+                        {
+                            "canary", "tree-child", arguments[2], arguments[3], arguments[5]
+                        });
+                }
+                catch (Exception)
                 {
+                    File.WriteAllText(
+                        arguments[4],
+                        new ChildReadinessObservation(
+                            ReadinessOutcome.LaunchFailed,
+                            ReadinessMarkerState.Missing,
+                            false,
+                            null,
+                            elapsed.ElapsedMilliseconds).ToDiagnostic());
                     return 24;
                 }
-                child.Dispose();
-                Stopwatch wait = Stopwatch.StartNew();
-                while (!File.Exists(arguments[2]) && wait.Elapsed < TimeSpan.FromSeconds(3))
+                if (child == null)
                 {
-                    Thread.Sleep(25);
+                    File.WriteAllText(
+                        arguments[4],
+                        new ChildReadinessObservation(
+                            ReadinessOutcome.LaunchFailed,
+                            ReadinessMarkerState.Missing,
+                            false,
+                            null,
+                            elapsed.ElapsedMilliseconds).ToDiagnostic());
+                    return 24;
                 }
-                return File.Exists(arguments[2]) && File.ReadAllText(arguments[2]) == "appcontainer" ? 0 : 25;
+                using (child)
+                {
+                    File.WriteAllText(
+                        arguments[6],
+                        child.Id.ToString(CultureInfo.InvariantCulture)
+                            + ";"
+                            + child.StartTime.ToUniversalTime().Ticks.ToString(
+                                CultureInfo.InvariantCulture));
+                    bool oldOneShotPredicateRejectedIncompleteMarker = false;
+                    ChildReadinessObservation observation = ObserveChildReadiness(
+                        child,
+                        arguments[2],
+                        DescendantReadinessDeadlineMilliseconds,
+                        delegate
+                        {
+                            bool oldOneShotReady = false;
+                            try
+                            {
+                                oldOneShotReady = File.Exists(arguments[2])
+                                    && File.ReadAllText(arguments[2]) == "appcontainer";
+                            }
+                            catch (IOException)
+                            {
+                                // The old one-shot read also fails if the writer still owns the file.
+                            }
+                            if (!File.Exists(arguments[2])
+                                || child.HasExited
+                                || new FileInfo(arguments[2]).Length != 0
+                                || oldOneShotReady)
+                            {
+                                throw new ContainmentFailure("readiness-transition-incomplete-marker");
+                            }
+                            oldOneShotPredicateRejectedIncompleteMarker = true;
+                            File.WriteAllText(arguments[5], String.Empty);
+                        });
+                    File.WriteAllText(arguments[4], observation.ToDiagnostic());
+                    return observation.Outcome == ReadinessOutcome.Ready
+                        && observation.ChildAlive
+                        && oldOneShotPredicateRejectedIncompleteMarker
+                        ? 0
+                        : 25;
+                }
             }
             if (arguments.Length != 8)
             {
