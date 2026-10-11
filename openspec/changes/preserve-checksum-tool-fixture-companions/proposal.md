@@ -1,13 +1,13 @@
 ## Why
 
-The installed macOS ARM regression stops in the curated checksum-tool fixture because the relocated `shasum` wrapper cannot find an alternative implementation. The release regression must preserve the real host tool's executable dependencies so its readiness and integrity assertions can complete.
+The installed macOS ARM regression stops because the relocated generic `shasum` script cannot dispatch to its real versioned implementation. Apple's Perl versioner rewrites script arguments only beneath the interpreter's original directory prefix; adding versioned siblings beside the relocated script does not restore that dispatch boundary. The fixture must execute the real host checksum implementation while retaining its curated PATH.
 
 ## What Changes
 
-- Preserve required checksum-tool companions in the existing temporary curated-path fixture.
-- Retain the real checksum implementation, curated PATH assertion, readiness/integrity checks, and ordinary native-tool behavior.
-- Confirm the fixture diagnosis and correction with the existing focused native macOS regression and required affected checks.
-- Hand fresh complete candidate acceptance to #492 after the owning fix merges.
+- Resolve the host's real checksum implementation and expose it under the existing curated command name.
+- On affected macOS hosts, bind the curated `shasum` name to the real implementation selected by the active host Perl version, without guessing a version suffix.
+- Preserve standalone native-tool behavior, every curated-path, checksum, readiness, stale-state, and non-mutation assertion, and production hook routing.
+- Prove the affected `shasum` path on both native macOS architectures before handing fresh complete candidate acceptance to #492.
 
 ## Capabilities
 
@@ -21,8 +21,8 @@ None. Production checksum routing and installed hook behavior remain unchanged.
 
 ## Impact
 
-#669 owns checksum-tool staging in `crates/projectatlas-cli/tests/e2e_lifecycle.rs`, affected frozen-source metadata, and causal native macOS proof. The fixture currently links the generic tool but omits any required versioned siblings. Planning remains backlog until published specification and release admission; implementation follows the already-started #668 boundary.
+#669 owns checksum-tool staging in `crates/projectatlas-cli/tests/e2e_lifecycle.rs`, the two existing frozen lifecycle source-hash owners, and causal native macOS proof. Correct the existing issue and OpenSpec contract in the owning change; retain its slug and release mapping. Implementation follows acceptance of the already-started #668 boundary.
 
 ## Non-Goals
 
-No new checksum implementation, product hook feature, dependency, database migration, weakened assertion, real Nix-host acceptance claim, release publication, or stable promotion.
+No new checksum implementation, product hook feature, dependency, workflow, environment selector, database migration, weakened assertion, ambient PATH fallback, real Nix-host acceptance claim, release publication, or stable promotion.
