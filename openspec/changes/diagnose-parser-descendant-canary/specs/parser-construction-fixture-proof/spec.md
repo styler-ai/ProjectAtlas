@@ -39,3 +39,7 @@ The descendant canary SHALL establish a live child with valid containment eviden
 #### Scenario: Live descendant has not written its completion marker
 - **WHEN** the exact descendant remains live after the existing job-close cleanup bound
 - **THEN** the canary fails retirement proof even if the completion marker is absent
+
+#### Scenario: Retirement is observed after the cleanup deadline
+- **WHEN** the observer resumes or completes its process observation after the existing cleanup deadline
+- **THEN** it refuses bounded retirement proof even if the descendant has exited and its completion marker is absent

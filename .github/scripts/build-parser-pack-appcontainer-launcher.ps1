@@ -2120,6 +2120,48 @@ namespace ProjectAtlas.Release
                     descendantProcessId,
                     descendantStartTimeUtcTicks,
                     descendantCompleted);
+                long descendantCleanupDeadlineTicks =
+                    DescendantCleanupDeadlineTicks();
+                int withinBoundClockReads = 0;
+                RequireCanaryProcessRetired(
+                    descendantProcessId,
+                    descendantStartTimeUtcTicks,
+                    descendantCompleted,
+                    delegate
+                    {
+                        withinBoundClockReads += 1;
+                        return withinBoundClockReads == 1
+                            ? 0L
+                            : descendantCleanupDeadlineTicks;
+                    });
+                if (withinBoundClockReads != 2)
+                {
+                    throw new ContainmentFailure(
+                        "descendant-cleanup-deadline-self-test");
+                }
+
+                int lateObservationClockReads = 0;
+                RequireContainmentFailure(
+                    delegate
+                    {
+                        RequireCanaryProcessRetired(
+                            descendantProcessId,
+                            descendantStartTimeUtcTicks,
+                            descendantCompleted,
+                            delegate
+                            {
+                                lateObservationClockReads += 1;
+                                return lateObservationClockReads == 1
+                                    ? 0L
+                                    : descendantCleanupDeadlineTicks + 1L;
+                            });
+                    },
+                    "descendant-cleanup-canary");
+                if (lateObservationClockReads != 2)
+                {
+                    throw new ContainmentFailure(
+                        "descendant-cleanup-deadline-self-test");
+                }
 
                 string sleepingChildCompletion = Path.Combine(
                     writeRoot,
@@ -2449,35 +2491,71 @@ namespace ProjectAtlas.Release
             long startTimeUtcTicks,
             string completionMarker)
         {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            RequireCanaryProcessRetired(
+                processId,
+                startTimeUtcTicks,
+                completionMarker,
+                delegate { return elapsed.ElapsedTicks; });
+        }
+
+        private static void RequireCanaryProcessRetired(
+            int processId,
+            long startTimeUtcTicks,
+            string completionMarker,
+            Func<long> elapsedTicks)
+        {
             if (processId <= 0 || startTimeUtcTicks <= 0)
             {
                 throw new ContainmentFailure("descendant-cleanup-canary");
             }
+            if (elapsedTicks == null)
+            {
+                throw new ContainmentFailure("descendant-cleanup-canary");
+            }
 
-            Stopwatch elapsed = Stopwatch.StartNew();
+            long cleanupDeadlineTicks = DescendantCleanupDeadlineTicks();
             while (true)
             {
+                if (elapsedTicks() > cleanupDeadlineTicks)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
                 if (File.Exists(completionMarker))
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
                 }
-                if (!IsExactCanaryProcessAlive(processId, startTimeUtcTicks))
+                bool processAlive = IsExactCanaryProcessAlive(
+                    processId,
+                    startTimeUtcTicks);
+                if (File.Exists(completionMarker))
                 {
-                    if (File.Exists(completionMarker))
-                    {
-                        throw new ContainmentFailure("descendant-cleanup-canary");
-                    }
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                long observedElapsedTicks = elapsedTicks();
+                if (observedElapsedTicks > cleanupDeadlineTicks)
+                {
+                    throw new ContainmentFailure("descendant-cleanup-canary");
+                }
+                if (!processAlive)
+                {
                     return;
                 }
 
                 long remainingMilliseconds =
-                    DescendantCleanupWaitMilliseconds - elapsed.ElapsedMilliseconds;
+                    DescendantCleanupWaitMilliseconds
+                    - observedElapsedTicks * 1000L / Stopwatch.Frequency;
                 if (remainingMilliseconds <= 0)
                 {
                     throw new ContainmentFailure("descendant-cleanup-canary");
                 }
                 Thread.Sleep((int)Math.Min(ReadinessPollMilliseconds, remainingMilliseconds));
             }
+        }
+
+        private static long DescendantCleanupDeadlineTicks()
+        {
+            return DescendantCleanupWaitMilliseconds * Stopwatch.Frequency / 1000L;
         }
 
         private static bool IsExactCanaryProcessAlive(int processId, long startTimeUtcTicks)
