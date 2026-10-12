@@ -1,10 +1,10 @@
 ## Context
 
-See proposal.md for the observed failure. `exercise_released_upgrade_migration_repair` decodes column zero of its registration query as `String`; current and predecessor worktree registrations use SQLite integer primary keys. The helper reuses this value in parameterized reads and updates on a disposable predecessor backup.
+See proposal.md for the observed failures. The earlier `exercise_released_upgrade_migration_repair` decoded column zero of its registration query as `String`; its accepted repair uses the SQLite integer identity in parameterized reads and updates on a disposable predecessor backup. The remaining native acquisition failure is the shared plugin assertion requiring newer files from the published predecessor.
 
 ## Goals / Non-Goals
 
-Preserve native identity through the existing query and bindings so migration failure/rollback and repair/retry execute. No schema, production behavior, installed-route inventory, or publication-policy change is required.
+Preserve native identity through the existing query and bindings so migration failure/rollback and repair/retry execute. Respect shipped predecessor assets while requiring every current native plugin asset. No schema, production behavior, installed-route inventory, or publication-policy change is required.
 
 ## Decisions
 
@@ -21,6 +21,8 @@ The helper proves database migration and authority preservation. The outer insta
 Use the existing real-SQLite installed upgrade contract to exercise the same helper read; retain its unchanged-baseline failure and corrected-run result as causal proof. Reuse existing fixture and migration owners; add no generic registration abstraction or independent upgrade harness. Execute the full corrected Windows published-predecessor contract against the installed runtime and retain its refusal/repair/retry and state-preservation checks.
 
 ## Risks / Trade-offs
+
+The shared native plugin assertion must compare only the manifest and skill shipped by v0.4.5. Move `skills/projectatlas/references/language-support.md`, `skills/projectatlas/references/short-cli.md`, and `hooks/agent-instructions.txt` to its existing current-candidate-version branch beside the readiness assets. Keep exact source/cache byte comparisons and mandatory reads for every current asset; do not make file existence optional. Exercise predecessor success and current missing/mismatch refusal, then execute the installed Windows predecessor contract with native Codex acquisition enabled. Prepublish-only mode does not exercise this boundary.
 
 - A fixture checks a duplicate query rather than the helper: exercise the owning read or full helper with an integer registration key.
 - A passing focused check hides later upgrade defects: retain real installed Windows proof and mandatory fresh four-platform acceptance under #492.

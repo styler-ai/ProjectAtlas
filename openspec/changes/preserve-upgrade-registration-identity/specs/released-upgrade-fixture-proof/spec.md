@@ -1,8 +1,23 @@
 ## Purpose
 
-Keep released-upgrade fixtures faithful to native database identities so migration failure, preservation, repair, and retry evidence remains causal.
+Keep released-upgrade fixtures faithful to native database identities and shipped plugin assets so native acquisition, migration failure, preservation, repair, and retry evidence remains causal.
 
 ## ADDED Requirements
+
+### Requirement: Native plugin proof respects release-specific shipped assets
+The existing native plugin assertion SHALL compare predecessor manifest and skill bytes against the exact published predecessor source. It SHALL require all current-candidate references, instructions, and readiness assets in its existing current-version branch, retaining mandatory reads and exact source/cache comparison. Missing historical current-only files SHALL NOT prevent predecessor acquisition proof; missing or mismatched required current files SHALL fail acceptance.
+
+#### Scenario: Published predecessor lacks newer plugin assets
+- **WHEN** native Codex acquires the exact v0.4.5 plugin, which ships its manifest and skill but not the newer reference and instruction files
+- **THEN** its shipped assets are compared strictly and the upgrade contract reaches candidate installation
+
+#### Scenario: Current candidate lacks or changes a required cached asset
+- **WHEN** a required current-candidate plugin asset is missing or differs from the candidate source
+- **THEN** the existing native plugin assertion refuses acceptance
+
+#### Scenario: Diagnostic mode skips native acquisition
+- **WHEN** prepublish-only mode skips Codex plugin assertions
+- **THEN** a passing diagnostic is not counted as full native predecessor or candidate plugin proof
 
 ### Requirement: Upgrade repair fixtures preserve native registration identity
 The released-upgrade migration-repair fixture SHALL decode and bind worktree registration identities using the integer type declared by the database schema. It SHALL retain parameterized queries and select the intended registration without changing production schema or coercing identity to text.

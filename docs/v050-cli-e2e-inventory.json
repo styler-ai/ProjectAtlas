@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "1d9da7af644f975a48dfe5ece597584da74771c42dd7cd18daa59f1707218c08",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "d9145237d1af2ee21c59cefd351cb99d2e0148ba3722e24ae9721d68cb2e5f8c",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "60fd419d6d39fd2cd5d72327f6ab7dc92231330392fd3e48b35e2cc62c78ca07",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "8a7e15248ee6eb740aebe2809e30d110a055ce0e366e0fc51d6ebf2496e35854",
@@ -14,8 +14,8 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 203,
-  "symbol_count": 433,
+  "test_count": 204,
+  "symbol_count": 437,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
     "e2e_delivery": "installer, release, packaged, and plugin contracts",
@@ -1829,6 +1829,15 @@
     {
       "name": "scan_and_watch_preserve_atomic_publication_across_roots",
       "owner": "e2e_worktrees",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "codex_plugin_assets_are_version_scoped_and_fail_closed",
+      "line": 19929,
+      "end_line": 20016,
+      "owner": "e2e_delivery",
       "attributes": [
         "#[test]"
       ]
@@ -7058,6 +7067,48 @@
       "end_line": 36987,
       "owners": [
         "e2e_maintenance"
+      ],
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "kind": "value",
+      "name": "CODEX_PLUGIN_BASELINE_ASSETS",
+      "line": 182,
+      "end_line": 183,
+      "owners": [
+        "e2e_delivery"
+      ],
+      "attributes": []
+    },
+    {
+      "kind": "value",
+      "name": "CODEX_PLUGIN_CURRENT_ASSETS",
+      "line": 184,
+      "end_line": 191,
+      "owners": [
+        "e2e_delivery"
+      ],
+      "attributes": []
+    },
+    {
+      "kind": "function",
+      "name": "assert_codex_projectatlas_plugin_assets",
+      "line": 19899,
+      "end_line": 19926,
+      "owners": [
+        "e2e_delivery"
+      ],
+      "attributes": []
+    },
+    {
+      "kind": "function",
+      "name": "codex_plugin_assets_are_version_scoped_and_fail_closed",
+      "line": 19929,
+      "end_line": 20016,
+      "owners": [
+        "e2e_delivery"
       ],
       "attributes": [
         "#[test]"

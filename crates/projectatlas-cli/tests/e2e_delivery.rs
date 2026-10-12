@@ -179,6 +179,16 @@ const CODEX_CONFIG_DIR: &str = ".codex";
 const AGENT_INSTRUCTIONS_RELATIVE_PATH: &str = "hooks/agent-instructions.txt";
 const CODEX_HOOKS_CONFIG_RELATIVE_PATH: &str = "hooks/hooks.json";
 const PROJECTATLAS_PLUGIN_RELATIVE_PATH: &str = "plugins/projectatlas";
+const CODEX_PLUGIN_BASELINE_ASSETS: &[&str] =
+    &[".codex-plugin/plugin.json", "skills/projectatlas/SKILL.md"];
+const CODEX_PLUGIN_CURRENT_ASSETS: &[&str] = &[
+    "skills/projectatlas/references/language-support.md",
+    "skills/projectatlas/references/short-cli.md",
+    "hooks/agent-instructions.txt",
+    "hooks/hooks.json",
+    "hooks/readiness.ps1",
+    "hooks/readiness.sh",
+];
 
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 
@@ -505,7 +515,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 433;
+const CLI_E2E_SYMBOL_COUNT: usize = 437;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -536,7 +546,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "ed6330043750238d0515d4a16fb37b8c2462d699d6434b8d513f0f6cf79eb698";
+    "4a1a27ebc4ac765cbe5fd0abebabfc6be93f5a93f3b32cdd04b511d196bd8e1a";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -19882,13 +19892,26 @@ fn assert_codex_projectatlas_plugin(
     let manifest: Value =
         serde_json::from_slice(&fs::read(source.join(".codex-plugin/plugin.json"))?)?;
     require_json_string(&manifest, &["version"], version)?;
-    for relative in [
-        ".codex-plugin/plugin.json",
-        "skills/projectatlas/SKILL.md",
-        "skills/projectatlas/references/language-support.md",
-        "skills/projectatlas/references/short-cli.md",
-        "hooks/agent-instructions.txt",
-    ] {
+    assert_codex_projectatlas_plugin_assets(expected_source, &source, &cache, version)?;
+    Ok(())
+}
+
+fn assert_codex_projectatlas_plugin_assets(
+    expected_source: &Path,
+    source: &Path,
+    cache: &Path,
+    version: &str,
+) -> Result<(), Box<dyn Error>> {
+    let current_assets: &[&str] = if version == env!("CARGO_PKG_VERSION") {
+        CODEX_PLUGIN_CURRENT_ASSETS
+    } else {
+        &[]
+    };
+    for relative in CODEX_PLUGIN_BASELINE_ASSETS
+        .iter()
+        .chain(current_assets.iter())
+    {
+        let relative = *relative;
         let expected = fs::read(expected_source.join(relative))?;
         if fs::read(source.join(relative))? != expected
             || fs::read(cache.join(relative))? != expected
@@ -19899,23 +19922,96 @@ fn assert_codex_projectatlas_plugin(
             .into());
         }
     }
-    if version == env!("CARGO_PKG_VERSION") {
-        for relative in [
-            "hooks/hooks.json",
-            "hooks/readiness.ps1",
-            "hooks/readiness.sh",
-        ] {
-            let expected = fs::read(expected_source.join(relative))?;
-            if fs::read(source.join(relative))? != expected
-                || fs::read(cache.join(relative))? != expected
-            {
-                return Err(io::Error::other(format!(
-                    "Codex ProjectAtlas {version} source/cache asset {relative} does not match its release source"
-                ))
-                .into());
-            }
+    Ok(())
+}
+
+#[test]
+fn codex_plugin_assets_are_version_scoped_and_fail_closed() -> Result<(), Box<dyn Error>> {
+    let fixture = tempfile::tempdir()?;
+    let expected_source = fixture.path().join("expected");
+    let source = fixture.path().join("source");
+    let cache = fixture.path().join("cache");
+    for relative in CODEX_PLUGIN_BASELINE_ASSETS {
+        for root in [&expected_source, &source, &cache] {
+            let asset = root.join(relative);
+            fs::create_dir_all(asset.parent().expect("plugin asset has a parent"))?;
+            fs::write(asset, relative.as_bytes())?;
         }
     }
+
+    assert!(
+        assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5").is_ok()
+    );
+
+    for relative in CODEX_PLUGIN_CURRENT_ASSETS {
+        for root in [&expected_source, &source, &cache] {
+            let asset = root.join(relative);
+            fs::create_dir_all(asset.parent().expect("plugin asset has a parent"))?;
+            fs::write(asset, relative.as_bytes())?;
+        }
+    }
+    let candidate_version = env!("CARGO_PKG_VERSION");
+    assert!(
+        assert_codex_projectatlas_plugin_assets(
+            &expected_source,
+            &source,
+            &cache,
+            candidate_version
+        )
+        .is_ok()
+    );
+
+    let missing_candidate_asset = cache.join(CODEX_PLUGIN_CURRENT_ASSETS[0]);
+    fs::remove_file(&missing_candidate_asset)?;
+    assert!(
+        assert_codex_projectatlas_plugin_assets(
+            &expected_source,
+            &source,
+            &cache,
+            candidate_version
+        )
+        .is_err()
+    );
+    fs::write(
+        &missing_candidate_asset,
+        CODEX_PLUGIN_CURRENT_ASSETS[0].as_bytes(),
+    )?;
+
+    let stale_cached_candidate_asset = cache.join(CODEX_PLUGIN_CURRENT_ASSETS[0]);
+    fs::write(&stale_cached_candidate_asset, b"stale")?;
+    assert!(
+        assert_codex_projectatlas_plugin_assets(
+            &expected_source,
+            &source,
+            &cache,
+            candidate_version
+        )
+        .is_err()
+    );
+    fs::write(
+        &stale_cached_candidate_asset,
+        CODEX_PLUGIN_CURRENT_ASSETS[0].as_bytes(),
+    )?;
+
+    let stale_candidate_asset = source.join(CODEX_PLUGIN_CURRENT_ASSETS[1]);
+    fs::write(&stale_candidate_asset, b"stale")?;
+    assert!(
+        assert_codex_projectatlas_plugin_assets(
+            &expected_source,
+            &source,
+            &cache,
+            candidate_version
+        )
+        .is_err()
+    );
+
+    let stale_predecessor_skill = cache.join(CODEX_PLUGIN_BASELINE_ASSETS[1]);
+    fs::write(&stale_predecessor_skill, b"stale")?;
+    assert!(
+        assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5")
+            .is_err()
+    );
+
     Ok(())
 }
 
