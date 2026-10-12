@@ -19116,8 +19116,8 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     let canary = temp.path().join("unrelated.txt");
     fs::write(&canary, "preserve unrelated state\n")?;
     let database_relative = Path::new(".projectatlas/projectatlas.db");
-    let database = repo.join(database_relative);
     let project_atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let database = project_atlas_dir.join("projectatlas.db");
     let project_config = project_atlas_dir.join("config.toml");
 
     let isolated_path = std::env::join_paths(
