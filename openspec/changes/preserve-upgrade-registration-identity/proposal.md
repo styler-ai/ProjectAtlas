@@ -8,6 +8,8 @@ The full native Codex upgrade run also fails on all four platforms before candid
 
 ## What Changes
 
+After native acquisition succeeds, the fresh isolated Codex profile has no MCP registration, while the published v0.4.5 installer intentionally updates only an existing registration. Seed the configured-predecessor baseline through real `codex mcp add` before that installer, using the pinned predecessor executable, version fence, and the same absolute canonical database/config paths used by the existing assertions. Preserve both predecessor and candidate registry assertions and the actual installers; add no product auto-registration behavior.
+
 - Read and bind the native integer registration identity in the existing migration-repair helper.
 - Match the typed root-identity error actually emitted while migration decodes the injected relative retired root; retain exact rollback and repair/retry assertions.
 - Exercise the disposable schema-19 state from the retained compatible backup at the selected test root's canonical database path before candidate initialization, preserving ordinary product admission.

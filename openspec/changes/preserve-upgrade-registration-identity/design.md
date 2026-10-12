@@ -22,6 +22,8 @@ Use the existing real-SQLite installed upgrade contract to exercise the same hel
 
 ## Risks / Trade-offs
 
+The native upgrade fixture represents a configured predecessor. Its fresh isolated Codex home must therefore receive the predecessor registration before the old installer runs: that published installer reconciles existing entries and does not create one in an empty profile. Use the existing `run_isolated_codex_command` failure boundary for real `mcp add`, hoist the canonical database variable, and reuse the same canonical config path in the later unchanged registry assertions. Registration writes configuration only; do not manually initialize or alter the database to seed this baseline. This preserves the real predecessor reconciliation and candidate upgrade rather than relaxing a missing-server assertion.
+
 The shared native plugin assertion must compare only the manifest and skill shipped by v0.4.5. Move `skills/projectatlas/references/language-support.md`, `skills/projectatlas/references/short-cli.md`, and `hooks/agent-instructions.txt` to its existing current-candidate-version branch beside the readiness assets. Keep exact source/cache byte comparisons and mandatory reads for every current asset; do not make file existence optional. Exercise predecessor success and current missing/mismatch refusal, then execute the installed Windows predecessor contract with native Codex acquisition enabled. Prepublish-only mode does not exercise this boundary.
 
 - A fixture checks a duplicate query rather than the helper: exercise the owning read or full helper with an integer registration key.

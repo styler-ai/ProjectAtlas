@@ -19115,6 +19115,9 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     }
     let canary = temp.path().join("unrelated.txt");
     fs::write(&canary, "preserve unrelated state\n")?;
+    let database_relative = Path::new(".projectatlas/projectatlas.db");
+    let database = repo.join(database_relative);
+    let project_config = repo.join(ATLAS_DIR_NAME).join("config.toml");
 
     let isolated_path = std::env::join_paths(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|directory| {
@@ -19193,6 +19196,28 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             "v0.4.5",
             &predecessor_source.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
         )?;
+        let predecessor_path = predecessor.to_string_lossy();
+        let database_path = database.to_string_lossy();
+        let project_config_path = project_config.to_string_lossy();
+        run_isolated_codex_command(
+            codex,
+            &home,
+            &isolated_path,
+            &[
+                "mcp",
+                "add",
+                "projectatlas",
+                "--",
+                predecessor_path.as_ref(),
+                "--require-version",
+                "0.4.5",
+                "--db",
+                database_path.as_ref(),
+                "--config",
+                project_config_path.as_ref(),
+                "mcp",
+            ],
+        )?;
     }
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &predecessor_source,
@@ -19231,8 +19256,6 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         "published predecessor installer",
         deadline.saturating_duration_since(Instant::now()),
     )?)?;
-    let database_relative = Path::new(".projectatlas/projectatlas.db");
-    let database = repo.join(database_relative);
     if let Some(codex) = codex_command.as_deref() {
         assert_codex_projectatlas_mcp_registry(
             codex,
@@ -19241,7 +19264,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &predecessor,
             "0.4.5",
             &database,
-            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
+            &project_config,
         )?;
     }
     for arguments in [
@@ -19565,7 +19588,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &installed,
             candidate_version,
             &database,
-            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
+            &project_config,
         )?;
     }
     if sha256_hex(&fs::read(&installed)?) != sha256_hex(&fs::read(&executable)?) {
