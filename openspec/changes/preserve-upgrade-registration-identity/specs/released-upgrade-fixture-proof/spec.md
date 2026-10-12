@@ -5,7 +5,7 @@ Keep released-upgrade fixtures faithful to native database identities and shippe
 ## ADDED Requirements
 
 ### Requirement: Native upgrade proof begins with a configured predecessor
-The native upgrade fixture SHALL seed its isolated Codex MCP registration through the real CLI before invoking the published predecessor installer. It SHALL bind the exact pinned predecessor executable, required predecessor version, and the same absolute canonical database/config paths used by the subsequent registry assertions. It SHALL preserve both installers and exact predecessor/candidate registry checks without changing product registration policy or manually preparing database state for this configuration step.
+The native upgrade fixture SHALL create its standard minimal canonical project config without initializing the database, then seed its isolated Codex MCP registration through the real CLI before invoking the published predecessor installer. It SHALL bind the exact pinned predecessor executable, required predecessor version, and the same absolute canonical database/config paths used by the subsequent registry assertions. It SHALL preserve both installers and exact predecessor/candidate registry checks without changing product registration policy or manually preparing database state for this configuration step.
 
 #### Scenario: Published installer reconciles a prior registration
 - **WHEN** the isolated profile contains the pinned predecessor registration before the published v0.4.5 installer runs

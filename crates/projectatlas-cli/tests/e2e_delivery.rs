@@ -19117,7 +19117,8 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     fs::write(&canary, "preserve unrelated state\n")?;
     let database_relative = Path::new(".projectatlas/projectatlas.db");
     let database = repo.join(database_relative);
-    let project_config = repo.join(ATLAS_DIR_NAME).join("config.toml");
+    let project_atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let project_config = project_atlas_dir.join("config.toml");
 
     let isolated_path = std::env::join_paths(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|directory| {
@@ -19196,6 +19197,8 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             "v0.4.5",
             &predecessor_source.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
         )?;
+        fs::create_dir_all(&project_atlas_dir)?;
+        fs::write(&project_config, "[project]\nroot = \".\"\n")?;
         let predecessor_path = predecessor.to_string_lossy();
         let database_path = database.to_string_lossy();
         let project_config_path = project_config.to_string_lossy();
