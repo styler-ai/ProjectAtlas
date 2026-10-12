@@ -58,3 +58,18 @@ The version-matched installer MUST refuse incompatible schema or project binding
 #### Scenario: Wrong project or newer database
 - **WHEN** a repair targets a registration bound to a different project or a schema not supported by the selected runtime
 - **THEN** it returns typed actionable refusal while retaining the prior database and registration until an explicit supported selection is made
+
+### Requirement: Native marketplace preservation does not require private metadata
+The installer SHALL admit an existing official Codex marketplace and plugin whose validated native inventory, configuration, source/cache identity and safe path ancestry meet the existing integration contract even when `.codex-marketplace-install.json` is absent. It SHALL snapshot and restore the whole marketplace, plugin cache and config through the existing preservation owner without creating synthetic metadata. When the marker exists, its safe regular-file checks SHALL remain mandatory. Unsafe paths, links/reparse points, directories, inaccessible state or ambiguous inventory SHALL still refuse before destructive update.
+
+#### Scenario: Native Codex predecessor has no private marker
+- **WHEN** supported real Codex creates a valid official predecessor marketplace/plugin without the private marker
+- **THEN** the version-matched installer preserves that admitted state, advances the marketplace/plugin to the candidate version, and verifies the result without treating marker absence as failure
+
+#### Scenario: Replacement fails after a marker-free snapshot
+- **WHEN** a candidate marketplace or plugin replacement fails after snapshotting an admitted marker-free integration
+- **THEN** rollback restores the exact predecessor config, marketplace and cache, keeps the marker absent, and reports integration incomplete rather than losing prior working state
+
+#### Scenario: Optional marker or integration path is unsafe
+- **WHEN** a present marker or another existing integration path fails its regular-file or canonical ancestry checks
+- **THEN** preservation refuses before destructive update and retains the prior working state

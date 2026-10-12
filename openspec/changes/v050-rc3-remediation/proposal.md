@@ -27,3 +27,7 @@ The separately requested map cleanup (#627) is also in RC3 scope: retain the cor
 ## Impact
 
 The existing plugin/installer/host integration, Rust document parser, CLI text-index, coverage/publication, CLI/MCP map routes, tests, platform package gates, OpenSpec issue map, and #492 release graph. No new crate, parser dependency, database reset, or stable promotion is planned. Ready for issue-scoped implementation after task mapping and issue graph synchronization.
+
+## Native marketplace preservation compatibility (#620)
+
+Real Codex 0.162.1 creates a valid official v0.4.5 marketplace and plugin without `.codex-marketplace-install.json`. The candidate installer refuses its existing-state snapshot because that private marker is absent, updates runtime/MCP, and leaves the marketplace and plugin at v0.4.5. Fake-Codex fixtures create the marker and hide this compatibility gap. Accept absence only after the existing authoritative marketplace/plugin/config/cache and path checks pass; preserve the whole marketplace exactly, including marker absence on rollback. Retain strict safe-file checks when the marker exists. #620 owns both installer implementations and causal success/refusal/rollback proof; #666 waits for the repair on main before repeating the real upgrade contract.
