@@ -19930,7 +19930,7 @@ fn codex_plugin_assets_are_version_scoped_and_fail_closed() -> Result<(), Box<dy
     let fixture = tempfile::tempdir()?;
     let expected_source = fixture.path().join("expected");
     let source = fixture.path().join("source");
-    let cache = fixture.path().join("cache");
+    let cache = fixture.path().join("installed-plugin-cache");
     for relative in CODEX_PLUGIN_BASELINE_ASSETS {
         for root in [&expected_source, &source, &cache] {
             let asset = root.join(relative);
