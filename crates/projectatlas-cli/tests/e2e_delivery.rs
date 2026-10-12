@@ -19934,44 +19934,30 @@ fn codex_plugin_assets_are_version_scoped_and_fail_closed() -> Result<(), Box<dy
     for relative in CODEX_PLUGIN_BASELINE_ASSETS {
         for root in [&expected_source, &source, &cache] {
             let asset = root.join(relative);
-            fs::create_dir_all(asset.parent().expect("plugin asset has a parent"))?;
+            fs::create_dir_all(asset.parent().ok_or("plugin asset has no parent")?)?;
             fs::write(asset, relative.as_bytes())?;
         }
     }
 
-    assert!(
-        assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5").is_ok()
-    );
+    assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5")?;
 
     for relative in CODEX_PLUGIN_CURRENT_ASSETS {
         for root in [&expected_source, &source, &cache] {
             let asset = root.join(relative);
-            fs::create_dir_all(asset.parent().expect("plugin asset has a parent"))?;
+            fs::create_dir_all(asset.parent().ok_or("plugin asset has no parent")?)?;
             fs::write(asset, relative.as_bytes())?;
         }
     }
     let candidate_version = env!("CARGO_PKG_VERSION");
-    assert!(
-        assert_codex_projectatlas_plugin_assets(
-            &expected_source,
-            &source,
-            &cache,
-            candidate_version
-        )
-        .is_ok()
-    );
+    assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)?;
 
     let missing_candidate_asset = cache.join(CODEX_PLUGIN_CURRENT_ASSETS[0]);
     fs::remove_file(&missing_candidate_asset)?;
-    assert!(
-        assert_codex_projectatlas_plugin_assets(
-            &expected_source,
-            &source,
-            &cache,
-            candidate_version
-        )
-        .is_err()
-    );
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)
+        .is_ok()
+    {
+        return Err(io::Error::other("missing candidate cache asset was accepted").into());
+    }
     fs::write(
         &missing_candidate_asset,
         CODEX_PLUGIN_CURRENT_ASSETS[0].as_bytes(),
@@ -19979,15 +19965,11 @@ fn codex_plugin_assets_are_version_scoped_and_fail_closed() -> Result<(), Box<dy
 
     let stale_cached_candidate_asset = cache.join(CODEX_PLUGIN_CURRENT_ASSETS[0]);
     fs::write(&stale_cached_candidate_asset, b"stale")?;
-    assert!(
-        assert_codex_projectatlas_plugin_assets(
-            &expected_source,
-            &source,
-            &cache,
-            candidate_version
-        )
-        .is_err()
-    );
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)
+        .is_ok()
+    {
+        return Err(io::Error::other("stale candidate cache asset was accepted").into());
+    }
     fs::write(
         &stale_cached_candidate_asset,
         CODEX_PLUGIN_CURRENT_ASSETS[0].as_bytes(),
@@ -19995,22 +19977,17 @@ fn codex_plugin_assets_are_version_scoped_and_fail_closed() -> Result<(), Box<dy
 
     let stale_candidate_asset = source.join(CODEX_PLUGIN_CURRENT_ASSETS[1]);
     fs::write(&stale_candidate_asset, b"stale")?;
-    assert!(
-        assert_codex_projectatlas_plugin_assets(
-            &expected_source,
-            &source,
-            &cache,
-            candidate_version
-        )
-        .is_err()
-    );
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)
+        .is_ok()
+    {
+        return Err(io::Error::other("stale candidate source asset was accepted").into());
+    }
 
     let stale_predecessor_skill = cache.join(CODEX_PLUGIN_BASELINE_ASSETS[1]);
     fs::write(&stale_predecessor_skill, b"stale")?;
-    assert!(
-        assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5")
-            .is_err()
-    );
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5").is_ok() {
+        return Err(io::Error::other("stale predecessor skill asset was accepted").into());
+    }
 
     Ok(())
 }
