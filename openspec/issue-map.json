@@ -61,7 +61,7 @@
         "499": { "blocked_by": [639] },
         "645": { "blocked_by": [620] },
         "664": { "blocked_by": [] },
-        "666": { "blocked_by": [] },
+        "666": { "blocked_by": [620] },
         "668": { "blocked_by": [] },
         "669": { "blocked_by": [] }
       }
