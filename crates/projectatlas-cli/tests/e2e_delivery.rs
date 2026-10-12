@@ -4769,8 +4769,13 @@ gate_status={gate_status}
                 .into());
             }
         }
+        let installed_candidate_timeout = if job == "Unix" {
+            "timeout-minutes: 20"
+        } else {
+            "timeout-minutes: 10"
+        };
         for required in [
-            "timeout-minutes: 10",
+            installed_candidate_timeout,
             "--exact --include-ignored --nocapture",
         ] {
             if !installed_candidate_step.contains(required) {

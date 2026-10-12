@@ -509,6 +509,93 @@ fn assert_bundled_hook_sanitizes_control_paths_without_python() -> Result<(), Bo
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+#[cfg(target_os = "macos")]
+fn parse_macos_shasum_target(stderr: &str) -> Result<Option<&str>, io::Error> {
+    const SHASUM: &str = "/usr/bin/shasum";
+    if stderr.is_empty() {
+        return Ok(None);
+    }
+    let mappings = stderr
+        .lines()
+        .filter_map(|line| {
+            let (source, target) = line.split_once(" -> ")?;
+            Some((
+                source
+                    .rsplit_once(": ")
+                    .map_or(source, |(_, source)| source),
+                target,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if mappings.len() != 1 {
+        return Err(io::Error::other(format!(
+            "VERSIONER_DEBUG reported {} mappings for {SHASUM}",
+            mappings.len()
+        )));
+    }
+    let (source, target) = mappings[0];
+    if source != SHASUM || target.trim().is_empty() {
+        return Err(io::Error::other(format!(
+            "VERSIONER_DEBUG reported an invalid mapping for {SHASUM}: {source} -> {target}"
+        )));
+    }
+    Ok(Some(target.trim()))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_shasum_target(input: &Path, expected_sha256: &str) -> Result<PathBuf, Box<dyn Error>> {
+    const SHASUM: &str = "/usr/bin/shasum";
+    if !matches!(
+        parse_macos_shasum_target("versioner: /usr/bin/shasum -> /usr/bin/shasum-native"),
+        Ok(Some("/usr/bin/shasum-native"))
+    ) || !matches!(parse_macos_shasum_target(""), Ok(None))
+        || parse_macos_shasum_target("unexpected versioner diagnostic").is_ok()
+        || parse_macos_shasum_target("versioner: /usr/bin/perl -> /usr/bin/perl5.34").is_ok()
+        || parse_macos_shasum_target(concat!(
+            "versioner: /usr/bin/shasum -> /usr/bin/shasum-one\n",
+            "versioner: /usr/bin/shasum -> /usr/bin/shasum-two"
+        ))
+        .is_ok()
+    {
+        return Err(io::Error::other(
+            "VERSIONER_DEBUG shasum mapping did not fail closed for missing or ambiguous targets",
+        )
+        .into());
+    }
+    let dispatch = StdCommand::new(SHASUM)
+        .args(["-a", "256"])
+        .arg(input)
+        .env("VERSIONER_DEBUG", "1")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&dispatch.stdout);
+    let stderr = String::from_utf8_lossy(&dispatch.stderr);
+    if !dispatch.status.success() || stdout.split_whitespace().next() != Some(expected_sha256) {
+        return Err(io::Error::other(format!(
+            "native {SHASUM} failed its known SHA-256 vector: status={} stdout={stdout} stderr={stderr}",
+            dispatch.status
+        ))
+        .into());
+    }
+
+    let mapping = parse_macos_shasum_target(&stderr)
+        .map_err(|error| io::Error::other(format!("{error}: {stderr}")))?;
+    let target = match mapping {
+        Some(target) => fs::canonicalize(target)?,
+        None => fs::canonicalize(SHASUM)?,
+    };
+    if !target.is_file() || (mapping.is_some() && target == Path::new(SHASUM)) {
+        return Err(io::Error::other(format!(
+            "VERSIONER_DEBUG selected an invalid {SHASUM} target: {}",
+            target.display()
+        ))
+        .into());
+    }
+    Ok(target)
+}
+
 #[test]
 fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
@@ -1204,6 +1291,10 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
         }
         let jq_available = StdCommand::new("jq").arg("--version").output().is_ok();
         let python_available = StdCommand::new("python3").arg("--version").output().is_ok();
+        #[cfg(target_os = "macos")]
+        if !jq_available && !python_available {
+            return Err(io::Error::other("macOS checksum fixture requires jq or Python 3").into());
+        }
         if jq_available || python_available {
             let parser = if jq_available { "jq" } else { "python3" };
             let jq_only_bin = fixture.path().join("jq-only-bin");
@@ -1223,6 +1314,14 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 std::os::unix::fs::symlink(&source, jq_only_bin.join(name))?;
                 std::os::unix::fs::symlink(source, system_bin.join(name))?;
             }
+            #[cfg(target_os = "macos")]
+            let (checksum_name, checksum_source, checksum_probe) = {
+                let checksum_probe = fixture.path().join("known-sha256-input");
+                fs::write(&checksum_probe, b"abc")?;
+                let checksum_source = macos_shasum_target(&checksum_probe, SHA256_ABC)?;
+                ("shasum", checksum_source, checksum_probe)
+            };
+            #[cfg(not(target_os = "macos"))]
             let checksum_name = ["sha256sum", "shasum"]
                 .into_iter()
                 .find(|name| {
@@ -1230,6 +1329,7 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                         .any(|directory| directory.join(name).is_file())
                 })
                 .ok_or("required POSIX checksum tool missing")?;
+            #[cfg(not(target_os = "macos"))]
             let checksum_source =
                 std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
                     .map(|directory| directory.join(checksum_name))
@@ -1243,6 +1343,46 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
                 fs::canonicalize(&checksum_source)?,
                 system_bin.join(checksum_name),
             )?;
+            #[cfg(target_os = "macos")]
+            {
+                const MACOS_SHA256SUM_COMMAND_NAME: &str = "sha256sum";
+                if system_bin.join(MACOS_SHA256SUM_COMMAND_NAME).exists()
+                    || jq_only_bin.join(MACOS_SHA256SUM_COMMAND_NAME).exists()
+                {
+                    return Err(io::Error::other(
+                        "macOS checksum fixture unexpectedly staged sha256sum",
+                    )
+                    .into());
+                }
+                let checksum_output = StdCommand::new("/bin/sh")
+                    .args(["-c", "shasum -a 256 \"$1\"", "curated-shasum"])
+                    .arg(&checksum_probe)
+                    .env("PATH", &system_bin)
+                    .output()?;
+                let actual_sha256 = String::from_utf8_lossy(&checksum_output.stdout)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                if !checksum_output.status.success() || actual_sha256 != SHA256_ABC {
+                    return Err(io::Error::other(format!(
+                        "curated macOS shasum failed its known SHA-256 vector: status={} stdout={} stderr={}",
+                        checksum_output.status,
+                        String::from_utf8_lossy(&checksum_output.stdout),
+                        String::from_utf8_lossy(&checksum_output.stderr)
+                    ))
+                    .into());
+                }
+                writeln!(
+                    io::stderr(),
+                    "macOS VERSIONER_DEBUG selected shasum target: {}",
+                    checksum_source.display()
+                )?;
+                writeln!(
+                    io::stderr(),
+                    "curated shasum -a 256 known vector SHA256(abc)={actual_sha256}"
+                )?;
+            }
             let jq_only_path = std::env::join_paths([
                 jq_only_bin,
                 fixture.path().join("bin"),
