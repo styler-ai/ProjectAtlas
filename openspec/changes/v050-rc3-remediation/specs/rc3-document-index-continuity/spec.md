@@ -213,5 +213,6 @@ A scan SHALL publish a navigable generation only when all accepted source facts 
 #### Scenario: Cold PDF module initialization preserves the caller budget
 - **WHEN** a fresh process initializes the fixed trusted PDF module before document execution
 - **THEN** the original captured caller deadline and cancellation are checked before and after initialization and are never renewed or discarded
-- **AND** measured cold translation and guest execution identify the cause of a local execution timeout; any corrected execution-budget boundary retains finite fuel, memory, output, and document execution limits
+- **AND** the existing ten-second per-document ceiling starts after successful initialization and covers Store setup, guest execution, and output while retaining finite fuel, memory, and output limits
+- **AND** a deadline-free library caller supplies no initialization deadline; cold translation and guest execution are measured separately without claiming a passing sample establishes the cause of an earlier timeout
 - **AND** caller cancellation or deadline expiration refuses publication and preserves the previous complete generation
