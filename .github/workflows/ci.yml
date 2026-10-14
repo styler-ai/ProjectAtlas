@@ -486,8 +486,9 @@ jobs:
         timeout-minutes: 15
         shell: bash
         run: |
+          cargo test --locked -p projectatlas-symbols --lib documents::pdf_runtime::tests::cold_parser_startup_and_guest_execution_are_measured -- --exact --ignored --nocapture
           cargo test --locked -p projectatlas-symbols documents:: -- --nocapture
-          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact
+          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch -- --exact
 
       - name: Document resource proof

@@ -209,3 +209,9 @@ A scan SHALL publish a navigable generation only when all accepted source facts 
 #### Scenario: Wrong root, missing index, and no implicit mutation
 - **WHEN** MCP navigation selects the wrong root, has no published index, or encounters a stale document
 - **THEN** it reports the exact verification state for that root without borrowing another root's database or silently initializing/mutating it
+
+#### Scenario: Cold PDF module initialization preserves the caller budget
+- **WHEN** a fresh process initializes the fixed trusted PDF module before document execution
+- **THEN** the original captured caller deadline and cancellation are checked before and after initialization and are never renewed or discarded
+- **AND** measured cold translation and guest execution identify the cause of a local execution timeout; any corrected execution-budget boundary retains finite fuel, memory, output, and document execution limits
+- **AND** caller cancellation or deadline expiration refuses publication and preserves the previous complete generation

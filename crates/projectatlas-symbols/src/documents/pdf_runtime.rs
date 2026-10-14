@@ -507,6 +507,97 @@ mod tests {
     use super::*;
     use projectatlas_core::{IndexCancellation, IndexWorkFailure};
 
+    #[test]
+    #[ignore = "run alone in a fresh process to measure cold eager translation"]
+    fn cold_parser_startup_and_guest_execution_are_measured() {
+        use std::io::Write as _;
+
+        let started = std::time::Instant::now();
+        parser_module().expect("fixed module");
+        let cold_elapsed = started.elapsed();
+        writeln!(
+            std::io::stderr(),
+            "PDF cold eager module translation: {cold_elapsed:?}"
+        )
+        .unwrap();
+
+        let minimal = super::super::tests::minimal_pdf();
+        let mut document = lopdf::Document::load_mem(&minimal).unwrap();
+        let mut image = lopdf::Dictionary::new();
+        image.set("Subtype", "Image");
+        image.set("Filter", "DCTDecode");
+        let image = document.add_object(lopdf::Stream::new(image, vec![b' '; 2_000_001]));
+        let mut xobjects = lopdf::Dictionary::new();
+        xobjects.set("Image", image);
+        document
+            .get_dictionary_mut((3, 0))
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("XObject", xobjects);
+        document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/Image Do\nBT /F1 12 Tf 72 720 Td (Hello PDF) Tj ET\n".to_vec());
+        let mut large_image = Vec::new();
+        document.save_to(&mut large_image).unwrap();
+        assert!(large_image.len() > 2_000_000);
+
+        for (name, bytes) in [("minimal", minimal), ("large opaque image", large_image)] {
+            let started = std::time::Instant::now();
+            let control =
+                IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(10)));
+            let (mut store, instance, extract) = guest_with_input(&bytes);
+            let outcome = run_parser(&mut store, extract, || {
+                control
+                    .check(IndexWorkStage::TextIndex)
+                    .map_err(DocumentExtractionError::from)
+            });
+            let guest_elapsed = started.elapsed();
+            let completed_fuel = match &outcome {
+                Ok(ParserRun::Complete(_)) => Some(TOTAL_FUEL - store.get_fuel().unwrap()),
+                _ => None,
+            };
+            writeln!(
+                std::io::stderr(),
+                "PDF {name} guest setup+execution: {guest_elapsed:?}; cold_plus_guest={:?}; input_bytes={}; completed_fuel={completed_fuel:?}; memory_bytes={}; outcome={outcome:?}",
+                cold_elapsed + guest_elapsed,
+                bytes.len(),
+                instance.get_memory(&store, "memory").unwrap().data(&store).len(),
+            ).unwrap();
+            let status = match outcome.unwrap() {
+                ParserRun::Complete(status) => Some(status),
+                _ => None,
+            }
+            .expect("measured valid PDF stays within retained resource limits");
+            assert!(status >= 0);
+            let output = finish_output(
+                instance,
+                &mut store,
+                status as usize,
+                &control,
+                IndexWorkStage::TextIndex,
+            );
+            writeln!(
+                std::io::stderr(),
+                "PDF {name} output: {:?}; output_bytes={status}; error={:?}",
+                started.elapsed(),
+                output.as_ref().err()
+            )
+            .unwrap();
+            let pages = match output.unwrap() {
+                PdfPages::Complete(pages) => Some(pages),
+                PdfPages::Incomplete(_) => None,
+            }
+            .expect("measured valid PDF has complete output");
+            assert_eq!(pages, vec![(1, "Hello PDF".to_owned())]);
+        }
+    }
+
     fn guest_with_input(
         bytes: &[u8],
     ) -> (Store<PdfStoreLimits>, Instance, wasmi::TypedFunc<(), i32>) {
