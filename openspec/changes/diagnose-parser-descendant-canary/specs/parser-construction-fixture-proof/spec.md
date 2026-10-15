@@ -27,7 +27,12 @@ Construction canaries SHALL distinguish early child exit, missing or invalid rea
 - **WHEN** the native named-object fault subprocess exceeds its outer observation limit before returning its expected classified outcome
 - **THEN** failure preserves fixed phase and elapsed checkpoints plus bounded non-secret owned diagnostic output before cleanup removes the fixture
 - **AND** initialization, native setup, and descendant execution remain distinguishable without inferring an unobserved cause
-- **AND** the existing outer, descendant, pipe, and intentional timeout-negative limits, expected native failure, process reaping, pipe completion, and disposal assertions remain unchanged
+- **AND** the native diagnostic uses the normal probe's existing 30-second compile-inclusive command budget, while combined-fault and intentional timeout-negative observations remain at 15 seconds and descendant, pipe, reaping, disposal, product, and workflow limits remain unchanged
+
+#### Scenario: Native diagnostic compilation exceeds the shorter observation window
+- **WHEN** native diagnostic compilation continues beyond 15 seconds but the actual fault completes within the normal probe's 30-second command budget
+- **THEN** the diagnostic observes the real native failure with all fixed phases, expected exit and native error code, empty stdout, and successful owned cleanup
+- **AND** an operation exceeding its applicable finite budget still fails with phase evidence and owned cleanup
 
 ### Requirement: Descendant cleanup proof begins with a live admitted child
 
