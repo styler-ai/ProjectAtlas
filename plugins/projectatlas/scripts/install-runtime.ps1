@@ -3956,6 +3956,21 @@ function Get-ProjectAtlasCodexMarketplaceRef {
     return $null
 }
 
+function Get-ProjectAtlasCodexLiteralPath {
+    param(
+        [string]$Path
+    )
+    if (-not (Test-ProjectAtlasWindows) -or $Path.StartsWith('\\?\')) {
+        return $Path
+    }
+    # Keep canonical identities unchanged; extend only native filesystem operands.
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith('\\')) {
+        return '\\?\UNC\' + $fullPath.Substring(2)
+    }
+    return '\\?\' + $fullPath
+}
+
 function Test-ProjectAtlasCodexContainedPath {
     param(
         [string]$Path,
@@ -3991,7 +4006,7 @@ function Assert-ProjectAtlasCodexDirectAncestry {
 
     $currentPath = $fullRoot
     while (-not [string]::IsNullOrWhiteSpace($currentPath)) {
-        $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction SilentlyContinue
+        $item = Get-Item -Force -LiteralPath (Get-ProjectAtlasCodexLiteralPath $currentPath) -ErrorAction SilentlyContinue
         if ($item -and (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
             throw "$Description has a symlink, junction, or reparse point in its Codex-root ancestry: $currentPath"
         }
@@ -4017,7 +4032,7 @@ function Assert-ProjectAtlasCodexDirectAncestry {
     )
     for ($index = 0; $index -lt $segments.Count; $index++) {
         $currentPath = Join-Path $currentPath $segments[$index]
-        $item = Get-Item -Force -LiteralPath $currentPath -ErrorAction SilentlyContinue
+        $item = Get-Item -Force -LiteralPath (Get-ProjectAtlasCodexLiteralPath $currentPath) -ErrorAction SilentlyContinue
         if (-not $item) {
             continue
         }
@@ -4037,8 +4052,9 @@ function Assert-ProjectAtlasCodexRestorableFile {
         [string]$CodexRoot
     )
     Assert-ProjectAtlasCodexDirectAncestry $Path $Description $CodexRoot
-    Assert-ProjectAtlasDirectFilePath $Path $Description
-    $item = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    $literalPath = Get-ProjectAtlasCodexLiteralPath $Path
+    Assert-ProjectAtlasDirectFilePath $literalPath $Description
+    $item = Get-Item -Force -LiteralPath $literalPath -ErrorAction Stop
     if ($item.PSObject.Properties.Name -contains "LinkType" `
         -and [string]::Equals($item.LinkType, "HardLink", [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "$Description is hard linked"
@@ -4052,12 +4068,13 @@ function Assert-ProjectAtlasCodexRestorableDirectory {
         [string]$CodexRoot
     )
     Assert-ProjectAtlasCodexDirectAncestry $Path $Description $CodexRoot
-    $rootItem = Get-Item -Force -LiteralPath $Path -ErrorAction Stop
+    $literalPath = Get-ProjectAtlasCodexLiteralPath $Path
+    $rootItem = Get-Item -Force -LiteralPath $literalPath -ErrorAction Stop
     if (-not ($rootItem -is [System.IO.DirectoryInfo]) `
         -or (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
         throw "$Description is not a direct directory"
     }
-    foreach ($item in Get-ChildItem -Force -LiteralPath $Path -Recurse) {
+    foreach ($item in Get-ChildItem -Force -LiteralPath $literalPath -Recurse) {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "$Description contains a reparse point"
         }
@@ -4174,7 +4191,7 @@ function New-ProjectAtlasCodexStateSnapshot {
     $snapshotRoot = $null
     $codexRoot = $null
     try {
-        $configExisted = Test-Path -LiteralPath $configPath
+        $configExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $configPath)
         $codexRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $configPath))
         Assert-ProjectAtlasCodexDirectAncestry $configPath "Codex config" $codexRoot
         if ($configExisted) {
@@ -4191,7 +4208,7 @@ function New-ProjectAtlasCodexStateSnapshot {
             $expectedMarketplaceRoot `
             "ProjectAtlas marketplace root" `
             $codexRoot
-        $marketplaceRootExisted = Test-Path -LiteralPath $expectedMarketplaceRoot
+        $marketplaceRootExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $expectedMarketplaceRoot)
         if ($marketplaceRootExisted) {
             Assert-ProjectAtlasCodexRestorableDirectory `
                 $expectedMarketplaceRoot `
@@ -4216,7 +4233,7 @@ function New-ProjectAtlasCodexStateSnapshot {
             throw "installed projectatlas plugin source does not use the expected Codex marketplace layout"
         }
 
-        $pluginSourceExisted = Test-Path -LiteralPath $pluginSourcePath
+        $pluginSourceExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $pluginSourcePath)
         if ($pluginSourceExisted) {
             Assert-ProjectAtlasCodexRestorableDirectory `
                 $pluginSourcePath `
@@ -4237,7 +4254,7 @@ function New-ProjectAtlasCodexStateSnapshot {
             $pluginCachePath = Join-Path $codexRoot (
                 "plugins\cache\projectatlas\projectatlas\" + $ProjectAtlasPlugin.version
             )
-            $pluginCacheExisted = Test-Path -LiteralPath $pluginCachePath
+            $pluginCacheExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $pluginCachePath)
             if (-not $pluginCacheExisted) {
                 throw "installed projectatlas plugin cache is missing"
             }
@@ -4253,7 +4270,7 @@ function New-ProjectAtlasCodexStateSnapshot {
             $expectedPluginCachePath `
             "expected projectatlas plugin cache" `
             $codexRoot
-        $expectedPluginCacheExisted = Test-Path -LiteralPath $expectedPluginCachePath
+        $expectedPluginCacheExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $expectedPluginCachePath)
         if ($expectedPluginCacheExisted `
             -and ($null -eq $pluginCachePath `
                 -or -not [string]::Equals(
@@ -4277,8 +4294,8 @@ function New-ProjectAtlasCodexStateSnapshot {
             $marketplaceInstallRecordPath `
             "ProjectAtlas marketplace install record" `
             $codexRoot
-        $marketplaceManifestExisted = Test-Path -LiteralPath $marketplaceManifestPath
-        $marketplaceInstallRecordExisted = Test-Path -LiteralPath $marketplaceInstallRecordPath
+        $marketplaceManifestExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $marketplaceManifestPath)
+        $marketplaceInstallRecordExisted = Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $marketplaceInstallRecordPath)
         if ($marketplaceManifestExisted) {
             Assert-ProjectAtlasCodexRestorableFile `
                 $marketplaceManifestPath `
@@ -4297,16 +4314,16 @@ function New-ProjectAtlasCodexStateSnapshot {
 
         $snapshotRoot = Join-Path $codexRoot (".projectatlas-plugin-state-" + [guid]::NewGuid().ToString("N"))
         Assert-ProjectAtlasCodexDirectAncestry $snapshotRoot "Codex state snapshot" $codexRoot
-        New-Item -ItemType Directory -Path $snapshotRoot -ErrorAction Stop | Out-Null
+        New-Item -ItemType Directory -Path (Get-ProjectAtlasCodexLiteralPath $snapshotRoot) -ErrorAction Stop | Out-Null
         Assert-ProjectAtlasCodexDirectAncestry $snapshotRoot "Codex state snapshot" $codexRoot
         if ($configExisted) {
-            [System.IO.File]::Copy($configPath, (Join-Path $snapshotRoot "config.toml"), $false)
+            [System.IO.File]::Copy((Get-ProjectAtlasCodexLiteralPath $configPath), (Get-ProjectAtlasCodexLiteralPath (Join-Path $snapshotRoot "config.toml")), $false)
         }
         if ($marketplaceRootExisted) {
-            Copy-Item -LiteralPath $expectedMarketplaceRoot -Destination (Join-Path $snapshotRoot "marketplace-root") -Recurse -Force
+            Copy-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $expectedMarketplaceRoot) -Destination (Get-ProjectAtlasCodexLiteralPath (Join-Path $snapshotRoot "marketplace-root")) -Recurse -Force
         }
         if ($pluginCacheExisted) {
-            Copy-Item -LiteralPath $pluginCachePath -Destination (Join-Path $snapshotRoot "plugin-cache") -Recurse -Force
+            Copy-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $pluginCachePath) -Destination (Get-ProjectAtlasCodexLiteralPath (Join-Path $snapshotRoot "plugin-cache")) -Recurse -Force
         }
         $cachePathsMatch = $pluginCachePath -and [string]::Equals(
             [System.IO.Path]::GetFullPath($pluginCachePath),
@@ -4314,7 +4331,7 @@ function New-ProjectAtlasCodexStateSnapshot {
             [System.StringComparison]::OrdinalIgnoreCase
         )
         if ($expectedPluginCacheExisted -and -not $cachePathsMatch) {
-            Copy-Item -LiteralPath $expectedPluginCachePath -Destination (Join-Path $snapshotRoot "expected-plugin-cache") -Recurse -Force
+            Copy-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $expectedPluginCachePath) -Destination (Get-ProjectAtlasCodexLiteralPath (Join-Path $snapshotRoot "expected-plugin-cache")) -Recurse -Force
         }
         return [pscustomobject]@{
             Root                         = $snapshotRoot
@@ -4331,7 +4348,7 @@ function New-ProjectAtlasCodexStateSnapshot {
         }
     }
     catch {
-        if ($snapshotRoot -and (Test-Path -LiteralPath $snapshotRoot)) {
+        if ($snapshotRoot -and (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $snapshotRoot))) {
             Remove-ProjectAtlasCodexStateSnapshot ([pscustomobject]@{
                     Root      = $snapshotRoot
                     CodexRoot = $codexRoot
@@ -4347,7 +4364,7 @@ function Restore-ProjectAtlasCodexStateSnapshot {
         [object]$Snapshot
     )
     try {
-        if (-not $Snapshot -or -not (Test-Path -LiteralPath $Snapshot.Root)) {
+        if (-not $Snapshot -or -not (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.Root))) {
             return $false
         }
         $currentCodexRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $Snapshot.ConfigPath))
@@ -4358,7 +4375,7 @@ function Restore-ProjectAtlasCodexStateSnapshot {
             )) {
             return $false
         }
-        Assert-ProjectAtlasDirectPath $currentCodexRoot "Codex state root"
+        Assert-ProjectAtlasDirectPath (Get-ProjectAtlasCodexLiteralPath $currentCodexRoot) "Codex state root"
         Assert-ProjectAtlasCodexDirectAncestry $Snapshot.Root "Codex state snapshot" $currentCodexRoot
         $directoryRestores = @(
                     [pscustomobject]@{
@@ -4396,17 +4413,17 @@ function Restore-ProjectAtlasCodexStateSnapshot {
                     $directoryRestore.Description `
                     $currentCodexRoot
                 $destinationParent = Split-Path -Parent $directoryRestore.Destination
-                New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+                New-Item -ItemType Directory -Path (Get-ProjectAtlasCodexLiteralPath $destinationParent) -Force | Out-Null
                 Assert-ProjectAtlasCodexDirectAncestry `
                     $directoryRestore.Destination `
                     $directoryRestore.Description `
                     $currentCodexRoot
-                if (Test-Path -LiteralPath $directoryRestore.Destination) {
+                if (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $directoryRestore.Destination)) {
                     Assert-ProjectAtlasCodexRestorableDirectory `
                         $directoryRestore.Destination `
                         $directoryRestore.Description `
                         $currentCodexRoot
-                    Remove-Item -LiteralPath $directoryRestore.Destination -Recurse -Force
+                    Remove-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $directoryRestore.Destination) -Recurse -Force
                 }
                 Assert-ProjectAtlasCodexDirectAncestry `
                     $directoryRestore.Destination `
@@ -4414,8 +4431,8 @@ function Restore-ProjectAtlasCodexStateSnapshot {
                     $currentCodexRoot
                 if ($directoryRestore.Existed) {
                     Copy-Item `
-                        -LiteralPath $directoryRestore.Snapshot `
-                        -Destination $directoryRestore.Destination `
+                        -LiteralPath (Get-ProjectAtlasCodexLiteralPath $directoryRestore.Snapshot) `
+                        -Destination (Get-ProjectAtlasCodexLiteralPath $directoryRestore.Destination) `
                         -Recurse `
                         -Force
                 }
@@ -4426,19 +4443,19 @@ function Restore-ProjectAtlasCodexStateSnapshot {
                 "Codex config snapshot" `
                 $currentCodexRoot
             Assert-ProjectAtlasCodexDirectAncestry $Snapshot.ConfigPath "Codex config" $currentCodexRoot
-            if (Test-Path -LiteralPath $Snapshot.ConfigPath) {
+            if (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.ConfigPath)) {
                 Assert-ProjectAtlasCodexRestorableFile $Snapshot.ConfigPath "Codex config" $currentCodexRoot
             }
             $temporaryConfigPath = $Snapshot.ConfigPath + ".projectatlas-restore-" + [guid]::NewGuid().ToString("N")
             Assert-ProjectAtlasCodexDirectAncestry $temporaryConfigPath "Codex config" $currentCodexRoot
-            [System.IO.File]::Copy((Join-Path $Snapshot.Root "config.toml"), $temporaryConfigPath, $false)
+            [System.IO.File]::Copy((Get-ProjectAtlasCodexLiteralPath (Join-Path $Snapshot.Root "config.toml")), (Get-ProjectAtlasCodexLiteralPath $temporaryConfigPath), $false)
             Assert-ProjectAtlasCodexDirectAncestry $Snapshot.ConfigPath "Codex config" $currentCodexRoot
-            Move-Item -LiteralPath $temporaryConfigPath -Destination $Snapshot.ConfigPath -Force
+            Move-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $temporaryConfigPath) -Destination (Get-ProjectAtlasCodexLiteralPath $Snapshot.ConfigPath) -Force
         }
-        elseif (Test-Path -LiteralPath $Snapshot.ConfigPath) {
+        elseif (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.ConfigPath)) {
             Assert-ProjectAtlasCodexRestorableFile $Snapshot.ConfigPath "Codex config" $currentCodexRoot
-            Remove-Item -LiteralPath $Snapshot.ConfigPath -Force
-            if (Test-Path -LiteralPath $Snapshot.ConfigPath) {
+            Remove-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.ConfigPath) -Force
+            if (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.ConfigPath)) {
                 throw "Codex config removal did not complete"
             }
         }
@@ -4454,7 +4471,7 @@ function Remove-ProjectAtlasCodexStateSnapshot {
     param(
         [object]$Snapshot
     )
-    if (-not $Snapshot -or -not (Get-Item -Force -LiteralPath $Snapshot.Root -ErrorAction SilentlyContinue)) {
+    if (-not $Snapshot -or -not (Get-Item -Force -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.Root) -ErrorAction SilentlyContinue)) {
         return $true
     }
     try {
@@ -4468,8 +4485,8 @@ function Remove-ProjectAtlasCodexStateSnapshot {
         return $false
     }
     try {
-        Remove-Item -LiteralPath $Snapshot.Root -Recurse -Force -ErrorAction Stop
-        if (Test-Path -LiteralPath $Snapshot.Root) {
+        Remove-Item -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.Root) -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $Snapshot.Root)) {
             throw "snapshot still exists after cleanup"
         }
         return $true
@@ -4753,11 +4770,11 @@ function Update-ProjectAtlasCodexPlugin {
     }
     try {
         $retainedSnapshot = $null
-        if (Test-Path -LiteralPath $updateLock.Root) {
-            Assert-ProjectAtlasDirectPath $updateLock.Root "Codex state root"
+        if (Test-Path -LiteralPath (Get-ProjectAtlasCodexLiteralPath $updateLock.Root)) {
+            Assert-ProjectAtlasDirectPath (Get-ProjectAtlasCodexLiteralPath $updateLock.Root) "Codex state root"
             $retainedSnapshot = Get-ChildItem `
                 -Force `
-                -LiteralPath $updateLock.Root `
+                -LiteralPath (Get-ProjectAtlasCodexLiteralPath $updateLock.Root) `
                 -Filter ".projectatlas-plugin-state-*" `
                 -ErrorAction Stop `
                 | Select-Object -First 1

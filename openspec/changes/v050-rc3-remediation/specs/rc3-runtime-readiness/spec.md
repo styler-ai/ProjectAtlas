@@ -73,3 +73,7 @@ The installer SHALL admit an existing official Codex marketplace and plugin whos
 #### Scenario: Optional marker or integration path is unsafe
 - **WHEN** a present marker or another existing integration path fails its regular-file or canonical ancestry checks
 - **THEN** preservation refuses before destructive update and retains the prior working state
+
+#### Scenario: Windows preservation uses deep admitted paths
+- **WHEN** an admitted native marketplace tree produces snapshot paths beyond the legacy Windows path limit
+- **THEN** the existing preservation owner copies and restores the exact tree under the supported Windows PowerShell host, permits verified candidate convergence, and preserves exact prior state after injected replacement failure without shortening paths or bypassing safe-path checks

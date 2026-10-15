@@ -515,7 +515,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 437;
+const CLI_E2E_SYMBOL_COUNT: usize = 438;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -546,7 +546,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "4a1a27ebc4ac765cbe5fd0abebabfc6be93f5a93f3b32cdd04b511d196bd8e1a";
+    "98a3485b146bdf8d1b4f99ee3898dfacf6ef2cd9e16a80ec6a551b0007ee2d4d";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -12758,6 +12758,8 @@ fn windows_installer_obsolete_mcp_handoff_requires_exact_codex_plugin_state()
         r#"$ErrorActionPreference = "Stop"
 $installerSource = Get-Content -Raw -LiteralPath $env:PROJECTATLAS_INSTALLER
 $selectorFunctions = foreach ($functionName in @(
+        "Test-ProjectAtlasWindows",
+        "Get-ProjectAtlasCodexLiteralPath",
         "Test-ProjectAtlasJsonObject",
         "Test-ProjectAtlasOfficialMarketplaceSource",
         "Get-ProjectAtlasCodexPluginInventory",
@@ -12786,6 +12788,16 @@ $selectorFunctions = foreach ($functionName in @(
 $selectorPath = Join-Path $PSScriptRoot "codex-selectors.ps1"
 Set-Content -LiteralPath $selectorPath -Value $selectorFunctions
 . $selectorPath
+foreach ($paths in @(
+        @('C:\state\..\codex\literal[1]', '\\?\C:\codex\literal[1]'),
+        @('\\server\share\codex', '\\?\UNC\server\share\codex'),
+        @('\\?\C:\codex', '\\?\C:\codex'),
+        @('\\?\UNC\server\share\codex', '\\?\UNC\server\share\codex')
+    )) {
+    if ((Get-ProjectAtlasCodexLiteralPath $paths[0]) -cne $paths[1]) {
+        throw "Codex filesystem path conversion changed the literal absolute path: $($paths[0])"
+    }
+}
 $script:pluginPayload = $null
 function Invoke-ProjectAtlasBoundedJsonCommand {
     return ,$script:pluginPayload
@@ -15428,6 +15440,8 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
     let marketplace_install_record =
         marketplace_root.join(CODEX_MARKETPLACE_INSTALL_RECORD_FILE_NAME);
     fs::remove_file(&marketplace_install_record)?;
+    #[cfg(windows)]
+    let deep_marketplace_files = write_deep_windows_marketplace_files(&codex_dir)?;
     fs::create_dir(marketplace_root.join(".git"))?;
     let unavailable_git = fake_path.join(if cfg!(windows) { "git.cmd" } else { "git" });
     write_executable_script(
@@ -15495,6 +15509,25 @@ fn plugin_update_repairs_current_codex_plugin_with_stale_source_manifest()
             "successful current Codex plugin repair created a marketplace install record Codex did not provide",
         )
         .into());
+    }
+    #[cfg(windows)]
+    {
+        for path in deep_marketplace_files {
+            if fs::read(&path)? != b"deep admitted marketplace state\n" {
+                return Err(io::Error::other("repair changed deep marketplace state").into());
+            }
+        }
+        for entry in fs::read_dir(&codex_dir)? {
+            if entry?
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".projectatlas-plugin-state-")
+            {
+                return Err(
+                    io::Error::other("successful repair retained its recovery snapshot").into(),
+                );
+            }
+        }
     }
     let manifest_after = fs::read_to_string(&manifest_path)?;
     if !manifest_after.contains(env!("CARGO_PKG_VERSION")) {
@@ -15628,6 +15661,48 @@ enum CodexReplacementFailure {
     },
 }
 
+#[cfg(windows)]
+fn write_deep_windows_marketplace_files(codex_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    // The fixed-width snapshot name adds depth to an otherwise admitted marketplace tree.
+    let relative_directory = Path::new("docs").join("benchmarks");
+    let snapshot_directory = codex_dir
+        .join(format!(".projectatlas-plugin-state-{}", "0".repeat(32)))
+        .join("marketplace-root")
+        .join(&relative_directory);
+    let source_directory =
+        fake_codex_projectatlas_marketplace_root(codex_dir).join(&relative_directory);
+    fs::create_dir_all(&source_directory)?;
+    let mut paths = Vec::new();
+    for snapshot_length in [259_usize, 260, 300] {
+        let suffix = ".jsonl";
+        let padding = snapshot_length
+            .checked_sub(snapshot_directory.as_os_str().encode_wide().count() + 1 + suffix.len())
+            .ok_or_else(|| {
+                io::Error::other("temporary root is too deep for the path-limit fixture")
+            })?;
+        let filename = format!("{}{suffix}", "x".repeat(padding));
+        let path = source_directory.join(&filename);
+        if snapshot_directory
+            .join(&filename)
+            .as_os_str()
+            .encode_wide()
+            .count()
+            != snapshot_length
+            || path.as_os_str().encode_wide().count() >= 260
+        {
+            return Err(io::Error::other(
+                "deep marketplace fixture missed the path-limit boundary",
+            )
+            .into());
+        }
+        fs::write(&path, b"deep admitted marketplace state\n")?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
 fn assert_failed_codex_replacement_preserves_prior_integration(
     previous_ref: &str,
     config_existed: bool,
@@ -15675,6 +15750,8 @@ fn assert_failed_codex_replacement_preserves_prior_integration(
         CodexReplacementFailure::CommandWithoutMarketplaceInstallRecord
     ) {
         fs::remove_file(&marketplace_install_record)?;
+        #[cfg(windows)]
+        write_deep_windows_marketplace_files(&codex_dir)?;
     }
     let unrelated_marketplace_state = marketplace_root.join("retained-state");
     fs::create_dir_all(unrelated_marketplace_state.join("empty-directory"))?;
