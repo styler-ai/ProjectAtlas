@@ -8554,7 +8554,16 @@ fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn E
 
 #[test]
 fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
-    let workflow = fs::read_to_string(workspace_root()?.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    let workspace = workspace_root()?;
+    let workflow = fs::read_to_string(workspace.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    let install =
+        fs::read_to_string(workspace.join(".github/scripts/install-real-host-readers.sh"))?;
+    require(
+        install.lines().any(|line| {
+            line == "npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10"
+        }),
+        "shared real host installation must retain the exact supported versions",
+    )?;
     let intel_bootstrap = workflow
         .split_once("\"label\": \"macos-x64\"")
         .and_then(|(_, row)| row.split_once('}').map(|(row, _)| row))
@@ -8574,6 +8583,15 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
             format!("{name} must cover plugin platforms and macOS Intel"),
         )?;
     }
+    let install_step = workflow_job_step(
+        &workflow,
+        "e2e-smoke",
+        "Install exact real host CLIs for native reader proof",
+    )?;
+    require(
+        install_step["run"].as_str() == Some("bash .github/scripts/install-real-host-readers.sh"),
+        "CI must use the shared pinned real host installation",
+    )?;
     let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
     let commands = step["run"].as_str().unwrap_or_default();
     for command in [
@@ -8593,6 +8611,84 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
         workflow.matches(REQUIRE_REAL_HOST_READERS_ENV).count() == 1,
         "required-reader mode must be scoped only to the installed-host proof step".to_owned(),
     )?;
+    let release = fs::read_to_string(workspace.join(RELEASE_WORKFLOW_PATH))?;
+    for (job, required) in [
+        (
+            "prepublish-installer-smoke-unix",
+            &[
+                "runtime=\"${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}\"",
+                "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
+                "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
+                "if ! inventory=\"$(\"$contract\" --list)\"; then",
+                "awk -v expected=\"${test}: test\" '$0 == expected { matches += 1 } END { print matches + 0 }'",
+                "if [ \"$matches\" -ne 1 ]; then",
+                "\"$contract\" \"$test\" --exact --include-ignored --nocapture",
+            ][..],
+        ),
+        (
+            "prepublish-installer-smoke-windows",
+            &[
+                "$env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP \"projectatlas-prepublish\\projectatlas.exe\"",
+                "$env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE \"plugins\\projectatlas\"",
+                "$inventory = @(& pwsh -NoProfile -File $contractRunner --list)",
+                "$LASTEXITCODE -ne 0",
+                "Where-Object { $_ -ceq \"${test}: test\" }",
+                "if ($matches -ne 1) {",
+                "& pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture",
+            ][..],
+        ),
+    ] {
+        let install = workflow_job_step(
+            &release,
+            job,
+            "Install exact real host CLIs for native reader proof",
+        )?;
+        require(
+            install["if"].is_badvalue()
+                && install["shell"].as_str() == Some("bash")
+                && install["run"].as_str()
+                    == Some("bash .github/scripts/install-real-host-readers.sh"),
+            format!("{job} must install both pinned readers on every tuple"),
+        )?;
+        let proof = workflow_job_step(&release, job, "Real installed packaged host reader proof")?;
+        require(
+            proof["if"].is_badvalue()
+                && proof["timeout-minutes"].as_i64() == Some(15)
+                && proof["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1")
+                && proof["env"]["PROJECTATLAS_NO_TELEMETRY"].as_str() == Some("1"),
+            format!("{job} must require both packaged readers on every tuple"),
+        )?;
+        let commands = proof["run"].as_str().unwrap_or_default();
+        for required in required.iter().copied().chain([
+            "installed_hosts_read_generated_configs_and_report_native_status",
+            "Packaged host reader contract inventory failed",
+            "Packaged host reader contract inventory must contain exactly one",
+        ]) {
+            require(
+                commands.contains(required),
+                format!("{job} packaged reader proof omitted {required:?}"),
+            )?;
+        }
+    }
+    require(
+        release.matches(REQUIRE_REAL_HOST_READERS_ENV).count() == 2,
+        "release required-reader mode must be scoped only to the two packaged reader steps",
+    )?;
+    for (job, route) in [
+        (
+            "package-unix",
+            "|installed_hosts_read_generated_configs_and_report_native_status)\n              binary=e2e_delivery ;;",
+        ),
+        (
+            "package-windows",
+            "\"installed_hosts_read_generated_configs_and_report_native_status\" { return \"e2e_delivery.exe\" }",
+        ),
+    ] {
+        require(
+            workflow_job_block(&release, job)?.contains(route),
+            format!("{job} must route the packaged reader contract to its delivery owner"),
+        )?;
+    }
     Ok(())
 }
 

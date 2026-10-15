@@ -517,7 +517,7 @@ jobs:
         if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'
         timeout-minutes: 10
         shell: bash
-        run: npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10
+        run: bash .github/scripts/install-real-host-readers.sh
 
       - name: Real installed host reader proof
         if: contains(matrix.contracts, 'plugin') || matrix.label == 'macos-x64'

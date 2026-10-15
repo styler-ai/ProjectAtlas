@@ -283,7 +283,7 @@ jobs:
             exit 0
           fi
           case "${1:-}" in
-            mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*)
+            mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*|installed_hosts_read_generated_configs_and_report_native_status)
               binary=e2e_delivery ;;
             mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*|pdf_rendering_resource_stop_preserves_source_and_repairs|pdf_parser_limits_preserve_cli_and_mcp_publication|bounded_pdf_and_docx_reach_cli_and_mcp_navigation)
               binary=e2e_navigation ;;
@@ -407,6 +407,7 @@ jobs:
             switch -Wildcard ($TestName) {
               "mcp_advertised_tools_*" { return "e2e_delivery.exe" }
               "packaged_cli_*" { return "e2e_delivery.exe" }
+              "installed_hosts_read_generated_configs_and_report_native_status" { return "e2e_delivery.exe" }
               "installed_candidate_version_*" { return "e2e_lifecycle.exe" }
               "*plugin*" { return "e2e_delivery.exe" }
               "*installer*" { return "e2e_delivery.exe" }
@@ -784,6 +785,34 @@ jobs:
               "$contract" "$test" --exact --include-ignored --nocapture
           done
 
+      - name: Install exact real host CLIs for native reader proof
+        timeout-minutes: 10
+        shell: bash
+        run: bash .github/scripts/install-real-host-readers.sh
+
+      - name: Real installed packaged host reader proof
+        timeout-minutes: 15
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
+        run: |
+          set -euo pipefail
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          test=installed_hosts_read_generated_configs_and_report_native_status
+          if ! inventory="$("$contract" --list)"; then
+            echo "Packaged host reader contract inventory failed." >&2
+            exit 1
+          fi
+          matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+          if [ "$matches" -ne 1 ]; then
+            echo "Packaged host reader contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+            exit 1
+          fi
+          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+            "$contract" "$test" --exact --include-ignored --nocapture
+
       - name: Clean macOS arm64 holistic packaged lifecycle
         if: matrix.label == 'macos-arm64-posix'
         timeout-minutes: 15
@@ -1098,6 +1127,35 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Packaged contract '$test' failed with exit code $LASTEXITCODE."
             }
+          }
+
+      - name: Install exact real host CLIs for native reader proof
+        timeout-minutes: 10
+        shell: bash
+        run: bash .github/scripts/install-real-host-readers.sh
+
+      - name: Real installed packaged host reader proof
+        timeout-minutes: 15
+        shell: pwsh
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
+        run: |
+          $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish\projectatlas.exe"
+          $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          $test = "installed_hosts_read_generated_configs_and_report_native_status"
+          $inventory = @(& pwsh -NoProfile -File $contractRunner --list)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged host reader contract inventory failed with exit code $LASTEXITCODE."
+          }
+          $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
+          if ($matches -ne 1) {
+            throw "Packaged host reader contract inventory must contain exactly one '${test}: test' line; found $matches."
+          }
+          & pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged host reader contract '$test' failed with exit code $LASTEXITCODE."
           }
 
       - name: Installed-candidate regression and upgrade contracts
