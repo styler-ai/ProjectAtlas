@@ -505,6 +505,8 @@ flowchart TB
 
 ## Codex MCP owner fixture readiness
 
+Accepted-owner teardown uses native exact stop. Readiness failure retains the existing stop request, bounded owner observation and exact child recovery; the fixture finalizer retires its child before a confirmed owner exit. Deliberate helper-fault tests retain the primary, fallback and final-native chain and its original error after recovery.
+
 ```mermaid
 flowchart TB
     suite[Parallel Windows E2E] --> owner[Spawn compiled Codex owner]
@@ -512,22 +514,23 @@ flowchart TB
     child --> publish[Atomically publish PID, start time, and path]
     owner --> poll{Publication and identity readiness within one named 30 s deadline}
     publish --> poll
-    poll -->|exit or deadline| fail[Typed failure and owned cleanup]
-    poll -->|not ready| pause[Wait 25 ms]
-    pause --> poll
-    poll -->|published before same deadline| validate{Exact identity valid before same deadline?}
-    validate -->|no| fail
+    poll -->|published before same deadline| validate{Native exact capture valid before same deadline?}
     validate -->|yes| installer[Run existing installer handoff assertions]
-    installer --> cleanup[Attempt exact child stop]
-    fail --> cleanup
-    cleanup -->|stop helper stalls or fails| fallback[One bounded exact-identity cleanup fallback]
-    fallback -->|child stopped or already gone| reap[Kill and reap owned parent]
-    fallback -->|fallback stalls or fails| final[One bounded helper-free native exact-identity stop]
-    final -->|child stopped or already gone| reap
-    final -->|cleanup cannot prove ownership or stop child| reap
+    installer --> cleanup[Native exact child stop within existing cleanup deadline]
+    cleanup --> reap[Kill and reap owned parent, preserving prior errors]
     reap -->|all cleanup complete| done[Owned cleanup complete]
     reap -->|any cleanup failure| diagnostic[Fail closed with cleanup diagnostic]
-    cleanup -->|child stopped| reap
+    poll -->|not ready| pause[Wait 25 ms]
+    pause --> poll
+    poll -->|exit or deadline| fail[Existing bounded owner and exact-child failure recovery]
+    validate -->|no| fail
+    fail --> refused[Return typed readiness failure after owned cleanup]
+    fault[Deliberate helper-failure fixture] --> helper[Bounded exact-identity stop helper]
+    helper -->|child stopped| reap
+    helper -->|stalls or fails, retain original error| fallback[One bounded exact-identity cleanup fallback]
+    fallback -->|child stopped or already gone| reap
+    fallback -->|fallback stalls or fails| final[One bounded helper-free native exact-identity stop]
+    final -->|stopped, absent, or cleanup failure| reap
 ```
 
 ## Production module ownership decision

@@ -5,10 +5,10 @@
 
 ## 2. Bounded Fixture Readiness
 
-- [x] 2.1 Replace the hard-coded five-second child-PID publication assumption at the smallest owning Windows delivery-test helper with one named bounded readiness contract; preserve 25 ms polling or an equally bounded existing mechanism, parent early-exit detection, atomic identity publication, exact PID/start-time/executable-path validation, actionable timeout diagnostics, and complete owned-process cleanup.
-- [x] 2.2 Add deterministic regression proof whose valid publication exceeds the former five-second ceiling plus negative coverage for true timeout, early parent exit, malformed or mismatched identity, and cleanup; do not weaken or duplicate the existing production-installer behavior assertions.
+- [x] 2.1 Reuse the existing native exact-identity capture and stop owners for routine Windows fixture readiness and teardown; retain the original named 30-second readiness deadline, cleanup budgets, bounded polling, atomic publication, early parent-exit handling, exact PID/creation-time/path validation and owned cleanup, while preserving deliberately injected helper-failure recovery and its original errors.
+- [x] 2.2 Prove delayed publication and capture, routine native readiness/teardown, true deadlines, late observations, early exit, malformed or mismatched identity, helper-failure recovery and unrelated-process protection through deterministic owning fixtures; retain production-installer assertions and add no new harness, dependency, retry-only acceptance or weakened budget.
 
 ## 3. Integration and Acceptance
 
-- [x] 3.1 Run the focused fixture and installer E2E, repeated required parallel workspace gate, strict Rust/workspace/OpenSpec/IssueOps checks, and exact-head hosted Windows proof; refresh dependent #487 only after the accepted fix is on `main`, and confirm it retains one final helper owner.
+- [x] 3.1 Pass focused fixture and installer E2E, repeated required parallel workspace proof, strict Rust/workspace/OpenSpec/IssueOps checks and hosted Windows gates bound to behavior-relevant inputs; hand off dependent #666 refresh and affected native-upgrade proof for execution after this fix merges, retaining one final fixture owner.
 - [x] 3.2 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.

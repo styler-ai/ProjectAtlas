@@ -1,13 +1,16 @@
 ## Why
 
-The required Windows workspace gate can reject an otherwise accepted head when the Codex-owned obsolete-MCP fixture does not publish its child PID within a hard-coded five-second startup window under parallel suite contention. The exact test passes in isolation, so retry-only acceptance would hide a release-gate race rather than prove that the broad run is reliable for v0.5.0.
+The earlier #518 repair established a named 30-second readiness deadline and exact owned-process validation. The RC3 required parallel delivery gate now exposes two remaining fixture failures: its positive delayed-publication/identity case exhausts that deadline, and ordinary final teardown propagates a PowerShell stop-helper timeout even though exact fallback cleanup completed. The earlier startup and helper-creation costs are not separately measured, so the precise lost headroom is unconfirmed.
+
+Routine readiness still starts PowerShell through its deadline-specific identity path although the fixture already owns native exact identity capture. Ordinary teardown also uses the deliberately diagnostic helper-failure chain. Reuse the existing native owners for routine fixture work; preserve that failure chain for tests which intentionally exercise it. Retrying the gate or increasing its budgets would not repair these ownership boundaries.
 
 ## What Changes
 
-- Define one named, bounded readiness contract for the Codex MCP owner fixture that remains reliable under supported parallel workspace test load.
+- Reuse native exact identity capture and stop for ordinary Windows fixture readiness and teardown, retaining the named readiness and cleanup bounds.
+- Retain the existing bounded readiness-failure recovery and deliberate helper-fault cleanup paths; native teardown applies to the accepted-owner routine path.
 - Preserve early parent-exit detection, atomic PID publication, exact PID/start-time/executable-path validation, bounded failure, and complete owned-process cleanup.
-- Add deterministic delayed-publication and true-failure proof so the repair cannot become an unbounded wait or a weakened process-identity assertion.
-- Reconcile the current monolithic test owner with the accepted #487 delivery-test split without duplicating the helper or changing product behavior.
+- Preserve deterministic delayed-publication/capture, true-deadline and helper-failure proof, including original helper errors after successful recovery and unrelated-process protection.
+- Retain the single delivery-test owner established by historical #487; accept this repair before refreshing dependent #666 native-upgrade proof.
 
 ## Capabilities
 
@@ -22,7 +25,7 @@ None.
 ## Impact
 
 - Affects only the Windows CLI integration-test fixture owner and its focused architecture/test proof.
-- Unblocks the final delivery-test owner in #487.
+- Unblocks #666's required broad Windows gate; #487's accepted split remains historical.
 - Adds no dependency, product configuration, public payload, installer/MCP behavior, schema, database path, or production timeout change.
 - Ready for implementation in v0.5.0 after the specification and architecture view are accepted.
 
