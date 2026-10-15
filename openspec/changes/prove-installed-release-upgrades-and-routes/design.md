@@ -22,6 +22,7 @@ Prove complete installed CLI route execution and real v0.4.5-to-candidate contin
 
 ## Risks / Trade-offs
 
+- Cargo's native runtime search directories can exceed CMD's inherited PATH lookup limit. Generated Windows fault fixtures must use the existing absolute PowerShell and System32 tool identities instead of ambient `powershell`, `ping`, or `cmd` lookup; preserve their timing, descendant structure, and process-ownership assertions.
 - Ambient runtime or host state could create false proof: pass explicit executable, plugin, database, and isolated profile paths and preserve unrelated canaries.
 - A help-only case or wrong nested dispatch could pass: reconcile case coverage with the frozen route inventory and assert state/output for the actual route.
 - Schema-specific snapshots could reject legitimate migration or hide loss: compare authored authority and stable identity separately from derived freshness, and retain a complete predecessor backup for refusal/recovery assertions.

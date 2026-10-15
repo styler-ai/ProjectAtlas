@@ -2606,17 +2606,17 @@ if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
     fs::create_dir_all(&probe_temp)?;
     fs::write(
         &flooding_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
+        "@echo off\r\n\"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
     )?;
     fs::write(
         &timeout_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
+        "@echo off\r\n\"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
     )?;
     let async_runtime = temp.path().join("async-projectatlas.cmd");
     let async_child_pid = temp.path().join("async-child.pid");
     fs::write(
         &async_runtime,
-        "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
+        "@echo off\r\nstart \"\" /b \"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  \"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
     )?;
     let powershell_runtime = temp.path().join(POWERSHELL_RUNTIME_SCRIPT);
     fs::write(
@@ -28380,6 +28380,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     const FLOOD_CHUNK_BYTES: usize = 128 * 1024;
     const FLOOD_CHUNKS: usize = 16;
 
+    #[cfg(windows)]
+    let system32 = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    )
+    .join(WINDOWS_SYSTEM32_DIR);
     let temp = tempfile::tempdir()?;
     let archive = temp.path().join("projectatlas-test.zip");
     let asset = b"release asset fixture";
@@ -28785,8 +28791,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let server = new_server()?;
     #[cfg(windows)]
     let mut descendant_command = {
-        let mut command = StdCommand::new("cmd");
-        command.args(["/D", "/C", "ping.exe -n 6 127.0.0.1"]);
+        use std::os::windows::process::CommandExt;
+
+        let mut command = StdCommand::new(system32.join("cmd.exe"));
+        command
+            .args(["/D", "/C"])
+            .raw_arg(r#"""%SystemRoot%\System32\ping.exe" -n 6 127.0.0.1""#);
         command
     };
     #[cfg(unix)]
@@ -28847,12 +28857,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
 
     #[cfg(windows)]
     let completed_parent_with_descendant = || {
-        let mut command = StdCommand::new("cmd.exe");
-        command.args([
-            "/D",
-            "/C",
-            "cmd.exe /D /C start /B ping.exe -n 16 127.0.0.1",
-        ]);
+        use std::os::windows::process::CommandExt;
+
+        let mut command = StdCommand::new(system32.join("cmd.exe"));
+        command
+            .args(["/D", "/C"])
+            .raw_arg(r#"""%SystemRoot%\System32\cmd.exe" /D /C start "" /B "%SystemRoot%\System32\ping.exe" -n 16 127.0.0.1""#);
         command
     };
     #[cfg(unix)]
