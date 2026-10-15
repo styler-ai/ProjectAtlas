@@ -179,6 +179,16 @@ const CODEX_CONFIG_DIR: &str = ".codex";
 const AGENT_INSTRUCTIONS_RELATIVE_PATH: &str = "hooks/agent-instructions.txt";
 const CODEX_HOOKS_CONFIG_RELATIVE_PATH: &str = "hooks/hooks.json";
 const PROJECTATLAS_PLUGIN_RELATIVE_PATH: &str = "plugins/projectatlas";
+const CODEX_PLUGIN_BASELINE_ASSETS: &[&str] =
+    &[".codex-plugin/plugin.json", "skills/projectatlas/SKILL.md"];
+const CODEX_PLUGIN_CURRENT_ASSETS: &[&str] = &[
+    "skills/projectatlas/references/language-support.md",
+    "skills/projectatlas/references/short-cli.md",
+    "hooks/agent-instructions.txt",
+    "hooks/hooks.json",
+    "hooks/readiness.ps1",
+    "hooks/readiness.sh",
+];
 
 const CODEX_PLUGIN_MANIFEST_DIR: &str = ".codex-plugin";
 
@@ -505,7 +515,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 434;
+const CLI_E2E_SYMBOL_COUNT: usize = 438;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -536,7 +546,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "4d471431e2a0818c483d8f37e6c3421d490fd841c33d0819d961af9cb4276941";
+    "98a3485b146bdf8d1b4f99ee3898dfacf6ef2cd9e16a80ec6a551b0007ee2d4d";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -19217,6 +19227,11 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
     }
     let canary = temp.path().join("unrelated.txt");
     fs::write(&canary, "preserve unrelated state\n")?;
+    #[cfg(windows)]
+    let database_relative = Path::new(".projectatlas/projectatlas.db");
+    let project_atlas_dir = repo.join(ATLAS_DIR_NAME);
+    let database = project_atlas_dir.join("projectatlas.db");
+    let project_config = project_atlas_dir.join("config.toml");
 
     let isolated_path = std::env::join_paths(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).filter(|directory| {
@@ -19295,6 +19310,30 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             "v0.4.5",
             &predecessor_source.join(PROJECTATLAS_PLUGIN_RELATIVE_PATH),
         )?;
+        fs::create_dir_all(&project_atlas_dir)?;
+        fs::write(&project_config, "[project]\nroot = \".\"\n")?;
+        let predecessor_path = predecessor.to_string_lossy();
+        let database_path = database.to_string_lossy();
+        let project_config_path = project_config.to_string_lossy();
+        run_isolated_codex_command(
+            codex,
+            &home,
+            &isolated_path,
+            &[
+                "mcp",
+                "add",
+                "projectatlas",
+                "--",
+                predecessor_path.as_ref(),
+                "--require-version",
+                "0.4.5",
+                "--db",
+                database_path.as_ref(),
+                "--config",
+                project_config_path.as_ref(),
+                "mcp",
+            ],
+        )?;
     }
     let mut install = projectatlas_plugin_installer_command_with_optional_path_and_home(
         &predecessor_source,
@@ -19333,8 +19372,6 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
         "published predecessor installer",
         deadline.saturating_duration_since(Instant::now()),
     )?)?;
-    let database_relative = Path::new(".projectatlas/projectatlas.db");
-    let database = repo.join(database_relative);
     if let Some(codex) = codex_command.as_deref() {
         assert_codex_projectatlas_mcp_registry(
             codex,
@@ -19343,7 +19380,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &predecessor,
             "0.4.5",
             &database,
-            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
+            &project_config,
         )?;
     }
     for arguments in [
@@ -19637,7 +19674,13 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
                 "Preserve the released authored purpose.",
             )?;
         } else {
-            require_successful_plugin_installer_output(output)?;
+            let output = require_successful_plugin_installer_output(output)?;
+            writeln!(
+                io::stderr(),
+                "published predecessor upgrade: candidate installer stdout:\n{}\npublished predecessor upgrade: candidate installer stderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )?;
         }
     }
     let installed_config: Value =
@@ -19667,7 +19710,7 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
             &installed,
             candidate_version,
             &database,
-            &repo.join(ATLAS_DIR_NAME).join("config.toml"),
+            &project_config,
         )?;
     }
     if sha256_hex(&fs::read(&installed)?) != sha256_hex(&fs::read(&executable)?) {
@@ -19994,13 +20037,26 @@ fn assert_codex_projectatlas_plugin(
     let manifest: Value =
         serde_json::from_slice(&fs::read(source.join(".codex-plugin/plugin.json"))?)?;
     require_json_string(&manifest, &["version"], version)?;
-    for relative in [
-        ".codex-plugin/plugin.json",
-        "skills/projectatlas/SKILL.md",
-        "skills/projectatlas/references/language-support.md",
-        "skills/projectatlas/references/short-cli.md",
-        "hooks/agent-instructions.txt",
-    ] {
+    assert_codex_projectatlas_plugin_assets(expected_source, &source, &cache, version)?;
+    Ok(())
+}
+
+fn assert_codex_projectatlas_plugin_assets(
+    expected_source: &Path,
+    source: &Path,
+    cache: &Path,
+    version: &str,
+) -> Result<(), Box<dyn Error>> {
+    let current_assets: &[&str] = if version == env!("CARGO_PKG_VERSION") {
+        CODEX_PLUGIN_CURRENT_ASSETS
+    } else {
+        &[]
+    };
+    for relative in CODEX_PLUGIN_BASELINE_ASSETS
+        .iter()
+        .chain(current_assets.iter())
+    {
+        let relative = *relative;
         let expected = fs::read(expected_source.join(relative))?;
         if fs::read(source.join(relative))? != expected
             || fs::read(cache.join(relative))? != expected
@@ -20011,23 +20067,73 @@ fn assert_codex_projectatlas_plugin(
             .into());
         }
     }
-    if version == env!("CARGO_PKG_VERSION") {
-        for relative in [
-            "hooks/hooks.json",
-            "hooks/readiness.ps1",
-            "hooks/readiness.sh",
-        ] {
-            let expected = fs::read(expected_source.join(relative))?;
-            if fs::read(source.join(relative))? != expected
-                || fs::read(cache.join(relative))? != expected
-            {
-                return Err(io::Error::other(format!(
-                    "Codex ProjectAtlas {version} source/cache asset {relative} does not match its release source"
-                ))
-                .into());
-            }
+    Ok(())
+}
+
+#[test]
+fn codex_plugin_assets_are_version_scoped_and_fail_closed() -> Result<(), Box<dyn Error>> {
+    let fixture = tempfile::tempdir()?;
+    let expected_source = fixture.path().join("expected");
+    let source = fixture.path().join("source");
+    let cache = fixture.path().join("installed-plugin-cache");
+    for relative in CODEX_PLUGIN_BASELINE_ASSETS {
+        for root in [&expected_source, &source, &cache] {
+            let asset = root.join(relative);
+            fs::create_dir_all(asset.parent().ok_or("plugin asset has no parent")?)?;
+            fs::write(asset, relative.as_bytes())?;
         }
     }
+
+    assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5")?;
+
+    for relative in CODEX_PLUGIN_CURRENT_ASSETS {
+        for root in [&expected_source, &source, &cache] {
+            let asset = root.join(relative);
+            fs::create_dir_all(asset.parent().ok_or("plugin asset has no parent")?)?;
+            fs::write(asset, relative.as_bytes())?;
+        }
+    }
+    let candidate_version = env!("CARGO_PKG_VERSION");
+    assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)?;
+
+    let missing_candidate_asset = cache.join(CODEX_PLUGIN_CURRENT_ASSETS[0]);
+    fs::remove_file(&missing_candidate_asset)?;
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)
+        .is_ok()
+    {
+        return Err(io::Error::other("missing candidate cache asset was accepted").into());
+    }
+    fs::write(
+        &missing_candidate_asset,
+        CODEX_PLUGIN_CURRENT_ASSETS[0].as_bytes(),
+    )?;
+
+    let stale_cached_candidate_asset = cache.join(CODEX_PLUGIN_CURRENT_ASSETS[0]);
+    fs::write(&stale_cached_candidate_asset, b"stale")?;
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)
+        .is_ok()
+    {
+        return Err(io::Error::other("stale candidate cache asset was accepted").into());
+    }
+    fs::write(
+        &stale_cached_candidate_asset,
+        CODEX_PLUGIN_CURRENT_ASSETS[0].as_bytes(),
+    )?;
+
+    let stale_candidate_asset = source.join(CODEX_PLUGIN_CURRENT_ASSETS[1]);
+    fs::write(&stale_candidate_asset, b"stale")?;
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, candidate_version)
+        .is_ok()
+    {
+        return Err(io::Error::other("stale candidate source asset was accepted").into());
+    }
+
+    let stale_predecessor_skill = cache.join(CODEX_PLUGIN_BASELINE_ASSETS[1]);
+    fs::write(&stale_predecessor_skill, b"stale")?;
+    if assert_codex_projectatlas_plugin_assets(&expected_source, &source, &cache, "0.4.5").is_ok() {
+        return Err(io::Error::other("stale predecessor skill asset was accepted").into());
+    }
+
     Ok(())
 }
 
