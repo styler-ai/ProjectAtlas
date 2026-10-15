@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "ea95a72aac59e36d66c0d7fe0481928c3a47aebd3b31e6cb3de3be3a0e12633e",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "f0fbcdc31eee95fc817279dd525edaf10eaf80c0ea9c711809eb3a9361880156",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "60fd419d6d39fd2cd5d72327f6ab7dc92231330392fd3e48b35e2cc62c78ca07",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "fa3e67383b839743d9951e0d1599378e18db2a608de5e3103c257b798700a5d5",
@@ -1835,8 +1835,8 @@
     },
     {
       "name": "codex_plugin_assets_are_version_scoped_and_fail_closed",
-      "line": 19929,
-      "end_line": 20016,
+      "line": 19997,
+      "end_line": 20062,
       "owner": "e2e_delivery",
       "attributes": [
         "#[test]"
@@ -7095,8 +7095,8 @@
     {
       "kind": "function",
       "name": "assert_codex_projectatlas_plugin_assets",
-      "line": 19899,
-      "end_line": 19926,
+      "line": 19967,
+      "end_line": 19993,
       "owners": [
         "e2e_delivery"
       ],
@@ -7105,8 +7105,8 @@
     {
       "kind": "function",
       "name": "codex_plugin_assets_are_version_scoped_and_fail_closed",
-      "line": 19929,
-      "end_line": 20016,
+      "line": 19997,
+      "end_line": 20062,
       "owners": [
         "e2e_delivery"
       ],

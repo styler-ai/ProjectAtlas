@@ -19597,7 +19597,13 @@ fn packaged_cli_upgrades_published_predecessor_without_losing_state() -> Result<
                 "Preserve the released authored purpose.",
             )?;
         } else {
-            require_successful_plugin_installer_output(output)?;
+            let output = require_successful_plugin_installer_output(output)?;
+            writeln!(
+                io::stderr(),
+                "published predecessor upgrade: candidate installer stdout:\n{}\npublished predecessor upgrade: candidate installer stderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )?;
         }
     }
     let installed_config: Value =
