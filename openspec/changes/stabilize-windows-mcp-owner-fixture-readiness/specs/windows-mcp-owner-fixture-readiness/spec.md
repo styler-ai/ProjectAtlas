@@ -38,9 +38,19 @@ The readiness repair SHALL retain atomic publication plus exact child PID, start
 - **WHEN** publication, identity validation, or the later installer assertion fails
 - **THEN** the test cleanup stops and waits only for the fixture-owned parent and child processes and leaves unrelated processes untouched
 
+#### Scenario: Routine fixture work has no helper-process startup dependency
+
+- **WHEN** ordinary fixture readiness or teardown runs with a valid owned process identity
+- **THEN** it uses the existing native exact-identity owner, retains the original deadline checks before and after capture, and proves cleanup without depending on PowerShell helper startup
+
+#### Scenario: Deliberate helper failure is recovered
+
+- **WHEN** a helper-failure contract intentionally makes a bounded stop helper fail or time out and exact fallback retires the child
+- **THEN** the original helper failure remains observable, redundant final stop is skipped after confirmed recovery, and unrelated processes remain untouched
+
 ### Requirement: Release and split ownership retain causal proof
 
-The accepted change SHALL pass the focused Windows fixture/installer E2E and the required parallel workspace gate without retry-only acceptance, and #487 SHALL retain exactly one final helper owner after refreshing onto the accepted change.
+The accepted change SHALL pass focused Windows fixture/installer E2E and repeated required parallel workspace proof without retry-only acceptance. The delivery suite SHALL retain the single fixture owner established by historical #487. Dependent #666 SHALL resume its affected native-upgrade proof only after this repair is accepted on main.
 
 #### Scenario: Required workspace gate runs under parallel load
 
@@ -49,7 +59,7 @@ The accepted change SHALL pass the focused Windows fixture/installer E2E and the
 
 #### Scenario: Delivery suite is refreshed
 
-- **WHEN** #487 refreshes its split delivery-test owner onto the accepted #518 main revision
+- **WHEN** #666 refreshes its delivery-test owner onto the accepted #518 main revision
 - **THEN** the readiness helper, delay seam, diagnostics, and causal tests exist exactly once in the final delivery owner and its frozen inventory reflects the real source
 
 #### Scenario: Product surfaces remain unchanged
