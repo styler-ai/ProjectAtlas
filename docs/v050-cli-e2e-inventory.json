@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "8c8805e53005f6be97a2e0a0efaf72ba2ac681af52cfab0ebf85a458e156a7f4",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "3afb5b7c8f5eabee2db676101cd305093bb3fa665ee18b7e77ecd226d7ceb54b",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "60fd419d6d39fd2cd5d72327f6ab7dc92231330392fd3e48b35e2cc62c78ca07",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "fa3e67383b839743d9951e0d1599378e18db2a608de5e3103c257b798700a5d5",
@@ -3853,7 +3853,7 @@
       "kind": "function",
       "name": "write_deep_windows_marketplace_files",
       "line": 15655,
-      "end_line": 15695,
+      "end_line": 15694,
       "owners": [
         "e2e_delivery"
       ],

@@ -15656,14 +15656,13 @@ fn write_deep_windows_marketplace_files(codex_dir: &Path) -> Result<Vec<PathBuf>
     use std::os::windows::ffi::OsStrExt;
 
     // The fixed-width snapshot name adds depth to an otherwise admitted marketplace tree.
+    let relative_directory = Path::new("docs").join("benchmarks");
     let snapshot_directory = codex_dir
         .join(format!(".projectatlas-plugin-state-{}", "0".repeat(32)))
         .join("marketplace-root")
-        .join("docs")
-        .join("benchmarks");
-    let source_directory = fake_codex_projectatlas_marketplace_root(codex_dir)
-        .join("docs")
-        .join("benchmarks");
+        .join(&relative_directory);
+    let source_directory =
+        fake_codex_projectatlas_marketplace_root(codex_dir).join(&relative_directory);
     fs::create_dir_all(&source_directory)?;
     let mut paths = Vec::new();
     for snapshot_length in [259_usize, 260, 300] {
