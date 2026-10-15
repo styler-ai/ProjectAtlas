@@ -10,5 +10,5 @@
 
 ## 3. Integration and Acceptance
 
-- [ ] 3.1 Pass focused fixture and installer E2E, repeated required parallel workspace proof, strict Rust/workspace/OpenSpec/IssueOps checks and hosted Windows gates bound to behavior-relevant inputs; hand off dependent #666 refresh and affected native-upgrade proof for execution after this fix merges, retaining one final fixture owner.
+- [x] 3.1 Pass focused fixture and installer E2E, repeated required parallel workspace proof, strict Rust/workspace/OpenSpec/IssueOps checks and hosted Windows gates bound to behavior-relevant inputs; hand off dependent #666 refresh and affected native-upgrade proof for execution after this fix merges, retaining one final fixture owner.
 - [x] 3.2 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
