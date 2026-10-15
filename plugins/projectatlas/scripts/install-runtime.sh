@@ -1830,9 +1830,6 @@ stage_codex_projectatlas_snapshot() {
   if [ -e "$marketplace_install_record_path" ] || [ -L "$marketplace_install_record_path" ]; then
     validate_codex_projectatlas_snapshot_file "$marketplace_install_record_path" "ProjectAtlas marketplace install record" "$codex_root" || return 1
     marketplace_install_record_existed=true
-  elif [ -n "$installed_version" ]; then
-    printf '%s\n' "warning: Codex ProjectAtlas plugin update skipped: ProjectAtlas marketplace install record is missing." >&2
-    return 1
   fi
 
   snapshot_dir=$(mktemp -d "$codex_root/.projectatlas-plugin-state.XXXXXX") || return 1
