@@ -28381,11 +28381,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     const FLOOD_CHUNKS: usize = 16;
 
     #[cfg(windows)]
-    let system32 = PathBuf::from(
+    let system_command = PathBuf::from(
         std::env::var_os("SystemRoot")
             .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
     )
-    .join(WINDOWS_SYSTEM32_DIR);
+    .join(WINDOWS_SYSTEM32_DIR)
+    .join("cmd.exe");
     let temp = tempfile::tempdir()?;
     let archive = temp.path().join("projectatlas-test.zip");
     let asset = b"release asset fixture";
@@ -28793,7 +28794,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let mut descendant_command = {
         use std::os::windows::process::CommandExt;
 
-        let mut command = StdCommand::new(system32.join("cmd.exe"));
+        let mut command = StdCommand::new(&system_command);
         command
             .args(["/D", "/C"])
             .raw_arg(r#"""%SystemRoot%\System32\ping.exe" -n 6 127.0.0.1""#);
@@ -28859,7 +28860,7 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let completed_parent_with_descendant = || {
         use std::os::windows::process::CommandExt;
 
-        let mut command = StdCommand::new(system32.join("cmd.exe"));
+        let mut command = StdCommand::new(&system_command);
         command
             .args(["/D", "/C"])
             .raw_arg(r#"""%SystemRoot%\System32\cmd.exe" /D /C start "" /B "%SystemRoot%\System32\ping.exe" -n 16 127.0.0.1""#);
