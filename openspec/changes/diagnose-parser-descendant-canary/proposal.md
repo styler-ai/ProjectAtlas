@@ -6,7 +6,8 @@ A controlled fixture separately demonstrates that the former existence check can
 
 ## What Changes
 
-- Reopen bounded diagnostic observation for the native named-object fault: the latest Windows construction diagnostic expired its outer process limit without exposing whether initialization, native setup, or descendant execution was active. Preserve the previously accepted marker-readiness and live-retirement correction. Add fixed phase/elapsed checkpoints and bounded non-secret failure output before changing execution timing or native behavior.
+- Align only the native named-object diagnostic fault with the same probe's existing 30-second compile-inclusive normal command budget. The fresh failure retained initialization and native-compilation checkpoints, then reached the diagnostic's shorter 15-second limit before native setup. Reaping, pipes, and disposal succeeded. This establishes a diagnostic budget mismatch, not why compilation was slow or that 30 seconds necessarily suffices.
+- Preserve the accepted phase/elapsed observation, marker-readiness, and live-retirement corrections. Keep combined-fault and controlled-timeout observations at 15 seconds, descendant execution at 15 seconds, existing reap/pipe allowances, and all product and workflow limits unchanged.
 - Report bounded child exit, exact marker state, and elapsed time at the existing canary failure boundary.
 - Retain the child handle and establish a live admitted descendant before testing job-close cleanup.
 - Repair only the demonstrated fixture or launch defect and verify it through the existing Windows clean construction and complete pack verification.
@@ -28,4 +29,4 @@ Issue #664 owns the existing Windows AppContainer launcher canary and its causal
 
 ## Non-Goals
 
-No containment bypass, removal of token or descendant-cleanup checks, retry-only acceptance, blanket timeout increase, new process framework, runtime/database migration, dependency update, or unrelated workflow change. Stable promotion remains separate #602 work.
+No containment bypass, removal of token or descendant-cleanup checks, retry-only acceptance, blanket timeout increase, new process framework, runtime/database migration, dependency update, or unrelated workflow change. The native diagnostic adopts an existing same-owner budget; product, descendant, combined-fault, controlled-negative, and workflow limits do not increase. Stable promotion remains separate #602 work.

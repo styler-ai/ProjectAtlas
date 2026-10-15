@@ -1501,11 +1501,13 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 Name = 'combined'
                 Fault = 'operation-and-cleanup'
                 ExitCode = 129
+                OperationTimeoutMilliseconds = 15000
             },
             [pscustomobject]@{
                 Name = 'native'
                 Fault = 'descendant-open-not-found'
                 ExitCode = 127
+                OperationTimeoutMilliseconds = 30000
             }
         )) {
             $faultId = [Guid]::NewGuid().ToString('N')
@@ -1537,7 +1539,7 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
             }
             $faultReceipt = Invoke-BoundedDiagnosticChild `
                 -StartInfo $faultStart `
-                -OperationTimeoutMilliseconds 15000
+                -OperationTimeoutMilliseconds $faultRow.OperationTimeoutMilliseconds
             $faultPhases = Format-NamedObjectDiagnosticPhases `
                 -StandardError $faultReceipt.StandardError
             Write-Output (
