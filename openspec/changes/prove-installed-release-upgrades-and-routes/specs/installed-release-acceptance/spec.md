@@ -48,3 +48,8 @@ The existing release workflow SHALL execute the complete CLI/MCP route, predeces
 #### Scenario: One platform or contract fails
 - **WHEN** any required installed contract fails or executes no intended test
 - **THEN** publication remains blocked and no passing sibling platform substitutes for that proof
+
+#### Scenario: Isolated runtime preparation overlaps parallel process launches
+- **WHEN** native acceptance prepares an isolated executable while sibling tests launch processes
+- **THEN** preparation returns a complete independent executable after its writer has retired, with the required executable permissions and selected-runtime binding
+- **AND** copy or launch errors fail the required proof gate

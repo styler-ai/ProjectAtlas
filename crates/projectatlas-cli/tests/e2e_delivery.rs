@@ -515,7 +515,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 438;
+const CLI_E2E_SYMBOL_COUNT: usize = 440;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -546,7 +546,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "98a3485b146bdf8d1b4f99ee3898dfacf6ef2cd9e16a80ec6a551b0007ee2d4d";
+    "d110c648a93a92770640218975136aba1bb0dacdca06ae052ca8affcd05a7e61";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -6868,7 +6868,7 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     } else {
         "projectatlas"
     });
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -7325,7 +7325,7 @@ fn copy_runtime_into_special_path(
         .file_name()
         .ok_or_else(|| io::Error::other("ProjectAtlas runtime path omitted its file name"))?;
     let copied_runtime = runtime_directory.join(runtime_name);
-    fs::copy(runtime, &copied_runtime)?;
+    copy_executable_fixture(runtime, &copied_runtime)?;
     Ok(copied_runtime)
 }
 
@@ -10208,7 +10208,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
     let runtime_dir = temp.path().join("real runtime");
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(&runtime)?.permissions();
@@ -32962,7 +32962,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     } else {
         "projectatlas"
     });
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -34657,7 +34657,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     #[cfg(unix)]
     {
         fs::create_dir_all(home.join(TEST_POSIX_USER_BIN_DIR))?;
-        fs::copy(&runtime, &retirement_helper)?;
+        copy_executable_fixture(&runtime, &retirement_helper)?;
     }
     for (invalid_runtime_file, forwarder_present) in
         [(false, true), (false, false), (true, true), (true, false)]
@@ -35050,8 +35050,8 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     fs::create_dir_all(&second_runtime_dir)?;
     let first_runtime = first_runtime_dir.join(runtime_name);
     let second_runtime = second_runtime_dir.join(runtime_name);
-    fs::copy(mcp_contract_executable(), &first_runtime)?;
-    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &first_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &second_runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -35433,8 +35433,8 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     fs::create_dir_all(&second_runtime_dir)?;
     let first_runtime = first_runtime_dir.join(runtime_name);
     let second_runtime = second_runtime_dir.join(runtime_name);
-    fs::copy(mcp_contract_executable(), &first_runtime)?;
-    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &first_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &second_runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -36334,7 +36334,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
     let real_runtime = mcp_contract_executable();
-    fs::copy(&real_runtime, &runtime)?;
+    copy_executable_fixture(&real_runtime, &runtime)?;
     let mut permissions = fs::metadata(&runtime)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&runtime, permissions)?;
@@ -36484,6 +36484,124 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     Ok(())
 }
 
+/// Publish a separate executable without a writable descriptor in the test parent.
+fn copy_executable_fixture(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(source)?;
+        if !metadata.is_file() || destination.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "executable fixture copy requires file paths",
+            )
+            .into());
+        }
+        // A concurrent fork can inherit a parent's writable executable descriptor
+        // even when fs::copy closes it before the subsequent exec (Rust #114554).
+        // Waiting for native cp keeps that writable descriptor in its child only.
+        let mut command = StdCommand::new("/bin/cp");
+        command.arg("--").arg(source).arg(destination);
+        let output = run_bounded_output(command, "executable fixture copy")?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "executable fixture copy failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        fs::set_permissions(destination, metadata.permissions())?;
+    }
+    #[cfg(not(unix))]
+    fs::copy(source, destination)?;
+    Ok(())
+}
+
+#[test]
+fn executable_fixture_copies_are_independent_and_launch_in_parallel() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let source = temp.path().join("fixture-source");
+    let destination = temp.path().join("fixture-copy");
+    let contents = b"independent executable fixture contents";
+    fs::write(&source, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+    }
+    copy_executable_fixture(&source, &destination)?;
+    require(
+        fs::read(&destination)? == contents,
+        "executable copy changed its contents",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let source_metadata = fs::metadata(&source)?;
+        let destination_metadata = fs::metadata(&destination)?;
+        require(
+            source_metadata.ino() != destination_metadata.ino(),
+            "executable copy shares its source inode",
+        )?;
+        require(
+            destination_metadata.permissions().mode() & 0o777 == 0o755,
+            "executable copy lost its source permissions",
+        )?;
+    }
+    fs::write(&destination, b"changed copy")?;
+    require(
+        fs::read(&source)? == contents,
+        "writing the executable copy changed its source",
+    )?;
+    let error = copy_executable_fixture(&temp.path().join("missing-source"), &destination)
+        .err()
+        .ok_or_else(|| io::Error::other("an absent executable source must fail"))?;
+    require(
+        error.downcast_ref::<io::Error>().map(io::Error::kind) == Some(io::ErrorKind::NotFound),
+        format!("executable copy lost the missing-source error: {error}"),
+    )?;
+    require(
+        copy_executable_fixture(&source, &temp.path().join("missing-parent/copy")).is_err(),
+        "executable copy accepted a missing destination parent",
+    )?;
+
+    thread::scope(|scope| {
+        let workers = (0..2)
+            .map(|index| {
+                let directory = temp.path().join(format!("parallel-runtime-{index}"));
+                scope.spawn(move || -> Result<(), String> {
+                    fs::create_dir(&directory).map_err(|error| error.to_string())?;
+                    let copied = isolated_installer_runtime(&directory)
+                        .map_err(|error| error.to_string())?;
+                    let mut command = StdCommand::new(&copied);
+                    command.arg("--version");
+                    let output = run_bounded_output(command, "copied executable version")
+                        .map_err(|error| error.to_string())?;
+                    if !output.status.success()
+                        || !String::from_utf8_lossy(&output.stdout)
+                            .contains(env!("CARGO_PKG_VERSION"))
+                    {
+                        return Err(format!("copied runtime identity failed: {output:?}"));
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|panic| {
+                    io::Error::other(format!("executable fixture worker panicked: {panic:?}"))
+                })?
+                .map_err(io::Error::other)?;
+        }
+        Ok::<(), io::Error>(())
+    })?;
+    Ok(())
+}
+
 /// Give each isolated installer authority its own runtime publication path.
 fn isolated_installer_runtime(temp_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let runtime_dir = temp_root.join("projectatlas-installer-runtime");
@@ -36493,7 +36611,7 @@ fn isolated_installer_runtime(temp_root: &Path) -> Result<PathBuf, Box<dyn Error
     } else {
         "projectatlas"
     });
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
