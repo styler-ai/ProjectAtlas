@@ -23,6 +23,12 @@ Construction canaries SHALL distinguish early child exit, missing or invalid rea
 - **THEN** marker existence alone does not end readiness observation
 - **AND** the canary accepts only the valid contents from the still-live child within that deadline
 
+#### Scenario: Native fault diagnostic reaches its outer deadline
+- **WHEN** the native named-object fault subprocess exceeds its outer observation limit before returning its expected classified outcome
+- **THEN** failure preserves fixed phase and elapsed checkpoints plus bounded non-secret owned diagnostic output before cleanup removes the fixture
+- **AND** initialization, native setup, and descendant execution remain distinguishable without inferring an unobserved cause
+- **AND** the existing outer, descendant, pipe, and intentional timeout-negative limits, expected native failure, process reaping, pipe completion, and disposal assertions remain unchanged
+
 ### Requirement: Descendant cleanup proof begins with a live admitted child
 
 The descendant canary SHALL establish a live child with valid containment evidence before asserting job-close cleanup. It MUST prove that closing the existing containment owner retires that child. Diagnostics or fixture repair MUST NOT bypass token checks, extend workflow deadlines, or accept retries as proof.

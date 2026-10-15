@@ -45,7 +45,7 @@
         "574": { "blocked_by": [] },
         "586": { "blocked_by": [] },
         "590": { "blocked_by": [] },
-        "593": { "blocked_by": [] },
+        "593": { "blocked_by": [664] },
         "604": { "blocked_by": [] },
         "605": { "blocked_by": [] },
         "606": { "blocked_by": [] },

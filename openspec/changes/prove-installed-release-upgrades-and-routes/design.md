@@ -38,7 +38,7 @@ The [installed release acceptance flow](../../../docs/v050-release-architecture.
 
 ## Dependencies / Cross-Issue Impact
 
-Issue #593 is a direct child and blocker of #492. It reuses the accepted packaged test and installer boundaries already on main; no open implementation prerequisite remains. The final candidate freeze and clean parser/prepublish sequence restart after this proof repair merges.
+Issue #593 is a direct child and blocker of #492. Its #664 construction-diagnostic observation prerequisite is accepted on main, and it reuses the accepted packaged test and installer boundaries; no open implementation prerequisite remains. The final candidate freeze and clean parser/prepublish sequence restart after this proof repair merges.
 
 ## Open Questions
 
