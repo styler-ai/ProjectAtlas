@@ -57,66 +57,110 @@ function Invoke-BoundedDiagnosticChild {
         PipeCompleted = $false
         Disposed = $false
         ExitCode = -1
+        OperationElapsedMilliseconds = 0L
         StandardOutput = ''
         StandardError = ''
     }
     $process = $null
     $operationFailure = $null
+    $operationClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $outputTask = $null
+    $errorTask = $null
     try {
-        $process = [System.Diagnostics.Process]::Start($StartInfo)
-        if ($null -eq $process) {
-            throw "Could not start bounded diagnostic child."
-        }
-        $outputTask = $process.StandardOutput.ReadToEndAsync()
-        $errorTask = $process.StandardError.ReadToEndAsync()
-        $finished = $process.WaitForExit($OperationTimeoutMilliseconds)
-        if (-not $finished) {
-            $receipt.TimedOut = $true
-            $process.Kill($true)
-            if (-not $process.WaitForExit(5000)) {
-                throw "Timed-out diagnostic child could not be reaped."
+        try {
+            $process = [System.Diagnostics.Process]::Start($StartInfo)
+            if ($null -eq $process) {
+                throw "Could not start bounded diagnostic child."
             }
-        }
-        $receipt.ReapedBeforePipeCollection = $process.HasExited
-        if (-not $receipt.ReapedBeforePipeCollection) {
-            throw "Diagnostic child was not reaped before pipe collection."
-        }
-        $pipeTasks = [System.Threading.Tasks.Task[]]@($outputTask, $errorTask)
-        $receipt.PipeCompleted = [System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)
-        if (-not $receipt.PipeCompleted) {
-            throw "Diagnostic child pipes did not close inside the fixed deadline."
-        }
-        $receipt.StandardOutput = $outputTask.Result
-        $receipt.StandardError = $errorTask.Result
-        if ($receipt.StandardOutput.Length -gt 4096 -or
-            $receipt.StandardError.Length -gt 4096) {
-            throw "Diagnostic child exceeded its fixed pipe-output limit."
-        }
-        $receipt.ExitCode = $process.ExitCode
-    }
-    catch {
-        $operationFailure = $_.Exception
-    }
-    finally {
-        if ($null -ne $process) {
-            try {
-                if (-not $process.HasExited) {
-                    $process.Kill($true)
-                    if (-not $process.WaitForExit(5000)) {
-                        throw "Fallback diagnostic child termination could not be reaped."
-                    }
+            $outputTask = $process.StandardOutput.ReadToEndAsync()
+            $errorTask = $process.StandardError.ReadToEndAsync()
+            $finished = $process.WaitForExit($OperationTimeoutMilliseconds)
+            $receipt.OperationElapsedMilliseconds = $operationClock.ElapsedMilliseconds
+            if (-not $finished) {
+                $receipt.TimedOut = $true
+                $process.Kill($true)
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Timed-out diagnostic child could not be reaped."
                 }
             }
-            finally {
-                $process.Dispose()
-                $receipt.Disposed = $true
+            $receipt.ReapedBeforePipeCollection = $process.HasExited
+            if (-not $receipt.ReapedBeforePipeCollection) {
+                throw "Diagnostic child was not reaped before pipe collection."
+            }
+            $pipeTasks = [System.Threading.Tasks.Task[]]@($outputTask, $errorTask)
+            $receipt.PipeCompleted = [System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)
+            if (-not $receipt.PipeCompleted) {
+                throw "Diagnostic child pipes did not close inside the fixed deadline."
+            }
+            $receipt.StandardOutput = $outputTask.Result
+            $receipt.StandardError = $errorTask.Result
+            if ($receipt.StandardOutput.Length -gt 4096 -or
+                $receipt.StandardError.Length -gt 4096) {
+                throw "Diagnostic child exceeded its fixed pipe-output limit."
+            }
+            $receipt.ExitCode = $process.ExitCode
+        }
+        catch {
+            $operationFailure = $_.Exception
+        }
+        finally {
+            if ($null -ne $process) {
+                try {
+                    if (-not $process.HasExited) {
+                        $process.Kill($true)
+                        if (-not $process.WaitForExit(5000)) {
+                            throw "Fallback diagnostic child termination could not be reaped."
+                        }
+                    }
+                }
+                finally {
+                    $process.Dispose()
+                    $receipt.Disposed = $true
+                }
+            }
+        }
+        if ($null -ne $operationFailure) {
+            throw $operationFailure
+        }
+    }
+    catch {
+        $failure = $_
+        try {
+            $phaseText = ''
+            if ($null -ne $errorTask -and $errorTask.IsCompletedSuccessfully) {
+                $phaseText = $errorTask.Result
+                $phaseText = $phaseText.Substring(0, [Math]::Min(4096, $phaseText.Length))
+            }
+            $phases = Format-NamedObjectDiagnosticPhases -StandardError $phaseText
+            $observation =
+                "operation_elapsed_ms=$($receipt.OperationElapsedMilliseconds), " +
+                "observed_elapsed_ms=$($operationClock.ElapsedMilliseconds), " +
+                "phases=$phases, reaped=$($receipt.ReapedBeforePipeCollection), " +
+                "pipes_completed=$($receipt.PipeCompleted), disposed=$($receipt.Disposed)."
+            $failure.Exception.Data['ProjectAtlasDiagnosticObservation'] = $observation
+            [Console]::Error.WriteLine("Diagnostic child failure observation: $observation")
+        }
+        catch {
+            # Supplemental observation must never replace the original failure.
+        }
+        throw $failure
+    }
+    return $receipt
+}
+
+function Format-NamedObjectDiagnosticPhases {
+    param([string]$StandardError)
+
+    $phases = [System.Collections.Generic.List[string]]::new()
+    foreach ($row in ($StandardError -split '\r?\n')) {
+        if ($row -cmatch '\Anamed-object-phase=(initialization|native-compilation|native-setup|descendant-launch|descendant-wait|descendant-complete|result-write) elapsed_ms=([0-9]{1,10})\z') {
+            if ($phases.Count -lt 7) {
+                $phases.Add("$($Matches[1])@$($Matches[2])ms")
             }
         }
     }
-    if ($null -ne $operationFailure) {
-        throw $operationFailure
-    }
-    return $receipt
+    if ($phases.Count -eq 0) { return 'none' }
+    return $phases -join ','
 }
 
 $production = Get-Item -LiteralPath $ProductionScript -Force
@@ -834,7 +878,8 @@ public static class ProjectAtlasBuildContractFaultProbe
             Console.Out.Write("contract-row\r\n\r\n");
             return 0;
         }
-        Console.Out.Write(new string('a', 4096));
+        Console.Error.WriteLine("named-object-phase=native-compilation elapsed_ms=12");
+        Console.Out.Write(new string('a', 4097));
         return 0;
     }
 }
@@ -1163,6 +1208,62 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 $boundedDiagnosticText.Contains('finally {')) `
             "Bounded diagnostic child changed reap, pipe, or disposal ordering."
 
+        $phaseSummary = Format-NamedObjectDiagnosticPhases -StandardError (
+            "named-object-phase=initialization elapsed_ms=0`n" +
+            "private C:/secret/environment.txt`n" +
+            "named-object-phase=native-compilation elapsed_ms=12`n" +
+            "named-object-phase=unknown elapsed_ms=13`n" +
+            "named-object-phase=descendant-wait elapsed_ms=-1`n" +
+            "named-object-phase=result-write elapsed_ms=99999999999"
+        )
+        Require `
+            ($phaseSummary -ceq 'initialization@0ms,native-compilation@12ms' -and
+                (Format-NamedObjectDiagnosticPhases -StandardError '') -ceq 'none') `
+            "Named-object phase formatting admitted arbitrary or invalid child text."
+        Require `
+            ((Format-NamedObjectDiagnosticPhases -StandardError (
+                (@('named-object-phase=initialization elapsed_ms=0') * 20) -join "`n"
+            )).Split(',').Count -eq 7) `
+            "Named-object phase formatting exceeded its fixed checkpoint count."
+
+        $failureStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $failureStart.FileName = $overflowProbe
+        $failureStart.UseShellExecute = $false
+        $failureStart.CreateNoWindow = $true
+        $failureStart.RedirectStandardOutput = $true
+        $failureStart.RedirectStandardError = $true
+        $observedFailure = $null
+        try {
+            [void](Invoke-BoundedDiagnosticChild `
+                -StartInfo $failureStart -OperationTimeoutMilliseconds 15000)
+        }
+        catch { $observedFailure = $_.Exception }
+        Require `
+            ($null -ne $observedFailure -and
+                $observedFailure.Message -ceq
+                    'Diagnostic child exceeded its fixed pipe-output limit.' -and
+                $observedFailure.Data['ProjectAtlasDiagnosticObservation'] -match
+                    'phases=native-compilation@12ms, reaped=True, pipes_completed=True, disposed=True\.') `
+            "Diagnostic output failure lost its original cause, fixed phase, or disposal evidence."
+
+        $failureStart.FileName = [System.IO.Path]::Combine($testRoot, 'missing-diagnostic-child.exe')
+        $observedFailure = $null
+        try {
+            [void](Invoke-BoundedDiagnosticChild `
+                -StartInfo $failureStart -OperationTimeoutMilliseconds 15000)
+        }
+        catch { $observedFailure = $_.Exception }
+        Require `
+            ($null -ne $observedFailure -and
+                $observedFailure.Data['ProjectAtlasDiagnosticObservation'] -match 'phases=none,') `
+            "Diagnostic startup failure invented a completed stream or lost its observation."
+        $nativeFailure = $observedFailure
+        while ($null -ne $nativeFailure.InnerException) {
+            $nativeFailure = $nativeFailure.InnerException
+        }
+        Require ($nativeFailure -is [System.ComponentModel.Win32Exception]) `
+            "Diagnostic startup observation replaced the original native failure."
+
         $timeoutStart = [System.Diagnostics.ProcessStartInfo]::new()
         $timeoutStart.FileName =
             [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -1437,6 +1538,13 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
             $faultReceipt = Invoke-BoundedDiagnosticChild `
                 -StartInfo $faultStart `
                 -OperationTimeoutMilliseconds 15000
+            $faultPhases = Format-NamedObjectDiagnosticPhases `
+                -StandardError $faultReceipt.StandardError
+            Write-Output (
+                "Named-object $($faultRow.Name) observation: " +
+                "operation_elapsed_ms=$($faultReceipt.OperationElapsedMilliseconds), " +
+                "phases=$faultPhases."
+            )
             Require `
                 (-not $faultReceipt.TimedOut -and
                     $faultReceipt.ReapedBeforePipeCollection -and
@@ -1446,7 +1554,20 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 ("Named-object $($faultRow.Name) fault lost its stable process boundary: " +
                     "timed_out=$($faultReceipt.TimedOut), exit_code=$($faultReceipt.ExitCode), " +
                     "reaped=$($faultReceipt.ReapedBeforePipeCollection), " +
-                    "pipes_completed=$($faultReceipt.PipeCompleted), disposed=$($faultReceipt.Disposed).")
+                    "pipes_completed=$($faultReceipt.PipeCompleted), disposed=$($faultReceipt.Disposed), " +
+                    "operation_elapsed_ms=$($faultReceipt.OperationElapsedMilliseconds), " +
+                    "phases=$faultPhases.")
+            $expectedPhases = if ($faultRow.Name -ceq 'combined') {
+                'initialization,result-write'
+            }
+            else {
+                'initialization,native-compilation,native-setup,descendant-launch,' +
+                    'descendant-wait,descendant-complete,result-write'
+            }
+            Require `
+                (($faultPhases -replace '@[0-9]+ms', '') -ceq $expectedPhases -and
+                    $faultReceipt.StandardOutput.Length -eq 0) `
+                "Named-object fault lost fixed phase evidence or changed its stdout contract."
             $faultRecord = Read-NamedObjectProbeRecord -Path $faultResult
             if ($faultRow.Name -eq 'combined') {
                 $combinedMessage = Format-NamedObjectProbeFailure `
@@ -1481,6 +1602,35 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                     "Descendant OpenSemaphore failure lost its native error code."
             }
         }
+
+        $blockedProbe = "$probeScript.blocked.ps1"
+        $nativeCompilation = 'Add-Type -TypeDefinition $nativeProbeSource -Language CSharp -ErrorAction Stop'
+        Require ($probeSource.Contains($nativeCompilation)) `
+            "Expected the existing native compilation checkpoint."
+        [System.IO.File]::WriteAllText(
+            $blockedProbe,
+            $probeSource.Replace($nativeCompilation, 'Start-Sleep -Seconds 30'),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $faultStart.ArgumentList[6] = $blockedProbe
+        $blockedReceipt = Invoke-BoundedDiagnosticChild `
+            -StartInfo $faultStart `
+            -OperationTimeoutMilliseconds 15000
+        $blockedPhases = Format-NamedObjectDiagnosticPhases `
+            -StandardError $blockedReceipt.StandardError
+        Require `
+            ($blockedReceipt.TimedOut -and
+                $blockedReceipt.ReapedBeforePipeCollection -and
+                $blockedReceipt.PipeCompleted -and $blockedReceipt.Disposed -and
+                ($blockedPhases -replace '@[0-9]+ms', '') -ceq
+                    'initialization,native-compilation') `
+            "Named-object outer timeout lost its last owned phase or cleanup evidence."
+        Write-Output (
+            "Named-object controlled timeout observation: " +
+            "operation_elapsed_ms=$($blockedReceipt.OperationElapsedMilliseconds), " +
+            "phases=$blockedPhases, reaped=$($blockedReceipt.ReapedBeforePipeCollection), " +
+            "pipes_completed=$($blockedReceipt.PipeCompleted), disposed=$($blockedReceipt.Disposed)."
+        )
 
         $diagnosticSeed.Dispose()
 
