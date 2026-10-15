@@ -29383,7 +29383,7 @@ fn cleanup_codex_owner_processes(
 ) -> Result<(), Box<dyn Error>> {
     let cleanup_deadline = codex_owner_cleanup_deadline(Instant::now());
     let child_cleanup_result =
-        stop_windows_fixture_process_until(child_identity, cleanup_deadline, None, None);
+        stop_windows_fixture_process_native(child_identity, cleanup_deadline);
     let kill_result = parent.kill();
     let wait_result = parent.wait();
     let mut failures = Vec::new();
@@ -29443,7 +29443,6 @@ fn read_codex_owner_child_identity_with_test_delay(
         published.process_id,
         readiness_deadline,
         test_delay,
-        None,
     )?;
     if captured.process_id != published.process_id
         || captured.creation_file_time_utc != published.creation_file_time_utc
@@ -29729,9 +29728,8 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
     let codex_fixture = temp.path().join(CODEX_FIXTURE_EXECUTABLE_FILE_NAME);
     compile_codex_mcp_owner_fixture(&codex_fixture)?;
 
-    // Exercise the production readiness helper with prompt publication plus a real PowerShell
-    // identity capture delay beyond the former five-second boundary, while remaining inside the
-    // one absolute readiness deadline.
+    // Deliberate publication and native capture delays share the one readiness deadline,
+    // including delays beyond the former five-second boundary.
     let delayed_identity_file = temp.path().join("delayed-identity.pid");
     let delayed_started = Instant::now();
     let (delayed_parent, delayed_identity) = spawn_codex_owned_obsolete_mcp_with_test_delays(
@@ -29943,8 +29941,8 @@ fn windows_codex_owner_fixture_readiness_is_bounded_and_identity_safe() -> Resul
         .into());
     }
 
-    // Exercise the real production helper when publication and PowerShell identity capture
-    // compose beyond the same absolute readiness deadline. Cleanup must reap the exact retained
+    // Publication and native identity capture delays compose beyond the same absolute
+    // readiness deadline. Cleanup must reap the exact retained
     // child and the held owner without creating a second readiness envelope.
     let boundary_identity_file = temp.path().join("readiness-boundary.pid");
     let boundary_started = Instant::now();
@@ -30156,18 +30154,33 @@ fn capture_windows_process_identity_until(
     process_id: u32,
     deadline: Instant,
     test_delay: Option<Duration>,
-    observation_delay: Option<Duration>,
 ) -> Result<WindowsProcessIdentity, Box<dyn Error>> {
-    if Instant::now() >= deadline {
+    let started = Instant::now();
+    if started >= deadline {
         return Err(io::Error::other(format!(
             "Windows fixture identity capture deadline expired before probing process {process_id}"
         ))
         .into());
     }
-    let capture = spawn_windows_process_identity_capture(process_id, test_delay)?;
-    let capture =
-        reject_windows_identity_capture_started_after_deadline(process_id, capture, deadline)?;
-    capture_windows_process_identity_from_child(process_id, capture, deadline, observation_delay)
+    if let Some(delay) = test_delay {
+        thread::sleep(delay.min(deadline.saturating_duration_since(Instant::now())));
+    }
+    if Instant::now() >= deadline {
+        return Err(io::Error::other(format!(
+            "timed out capturing Windows fixture process identity {process_id} at the readiness deadline (observed after {:?})",
+            started.elapsed()
+        ))
+        .into());
+    }
+    let captured = capture_windows_process_identity(process_id)?;
+    if Instant::now() >= deadline {
+        return Err(io::Error::other(format!(
+            "Windows fixture identity capture completed after the readiness deadline for process {process_id} (observed after {:?})",
+            started.elapsed()
+        ))
+        .into());
+    }
+    Ok(captured)
 }
 
 #[cfg(windows)]
@@ -30387,7 +30400,7 @@ fn stop_windows_fixture_process(identity: &WindowsProcessIdentity) -> Result<(),
         + CODEX_OWNER_CHILD_STOP_BUDGET
         + CODEX_OWNER_CHILD_STOP_FALLBACK_BUDGET
         + CODEX_OWNER_CHILD_STOP_FINAL_BUDGET;
-    stop_windows_fixture_process_until(identity, deadline, None, None)
+    stop_windows_fixture_process_native(identity, deadline)
 }
 
 #[cfg(windows)]
@@ -31075,6 +31088,37 @@ fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
             return Err(error);
         }
     };
+    let native_capture_result = (|| -> Result<(), Box<dyn Error>> {
+        let captured = capture_windows_process_identity_until(
+            identity.process_id,
+            Instant::now() + CODEX_OWNER_READINESS_TIMEOUT,
+            None,
+        )?;
+        require(
+            captured.process_id == identity.process_id
+                && captured.creation_file_time_utc == identity.creation_file_time_utc
+                && captured.executable_path == identity.executable_path,
+            format!("native readiness capture changed the owned identity: {captured:?}"),
+        )?;
+        let expired =
+            capture_windows_process_identity_until(identity.process_id, Instant::now(), None);
+        let delayed = capture_windows_process_identity_until(
+            identity.process_id,
+            Instant::now() + CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT,
+            Some(CODEX_OWNER_IDENTITY_CAPTURE_TEST_DELAY),
+        );
+        require(
+            expired.is_err() && delayed.is_err(),
+            format!(
+                "native readiness capture accepted an expired deadline: expired={expired:?} delayed={delayed:?}"
+            ),
+        )?;
+        let retained = capture_windows_process_identity(identity.process_id)?;
+        require(
+            retained.creation_file_time_utc == identity.creation_file_time_utc,
+            "rejected native capture changed the owned process",
+        )
+    })();
     let started = Instant::now();
     let result = capture_windows_process_identity_with_timeout(
         identity.process_id,
@@ -31091,6 +31135,7 @@ fn windows_fixture_identity_capture_is_bounded() -> Result<(), Box<dyn Error>> {
         return Err(error.into());
     }
     wait_result?;
+    native_capture_result?;
     if result.is_ok()
         || elapsed
             > CODEX_OWNER_IDENTITY_CAPTURE_TEST_TIMEOUT + CODEX_OWNER_READINESS_SCHEDULER_TOLERANCE
