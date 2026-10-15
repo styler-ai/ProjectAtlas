@@ -46,6 +46,12 @@ Stage parsing before the SQLite write transaction. For PDF resource stops, a gue
 
 The separate #627 OpenSpec change owns the fileless map contract; the RC3 release owner must prove the installed map CLI/MCP behavior without assuming a TOON snapshot file.
 
+### Measure PDF startup separately from bounded execution (#625)
+
+A fresh CLI process eagerly translates the fixed build-owned Wasm before its first document. The macOS Intel gate exposed a local ten-second PDF timeout that included that translation; a subsequent unchanged-runtime gate passed, so the historical failure's precise cause remains unconfirmed. Measure cold translation and guest execution separately without treating a passing sample as that diagnosis. The ten-second per-document allowance starts after successful initialization and covers Store setup, guest execution, and output. Fixed trusted module initialization remains under the original captured caller control, checked before and after translation, without renewing an absolute deadline. A library caller supplying no deadline deliberately leaves that trusted initialization without a wall-time deadline; synchronous eager translation already cannot be interrupted mid-call. Retain eager translation, finite guest fuel/memory/output bounds, and generation-fatal caller cancellation/deadline. A guest execution exceeding its allowance requires correcting its demonstrated work. No new timeout setting, parser mode or publication fallback is authorized. The existing index/publication diagram still represents the same ownership and failure boundary.
+
+Required shared platform proof makes #625 a prerequisite of #620 readiness; #666 remains dependent on #620. Native relations and issue-map declare those edges.
+
 ## Open Questions
 
 None.

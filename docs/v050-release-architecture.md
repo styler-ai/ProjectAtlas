@@ -255,7 +255,10 @@ One process-local admission lease covers both document formats and observes call
 cancellation and deadlines while queued, preventing source-worker parallelism from
 multiplying parser memory envelopes. Each parse has 64 MiB linear memory, a 1 MiB
 interpreter value stack, 256 call depth, 500 million total instruction fuel,
-and a ten-second ceiling that respects an earlier caller deadline. Fuel
+and a ten-second ceiling for Store setup, guest execution, and output that respects
+an earlier caller deadline. Fixed trusted module translation runs once per process
+under the original caller control, checked before and after initialization; a
+deadline-free library caller supplies no initialization deadline. Fuel
 suspensions check cancellation; real allocation denial remains a typed limit.
 The host supplies bounded entropy and an empty environment, with no filesystem,
 network, clock, or process capabilities. Page-tree validation and bounded

@@ -6,7 +6,7 @@
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "1d9da7af644f975a48dfe5ece597584da74771c42dd7cd18daa59f1707218c08",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "60fd419d6d39fd2cd5d72327f6ab7dc92231330392fd3e48b35e2cc62c78ca07",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "8a7e15248ee6eb740aebe2809e30d110a055ce0e366e0fc51d6ebf2496e35854",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "fa3e67383b839743d9951e0d1599378e18db2a608de5e3103c257b798700a5d5",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
     }
   },
@@ -19573,7 +19573,7 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "line": 470,
-      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact"
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact --nocapture"
     },
     {
       "workflow": ".github/workflows/ci.yml",
