@@ -7,8 +7,8 @@
 ## 2. Plugin and runtime readiness (#620)
 
 - [x] 2.1 Trace supported Codex marketplace, trusted hook, packaged installer, fresh-shell CLI resolution, generated config, and MCP registration paths; choose the smallest truthful readiness/repair route that the host actually supports.
-- [x] 2.2 Implement and exercise older-runtime/registry, version-matched repair, wrong-project/newer-schema refusal, disabled-hook manual diagnostics, and stale-parent versus fresh-child states without automatic project mutation or database replacement; reserve live Codex trust/disable and running-host restart proof for #492 installed acceptance.
-- [x] 2.3 Run the owning installer/plugin/host checks and independent review; reconcile documentation and architecture with the supported lifecycle and resolve every material finding.
+- [x] 2.2 Implement and exercise older-runtime/registry, version-matched repair, wrong-project/newer-schema refusal, disabled-hook manual diagnostics, and stale-parent versus fresh-child states including native marketplace state without the private install marker, exact absent/present marker preservation and injected replacement rollback, without automatic project mutation or database replacement; reserve live Codex trust/disable and running-host restart proof for #492 installed acceptance.
+- [x] 2.3 Run the owning installer/plugin/host checks, real Windows native-Codex marker-free predecessor repair, required hosted gates and independent review; reconcile documentation and architecture with the supported lifecycle and resolve every material finding.
 
 ## 3. DOCX font-specific symbol continuity (#624)
 
@@ -19,7 +19,7 @@
 
 ## 4. PDF execution-fuel continuity (#625)
 
-- [x] 4.1 Reproduce a valid PDF that exhausts RC2 Wasmi execution fuel; measure fuel, wall time, memory, and output against adversarial controls, distinguish parser fuel from text-index byte caps, and trace document/publication ownership.
-- [x] 4.2 Fix demonstrated parser inefficiency and raise the finite fuel budget if measured valid-input proof justifies it under retained limits; represent remaining exhaustion with exact path, typed reason, and document-local incomplete coverage.
-- [x] 4.3 Add full/incremental CLI and MCP regressions for a valid PDF above the old ceiling and ordinary source beside a PDF that still exhausts retained fuel, plus malformed/oversized inputs, fault/rollback/retry, and supported Windows/Linux/macOS package behavior.
+- [x] 4.1 Reproduce a valid PDF that exhausts RC2 Wasmi execution fuel; measure fuel, wall time, memory, and output against adversarial controls, distinguish parser fuel from text-index byte caps, measure cold module translation separately from document execution after the macOS Intel deadline failure, and trace document/publication ownership.
+- [x] 4.2 Fix demonstrated parser inefficiency and raise the finite fuel budget if measured valid-input proof justifies it under retained limits; represent remaining exhaustion with exact path, typed reason, and document-local incomplete coverage; separate fixed trusted module initialization from the per-document execution allowance without renewing the caller deadline or weakening finite execution limits.
+- [x] 4.3 Add full/incremental CLI and MCP regressions for a valid PDF above the old ceiling and ordinary source beside a PDF that still exhausts retained fuel, plus malformed/oversized inputs, cold startup versus execution timing, caller deadline/cancellation through initialization, fault/rollback/retry, and supported Windows/Linux/macOS package behavior.
 - [x] 4.4 Run `cargo test -p projectatlas-symbols`, the owning qualified CLI E2E, `cargo fmt --check`, affected workspace Clippy/check/tests, OpenSpec and IssueOps gates; obtain independent review and resolve findings.

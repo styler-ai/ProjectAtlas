@@ -249,6 +249,25 @@ fn parser_module() -> Result<&'static Module, DocumentExtractionError> {
         .map_err(|error| malformed(error.clone()))
 }
 
+/// Preserve caller control through shared initialization, then bound document execution.
+fn initialize_parser(
+    control: &IndexWorkControl,
+    stage: IndexWorkStage,
+    initialize: impl FnOnce() -> Result<&'static Module, DocumentExtractionError>,
+) -> Result<(&'static Module, IndexWorkControl), DocumentExtractionError> {
+    control.check(stage)?;
+    let module = initialize();
+    control.check(stage)?;
+    let module = module?;
+    let execution = control.with_timeout_ceiling(
+        control
+            .started_at()
+            .elapsed()
+            .saturating_add(Duration::from_secs(10)),
+    );
+    Ok((module, execution))
+}
+
 /// The only recoverable failures follow the guest's complete admission pass.
 pub(super) enum PdfPages {
     /// Every page produced validated text.
@@ -263,16 +282,8 @@ pub(super) fn extract_pages(
     control: &IndexWorkControl,
     stage: IndexWorkStage,
 ) -> Result<PdfPages, DocumentExtractionError> {
-    let control = control.with_timeout_ceiling(
-        control
-            .started_at()
-            .elapsed()
-            .saturating_add(Duration::from_secs(10)),
-    );
-    control.check(stage)?;
-    let module = parser_module()?;
+    let (module, control) = initialize_parser(control, stage, parser_module)?;
     let engine = module.engine();
-    control.check(stage)?;
     let mut store = Store::new(engine, PdfStoreLimits::default());
     store.limiter(|limits| limits);
     store
@@ -506,6 +517,203 @@ fn word(wire: &mut &[u8]) -> Result<u32, DocumentExtractionError> {
 mod tests {
     use super::*;
     use projectatlas_core::{IndexCancellation, IndexWorkFailure};
+
+    #[test]
+    fn execution_deadline_starts_after_module_initialization() {
+        let module = parser_module().unwrap();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let mut ready_at = control.started_at();
+        let (initialized, execution) =
+            initialize_parser(&control, IndexWorkStage::TextIndex, || {
+                std::thread::sleep(Duration::from_millis(2));
+                ready_at = std::time::Instant::now();
+                Ok(module)
+            })
+            .unwrap();
+        assert!(std::ptr::eq(initialized, module));
+        assert_eq!(execution.started_at(), control.started_at());
+        assert!(execution.deadline().unwrap() >= ready_at + Duration::from_secs(10));
+        assert!(control.deadline().is_none());
+    }
+
+    #[test]
+    fn initialization_preserves_an_earlier_caller_deadline_and_cancellation() {
+        let module = parser_module().unwrap();
+        let control = IndexWorkControl::with_deadline(
+            IndexCancellation::new(),
+            std::time::Instant::now() + Duration::from_secs(1),
+        );
+        let (_, execution) =
+            initialize_parser(&control, IndexWorkStage::TextIndex, || Ok(module)).unwrap();
+        assert_eq!(execution.deadline(), control.deadline());
+        assert_eq!(execution.started_at(), control.started_at());
+        control.cancel();
+        assert!(matches!(
+            execution.check(IndexWorkStage::TextIndex),
+            Err(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::TextIndex
+            })
+        ));
+    }
+
+    #[test]
+    fn stopped_caller_never_initializes_the_parser() {
+        for stage in [IndexWorkStage::TextIndex, IndexWorkStage::SymbolParsing] {
+            for cancelled in [true, false] {
+                let control = if cancelled {
+                    let control = IndexWorkControl::new(IndexCancellation::new(), None);
+                    control.cancel();
+                    control
+                } else {
+                    IndexWorkControl::with_deadline(
+                        IndexCancellation::new(),
+                        std::time::Instant::now(),
+                    )
+                };
+                let mut initialized = false;
+                let result = initialize_parser(&control, stage, || {
+                    initialized = true;
+                    parser_module()
+                });
+                assert!(!initialized);
+                if cancelled {
+                    assert!(
+                        matches!(result, Err(DocumentExtractionError::Work(IndexWorkFailure::Cancelled { stage: stopped })) if stopped == stage)
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(DocumentExtractionError::Work(IndexWorkFailure::DeadlineExceeded { stage: stopped })) if stopped == stage)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn caller_stopped_during_initialization_never_reaches_execution() {
+        let module = parser_module().unwrap();
+        for stage in [IndexWorkStage::TextIndex, IndexWorkStage::SymbolParsing] {
+            for cancelled in [true, false] {
+                let control = IndexWorkControl::new(
+                    IndexCancellation::new(),
+                    (!cancelled).then_some(Duration::from_millis(100)),
+                );
+                let mut initialized = false;
+                let result = initialize_parser(&control, stage, || {
+                    initialized = true;
+                    if cancelled {
+                        control.cancel();
+                    } else {
+                        while control.check(stage).is_ok() {
+                            std::thread::yield_now();
+                        }
+                    }
+                    Ok(module)
+                });
+                assert!(initialized);
+                if cancelled {
+                    assert!(
+                        matches!(result, Err(DocumentExtractionError::Work(IndexWorkFailure::Cancelled { stage: stopped })) if stopped == stage)
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(DocumentExtractionError::Work(IndexWorkFailure::DeadlineExceeded { stage: stopped })) if stopped == stage)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "run alone in a fresh process to measure cold eager translation"]
+    fn cold_parser_startup_and_guest_execution_are_measured() {
+        use std::io::Write as _;
+
+        let started = std::time::Instant::now();
+        parser_module().expect("fixed module");
+        let cold_elapsed = started.elapsed();
+        writeln!(
+            std::io::stderr(),
+            "PDF cold eager module translation: {cold_elapsed:?}"
+        )
+        .unwrap();
+
+        let minimal = super::super::tests::minimal_pdf();
+        let mut document = lopdf::Document::load_mem(&minimal).unwrap();
+        let mut image = lopdf::Dictionary::new();
+        image.set("Subtype", "Image");
+        image.set("Filter", "DCTDecode");
+        let image = document.add_object(lopdf::Stream::new(image, vec![b' '; 2_000_001]));
+        let mut xobjects = lopdf::Dictionary::new();
+        xobjects.set("Image", image);
+        document
+            .get_dictionary_mut((3, 0))
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("XObject", xobjects);
+        document
+            .get_object_mut((4, 0))
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_content(b"/Image Do\nBT /F1 12 Tf 72 720 Td (Hello PDF) Tj ET\n".to_vec());
+        let mut large_image = Vec::new();
+        document.save_to(&mut large_image).unwrap();
+        assert!(large_image.len() > 2_000_000);
+
+        for (name, bytes) in [("minimal", minimal), ("large opaque image", large_image)] {
+            let started = std::time::Instant::now();
+            let control =
+                IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(10)));
+            let (mut store, instance, extract) = guest_with_input(&bytes);
+            let outcome = run_parser(&mut store, extract, || {
+                control
+                    .check(IndexWorkStage::TextIndex)
+                    .map_err(DocumentExtractionError::from)
+            });
+            let guest_elapsed = started.elapsed();
+            let completed_fuel = match &outcome {
+                Ok(ParserRun::Complete(_)) => Some(TOTAL_FUEL - store.get_fuel().unwrap()),
+                _ => None,
+            };
+            writeln!(
+                std::io::stderr(),
+                "PDF {name} guest setup+execution: {guest_elapsed:?}; cold_plus_guest={:?}; input_bytes={}; completed_fuel={completed_fuel:?}; memory_bytes={}; outcome={outcome:?}",
+                cold_elapsed + guest_elapsed,
+                bytes.len(),
+                instance.get_memory(&store, "memory").unwrap().data(&store).len(),
+            ).unwrap();
+            let status = match outcome.unwrap() {
+                ParserRun::Complete(status) => Some(status),
+                _ => None,
+            }
+            .expect("measured valid PDF stays within retained resource limits");
+            assert!(status >= 0);
+            let output = finish_output(
+                instance,
+                &mut store,
+                status as usize,
+                &control,
+                IndexWorkStage::TextIndex,
+            );
+            writeln!(
+                std::io::stderr(),
+                "PDF {name} output: {:?}; output_bytes={status}; error={:?}",
+                started.elapsed(),
+                output.as_ref().err()
+            )
+            .unwrap();
+            let pages = match output.unwrap() {
+                PdfPages::Complete(pages) => Some(pages),
+                PdfPages::Incomplete(_) => None,
+            }
+            .expect("measured valid PDF has complete output");
+            assert_eq!(pages, vec![(1, "Hello PDF".to_owned())]);
+        }
+    }
 
     fn guest_with_input(
         bytes: &[u8],

@@ -52,7 +52,7 @@
         "607": { "blocked_by": [] },
         "608": { "blocked_by": [] },
         "609": { "blocked_by": [607] },
-        "620": { "blocked_by": [] },
+        "620": { "blocked_by": [625] },
         "624": { "blocked_by": [] },
         "625": { "blocked_by": [] },
         "627": { "blocked_by": [] },

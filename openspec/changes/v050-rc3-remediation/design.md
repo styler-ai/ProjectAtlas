@@ -28,11 +28,11 @@ Stage parsing before the SQLite write transaction. For PDF resource stops, a gue
 
 ## Risks / Trade-offs
 
-- [A startup diagnostic is unavailable when hooks are disabled/untrusted] → Document this host state and retain an explicit manual check/installer route; never claim readiness from plugin cache alone.
-- [A file-local skip could be misread as complete source evidence] → Persist/query typed incomplete coverage and test search, summary, graph, health, and MCP output before publication.
-- [A parser/resource fallback could hide malformed or changing input] → Accepted parser output/fact/memory/work or PDF fuel limits, unresolved DOCX symbol mappings, safely unexamined story types, and live page-number/date fields requiring evaluation on a safely admitted package become typed document-local incomplete coverage. Malformed or unsafe package/ZIP limits, I/O, source change, cancellation, and shared deadline remain generation-fatal.
-- [Shared document coverage changes conflict across issues] → Land one owning boundary first; rebase and reuse it for the other, with independent causal tests.
-- [Mac-only reproduction can overstate Windows impact] → Exercise the same fixtures on supported hosted/packaged platforms and label unobserved behavior as pending until readback.
+- [A startup diagnostic is unavailable when hooks are disabled/untrusted] â†’ Document this host state and retain an explicit manual check/installer route; never claim readiness from plugin cache alone.
+- [A file-local skip could be misread as complete source evidence] â†’ Persist/query typed incomplete coverage and test search, summary, graph, health, and MCP output before publication.
+- [A parser/resource fallback could hide malformed or changing input] â†’ Accepted parser output/fact/memory/work or PDF fuel limits, unresolved DOCX symbol mappings, safely unexamined story types, and live page-number/date fields requiring evaluation on a safely admitted package become typed document-local incomplete coverage. Malformed or unsafe package/ZIP limits, I/O, source change, cancellation, and shared deadline remain generation-fatal.
+- [Shared document coverage changes conflict across issues] â†’ Land one owning boundary first; rebase and reuse it for the other, with independent causal tests.
+- [Mac-only reproduction can overstate Windows impact] â†’ Exercise the same fixtures on supported hosted/packaged platforms and label unobserved behavior as pending until readback.
 
 ## Migration Plan
 
@@ -45,6 +45,18 @@ Stage parsing before the SQLite write transaction. For PDF resource stops, a gue
 #620, #624, #625, and the separately accepted #627 are independent direct children of #492. A shared document-coverage representation first landed by #624 is a baseline for #625 only if that implementation chooses the same storage boundary; then #625 refreshes from accepted main. #602 stable promotion remains separate.
 
 The separate #627 OpenSpec change owns the fileless map contract; the RC3 release owner must prove the installed map CLI/MCP behavior without assuming a TOON snapshot file.
+
+### Preserve native marketplace state without requiring private metadata (#620)
+
+The marketplace list, official source/ref in config, installed plugin inventory/version/source/cache, and canonical safe path ancestry remain admission authorities. `.codex-marketplace-install.json` has no production writer and is not produced by the exercised Codex CLI. Absence therefore cannot alone invalidate an otherwise admitted existing integration. Keep the existing whole-directory snapshot, config/cache backup, locking, atomic replacement and restore owners. If the optional marker exists, validate it as the same safe regular file before copying; a directory, link/reparse point, inaccessible file, ambiguity or unsafe ancestry still refuses before destructive update. Do not synthesize metadata or introduce another snapshot format. Rollback restores exact prior marketplace/config/cache bytes and preserves whether the marker was absent or present.
+
+Use causal fixture cases for absent/present marker success and injected replacement failure with exact restoration, plus existing unsafe-state refusal checks. Execute the actual Windows installer with native Codex against the reproduced marker-free predecessor and inspect ref, plugin version and readiness after repair. Required hosted installer/platform gates remain mandatory. The refreshed #666 native upgrade and final #492 four-platform package acceptance follow this repair on main.
+
+### Measure PDF startup separately from bounded execution (#625)
+
+A fresh CLI process eagerly translates the fixed build-owned Wasm before its first document. The macOS Intel gate exposed a local ten-second PDF timeout that included that translation; a subsequent unchanged-runtime gate passed, so the historical failure's precise cause remains unconfirmed. Measure cold translation and guest execution separately without treating a passing sample as that diagnosis. The ten-second per-document allowance starts after successful initialization and covers Store setup, guest execution, and output. Fixed trusted module initialization remains under the original captured caller control, checked before and after translation, without renewing an absolute deadline. A library caller supplying no deadline deliberately leaves that trusted initialization without a wall-time deadline; synchronous eager translation already cannot be interrupted mid-call. Retain eager translation, finite guest fuel/memory/output bounds, and generation-fatal caller cancellation/deadline. A guest execution exceeding its allowance requires correcting its demonstrated work. No new timeout setting, parser mode or publication fallback is authorized. The existing index/publication diagram still represents the same ownership and failure boundary.
+
+Required shared platform proof makes #625 a prerequisite of #620 readiness; #666 remains dependent on #620. Native relations and issue-map declare those edges.
 
 ## Open Questions
 

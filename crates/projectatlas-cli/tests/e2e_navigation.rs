@@ -11244,6 +11244,24 @@ fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Er
 fn bounded_pdf_and_docx_reach_cli_and_mcp_navigation() -> Result<(), Box<dyn Error>> {
     const PDF_FILE: &str = "guide.pdf";
     const DOCX_FILE: &str = "guide.docx";
+    let scan_number = std::cell::Cell::new(0);
+    let run_scan = |repo: &Path, database: &Path| -> Result<(), Box<dyn Error>> {
+        let number = scan_number.get() + 1;
+        scan_number.set(number);
+        let started = std::time::Instant::now();
+        let result = run_scan(repo, database);
+        writeln!(
+            io::stderr(),
+            "bounded document navigation scan {number}: {:?}",
+            started.elapsed()
+        )?;
+        result.map_err(|error| {
+            io::Error::other(format!(
+                "bounded document navigation scan {number}: {error}"
+            ))
+            .into()
+        })
+    };
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join("bounded-document-navigation");
     let docs = repo.join("docs");

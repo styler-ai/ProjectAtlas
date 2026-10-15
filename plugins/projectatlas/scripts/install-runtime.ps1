@@ -4294,9 +4294,6 @@ function New-ProjectAtlasCodexStateSnapshot {
                 "ProjectAtlas marketplace install record" `
                 $codexRoot
         }
-        elseif ($ProjectAtlasPlugin) {
-            throw "ProjectAtlas marketplace install record is missing"
-        }
 
         $snapshotRoot = Join-Path $codexRoot (".projectatlas-plugin-state-" + [guid]::NewGuid().ToString("N"))
         Assert-ProjectAtlasCodexDirectAncestry $snapshotRoot "Codex state snapshot" $codexRoot
