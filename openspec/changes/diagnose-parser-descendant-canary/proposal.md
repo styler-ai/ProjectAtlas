@@ -6,6 +6,7 @@ A controlled fixture separately demonstrates that the former existence check can
 
 ## What Changes
 
+- Reopen bounded diagnostic observation for the native named-object fault: the latest Windows construction diagnostic expired its outer process limit without exposing whether initialization, native setup, or descendant execution was active. Preserve the previously accepted marker-readiness and live-retirement correction. Add fixed phase/elapsed checkpoints and bounded non-secret failure output before changing execution timing or native behavior.
 - Report bounded child exit, exact marker state, and elapsed time at the existing canary failure boundary.
 - Retain the child handle and establish a live admitted descendant before testing job-close cleanup.
 - Repair only the demonstrated fixture or launch defect and verify it through the existing Windows clean construction and complete pack verification.
