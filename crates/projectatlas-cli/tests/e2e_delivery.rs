@@ -7352,7 +7352,7 @@ fn prepare_real_host_fixture(
         ),
     )?;
     let database = atlas_dir.join("projectatlas.db");
-    let init = Command::cargo_bin("projectatlas")?
+    let init = Command::new(runtime)
         .current_dir(&repo)
         .arg("--db")
         .arg(&database)
