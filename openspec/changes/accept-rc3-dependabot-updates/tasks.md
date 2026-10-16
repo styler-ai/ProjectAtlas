@@ -37,4 +37,4 @@
 ## 8. Yanked ZIP provider replacement (#499)
 
 - [x] 8.1 Replace yanked pinned zip 0.6.6 with non-yanked 9.0.3 and its required compression dependencies; adapt the existing DOCX reader and ZIP fixture/predecessor consumers while preserving exact part identity, duplicate handling, supported compression, bounded expansion, and typed failures without unrelated upgrades or weaker policy.
-- [ ] 8.2 Prove the unchanged locked dependency policy and causal valid, malformed, duplicate, and limit archive cases, mandatory local and current-head hosted affected gates, and independent review; accept the replacement on main before #593 refreshes and obtains a new clean parser handoff and installed-package proof.
+- [x] 8.2 Prove the unchanged locked dependency policy and causal valid, malformed, duplicate, and limit archive cases, mandatory local and current-head hosted affected gates, and independent review; accept the replacement on main before #593 refreshes and obtains a new clean parser handoff and installed-package proof.
