@@ -39,7 +39,7 @@ The [installed release acceptance flow](../../../docs/v050-release-architecture.
 
 ## Dependencies / Cross-Issue Impact
 
-Issue #593 is a direct child and blocker of #492. Its #664 construction-diagnostic observation prerequisite is accepted on main. The installed-package rehearsal subsequently failed the unchanged Rust advisory gate; #499's two compatible security patches are accepted on main at `89ea229121e7172b98d2a002cba00d0eb1fa6078`. This branch includes that dependency baseline; obtain a fresh clean parser handoff and installed-package proof before acceptance. This work reuses the accepted packaged test and installer boundaries. The final candidate freeze and clean parser/prepublish sequence restart after this proof repair merges.
+Issue #593 is a direct child and blocker of #492. Its #664 construction-diagnostic observation prerequisite and #499 dependency repairs are accepted on main. This branch includes the accepted `2a81e133bedc49f96ac3f8902d5f4edc85aae8d0` baseline with rustls 0.23.46, ruzstd 0.9.1, and ZIP 9.0.3, including the preserved DOCX admission contract. The earlier installed-package rehearsals failed the unchanged advisory and yanked-dependency gates; their parser producers remain historical evidence. Obtain a fresh clean parser handoff and installed-package proof for this dependency baseline before acceptance. This work reuses the accepted packaged test and installer boundaries. The final candidate freeze and clean parser/prepublish sequence restart after this proof repair merges.
 
 ## Open Questions
 

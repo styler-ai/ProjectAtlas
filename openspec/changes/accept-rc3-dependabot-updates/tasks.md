@@ -33,3 +33,8 @@
 
 - [x] 7.1 Resolve only rustls 0.23.45 to 0.23.46 and ruzstd 0.9.0 to 0.9.1 in Cargo.lock for RUSTSEC-2026-0346 through RUSTSEC-2026-0349 and RUSTSEC-2026-0344; preserve existing dependency ranges, unrelated packages, completed aggregate tasks, and security policy.
 - [x] 7.2 Prove the patched locked graph passes the existing dependency policy, affected token/parser consumers, mandatory local and current-head hosted platform gates, and independent review; require #593 to refresh from accepted patched main before restarting clean parser and installed-package acceptance.
+
+## 8. Yanked ZIP provider replacement (#499)
+
+- [x] 8.1 Replace yanked pinned zip 0.6.6 with non-yanked 9.0.3 and its required compression dependencies; adapt the existing DOCX reader and ZIP fixture/predecessor consumers while preserving exact part identity, duplicate handling, supported compression, bounded expansion, and typed failures without unrelated upgrades or weaker policy.
+- [x] 8.2 Prove the unchanged locked dependency policy and causal valid, malformed, duplicate, and limit archive cases, mandatory local and current-head hosted affected gates, and independent review; accept the replacement on main before #593 refreshes and obtains a new clean parser handoff and installed-package proof.

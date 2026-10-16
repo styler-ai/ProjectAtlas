@@ -239,7 +239,7 @@ The same extraction result supplies bounded literal content summaries and sugges
 purposes before its sparse graph is published; authored purposes remain unchanged.
 The document boundary pins a fixed `pdf-extract` `0.12.0+projectatlas` guest
 with `lopdf` `0.44.0`, the `wasmi`/`wasmi_core` `2.0.0` host, `quick-xml`
-`0.42.0`, and `zip` `0.6.6` (ZIP defaults disabled, only `deflate` enabled).
+`0.42.0`, and `zip` `9.0.3` (ZIP defaults disabled, only `deflate-flate2-zlib-rs` enabled).
 The PDF guest is embedded build-owned code; callers cannot select modules.
 Linux x86-64 with the repository-pinned Rust toolchain and locked WASI dependency
 tree is its canonical builder. `packaging/pdf-parser/build.py --install-target

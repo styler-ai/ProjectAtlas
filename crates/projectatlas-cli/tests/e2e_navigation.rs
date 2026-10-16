@@ -84,7 +84,7 @@ use support::{
 };
 use yaml_rust2::{Yaml, YamlLoader};
 use zip::ZipWriter;
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions as FileOptions;
 
 const TEST_REPO_DIR: &str = "repo";
 
