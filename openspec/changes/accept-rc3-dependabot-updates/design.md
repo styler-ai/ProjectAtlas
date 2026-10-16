@@ -30,6 +30,22 @@ Reuse #499 for all three existing bot PRs; do not create one issue per PR. PR #6
 
 DOMPurify 3.4.13 in the Mermaid lockfile is affected by GHSA-p98j-92pf-mc4p. The existing Mermaid range admits patched 3.4.16; update that locked package and compatible source-map-js 1.2.2 for GHSA-68fv-2mgg-jv7q, preserving the manifest and unrelated versions. Reopen #499 for this residual patch, keep its completed tasks, and validate installed-lock parsing and inspect the low-severity audit while retaining the existing moderate-severity gate. Close it after current-head acceptance, merge, and default-branch alert readback. No new dependency owner or audit framework is needed. KaTeX 0.16.47 remains affected by low-severity GHSA-238p-pmpm-9mq7: patched 0.18.2 is outside Mermaid's existing ^0.16.45 range, and the recommended Mermaid downgrade breaks the accepted dependency baseline. The checker calls mermaid.parse on diagram text; the inspected route does not render math or insert unsanitized HTML, so the advisory's prototype-pollution and math-rendering conditions are not established here. Retain and explicitly disposition this low finding; revisit it when Mermaid admits the patched range or the checker gains rendering. Do not override transitive ranges, suppress the advisory, or change the audit gate.
 
+### Patch the demonstrated Rust advisory gate
+
+The installed-package rehearsal refuses rustls 0.23.45 for RUSTSEC-2026-0346
+through RUSTSEC-2026-0349 and ruzstd 0.9.0 for RUSTSEC-2026-0344. Resolve only
+those Cargo.lock entries to compatible patches 0.23.46 and 0.9.1. Preserve the
+manifest, unrelated locked packages, deny policy, completed tasks, and deferred
+bot updates. The rustls path belongs to the optional grammar build dependency;
+ruzstd is used by token tooling. Use the existing dependency gate and consumer
+tests, mandatory local checks, current-head hosted platform proof, and independent
+review. No new harness, dependency override, or advisory exception is needed.
+
+#499 remains the owner and release blocker. #593 waits for this accepted baseline,
+then refreshes from main and obtains a new clean parser handoff and installed
+package proof. A Cargo.lock change invalidates the earlier parser producer; retain
+its historical success without reusing it for the patched graph.
+
 ### Adapt only the grouped update's actual source break
 
 Use RMCP 3.5's supported server/client configuration type names at existing adapter boundaries. Preserve initialize payloads and exact selected-root behavior with MCP tests. Prove native optional-parser loading at the updated language-pack version on supported Windows/Linux hosts; on macOS x64/arm64 prove typed `unsupported_containment` before worker launch and unchanged built-in parsing.

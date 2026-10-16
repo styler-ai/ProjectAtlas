@@ -28,3 +28,8 @@
 
 - [x] 6.1 Resolve the existing dependency ranges to patched DOMPurify 3.4.16 and source-map-js 1.2.2 in the Mermaid lockfile for GHSA-p98j-92pf-mc4p and GHSA-68fv-2mgg-jv7q; preserve the manifest and unrelated dependency versions, and verify the exact locked delta under aggregate #499.
 - [x] 6.2 Prove lockfile installation and valid and invalid Mermaid parsing, inspect the low-severity dependency audit, remediate compatible findings and document the remaining KaTeX compatibility and parser-only reachability disposition while retaining the repository audit gate; run OpenSpec, IssueOps, required affected local and current-head hosted checks, and resolve independent and automated review findings before acceptance.
+
+## 7. Rust dependency security patches (#499)
+
+- [x] 7.1 Resolve only rustls 0.23.45 to 0.23.46 and ruzstd 0.9.0 to 0.9.1 in Cargo.lock for RUSTSEC-2026-0346 through RUSTSEC-2026-0349 and RUSTSEC-2026-0344; preserve existing dependency ranges, unrelated packages, completed aggregate tasks, and security policy.
+- [x] 7.2 Prove the patched locked graph passes the existing dependency policy, affected token/parser consumers, mandatory local and current-head hosted platform gates, and independent review; require #593 to refresh from accepted patched main before restarting clean parser and installed-package acceptance.
