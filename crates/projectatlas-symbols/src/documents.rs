@@ -691,14 +691,20 @@ fn check_memory_budget(observed: usize) -> Result<(), DocumentExtractionError> {
 
 /// Admit original central-directory records, including names hidden by the indexed reader.
 struct DocxArchiveAdmission<'a> {
+    /// Validated unique part names reused by package relationship admission.
     names: HashSet<String>,
+    /// Original central-directory records seen, including duplicate names.
     entries: usize,
+    /// Request cancellation and deadline governing metadata admission.
     control: &'a IndexWorkControl,
+    /// Owning indexing stage reported by cancellation and deadline failures.
     stage: IndexWorkStage,
+    /// Typed admission failure retained across the ZIP visitor's fixed error type.
     failure: Option<DocumentExtractionError>,
 }
 
 impl DocxArchiveAdmission<'_> {
+    /// Count and validate one original part without reading its payload.
     fn admit_part(&mut self, metadata: &ZipFileEntry<'_>) -> Result<(), DocumentExtractionError> {
         self.control.check(self.stage)?;
         self.entries =
@@ -6558,7 +6564,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         }
         rename_zip_fixture_part(
             &mut bytes,
-            &format!("part-{:03}.bin", MAX_DOCUMENT_ENTRIES),
+            &format!("part-{MAX_DOCUMENT_ENTRIES:03}.bin"),
             &format!("part-{:03}.bin", MAX_DOCUMENT_ENTRIES - 1),
         );
         let archive = ZipArchive::new(Cursor::new(&bytes)).expect("valid duplicate ZIP");
