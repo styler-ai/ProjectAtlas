@@ -14,6 +14,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
 use thiserror::Error;
+use zip::read::{ZipFile, ZipFileEntry};
+use zip::result::{ZipError, ZipResult};
+use zip::unstable::stream::{ZipStreamReader, ZipStreamVisitor};
 use zip::{CompressionMethod, ZipArchive};
 
 #[path = "../../../packaging/pdf-parser/limits.rs"]
@@ -686,6 +689,77 @@ fn check_memory_budget(observed: usize) -> Result<(), DocumentExtractionError> {
     Ok(())
 }
 
+/// Admit original central-directory records, including names hidden by the indexed reader.
+struct DocxArchiveAdmission<'a> {
+    names: HashSet<String>,
+    entries: usize,
+    control: &'a IndexWorkControl,
+    stage: IndexWorkStage,
+    failure: Option<DocumentExtractionError>,
+}
+
+impl DocxArchiveAdmission<'_> {
+    fn admit_part(&mut self, metadata: &ZipFileEntry<'_>) -> Result<(), DocumentExtractionError> {
+        self.control.check(self.stage)?;
+        self.entries =
+            self.entries
+                .checked_add(1)
+                .ok_or(DocumentExtractionError::ResourceLimit {
+                    limit: DocumentLimit::EntryCount,
+                    observed: usize::MAX,
+                    maximum: MAX_DOCUMENT_ENTRIES,
+                })?;
+        if self.entries > MAX_DOCUMENT_ENTRIES {
+            return Err(DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::EntryCount,
+                observed: self.entries,
+                maximum: MAX_DOCUMENT_ENTRIES,
+            });
+        }
+        if std::str::from_utf8(metadata.name_raw()).is_err() {
+            return Err(DocumentExtractionError::InvalidDocxPackage {
+                message: "DOCX package part metadata is not UTF-8".to_owned(),
+            });
+        }
+        let name =
+            metadata
+                .name()
+                .map_err(|error| DocumentExtractionError::InvalidDocxPackage {
+                    message: error.to_string(),
+                })?;
+        if name.len() > MAX_DOCX_PART_NAME_BYTES {
+            return Err(DocumentExtractionError::InvalidDocxPackage {
+                message: format!("DOCX package part name exceeds {MAX_DOCX_PART_NAME_BYTES} bytes"),
+            });
+        }
+        if metadata.enclosed_name().is_none()
+            || name.contains('\\')
+            || name.starts_with('/')
+            || !self.names.insert(name.to_string())
+        {
+            return Err(DocumentExtractionError::InvalidDocxPackage {
+                message: format!("unsafe or duplicate package part {name}"),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl ZipStreamVisitor for DocxArchiveAdmission<'_> {
+    fn visit_file<R: Read>(&mut self, _file: &mut ZipFile<'_, R>) -> ZipResult<()> {
+        Err(ZipError::InvalidArchive(
+            "DOCX metadata traversal reached a local entry".into(),
+        ))
+    }
+
+    fn visit_additional_metadata(&mut self, metadata: &ZipFileEntry<'_>) -> ZipResult<()> {
+        self.admit_part(metadata).map_err(|error| {
+            self.failure = Some(error);
+            ZipError::InvalidArchive("DOCX metadata admission failed".into())
+        })
+    }
+}
+
 /// Validate a DOCX ZIP and parse only its declared document part with quick-xml.
 fn extract_docx(
     bytes: &[u8],
@@ -714,9 +788,32 @@ fn extract_docx(
             maximum: MAX_DOCUMENT_ENTRIES,
         });
     }
+    let mut admission = DocxArchiveAdmission {
+        names: HashSet::new(),
+        entries: 0,
+        control,
+        stage,
+        failure: None,
+    };
+    let mut metadata = Cursor::new(bytes);
+    metadata.set_position(archive.central_directory_start());
+    // The stream visitor stops at the first central parse error. The indexed reader above
+    // already validated these same immutable records; this pass only restores their identity/count.
+    let result = ZipStreamReader::new(metadata).visit(&mut admission);
+    if let Some(error) = admission.failure {
+        return Err(error);
+    }
+    result.map_err(|error| DocumentExtractionError::InvalidDocxPackage {
+        message: error.to_string(),
+    })?;
+    if admission.entries != archive.len() {
+        return Err(DocumentExtractionError::InvalidDocxPackage {
+            message: "DOCX metadata traversal is incomplete".to_owned(),
+        });
+    }
+    let names = admission.names;
     let mut compressed_bytes = 0usize;
     let mut expanded_bytes = 0usize;
-    let mut names = HashSet::new();
     for index in 0..archive.len() {
         check_parser_iteration(index, &mut || control.check(stage))?;
         let entry = archive.by_index_raw(index).map_err(|error| {
@@ -724,18 +821,11 @@ fn extract_docx(
                 message: error.to_string(),
             }
         })?;
-        if std::str::from_utf8(entry.name_raw()).is_err() {
-            return Err(DocumentExtractionError::InvalidDocxPackage {
-                message: "DOCX package part metadata is not UTF-8".to_owned(),
-            });
-        }
-        let name = entry.name().to_owned();
-        if name.len() > MAX_DOCX_PART_NAME_BYTES {
-            return Err(DocumentExtractionError::InvalidDocxPackage {
-                message: format!("DOCX package part name exceeds {MAX_DOCX_PART_NAME_BYTES} bytes"),
-            });
-        }
-        let enclosed = entry.enclosed_name().is_some();
+        let name = entry
+            .name()
+            .map_err(|error| DocumentExtractionError::InvalidDocxPackage {
+                message: error.to_string(),
+            })?;
         let compression = entry.compression();
         let compressed_size = entry.compressed_size();
         let expanded_size = entry.size();
@@ -747,6 +837,7 @@ fn extract_docx(
                 message: format!("unsupported compression for package part {name}"),
             });
         }
+        let name = name.into_owned();
         drop(entry);
         archive.by_index(index).map_err(|error| match error {
             zip::result::ZipError::UnsupportedArchive(message) => {
@@ -758,12 +849,6 @@ fn extract_docx(
                 message: error.to_string(),
             },
         })?;
-        if !enclosed || name.contains('\\') || name.starts_with('/') || !names.insert(name.clone())
-        {
-            return Err(DocumentExtractionError::InvalidDocxPackage {
-                message: format!("unsafe or duplicate package part {name}"),
-            });
-        }
         if name.ends_with('/') {
             continue;
         }
@@ -4859,7 +4944,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use zip::CompressionMethod;
     use zip::ZipWriter;
-    use zip::write::FileOptions;
+    use zip::write::SimpleFileOptions as FileOptions;
 
     fn control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), None)
@@ -6402,19 +6487,91 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         let mut bytes = Vec::new();
         {
             let mut writer = ZipWriter::new(Cursor::new(&mut bytes));
-            for value in [b"first".as_slice(), b"second".as_slice()] {
+            for (name, value) in [
+                (DOCX_DOCUMENT_PART, b"first".as_slice()),
+                ("word/duplicat.xml", b"second".as_slice()),
+            ] {
                 writer
-                    .start_file(DOCX_DOCUMENT_PART, FileOptions::default())
+                    .start_file(name, FileOptions::default())
                     .expect("fixture entry");
                 writer.write_all(value).expect("fixture XML");
             }
             writer.finish().expect("fixture archive");
         }
+        rename_zip_fixture_part(&mut bytes, "word/duplicat.xml", DOCX_DOCUMENT_PART);
         let error = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
             .expect_err("duplicate package parts must fail closed");
         assert!(matches!(
             error,
-            DocumentExtractionError::InvalidDocxPackage { .. }
+            DocumentExtractionError::InvalidDocxPackage { message }
+                if message.contains("duplicate package part")
+        ));
+    }
+
+    /// Form malformed duplicate metadata without asking the ZIP writer to admit it.
+    fn rename_zip_fixture_part(bytes: &mut [u8], from: &str, to: &str) {
+        assert_eq!(from.len(), to.len());
+        let positions: Vec<_> = bytes
+            .windows(from.len())
+            .enumerate()
+            .filter_map(|(index, value)| (value == from.as_bytes()).then_some(index))
+            .collect();
+        assert_eq!(positions.len(), 2, "local and central fixture names");
+        for index in positions {
+            bytes[index..index + from.len()].copy_from_slice(to.as_bytes());
+        }
+    }
+
+    #[test]
+    fn duplicate_unreferenced_docx_parts_are_rejected_at_every_position() {
+        let names = ["word/first.bin", "word/other.bin", "word/third.bin"];
+        for name in names {
+            let mut bytes = docx_archive_with_parts(&[
+                (DOCX_DOCUMENT_PART, b"not reached"),
+                (names[0], b"first"),
+                (names[1], b"middle"),
+                (names[2], b"last"),
+                ("word/spare.bin", b"duplicate"),
+            ]);
+            rename_zip_fixture_part(&mut bytes, "word/spare.bin", name);
+            let error = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
+                .expect_err("unreferenced duplicate parts must fail before XML reads");
+            assert!(matches!(
+                error,
+                DocumentExtractionError::InvalidDocxPackage { message }
+                    if message.contains("duplicate package part")
+            ));
+        }
+    }
+
+    #[test]
+    fn docx_entry_budget_counts_records_hidden_by_name_deduplication() {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = ZipWriter::new(Cursor::new(&mut bytes));
+            for index in 0..=MAX_DOCUMENT_ENTRIES {
+                writer
+                    .start_file(format!("part-{index:03}.bin"), FileOptions::default())
+                    .expect("fixture entry");
+            }
+            writer.finish().expect("fixture archive");
+        }
+        rename_zip_fixture_part(
+            &mut bytes,
+            &format!("part-{:03}.bin", MAX_DOCUMENT_ENTRIES),
+            &format!("part-{:03}.bin", MAX_DOCUMENT_ENTRIES - 1),
+        );
+        let archive = ZipArchive::new(Cursor::new(&bytes)).expect("valid duplicate ZIP");
+        assert_eq!(archive.len(), MAX_DOCUMENT_ENTRIES);
+        let error = extract_document_text_controlled(&bytes, "guide.docx", None, &control())
+            .expect_err("all central records count toward the entry limit");
+        assert!(matches!(
+            error,
+            DocumentExtractionError::ResourceLimit {
+                limit: DocumentLimit::EntryCount,
+                observed,
+                maximum: MAX_DOCUMENT_ENTRIES,
+            } if observed == MAX_DOCUMENT_ENTRIES + 1
         ));
     }
 
@@ -6531,7 +6688,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
     }
 
     #[test]
-    fn docx_actual_expansion_is_bounded_despite_forged_catalog_size() {
+    fn docx_forged_catalog_size_is_rejected_before_text_publication() {
         let mut bytes = docx_archive(
             &vec![b'x'; MAX_DOCUMENT_EXPANDED_BYTES + 8192],
             CompressionMethod::Deflated,
@@ -6548,11 +6705,8 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
             .expect_err("actual decompression must be bounded independently of ZIP metadata");
         assert!(matches!(
             error,
-            DocumentExtractionError::ResourceLimit {
-                limit: DocumentLimit::ExpandedBytes,
-                observed,
-                maximum: MAX_DOCUMENT_EXPANDED_BYTES,
-            } if observed > MAX_DOCUMENT_EXPANDED_BYTES
+            DocumentExtractionError::InvalidDocxPackage { message }
+                if message.contains("declared uncompressed size")
         ));
     }
 

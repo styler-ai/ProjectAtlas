@@ -9,6 +9,11 @@ for rustls 0.23.45 (RUSTSEC-2026-0346 through RUSTSEC-2026-0349) and ruzstd 0.9.
 (RUSTSEC-2026-0344). Reopen #499 for compatible patches 0.23.46 and 0.9.1 before
 refreshing #593 and restarting parser and installed-package acceptance.
 
+Those patches are accepted. The next installed-package rehearsal refuses yanked
+zip 0.6.6. The registry currently offers only non-yanked zip 9.0.3; replace the
+pinned provider and adapt its existing consumers under #499 without weakening
+the dependency gate or DOCX archive boundaries.
+
 ## What Changes
 
 - Bind one explicit local ownership reference before incidental upstream changelog references in IssueOps and PR-state, while retaining one-owner and milestone enforcement. Run the required owner/milestone check from protected base-branch workflow code and report a native current-head result from the eligible protected-base job, including Dependabot, without executing PR-head code in the protected validation job.
@@ -16,6 +21,7 @@ refreshing #593 and restarting parser and installed-package acceptance.
 - Adapt the grouped update to supported RMCP server/client configuration types and validate MCP and optional parser-pack behavior without weakening warnings, tests, or platform gates.
 - Update only the Mermaid lockfile to compatible patched DOMPurify 3.4.16 and source-map-js 1.2.2, prove parsing and dependency security, and reopen the existing aggregate without per-dependency issues.
 - Update only the two affected Rust lockfile packages to their compatible patched versions, preserve the manifest and security policy, and prove the affected dependency graph and existing consumers.
+- Replace yanked zip 0.6.6 with non-yanked 9.0.3 using the required compression features; adapt the existing DOCX reader and ZIP fixture consumers while preserving part identity, duplicate refusal, bounded expansion, and typed failures.
 - Reconcile the two issue/task owners, native parent/blocker relations, milestone, and release-owner installed acceptance before RC3 publication.
 
 ## Capabilities
@@ -23,7 +29,7 @@ refreshing #593 and restarting parser and installed-package acceptance.
 ### New Capabilities
 
 - `explicit-pr-owner-binding`: unambiguous ProjectAtlas issue ownership for PRs whose bodies contain upstream changelog references.
-- `rc3-dependency-update-admission`: issue-scoped acceptance of the existing bot PRs and residual Mermaid/Rust security patches with preserved parser, token, MCP, action-install, and parser-pack behavior.
+- `rc3-dependency-update-admission`: issue-scoped acceptance of the existing bot PRs, residual Mermaid/Rust security patches, and ZIP provider replacement with preserved DOCX, parser, token, MCP, action-install, and parser-pack behavior.
 
 ### Modified Capabilities
 
