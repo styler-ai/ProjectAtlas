@@ -286,7 +286,7 @@ jobs:
 
       - name: Retain mismatched PDF guest for comparison
         if: failure() && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mismatched-pdf-guest-linux
           path: .tmp/pdf-parser-build/wasm32-wasip1/release/projectatlas_pdf_parser.wasm
@@ -507,7 +507,7 @@ jobs:
 
       - name: Upload document resource measurements
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: document-resources-${{ matrix.label }}
           path: .tmp/document-resources.json
@@ -644,7 +644,7 @@ jobs:
 
       - name: Upload hosted PTY token dashboards
         if: matrix.label != 'windows' && contains(matrix.contracts, 'tui')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: token-tui-pty-${{ matrix.label }}
           path: |
