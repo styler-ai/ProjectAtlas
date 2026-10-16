@@ -45,3 +45,15 @@ A residual dependency security alert found before RC3 publication SHALL remain u
 #### Scenario: Patched sanitizer is already compatible
 - **WHEN** the locked DOMPurify and source-map-js versions are affected by GHSA-p98j-92pf-mc4p and GHSA-68fv-2mgg-jv7q, and the existing dependency ranges admit patched DOMPurify 3.4.16 and source-map-js 1.2.2
 - **THEN** update only those lockfile packages under reopened #499, preserve completed aggregate tasks, and close the aggregate after accepted merge and default-branch alert readback
+
+### Requirement: Rust security patches retain the existing gate
+Rust advisories discovered before RC3 publication SHALL use aggregate #499. The
+compatible rustls 0.23.46 and ruzstd 0.9.1 patches SHALL change only their lockfile
+entries, preserve manifest ranges and unrelated packages, and pass the unchanged
+dependency policy and affected local and hosted consumer checks. Earlier accepted
+tasks and explicitly deferred bot updates SHALL retain their disposition.
+
+#### Scenario: The installed-package rehearsal rejects vulnerable locked crates
+- **WHEN** the dependency gate reports RUSTSEC-2026-0346 through RUSTSEC-2026-0349 for rustls 0.23.45 and RUSTSEC-2026-0344 for ruzstd 0.9.0
+- **THEN** patch those two dependencies under #499 without suppressing advisories or weakening the gate
+- **AND** refresh #593 from the accepted patched main before obtaining a fresh clean parser handoff and installed-package proof; a prior Cargo.lock producer does not satisfy that proof
