@@ -653,9 +653,10 @@ upgrade proof. Artifact checks precede installation; read-only snapshots disting
 authored authority from derived freshness. Every supported platform must pass.
 
 Pinned Claude Code and OpenCode readers use generated MCP configurations bound to
-the checksum-verified installed candidate. Both hosts must return the source marker
-through an actual MCP tool call. Missing hosts, test discovery, or installed-runtime
-binding fail the publication gate.
+the checksum-verified installed candidate. The test inventory must contain exactly
+one reader contract. Both hosts must return the source marker from each isolated
+project through an actual MCP tool call. Missing hosts, exact test discovery,
+installed-runtime binding, or source evidence fail the publication gate.
 
 An exercised v0.4.5 Unix database has no native root identity. Ordinary opens and
 initialization refuse its ambiguous legacy path display. After verifying the
