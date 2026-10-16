@@ -4,6 +4,8 @@ Release acceptance currently executes every top-level CLI command and advertised
 
 ## What Changes
 
+- Close the remaining proof intersection: CI exercises real Claude Code and OpenCode readers with a source-built runtime, while release jobs bind direct contracts to installed packages without selecting that reader test. Reuse the existing real-reader integration against the checksum-verified installed candidate on all four native tuples; this is a proof gap, not a reproduced product failure.
+- Repair isolated executable preparation after required Linux proof reports `ETXTBSY` before runtime initialization. Preserve independent fixture copies, selected-runtime binding, permissions, and fail-closed copy/launch errors during parallel tests.
 - Extend the existing packaged CLI behavior contract to reconcile and execute every supported nested route with isolated state and typed positive or refusal outcomes.
 - Require the actual checksum-verified v0.4.5 platform executable to create and exercise a predecessor project before the exact candidate installer updates that same state.
 - Exercise injected installer failure, atomic preservation, repair/retry, authored and derived state continuity, generated host binding, and compatibility-safe rollback/refusal on every supported platform.

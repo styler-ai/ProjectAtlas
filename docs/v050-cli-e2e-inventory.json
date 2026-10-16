@@ -3,7 +3,7 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "8fbd1cc158b344c7c8c55a9a487324b6be17ae54d93dd4bb5f4a15651464ef2e",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "7330dd2f899d9e9f4d8d6a4d36e95f1d3a592a3b459436876ae7b07342840c8d",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "60fd419d6d39fd2cd5d72327f6ab7dc92231330392fd3e48b35e2cc62c78ca07",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "1f05b90c5e5487533029573a6bec7bee4d5dd4ed434574df4d871c6a1b943d5e",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "503c5fadaa516a5c14843623f30b4bdbf763425ad9b7af2c81fcc15cc0b3f86d",
@@ -14,8 +14,8 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 204,
-  "symbol_count": 438,
+  "test_count": 205,
+  "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
     "e2e_delivery": "installer, release, packaged, and plugin contracts",
@@ -1837,6 +1837,15 @@
       "name": "codex_plugin_assets_are_version_scoped_and_fail_closed",
       "line": 20074,
       "end_line": 20138,
+      "owner": "e2e_delivery",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "executable_fixture_copies_are_independent_and_launch_in_parallel",
+      "line": 36522,
+      "end_line": 36603,
       "owner": "e2e_delivery",
       "attributes": [
         "#[test]"
@@ -7119,6 +7128,30 @@
       "name": "codex_plugin_assets_are_version_scoped_and_fail_closed",
       "line": 20074,
       "end_line": 20138,
+      "owners": [
+        "e2e_delivery"
+      ],
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "copy_executable_fixture",
+      "line": 36488,
+      "end_line": 36519,
+      "owners": [
+        "e2e_delivery"
+      ],
+      "attributes": [
+        "/// Publish a separate executable without a writable descriptor in the test parent."
+      ]
+    },
+    {
+      "kind": "function",
+      "name": "executable_fixture_copies_are_independent_and_launch_in_parallel",
+      "line": 36522,
+      "end_line": 36603,
       "owners": [
         "e2e_delivery"
       ],

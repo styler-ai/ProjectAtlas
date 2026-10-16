@@ -652,6 +652,12 @@ The packaged contract runner owns complete route execution and real predecessor
 upgrade proof. Artifact checks precede installation; read-only snapshots distinguish
 authored authority from derived freshness. Every supported platform must pass.
 
+Pinned Claude Code and OpenCode readers use generated MCP configurations bound to
+the checksum-verified installed candidate. The test inventory must contain exactly
+one reader contract. Both hosts must return the source marker from each isolated
+project through an actual MCP tool call. Missing hosts, exact test discovery,
+installed-runtime binding, or source evidence fail the publication gate.
+
 An exercised v0.4.5 Unix database has no native root identity. Ordinary opens and
 initialization refuse its ambiguous legacy path display. After verifying the
 candidate archive and retaining a compatible database backup, the operator uses
@@ -684,5 +690,6 @@ flowchart TD
   Retry --> Continuity[Verify identity, authority, generation, and source continuity]
   Continuity --> Routes[Execute complete CLI routes and live MCP tool cases]
   Routes --> Recovery[Verify compatible recovery and incompatible rollback refusal]
-  Recovery --> Gate[All native tuples pass before publication]
+  Recovery --> Readers[Claude Code and OpenCode read through installed candidate MCP]
+  Readers --> Gate[All native tuples pass before publication]
 ```

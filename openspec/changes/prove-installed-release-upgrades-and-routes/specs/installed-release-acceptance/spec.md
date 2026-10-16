@@ -35,8 +35,21 @@ Every supported prepublish tuple SHALL obtain and checksum-verify the published 
 - **THEN** publication acceptance fails instead of skipping the contract or substituting a local build
 
 ### Requirement: Existing packaged matrix owns complete acceptance
-The existing release workflow SHALL execute the complete CLI/MCP route and predecessor-upgrade contracts against installed packages on Linux x64, Windows x64, macOS x64, and macOS arm64 before publication. The existing live MCP inventory/effect equality SHALL remain authoritative.
+The existing release workflow SHALL execute the complete CLI/MCP route, predecessor-upgrade, and existing real Claude Code and OpenCode reader contracts against checksum-verified installed candidates on Linux x64, Windows x64, macOS x64, and macOS arm64 before publication. The real reader contract SHALL require both pinned hosts, exact nonzero test discovery, isolated project routing, an actual MCP tool call, and source-marker evidence through its existing loopback model. Source-built runtime proof or direct MCP invocation alone SHALL NOT substitute for the packaged host-reader boundary. The existing live MCP inventory/effect equality SHALL remain authoritative.
+
+#### Scenario: Real host reads the installed package
+- **WHEN** each native prepublish tuple invokes the existing real-reader integration
+- **THEN** Claude Code and OpenCode use generated configurations bound to the verified installed candidate and return the expected source marker from each isolated project
+
+#### Scenario: Required packaged reader proof is unavailable
+- **WHEN** either host, exact test discovery, installed-candidate binding, or source-marker evidence is absent
+- **THEN** publication acceptance fails without skipping the test or falling back to a source-built Atlas runtime
 
 #### Scenario: One platform or contract fails
 - **WHEN** any required installed contract fails or executes no intended test
 - **THEN** publication remains blocked and no passing sibling platform substitutes for that proof
+
+#### Scenario: Isolated runtime preparation overlaps parallel process launches
+- **WHEN** native acceptance prepares an isolated executable while sibling tests launch processes
+- **THEN** preparation returns a complete independent executable after its writer has retired, with the required executable permissions and selected-runtime binding
+- **AND** copy or launch errors fail the required proof gate

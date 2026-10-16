@@ -515,7 +515,7 @@ const CLI_E2E_SOURCE_SHA256_BASELINE: &str =
 const CLI_E2E_SOURCE_SHA256_BEFORE_DELETION: &str =
     "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757";
 
-const CLI_E2E_SYMBOL_COUNT: usize = 438;
+const CLI_E2E_SYMBOL_COUNT: usize = 440;
 
 const CLI_E2E_FIXTURE_COUNT: usize = 91;
 
@@ -546,7 +546,7 @@ const CLI_E2E_SUPPORT_USIZE_GREATER_THAN_OWNERS: &[&str] = &["e2e_delivery", "e2
 const CLI_E2E_SUPPORT_COMMUNITY_OWNERS: &[&str] = &["e2e_delivery", "e2e_navigation"];
 
 const CLI_E2E_SYMBOLS_DIGEST: &str =
-    "98a3485b146bdf8d1b4f99ee3898dfacf6ef2cd9e16a80ec6a551b0007ee2d4d";
+    "d110c648a93a92770640218975136aba1bb0dacdca06ae052ca8affcd05a7e61";
 
 const CLI_E2E_FIXTURES_DIGEST: &str =
     "0dd300d503e6f82b6824bff69ac8ae954eac90a6bfb4e52d5ecbb6b3fd9ab61e";
@@ -2606,17 +2606,17 @@ if (-not $failed -or $global:PSModuleAutoLoadingPreference -ne 'All') {
     fs::create_dir_all(&probe_temp)?;
     fs::write(
         &flooding_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
+        "@echo off\r\n\"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_FLOOD_CHILD_PID; $chunk = -join ('x' * 131072); while ($true) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }\"\r\n",
     )?;
     fs::write(
         &timeout_runtime,
-        "@echo off\r\npowershell -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
+        "@echo off\r\n\"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoProfile -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_TIMEOUT_CHILD_PID; Start-Sleep -Seconds 60; [Console]::Out.WriteLine('{\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}')\"\r\n",
     )?;
     let async_runtime = temp.path().join("async-projectatlas.cmd");
     let async_child_pid = temp.path().join("async-child.pid");
     fs::write(
         &async_runtime,
-        "@echo off\r\nstart \"\" /b powershell -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  powershell -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
+        "@echo off\r\nstart \"\" /b \"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoLogo -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath $env:PROJECTATLAS_TEST_ASYNC_CHILD_PID; while ($true) { Start-Sleep -Seconds 60 }\"\r\nfor /L %%i in (1,1,200) do (\r\n  if exist \"%PROJECTATLAS_TEST_ASYNC_CHILD_PID%\" goto child_started\r\n  \"%PROJECTATLAS_TEST_SYSTEM_POWERSHELL%\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 10\"\r\n)\r\nexit /b 2\r\n:child_started\r\necho {\"project\":\"ProjectAtlas\",\"major_version\":3,\"version\":\"0.4.1\",\"capabilities\":[\"mcp\"],\"text_format\":\"TOON\"}\r\nexit /b 0\r\n",
     )?;
     let powershell_runtime = temp.path().join(POWERSHELL_RUNTIME_SCRIPT);
     fs::write(
@@ -6868,7 +6868,7 @@ fn plugin_installer_writes_real_harness_configs() -> Result<(), Box<dyn Error>> 
     } else {
         "projectatlas"
     });
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -7325,7 +7325,7 @@ fn copy_runtime_into_special_path(
         .file_name()
         .ok_or_else(|| io::Error::other("ProjectAtlas runtime path omitted its file name"))?;
     let copied_runtime = runtime_directory.join(runtime_name);
-    fs::copy(runtime, &copied_runtime)?;
+    copy_executable_fixture(runtime, &copied_runtime)?;
     Ok(copied_runtime)
 }
 
@@ -7352,7 +7352,7 @@ fn prepare_real_host_fixture(
         ),
     )?;
     let database = atlas_dir.join("projectatlas.db");
-    let init = Command::cargo_bin("projectatlas")?
+    let init = Command::new(runtime)
         .current_dir(&repo)
         .arg("--db")
         .arg(&database)
@@ -8554,7 +8554,16 @@ fn required_real_host_readers_reject_missing_discovery() -> Result<(), Box<dyn E
 
 #[test]
 fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> {
-    let workflow = fs::read_to_string(workspace_root()?.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    let workspace = workspace_root()?;
+    let workflow = fs::read_to_string(workspace.join(CI_WORKFLOW_RELATIVE_PATH))?;
+    let install =
+        fs::read_to_string(workspace.join(".github/scripts/install-real-host-readers.sh"))?;
+    require(
+        install.lines().any(|line| {
+            line == "npm install --global @anthropic-ai/claude-code@2.1.201 opencode-ai@1.18.10"
+        }),
+        "shared real host installation must retain the exact supported versions",
+    )?;
     let intel_bootstrap = workflow
         .split_once("\"label\": \"macos-x64\"")
         .and_then(|(_, row)| row.split_once('}').map(|(row, _)| row))
@@ -8574,6 +8583,15 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
             format!("{name} must cover plugin platforms and macOS Intel"),
         )?;
     }
+    let install_step = workflow_job_step(
+        &workflow,
+        "e2e-smoke",
+        "Install exact real host CLIs for native reader proof",
+    )?;
+    require(
+        install_step["run"].as_str() == Some("bash .github/scripts/install-real-host-readers.sh"),
+        "CI must use the shared pinned real host installation",
+    )?;
     let step = workflow_job_step(&workflow, "e2e-smoke", "Real installed host reader proof")?;
     let commands = step["run"].as_str().unwrap_or_default();
     for command in [
@@ -8593,6 +8611,84 @@ fn real_host_reader_ci_step_requires_both_hosts() -> Result<(), Box<dyn Error>> 
         workflow.matches(REQUIRE_REAL_HOST_READERS_ENV).count() == 1,
         "required-reader mode must be scoped only to the installed-host proof step".to_owned(),
     )?;
+    let release = fs::read_to_string(workspace.join(RELEASE_WORKFLOW_PATH))?;
+    for (job, required) in [
+        (
+            "prepublish-installer-smoke-unix",
+            &[
+                "runtime=\"${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}\"",
+                "PROJECTATLAS_MCP_CONTRACT_EXECUTABLE=\"$runtime\"",
+                "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT=\"$GITHUB_WORKSPACE/plugins/projectatlas\"",
+                "if ! inventory=\"$(\"$contract\" --list)\"; then",
+                "awk -v expected=\"${test}: test\" '$0 == expected { matches += 1 } END { print matches + 0 }'",
+                "if [ \"$matches\" -ne 1 ]; then",
+                "\"$contract\" \"$test\" --exact --include-ignored --nocapture",
+            ][..],
+        ),
+        (
+            "prepublish-installer-smoke-windows",
+            &[
+                "$env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP \"projectatlas-prepublish\\projectatlas.exe\"",
+                "$env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE \"plugins\\projectatlas\"",
+                "$inventory = @(& pwsh -NoProfile -File $contractRunner --list)",
+                "$LASTEXITCODE -ne 0",
+                "Where-Object { $_ -ceq \"${test}: test\" }",
+                "if ($matches -ne 1) {",
+                "& pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture",
+            ][..],
+        ),
+    ] {
+        let install = workflow_job_step(
+            &release,
+            job,
+            "Install exact real host CLIs for native reader proof",
+        )?;
+        require(
+            install["if"].is_badvalue()
+                && install["shell"].as_str() == Some("bash")
+                && install["run"].as_str()
+                    == Some("bash .github/scripts/install-real-host-readers.sh"),
+            format!("{job} must install both pinned readers on every tuple"),
+        )?;
+        let proof = workflow_job_step(&release, job, "Real installed packaged host reader proof")?;
+        require(
+            proof["if"].is_badvalue()
+                && proof["timeout-minutes"].as_i64() == Some(15)
+                && proof["env"][REQUIRE_REAL_HOST_READERS_ENV].as_str() == Some("1")
+                && proof["env"]["PROJECTATLAS_NO_TELEMETRY"].as_str() == Some("1"),
+            format!("{job} must require both packaged readers on every tuple"),
+        )?;
+        let commands = proof["run"].as_str().unwrap_or_default();
+        for required in required.iter().copied().chain([
+            "installed_hosts_read_generated_configs_and_report_native_status",
+            "Packaged host reader contract inventory failed",
+            "Packaged host reader contract inventory must contain exactly one",
+        ]) {
+            require(
+                commands.contains(required),
+                format!("{job} packaged reader proof omitted {required:?}"),
+            )?;
+        }
+    }
+    require(
+        release.matches(REQUIRE_REAL_HOST_READERS_ENV).count() == 2,
+        "release required-reader mode must be scoped only to the two packaged reader steps",
+    )?;
+    for (job, route) in [
+        (
+            "package-unix",
+            "|installed_hosts_read_generated_configs_and_report_native_status)\n              binary=e2e_delivery ;;",
+        ),
+        (
+            "package-windows",
+            "\"installed_hosts_read_generated_configs_and_report_native_status\" { return \"e2e_delivery.exe\" }",
+        ),
+    ] {
+        require(
+            workflow_job_block(&release, job)?.contains(route),
+            format!("{job} must route the packaged reader contract to its delivery owner"),
+        )?;
+    }
     Ok(())
 }
 
@@ -10112,7 +10208,7 @@ fn posix_installer_accepts_symlinked_runtime_path() -> Result<(), Box<dyn Error>
     let runtime_dir = temp.path().join("real runtime");
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(&runtime)?.permissions();
@@ -28284,6 +28380,13 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     const FLOOD_CHUNK_BYTES: usize = 128 * 1024;
     const FLOOD_CHUNKS: usize = 16;
 
+    #[cfg(windows)]
+    let system_command = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| io::Error::other("SystemRoot is unavailable"))?,
+    )
+    .join(WINDOWS_SYSTEM32_DIR)
+    .join("cmd.exe");
     let temp = tempfile::tempdir()?;
     let archive = temp.path().join("projectatlas-test.zip");
     let asset = b"release asset fixture";
@@ -28689,8 +28792,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
     let server = new_server()?;
     #[cfg(windows)]
     let mut descendant_command = {
-        let mut command = StdCommand::new("cmd");
-        command.args(["/D", "/C", "ping.exe -n 6 127.0.0.1"]);
+        use std::os::windows::process::CommandExt;
+
+        let mut command = StdCommand::new(&system_command);
+        command
+            .args(["/D", "/C"])
+            .raw_arg(r#"""%SystemRoot%\System32\ping.exe" -n 6 127.0.0.1""#);
         command
     };
     #[cfg(unix)]
@@ -28751,12 +28858,12 @@ fn release_asset_server_lifecycle_is_causal_and_bounded() -> Result<(), Box<dyn 
 
     #[cfg(windows)]
     let completed_parent_with_descendant = || {
-        let mut command = StdCommand::new("cmd.exe");
-        command.args([
-            "/D",
-            "/C",
-            "cmd.exe /D /C start /B ping.exe -n 16 127.0.0.1",
-        ]);
+        use std::os::windows::process::CommandExt;
+
+        let mut command = StdCommand::new(&system_command);
+        command
+            .args(["/D", "/C"])
+            .raw_arg(r#"""%SystemRoot%\System32\cmd.exe" /D /C start "" /B "%SystemRoot%\System32\ping.exe" -n 16 127.0.0.1""#);
         command
     };
     #[cfg(unix)]
@@ -32855,7 +32962,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     } else {
         "projectatlas"
     });
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -34550,7 +34657,7 @@ fn plugin_installer_manages_atlas_forwarder_lifecycle_and_argv() -> Result<(), B
     #[cfg(unix)]
     {
         fs::create_dir_all(home.join(TEST_POSIX_USER_BIN_DIR))?;
-        fs::copy(&runtime, &retirement_helper)?;
+        copy_executable_fixture(&runtime, &retirement_helper)?;
     }
     for (invalid_runtime_file, forwarder_present) in
         [(false, true), (false, false), (true, true), (true, false)]
@@ -34943,8 +35050,8 @@ fn plugin_installer_migrates_owned_atlas_forwarder_between_runtime_locations()
     fs::create_dir_all(&second_runtime_dir)?;
     let first_runtime = first_runtime_dir.join(runtime_name);
     let second_runtime = second_runtime_dir.join(runtime_name);
-    fs::copy(mcp_contract_executable(), &first_runtime)?;
-    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &first_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &second_runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -35326,8 +35433,8 @@ fn plugin_installer_serializes_opposite_atlas_forwarder_migrations() -> Result<(
     fs::create_dir_all(&second_runtime_dir)?;
     let first_runtime = first_runtime_dir.join(runtime_name);
     let second_runtime = second_runtime_dir.join(runtime_name);
-    fs::copy(mcp_contract_executable(), &first_runtime)?;
-    fs::copy(mcp_contract_executable(), &second_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &first_runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &second_runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -36227,7 +36334,7 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     fs::create_dir_all(&runtime_dir)?;
     let runtime = runtime_dir.join("projectatlas");
     let real_runtime = mcp_contract_executable();
-    fs::copy(&real_runtime, &runtime)?;
+    copy_executable_fixture(&real_runtime, &runtime)?;
     let mut permissions = fs::metadata(&runtime)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&runtime, permissions)?;
@@ -36377,6 +36484,124 @@ fn posix_atlas_forwarder_preserves_streams_exit_and_interrupt() -> Result<(), Bo
     Ok(())
 }
 
+/// Publish a separate executable without a writable descriptor in the test parent.
+fn copy_executable_fixture(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(source)?;
+        if !metadata.is_file() || destination.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "executable fixture copy requires file paths",
+            )
+            .into());
+        }
+        // A concurrent fork can inherit a parent's writable executable descriptor
+        // even when fs::copy closes it before the subsequent exec (Rust #114554).
+        // Waiting for native cp keeps that writable descriptor in its child only.
+        let mut command = StdCommand::new("/bin/cp");
+        command.arg("--").arg(source).arg(destination);
+        let output = run_bounded_output(command, "executable fixture copy")?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "executable fixture copy failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        fs::set_permissions(destination, metadata.permissions())?;
+    }
+    #[cfg(not(unix))]
+    fs::copy(source, destination)?;
+    Ok(())
+}
+
+#[test]
+fn executable_fixture_copies_are_independent_and_launch_in_parallel() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let source = temp.path().join("fixture-source");
+    let destination = temp.path().join("fixture-copy");
+    let contents = b"independent executable fixture contents";
+    fs::write(&source, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755))?;
+    }
+    copy_executable_fixture(&source, &destination)?;
+    require(
+        fs::read(&destination)? == contents,
+        "executable copy changed its contents",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let source_metadata = fs::metadata(&source)?;
+        let destination_metadata = fs::metadata(&destination)?;
+        require(
+            source_metadata.ino() != destination_metadata.ino(),
+            "executable copy shares its source inode",
+        )?;
+        require(
+            destination_metadata.permissions().mode() & 0o777 == 0o755,
+            "executable copy lost its source permissions",
+        )?;
+    }
+    fs::write(&destination, b"changed copy")?;
+    require(
+        fs::read(&source)? == contents,
+        "writing the executable copy changed its source",
+    )?;
+    let error = copy_executable_fixture(&temp.path().join("missing-source"), &destination)
+        .err()
+        .ok_or_else(|| io::Error::other("an absent executable source must fail"))?;
+    require(
+        error.downcast_ref::<io::Error>().map(io::Error::kind) == Some(io::ErrorKind::NotFound),
+        format!("executable copy lost the missing-source error: {error}"),
+    )?;
+    require(
+        copy_executable_fixture(&source, &temp.path().join("missing-parent/copy")).is_err(),
+        "executable copy accepted a missing destination parent",
+    )?;
+
+    thread::scope(|scope| {
+        let workers = (0..2)
+            .map(|index| {
+                let directory = temp.path().join(format!("parallel-runtime-{index}"));
+                scope.spawn(move || -> Result<(), String> {
+                    fs::create_dir(&directory).map_err(|error| error.to_string())?;
+                    let copied = isolated_installer_runtime(&directory)
+                        .map_err(|error| error.to_string())?;
+                    let mut command = StdCommand::new(&copied);
+                    command.arg("--version");
+                    let output = run_bounded_output(command, "copied executable version")
+                        .map_err(|error| error.to_string())?;
+                    if !output.status.success()
+                        || !String::from_utf8_lossy(&output.stdout)
+                            .contains(env!("CARGO_PKG_VERSION"))
+                    {
+                        return Err(format!("copied runtime identity failed: {output:?}"));
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|panic| {
+                    io::Error::other(format!("executable fixture worker panicked: {panic:?}"))
+                })?
+                .map_err(io::Error::other)?;
+        }
+        Ok::<(), io::Error>(())
+    })?;
+    Ok(())
+}
+
 /// Give each isolated installer authority its own runtime publication path.
 fn isolated_installer_runtime(temp_root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let runtime_dir = temp_root.join("projectatlas-installer-runtime");
@@ -36386,7 +36611,7 @@ fn isolated_installer_runtime(temp_root: &Path) -> Result<PathBuf, Box<dyn Error
     } else {
         "projectatlas"
     });
-    fs::copy(mcp_contract_executable(), &runtime)?;
+    copy_executable_fixture(&mcp_contract_executable(), &runtime)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

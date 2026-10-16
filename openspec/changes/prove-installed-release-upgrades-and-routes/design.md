@@ -8,6 +8,7 @@ Prove complete installed CLI route execution and real v0.4.5-to-candidate contin
 
 ## Decisions
 
+- Run the existing real Claude Code and OpenCode reader integration in every native prepublish tuple with the checksum-verified installed candidate selected by `PROJECTATLAS_MCP_CONTRACT_EXECUTABLE`. Reuse its isolated projects, generated host configurations, loopback model, MCP tool call, and source-marker assertions. Fixture initialization must invoke that supplied runtime too; binding only installer and MCP children leaves a Cargo-built executable dependency in the standalone runner. Require exact test discovery, nonzero execution, and both pinned hosts; missing readers or a Cargo fallback cannot satisfy packaged proof. Keep host installation pins shared with CI and scope required discovery to this contract. Existing accepted product, route, and predecessor-upgrade work remains complete; reopen only package proof and final reconciliation. No active Codex model session or new harness is required.
 - Extend the existing CLI behavior owner with a closed nested-route case set and compare it to the current frozen fixture's subcommands and actions. Each case executes the installed runtime with bounded output and causal filesystem/SQLite assertions. Unsupported parser-pack operations must execute and return the documented typed platform refusal without changing state; supported operations use local verified fixtures or test their specific invalid-input refusal. Help output cannot satisfy a behavior case.
 - Keep the dynamic MCP behavior table unchanged as the authority for every advertised tool. Reuse the existing root, missing-index, mutation, and canary checks instead of copying the tool inventory.
 - Make the published predecessor executable and checksum explicit workflow inputs to one environment-bound contract in the existing delivery/lifecycle runner. The release workflow obtains the platform-matched v0.4.5 asset and published checksum; no ambient PATH runtime or synthetic database substitutes for it.
@@ -21,6 +22,8 @@ Prove complete installed CLI route execution and real v0.4.5-to-candidate contin
 
 ## Risks / Trade-offs
 
+- Required Linux proof reported `ETXTBSY` when launching a freshly copied isolated runtime before installer execution. The unique fixture path and synchronous copy retain no parent-owned handle, but a sibling fork can briefly inherit a writable descriptor while the copy is active; the failed run does not identify that sibling. Keep Unix executable writes in a waited native copy child so the parallel parent never owns the writable descriptor, retain independent file identity and executable permissions, and fail on copy or launch errors. Windows retains its existing copy path. Verify copy identity/content, error behavior, and concurrent execution through the existing fixture boundary. This addresses the application-level ownership mechanism described in [Rust issue 114554](https://github.com/rust-lang/rust/issues/114554) without claiming the historical retaining process was observed.
+- Cargo's native runtime search directories can exceed CMD's inherited PATH lookup limit. Generated Windows fault fixtures must use the existing absolute PowerShell and System32 tool identities instead of ambient `powershell`, `ping`, or `cmd` lookup; preserve their timing, descendant structure, and process-ownership assertions.
 - Ambient runtime or host state could create false proof: pass explicit executable, plugin, database, and isolated profile paths and preserve unrelated canaries.
 - A help-only case or wrong nested dispatch could pass: reconcile case coverage with the frozen route inventory and assert state/output for the actual route.
 - Schema-specific snapshots could reject legitimate migration or hide loss: compare authored authority and stable identity separately from derived freshness, and retain a complete predecessor backup for refusal/recovery assertions.
@@ -36,7 +39,7 @@ The [installed release acceptance flow](../../../docs/v050-release-architecture.
 
 ## Dependencies / Cross-Issue Impact
 
-Issue #593 is a direct child and blocker of #492. It reuses the accepted packaged test and installer boundaries already on main; no open implementation prerequisite remains. The final candidate freeze and clean parser/prepublish sequence restart after this proof repair merges.
+Issue #593 is a direct child and blocker of #492. Its #664 construction-diagnostic observation prerequisite and #499 dependency repairs are accepted on main. This branch includes the accepted `2a81e133bedc49f96ac3f8902d5f4edc85aae8d0` baseline with rustls 0.23.46, ruzstd 0.9.1, and ZIP 9.0.3, including the preserved DOCX admission contract. The earlier installed-package rehearsals failed the unchanged advisory and yanked-dependency gates; their parser producers remain historical evidence. Obtain a fresh clean parser handoff and installed-package proof for this dependency baseline before acceptance. This work reuses the accepted packaged test and installer boundaries. The final candidate freeze and clean parser/prepublish sequence restart after this proof repair merges.
 
 ## Open Questions
 
