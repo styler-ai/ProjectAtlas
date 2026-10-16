@@ -57,3 +57,16 @@ tasks and explicitly deferred bot updates SHALL retain their disposition.
 - **WHEN** the dependency gate reports RUSTSEC-2026-0346 through RUSTSEC-2026-0349 for rustls 0.23.45 and RUSTSEC-2026-0344 for ruzstd 0.9.0
 - **THEN** patch those two dependencies under #499 without suppressing advisories or weakening the gate
 - **AND** refresh #593 from the accepted patched main before obtaining a fresh clean parser handoff and installed-package proof; a prior Cargo.lock producer does not satisfy that proof
+
+### Requirement: Yanked ZIP dependencies retain archive and release boundaries
+A yanked ZIP provider found before RC3 publication SHALL remain under #499 and
+block acceptance. Replace pinned zip 0.6.6 with non-yanked 9.0.3 and adapt only
+its existing consumers and required dependency graph. Preserve exact DOCX part
+identity, duplicate handling, supported compression, bounded expansion, typed
+failures, completed tasks, deferred updates, and the unchanged dependency gate.
+
+#### Scenario: The registry has no eligible smaller replacement
+- **WHEN** the unchanged dependency gate refuses zip 0.6.6 as yanked and only zip 9.0.3 remains non-yanked
+- **THEN** update the canonical ZIP provider and existing reader/fixture consumers without suppressing the failure or introducing another archive framework
+- **AND** require causal archive tests, affected local and current-head hosted proof, and independent review before accepting the replacement on main
+- **AND** refresh #593 and obtain a new clean parser handoff and installed-package proof for the changed lockfile

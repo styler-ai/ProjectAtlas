@@ -46,6 +46,31 @@ then refreshes from main and obtains a new clean parser handoff and installed
 package proof. A Cargo.lock change invalidates the earlier parser producer; retain
 its historical success without reusing it for the patched graph.
 
+### Replace the yanked ZIP provider at its existing consumers
+
+The next installed-package rehearsal refuses zip 0.6.6 as yanked. The registry
+currently offers only non-yanked 9.0.3, whose minimum Rust version fits the pinned
+toolchain. Replace the workspace pin with that canonical provider, retain only
+the required compression features, and adapt the existing DOCX reader and ZIP
+fixture/predecessor consumers. Preserve exact part-name identity and duplicate
+handling, supported compression, bounded expansion, and typed invalid-input
+behavior. Do not add an archive framework, suppress yanked packages, weaken the
+dependency gate, or accept unrelated upgrades. Record the resulting locked delta
+and prove valid, malformed, duplicate, and limit cases at the owning consumers.
+
+Disable defaults and select only `deflate-flate2-zlib-rs`; do not add an otherwise
+unused dependency for feature unification. Zip 9's indexed reader deduplicates
+raw names, so preserve DOCX duplicate-part refusal and original entry budgets
+through its canonical central-metadata visitor after normal archive validation
+on the same immutable bytes. This public visitor is explicitly unstable and
+therefore requires the exact `=9.0.3` pin. It must not replace archive validation,
+decompress unrelated members, or introduce manual ZIP-header parsing.
+
+Keep completed #499 tasks and the explicit deferred bot scope. #593 waits for the
+accepted replacement on main, then refreshes and obtains a new clean parser
+handoff and installed-package proof; the earlier producer is historical evidence
+for its original lockfile.
+
 ### Adapt only the grouped update's actual source break
 
 Use RMCP 3.5's supported server/client configuration type names at existing adapter boundaries. Preserve initialize payloads and exact selected-root behavior with MCP tests. Prove native optional-parser loading at the updated language-pack version on supported Windows/Linux hosts; on macOS x64/arm64 prove typed `unsupported_containment` before worker launch and unchanged built-in parsing.
