@@ -610,7 +610,7 @@ jobs:
           ) >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload immutable construction output
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: parser-pack-${{ matrix.target }}-construction
           path: ${{ runner.temp }}/parser-pack-output/publish/*
@@ -619,7 +619,7 @@ jobs:
           retention-days: 7
 
       - name: Upload reusable Cargo layer receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: parser-pack-${{ matrix.target }}-cargo-layer-receipt
           path: ${{ runner.temp }}/parser-pack-cache-receipt/cargo-layer-${{ matrix.target }}.json
@@ -883,7 +883,7 @@ jobs:
           }
 
       - name: Upload fresh platform proof
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: parser-pack-${{ matrix.target }}-proof
           path: ${{ runner.temp }}/parser-pack-verify-output/platform-proof-${{ matrix.target }}.json
@@ -1275,7 +1275,7 @@ jobs:
 
       - name: Upload absent-pack runtime comparison
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: parser-pack-${{ matrix.target }}-absent-pack-runtime-comparison
           path: ${{ runner.temp }}/parser-pack-runtime-measurement/absent-pack-runtime-comparison-${{ matrix.target }}.json
@@ -1326,7 +1326,7 @@ jobs:
               "$output/optional-parser-pack-proof-aggregate.json"
 
       - name: Upload aggregate proof
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: optional-parser-pack-proof-aggregate
           path: ${{ runner.temp }}/parser-pack-aggregate-output/optional-parser-pack-proof-aggregate.json
@@ -1372,7 +1372,7 @@ jobs:
 
       - name: Upload clean release handoff
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: optional-parser-pack-release-assets
           path: ${{ runner.temp }}/parser-pack-release-output/*
