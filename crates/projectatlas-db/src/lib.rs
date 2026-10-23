@@ -2191,7 +2191,7 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails or stored counts are invalid.
     pub fn load_file_text(&self, path: &str) -> DbResult<Option<IndexedFileText>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "
             SELECT path, content_hash, byte_count, line_count, content
             FROM file_texts
@@ -11970,6 +11970,11 @@ mod tests {
         )?;
         let texts = store.load_file_texts_for_search(Some("needle"), true)?;
         require_eq(&texts.len(), &1, "indexed text row count")?;
+        require_eq(
+            &store.load_file_text("src/main.rs")?,
+            &texts.first().cloned(),
+            "initial persisted-text read",
+        )?;
 
         store.replace_file_texts_for_paths(&["src/main.rs".to_string()], &[])?;
         let missing = store.load_file_text("src/main.rs")?;
@@ -12376,6 +12381,11 @@ mod tests {
         store.replace_file_texts_for_paths(
             std::slice::from_ref(&replacement.path),
             std::slice::from_ref(&replacement),
+        )?;
+        require_eq(
+            &store.load_file_text(&replacement.path)?,
+            &Some(replacement.clone()),
+            "replacement read after repeated hydration",
         )?;
         require_eq(
             &store

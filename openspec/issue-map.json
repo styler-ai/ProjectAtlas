@@ -84,7 +84,7 @@
       "contract": "checklist-v1",
       "primary_issue": 697,
       "owners": [
-        { "issue": 697, "first_task": "1.1", "last_task": "2.2" },
+        { "issue": 697, "first_task": "1.1", "last_task": "2.3" },
         { "issue": 698, "first_task": "3.1", "last_task": "3.2" },
         { "issue": 699, "first_task": "4.1", "last_task": "4.2" }
       ]
