@@ -6,13 +6,19 @@ Give agents reliable Unicode case-insensitive source search without silent candi
 
 ### Requirement: Unicode case-insensitive search preserves matches
 
-Literal and fuzzy case-insensitive searches SHALL honor Unicode case variants through storage and service matching. Candidate acceleration SHALL be a conservative superset. Results SHALL retain original source lines, deterministic pagination, case-sensitive behavior and existing resource limits without database reset.
+Literal and fuzzy case-insensitive searches SHALL use locale-independent Unicode simple case folding, agreeing with regex without canonical normalization. Storage and acceleration SHALL preserve a conservative candidate superset. Results SHALL retain original source lines, deterministic pagination, case-sensitive behavior and existing resource limits without database reset.
 
 #### Scenario: Accented Latin and Cyrillic persisted text
 
 - **WHEN** CLI or MCP searches for FÜR, CAFÉ, GRÜßE or русский against für, café, Grüße or Русский with case sensitivity disabled
 - **THEN** literal and fuzzy modes return the original matching line and regex provides a matching control
 - **AND** case-sensitive variants remain distinct and accelerated/fallback results agree where acceleration applies
+
+#### Scenario: Case folding differs from lowercase conversion
+
+- **WHEN** a caller searches for ΟΣ against οσ, kelvin against Kelvin or source against ſource
+- **THEN** literal and fuzzy modes agree with the Unicode case-insensitive regex control
+- **AND** an ASCII query cannot lose its Unicode source candidate in storage or acceleration
 
 #### Scenario: Bounded or invalid search
 

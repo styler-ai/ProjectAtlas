@@ -23,7 +23,7 @@ None. The repository currently has no relevant populated main-spec capability; t
 
 ## Impact
 
-Storage and service search, CLI parser lifecycle, MCP descriptions and documentation, causal regressions, release metadata and packaging. No new dependencies or database migration. Each bug has a separate implementation PR and independent review. This plan becomes implementation-ready after IssueOps and OpenSpec validation; #492 remains open through RC4 publication.
+Storage and service search, CLI parser lifecycle, MCP descriptions and documentation, causal regressions, release metadata and packaging. No newly resolved package or database migration; search may directly use the already locked regex-syntax Unicode folding implementation. Each bug has a separate implementation PR and independent review. This plan becomes implementation-ready after IssueOps and OpenSpec validation; #492 remains open through RC4 publication.
 
 ## Non-Goals
 
