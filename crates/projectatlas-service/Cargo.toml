@@ -13,6 +13,7 @@ projectatlas-db.workspace = true
 projectatlas-symbols.workspace = true
 globset.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

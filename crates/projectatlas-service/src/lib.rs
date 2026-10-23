@@ -56,6 +56,7 @@ use projectatlas_db::{
 };
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
+use regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
 use serde::Serialize;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1751,13 +1752,28 @@ fn search_indexed_files_with_bounds(
         )
     } else if query.fuzzy {
         LineMatcher::Fuzzy {
-            needle: normalized_search_text(query.pattern, query.case_sensitive),
-            case_sensitive: query.case_sensitive,
+            needle: query
+                .pattern
+                .chars()
+                .map(|character| {
+                    let mut class =
+                        ClassUnicode::new([ClassUnicodeRange::new(character, character)]);
+                    if !query.case_sensitive {
+                        class
+                            .try_case_fold_simple()
+                            .map_err(|source| ServiceError::InvalidInput(source.to_string()))?;
+                    }
+                    Ok(class)
+                })
+                .collect::<ServiceResult<Vec<_>>>()?,
         }
     } else {
         LineMatcher::Literal {
-            needle: normalized_search_text(query.pattern, query.case_sensitive),
-            case_sensitive: query.case_sensitive,
+            needle: query.pattern.to_string(),
+            matcher: RegexBuilder::new(&regex::escape(query.pattern))
+                .case_insensitive(!query.case_sensitive)
+                .build()
+                .map_err(|source| ServiceError::InvalidInput(source.to_string()))?,
         }
     };
     let mut report = SearchReport {
@@ -3518,17 +3534,15 @@ enum LineMatcher {
     Regex(regex::Regex),
     /// Literal substring matching.
     Literal {
-        /// Normalized literal needle.
+        /// Original literal needle for conservative candidate acceleration.
         needle: String,
-        /// Whether matching is case-sensitive.
-        case_sensitive: bool,
+        /// Escaped literal matcher using the regex mode's Unicode folding.
+        matcher: regex::Regex,
     },
     /// Fuzzy subsequence matching.
     Fuzzy {
-        /// Normalized fuzzy needle.
-        needle: String,
-        /// Whether matching is case-sensitive.
-        case_sensitive: bool,
+        /// One exact or Unicode-folded character class per pattern scalar.
+        needle: Vec<ClassUnicode>,
     },
 }
 
@@ -3561,14 +3575,8 @@ impl LineMatcher {
     fn is_match(&self, line: &str) -> bool {
         match self {
             Self::Regex(regex) => regex.is_match(line),
-            Self::Literal {
-                needle,
-                case_sensitive,
-            } => normalized_search_text(line, *case_sensitive).contains(needle),
-            Self::Fuzzy {
-                needle,
-                case_sensitive,
-            } => fuzzy_subsequence_matches(needle, &normalized_search_text(line, *case_sensitive)),
+            Self::Literal { matcher, .. } => matcher.is_match(line),
+            Self::Fuzzy { needle } => fuzzy_subsequence_matches(needle, line),
         }
     }
 }
@@ -3640,7 +3648,7 @@ fn append_line_matches(
     control.check(IndexWorkStage::TextIndex)
 }
 
-/// Normalize search text for case-sensitive or insensitive matching.
+/// Normalize ranking text for case-sensitive or ASCII-insensitive comparison.
 fn normalized_search_text(text: &str, case_sensitive: bool) -> String {
     if case_sensitive {
         text.to_string()
@@ -3650,16 +3658,17 @@ fn normalized_search_text(text: &str, case_sensitive: bool) -> String {
 }
 
 /// Return whether every needle character appears in candidate order.
-fn fuzzy_subsequence_matches(needle: &str, candidate: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let mut needle = needle.chars();
+fn fuzzy_subsequence_matches(needle: &[ClassUnicode], candidate: &str) -> bool {
+    let mut needle = needle.iter();
     let Some(mut expected) = needle.next() else {
         return true;
     };
     for character in candidate.chars() {
-        if character == expected {
+        if expected
+            .ranges()
+            .iter()
+            .any(|range| range.start() <= character && character <= range.end())
+        {
             let Some(next) = needle.next() else {
                 return true;
             };
@@ -6084,6 +6093,114 @@ mod tests {
     }
 
     #[test]
+    fn search_unicode_case_folding_preserves_persisted_lines_and_candidate_parity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        let pairs = [
+            ("FÜR", "für"),
+            ("CAFÉ", "café"),
+            ("GRÜßE", "Grüße"),
+            ("русский", "Русский"),
+            ("ΟΣ", "οσ"),
+            ("ΟΣ", "ος"),
+            ("kelvin", "Kelvin"),
+            ("source", "ſource"),
+            ("NEEDLE", "needle"),
+            ("[FÜR]", "[für]"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        for (pattern, source) in pairs {
+            let content = format!("// heading\n{source}\n{source}\n");
+            fs::write(root.join("src/example.rs"), &content)?;
+            let nodes = [test_node("src/example.rs", "hash-example")];
+            store.replace_scan(&nodes)?;
+            index_test_file_texts(&mut store, root, &nodes)?;
+            let escaped = regex::escape(pattern);
+            for (regex, fuzzy) in [(false, false), (false, true), (true, false)] {
+                let query = if regex { escaped.as_str() } else { pattern };
+                let report = search_indexed_files(
+                    &store,
+                    query,
+                    regex,
+                    fuzzy,
+                    false,
+                    Some("src/*.rs"),
+                    0,
+                    0,
+                    10,
+                )?;
+                require_eq(&report.returned, &2, &format!("Unicode matches: {pattern}"))?;
+                require_eq(&report.total_is_complete, &true, "complete Unicode search")?;
+                require_eq(&report.truncated, &false, "untruncated Unicode search")?;
+                if !regex && !fuzzy && pattern.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+                    require_eq(
+                        &report.strategy,
+                        &"fts5-bm25-candidates-exact-verified".to_string(),
+                        "Unicode equivalents admitted by acceleration",
+                    )?;
+                }
+                for (row, line) in report.results.iter().zip([2, 3]) {
+                    require_eq(&row.line, &line, "original line position")?;
+                    require_eq(&row.text, &source.to_string(), "original Unicode text")?;
+                }
+                let sensitive = search_indexed_files(
+                    &store,
+                    query,
+                    regex,
+                    fuzzy,
+                    true,
+                    Some("src/*.rs"),
+                    0,
+                    0,
+                    10,
+                )?;
+                require_eq(&sensitive.returned, &0, "case-sensitive negative")?;
+                let page = search_indexed_files(
+                    &store,
+                    query,
+                    regex,
+                    fuzzy,
+                    false,
+                    Some("src/*.rs"),
+                    0,
+                    1,
+                    1,
+                )?;
+                require_eq(&page.returned, &1, "bounded Unicode page")?;
+                require_eq(&page.results[0].line, &3, "Unicode page position")?;
+                require_eq(&page.truncated, &true, "Unicode result bound")?;
+                require_eq(&page.total_is_complete, &false, "bounded total is partial")?;
+            }
+        }
+        fs::write(root.join("src/example.rs"), "Straße\ncafe\u{301}\nf_ü_r\n")?;
+        let nodes = [test_node("src/example.rs", "hash-controls")];
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+        for (regex, fuzzy) in [(false, false), (false, true), (true, false)] {
+            for pattern in ["STRASSE", "CAFÉ"] {
+                let report =
+                    search_indexed_files(&store, pattern, regex, fuzzy, false, None, 0, 0, 10)?;
+                require_eq(
+                    &report.returned,
+                    &0,
+                    "no expansion or canonical normalization",
+                )?;
+            }
+            let subsequence =
+                search_indexed_files(&store, "FÜR", regex, fuzzy, false, None, 0, 0, 10)?;
+            require_eq(
+                &subsequence.returned,
+                &usize::from(fuzzy),
+                "Unicode subsequence",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn search_fts_candidates_preserve_fallback_results_and_unsafe_shapes_fall_back()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -6483,7 +6600,7 @@ mod tests {
             &["needle"],
             &LineMatcher::Literal {
                 needle: "needle".to_string(),
-                case_sensitive: true,
+                matcher: RegexBuilder::new("needle").build()?,
             },
             0,
             1,

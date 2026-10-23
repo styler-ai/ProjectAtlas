@@ -439,6 +439,8 @@ This preserves normal atlas reads while preventing usage telemetry writes to `.p
 | Corrupt or intentionally discarded local index | `atlas_reset_index` dry-run first | `projectatlas reset-index --dry-run`, then `projectatlas reset-index --apply` |
 | Migrating old `.purpose` files | `atlas_strip_legacy_purpose` dry-run first | `projectatlas strip-legacy-purpose --dry-run` |
 
+Case-insensitive literal, fuzzy and regex search uses locale-independent Unicode simple case folding while returning original source lines. Canonical normalization and multi-character folding (`ß` to `ss`) are not applied. Case-sensitive search preserves exact scalar distinctions; candidate acceleration must not discard Unicode equivalents.
+
 Default sequence for single-checkout coding tasks (use the MCP column above when routed-worktree behavior is needed):
 
 1. Bind the intended project and refresh if stale.
