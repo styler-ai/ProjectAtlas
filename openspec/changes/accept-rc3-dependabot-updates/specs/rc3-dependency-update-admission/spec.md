@@ -51,11 +51,17 @@ A residual dependency security alert found before RC publication SHALL remain un
 - **THEN** refresh only that locked package under #499, preserve all unrelated entries and the manifest, and repeat locked parser and current-head proof before RC4 acceptance
 
 ### Requirement: Rust security patches retain the existing gate
-Rust advisories discovered before RC3 publication SHALL use aggregate #499. The
-compatible rustls 0.23.46 and ruzstd 0.9.1 patches SHALL change only their lockfile
-entries, preserve manifest ranges and unrelated packages, and pass the unchanged
+Rust advisories discovered before RC publication SHALL use aggregate #499. The
+compatible patches SHALL change only their affected lockfile entries,
+preserve manifest ranges and unrelated packages, and pass the unchanged
 dependency policy and affected local and hosted consumer checks. Earlier accepted
 tasks and explicitly deferred bot updates SHALL retain their disposition.
+
+#### Scenario: RC4 refuses trust-store and I/O safety advisories
+- **WHEN** the unchanged gate reports RUSTSEC-2026-0382 for rustls-webpki 0.103.15, RUSTSEC-2026-0381 for webpki-roots 1.0.9 and RUSTSEC-2026-0386 for tokio 1.53.1
+- **THEN** resolve only those packages to compatible 0.103.16, 1.0.10 and 1.53.3 under #499, preserve manifests and unrelated versions, and inspect consumer API compatibility
+- **AND** retarget the existing exact webpki-roots license exception only after confirming unchanged license identity and content, without broadening the global allowlist
+- **AND** require the unchanged policy and affected local, current-head hosted platform and independent proof before accepting patched main; pending fixes refresh from that baseline and #492 obtains a new exact RC4 parser handoff and installed-package acceptance
 
 #### Scenario: The installed-package rehearsal rejects vulnerable locked crates
 - **WHEN** the dependency gate reports RUSTSEC-2026-0346 through RUSTSEC-2026-0349 for rustls 0.23.45 and RUSTSEC-2026-0344 for ruzstd 0.9.0
