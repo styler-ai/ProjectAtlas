@@ -10,6 +10,10 @@ IssueOps and PR-state independently scan PR title/body text for every local-look
 
 ## Decisions
 
+### Reuse the sanitizer owner for the RC4 audit refusal
+
+The existing Mermaid 11.16.1 range admits DOMPurify 3.4.17. Update only that locked package's version, URL and integrity for GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr and GHSA-c6gr-qvv4-5v3f. Preserve Mermaid, jsdom, source-map-js, the manifest, all unrelated locked versions and the existing moderate-severity audit gate. Reopen the existing task 6 sanitizer slice and reset acceptance; preserve the other completed tasks and the explicitly deferred bot scope. Prove locked installation, valid/invalid parser behavior, unchanged unrelated lock entries, and required current-head gates with independent review. The previously dispositioned low-severity KaTeX finding remains outside Mermaid's compatible range and the parse-only consumer remains unchanged. #492 repeats exact RC4 package acceptance; historical #593 proof remains evidence for its original RC3 inputs.
+
 ### Prefer one standalone ownership line
 
 Recognize an unindented standalone `Fixes #N`, `Closes #N`, `Resolves #N`, or non-closing `Refs #N` line naming this repository before the legacy all-reference fallback. Reject multiple distinct explicit local owners, mixed closing/non-closing references even for the same issue, and standalone ownership declarations naming a foreign repository. Ordinary foreign-qualified mentions and changelog links remain valid context alongside one explicit local owner. Allow repeated references of one kind to the same issue and retain the existing single-reference fallback for older PRs that lack an explicit ownership line. Mirror the rule in IssueOps and PR-state with matching positive/negative tests. The compatibility fallback can still misread one bare upstream HTML `#N` without an explicit line; require an explicit line on each new bot PR rather than claiming the legacy fallback is origin-aware.
