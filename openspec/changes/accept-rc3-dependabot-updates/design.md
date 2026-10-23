@@ -10,6 +10,12 @@ IssueOps and PR-state independently scan PR title/body text for every local-look
 
 ## Decisions
 
+### Patch the RC4 trust-store and I/O safety refusal
+
+The webpki-roots license remains CDLA-Permissive-2.0 with byte-identical LICENSE content. Retarget only its existing exact version exception from 1.0.9 to 1.0.10; do not broaden the global license allowlist or suppress unmatched exceptions.
+
+The mandatory push gate refuses rustls-webpki 0.103.15, webpki-roots 1.0.9 and tokio 1.53.1. Resolve only those lockfile entries to 0.103.16, 1.0.10 and 1.53.3 for RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0386. The existing dependency ranges admit these patches. Keep manifests, unrelated locked packages, completed tasks and security policy unchanged. Inspect consumers for deprecated AsyncFd constructors without assuming reachability from the advisory alone. Prove existing TLS/build and asynchronous MCP/parser boundaries through required locked local and current-head hosted gates; do not write a custom exploit or certificate validator. #499 remains the existing child/blocker of #492; #639 is accepted. Pending fixes refresh from accepted patched main, and #492 obtains new exact RC4 parser-pack and installed-package proof for the changed lockfile. Earlier success remains historical for its original graph.
+
 ### Reuse the sanitizer owner for the RC4 audit refusal
 
 The existing Mermaid 11.16.1 range admits DOMPurify 3.4.17. Update only that locked package's version, URL and integrity for GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr and GHSA-c6gr-qvv4-5v3f. Preserve Mermaid, jsdom, source-map-js, the manifest, all unrelated locked versions and the existing moderate-severity audit gate. Reopen the existing task 6 sanitizer slice and reset acceptance; preserve the other completed tasks and the explicitly deferred bot scope. Prove locked installation, valid/invalid parser behavior, unchanged unrelated lock entries, and required current-head gates with independent review. The previously dispositioned low-severity KaTeX finding remains outside Mermaid's compatible range and the parse-only consumer remains unchanged. #492 repeats exact RC4 package acceptance; historical #593 proof remains evidence for its original RC3 inputs.
