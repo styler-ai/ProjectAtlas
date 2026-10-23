@@ -1,0 +1,20 @@
+## Purpose
+
+Give agents reliable Unicode case-insensitive source search without silent candidate loss or changes to source evidence and bounded retrieval.
+
+## ADDED Requirements
+
+### Requirement: Unicode case-insensitive search preserves matches
+
+Literal and fuzzy case-insensitive searches SHALL honor Unicode case variants through storage and service matching. Candidate acceleration SHALL be a conservative superset. Results SHALL retain original source lines, deterministic pagination, case-sensitive behavior and existing resource limits without database reset.
+
+#### Scenario: Accented Latin and Cyrillic persisted text
+
+- **WHEN** CLI or MCP searches for FÜR, CAFÉ, GRÜßE or русский against für, café, Grüße or Русский with case sensitivity disabled
+- **THEN** literal and fuzzy modes return the original matching line and regex provides a matching control
+- **AND** case-sensitive variants remain distinct and accelerated/fallback results agree where acceleration applies
+
+#### Scenario: Bounded or invalid search
+
+- **WHEN** selection or output reaches an existing limit, or a caller selects a wrong root or missing index
+- **THEN** existing typed refusal or truthful truncation remains intact and search does not mutate source, approved purposes or project identity

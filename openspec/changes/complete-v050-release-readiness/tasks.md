@@ -198,3 +198,11 @@
 - [x] 28.3 From the exact installed candidate, safely execute the complete CLI/nested-command/MCP inventory and version-matched plugin/hook/installer upgrade paths on Windows, Linux, macOS x64, and macOS arm64, including fileless map responses with no legacy snapshot write, the DOCX/PDF regressions, parser limits, incomplete coverage, failure/retry, existing database preservation, and compatible rollback.
 - [x] 28.4 With separate release authorization, publish `v0.5.0-rc3` as a non-draft prerelease and independently read back tag, metadata, assets, SHA256SUMS, runtime/plugin/skill/hook/MCP/CLI/host identity, installed behavior, and v0.4.5 Latest state.
 - [x] 28.5 Resolve or disposition current automated/human feedback, synchronize release issue/OpenSpec/milestone state, retain stable promotion in #602, and close #492 last only after every required RC3 proof passes.
+
+## 29. v0.5.0 RC4 release acceptance (#492)
+
+- [ ] 29.1 Publish the validated #697-#699 defect contracts and exact task mirrors, reopen the existing RC release owner and milestone, and verify their sole direct parent and blocker relationships with IssueOps while preserving completed RC1-RC3 acceptance.
+- [ ] 29.2 After all three independently reviewed fixes merge, freeze accepted main, reconcile release-owned runtime/plugin/installer/package/documentation/workflow identities to 0.5.0-rc4 and cumulative notes, and pass required locked workspace, documentation, security/dependency, IssueOps, parser-pack and exact package gates.
+- [ ] 29.3 Exercise the complete installed CLI/nested-command/MCP/plugin/hook/host/parser-pack inventory and supported v0.4.5 upgrades on Windows, Linux and both macOS architectures, preserving authored state and proving the three regressions, failure, atomic refusal, repair/retry, cancellation, concurrency and compatible rollback.
+- [ ] 29.4 Publish the exact accepted v0.5.0-rc4 as a non-draft prerelease and independently verify tag/head, metadata, assets/checksums, installed runtime/plugin/skill/hook/CLI/MCP/host identities and behavior, retaining v0.4.5 as Latest.
+- [ ] 29.5 Resolve or disposition current human/automated feedback, synchronize OpenSpec/issues/reviews/milestone state, retain stable promotion in #602, and close #492 and the milestone last after all required RC4 proof passes.
