@@ -42,4 +42,4 @@
 ## 9. Rust trust-store and I/O safety patches (#499)
 
 - [x] 9.1 Resolve only rustls-webpki 0.103.15 to 0.103.16, webpki-roots 1.0.9 to 1.0.10 and tokio 1.53.1 to 1.53.3 for RUSTSEC-2026-0382, RUSTSEC-2026-0381 and RUSTSEC-2026-0386; verify the exact lockfile delta and unchanged license before retargeting its existing version-specific exception, preserve manifest ranges, unrelated packages, completed work and the security gate, and inspect affected consumers for required API adaptation.
-- [ ] 9.2 Pass unchanged dependency policy, affected TLS/build and asynchronous MCP/parser consumers, mandatory local and current-head hosted platform checks and independent review; accept the patched baseline on main before refreshing pending fixes and obtaining fresh RC4 parser-pack and installed-package proof under #492.
+- [x] 9.2 Pass unchanged dependency policy, affected TLS/build and asynchronous MCP/parser consumers, mandatory local and current-head hosted platform checks and independent review; accept the patched baseline on main before refreshing pending fixes and obtaining fresh RC4 parser-pack and installed-package proof under #492.
