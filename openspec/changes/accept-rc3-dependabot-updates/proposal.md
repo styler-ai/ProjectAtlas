@@ -1,5 +1,7 @@
 ## Why
 
+RC4 readiness now reproduces the mandatory npm audit failure for locked DOMPurify 3.4.16: GHSA-cg2g-xh64-v4q7 is critical and GHSA-mrv2-3pqr-j5jr is high. Reopen existing sanitizer owner #499 and its task 6 slice for the compatible 3.4.17 patch. Earlier accepted dependency work remains preserved; no deferred routine update enters RC4.
+
 Three open Dependabot PRs are blocked from RC3 acceptance by missing issue ownership, and the grouped Cargo update additionally fails warnings-as-errors on renamed RMCP API types. Upstream changelog issue numbers in bot PR bodies also confuse the shared PR-owner parser. The required PR-state workflow currently runs from a pull-request merge commit, so its pre-checkout step is not a trusted ownership gate.
 
 The earlier three updates are accepted. Final RC3 preparation exposed GHSA-p98j-92pf-mc4p in transitive DOMPurify 3.4.13; resolve it under the same aggregate #499 before publication.
@@ -19,7 +21,7 @@ the dependency gate or DOCX archive boundaries.
 - Bind one explicit local ownership reference before incidental upstream changelog references in IssueOps and PR-state, while retaining one-owner and milestone enforcement. Run the required owner/milestone check from protected base-branch workflow code and report a native current-head result from the eligible protected-base job, including Dependabot, without executing PR-head code in the protected validation job.
 - Accept the existing jsonc-parser, install-action, and grouped Cargo bot PRs under existing aggregate #499 after refreshing each onto accepted main and proving its affected behavior.
 - Adapt the grouped update to supported RMCP server/client configuration types and validate MCP and optional parser-pack behavior without weakening warnings, tests, or platform gates.
-- Update only the Mermaid lockfile to compatible patched DOMPurify 3.4.16 and source-map-js 1.2.2, prove parsing and dependency security, and reopen the existing aggregate without per-dependency issues.
+- Retain the accepted Mermaid lockfile correction to DOMPurify 3.4.16 and source-map-js 1.2.2, then advance only DOMPurify to compatible 3.4.17 for the RC4 audit refusal; prove parsing and dependency security under the existing aggregate without per-dependency issues.
 - Update only the two affected Rust lockfile packages to their compatible patched versions, preserve the manifest and security policy, and prove the affected dependency graph and existing consumers.
 - Replace yanked zip 0.6.6 with non-yanked 9.0.3 using the required compression features; adapt the existing DOCX reader and ZIP fixture consumers while preserving part identity, duplicate refusal, bounded expansion, and typed failures.
 - Reconcile the two issue/task owners, native parent/blocker relations, milestone, and release-owner installed acceptance before RC3 publication.
