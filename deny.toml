@@ -28,10 +28,10 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
-# tree-sitter-language-pack 1.13.2 pulls webpki-roots through its build-only
+# tree-sitter-language-pack pulls webpki-roots through its build-only
 # ureq path; keep this exception exact until the upstream build graph removes it.
 exceptions = [
-  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.9" },
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.10" },
 ]
 
 [bans]
