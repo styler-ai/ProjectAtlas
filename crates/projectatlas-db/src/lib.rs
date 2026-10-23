@@ -2397,7 +2397,7 @@ impl AtlasStore {
     ///
     /// For a nonempty case-sensitive `literal_pattern`, `SQLite` prefilters
     /// candidate files with an exact substring search. Case-insensitive visits
-    /// admit all rows because SQLite's built-in lower() is ASCII-only.
+    /// admit all rows because SQLite's built-in `lower()` is ASCII-only.
     /// Regex and fuzzy searches pass `None` and still use the persisted text
     /// index instead of reopening source files from disk.
     ///
@@ -2421,7 +2421,7 @@ impl AtlasStore {
     ///
     /// For a nonempty case-sensitive `literal_pattern`, `SQLite` prefilters
     /// candidate files with an exact substring search. Case-insensitive visits
-    /// admit all rows because SQLite's built-in lower() is ASCII-only.
+    /// admit all rows because SQLite's built-in `lower()` is ASCII-only.
     /// Returning `false` from `visitor` stops iteration early.
     ///
     /// # Errors
@@ -11986,7 +11986,7 @@ mod tests {
             test_file_node(&paths[0], "hash-a"),
             test_file_node(&paths[1], "hash-b"),
         ])?;
-        let content = "für Kelvin ſource\n";
+        let content = "für \u{212a}elvin ſource\n";
         let texts = paths
             .iter()
             .map(|path| IndexedFileText {

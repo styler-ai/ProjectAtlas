@@ -6105,7 +6105,7 @@ mod tests {
             ("русский", "Русский"),
             ("ΟΣ", "οσ"),
             ("ΟΣ", "ος"),
-            ("kelvin", "Kelvin"),
+            ("kelvin", "\u{212a}elvin"),
             ("source", "ſource"),
             ("NEEDLE", "needle"),
             ("[FÜR]", "[für]"),
