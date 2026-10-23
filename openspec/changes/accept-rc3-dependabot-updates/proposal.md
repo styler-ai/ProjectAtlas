@@ -1,5 +1,7 @@
 ## Why
 
+RC4 readiness now reproduces the mandatory npm audit failure for locked DOMPurify 3.4.16: GHSA-cg2g-xh64-v4q7 is critical and GHSA-mrv2-3pqr-j5jr is high. Reopen existing sanitizer owner #499 and its task 6 slice for the compatible 3.4.17 patch. Earlier accepted dependency work remains preserved; no deferred routine update enters RC4.
+
 Three open Dependabot PRs are blocked from RC3 acceptance by missing issue ownership, and the grouped Cargo update additionally fails warnings-as-errors on renamed RMCP API types. Upstream changelog issue numbers in bot PR bodies also confuse the shared PR-owner parser. The required PR-state workflow currently runs from a pull-request merge commit, so its pre-checkout step is not a trusted ownership gate.
 
 The earlier three updates are accepted. Final RC3 preparation exposed GHSA-p98j-92pf-mc4p in transitive DOMPurify 3.4.13; resolve it under the same aggregate #499 before publication.
