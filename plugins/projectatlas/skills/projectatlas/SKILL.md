@@ -78,6 +78,13 @@ For generated or vendored source, verify the repository's ownership and ignore p
 - **Deep symbol/graph rebuild:** use `atlas symbols build` / `atlas_symbols_build` only when the projection is reported missing/stale/incomplete or explicitly requested.
 - **Continuous editing:** a human may keep `atlas watch` running; agents use bounded one-pass refreshes.
 
+Indexing shares one cooperative budget across traversal, source hashing, parsing and publication
+checkpoints. MCP `timeout_seconds` and CLI `symbols build` / `watch` `--timeout-seconds` have a
+30-minute default and ceiling: larger representable budgets are clamped, while unrepresentable
+deadlines fail closed. Continuous watch budgets each refresh separately. Startup and initial
+root/input setup are separate; checkpoint-based stopping can exceed the requested wall time. A
+deadline refusal preserves the last valid index, identity and approved purposes; retry with an adequate budget.
+
 Never reset or replace an incompatible database as an orientation shortcut. Follow its typed recovery guidance and preserve authored purpose state.
 
 ## MCP Routing When Needed

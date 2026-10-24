@@ -1249,7 +1249,10 @@ enum Command {
         /// Maximum parser worker threads during refresh.
         #[arg(long)]
         max_workers: Option<usize>,
-        /// Stop starting parser work after this many seconds during refresh.
+        /// Cooperative indexing-work budget per refresh in seconds (30-minute default and ceiling).
+        /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
+        /// Covers traversal, source hashing, parsing and publication checkpoints.
+        /// Process startup and initial root/input setup are separate from this budget.
         #[arg(long)]
         timeout_seconds: Option<u64>,
         /// Maximum UTF-8 file size persisted into `SQLite` text search.
@@ -1633,7 +1636,10 @@ enum SymbolsCommand {
         /// Maximum parser worker threads. Defaults to Rayon automatic sizing.
         #[arg(long)]
         max_workers: Option<usize>,
-        /// Stop starting parser work after this many seconds.
+        /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
+        /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
+        /// Covers traversal, source hashing, parsing and publication checkpoints.
+        /// Process startup and initial root/input setup are separate from this budget.
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },

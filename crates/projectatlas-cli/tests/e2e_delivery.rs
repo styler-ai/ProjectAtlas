@@ -26303,6 +26303,21 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
         let normalized_schema = if name == "atlas_purpose_review" {
             Some(inline_legacy_purpose_review_item_schema(baseline_schema)?)
+        } else if matches!(
+            name,
+            "atlas_scan" | "atlas_symbols_build" | "atlas_watch_once"
+        ) {
+            let mut schema = baseline_schema.clone();
+            // Admit the corrected budget prose while retaining every frozen parameter constraint.
+            let description = schema
+                .pointer_mut("/properties/timeout_seconds/description")
+                .ok_or_else(|| io::Error::other("frozen indexing timeout description missing"))?;
+            *description = current_tool
+                .pointer("/inputSchema/properties/timeout_seconds/description")
+                .filter(|value| value.is_string())
+                .cloned()
+                .ok_or_else(|| io::Error::other("current indexing timeout description missing"))?;
+            Some(schema)
         } else if name == "atlas_map" {
             let mut schema = baseline_schema.clone();
             schema["properties"]["json"]["description"] =

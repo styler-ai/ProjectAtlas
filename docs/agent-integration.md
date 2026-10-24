@@ -141,8 +141,17 @@ optional-catalog identity, and independently derived detected, parsed, symbol, s
 benchmarked counts; aliases and extensions never inflate those capability totals, and catalog
 membership never implies an installed or accepted grammar. `atlas_task_status`
 and `atlas_task_cancel` expose the bounded MCP
-task-progress contract; scan, watch, search, summary, slice, and CLI commands remain synchronous in
-this release.
+task-progress contract; scan, watch, search, summary, slice, and CLI commands are synchronous by
+default.
+
+Indexing uses one cooperative work budget across traversal, source hashing, parsing and publication
+checkpoints. MCP `atlas_scan`, `atlas_symbols_build` and `atlas_watch_once` expose it as
+`timeout_seconds`; CLI `symbols build` and `watch` expose `--timeout-seconds`. The default and ceiling
+are 30 minutes: larger representable budgets are clamped, while unrepresentable deadlines fail
+closed. Continuous `watch` applies the budget to each refresh, rather than the whole watch session.
+Process startup and initial root/input setup are separate, and checkpoint-based stopping can exceed
+the requested wall time. A deadline refusal preserves the last valid index, identity and approved purposes;
+retry with an adequate budget to refresh it.
 
 The plugin no longer ships a PATH-based fallback `.mcp.json`. Registering a plugin-level MCP file with
 `command = "projectatlas"` is not portable across Windows, Linux, and macOS because an already-running
