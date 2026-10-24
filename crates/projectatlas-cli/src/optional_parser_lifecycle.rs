@@ -136,10 +136,10 @@ pub enum OptionalParserPackLifecycleError {
     /// Strict JSON decoding or encoding failed.
     #[error("optional parser-pack JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
-    /// One or more exact slot cleanup attempts failed after all slots were attempted.
+    /// One or more artifact-scoped cleanup operations failed.
     #[error("optional parser-pack cleanup was incomplete: {message}")]
     CleanupIncomplete {
-        /// Bounded aggregate of artifact-scoped cleanup failures.
+        /// Bounded artifact-scoped cleanup failure details.
         message: String,
     },
     /// A lifecycle operation failed and mandatory child cleanup also failed.
@@ -260,6 +260,12 @@ pub struct OptionalParserPackLifecycleReport {
     pub changed: bool,
 }
 
+/// Injectable artifact cleanup retained only by unit-test guards.
+#[cfg(test)]
+type ProfileCleanupOverride = dyn FnMut(&Path, &ParserArtifactIdentity) -> Result<(), OptionalParserPackLifecycleError>
+    + Send
+    + Sync;
+
 /// Owns cleanup of an artifact profile created from a temporary pack root.
 ///
 /// Callers must either hold the parser-pack lifecycle's exclusive lease or run
@@ -272,8 +278,11 @@ pub struct TemporaryParserArtifactProfile {
     pack_root: PathBuf,
     /// Identity of the exact artifact manifest that owns the profile.
     artifact: ParserArtifactIdentity,
-    /// Whether cleanup ownership has not been completed or transferred.
+    /// Whether this temporary guard still owns its one cleanup attempt.
     cleanup_pending: bool,
+    /// Per-instance cleanup override that keeps unit tests away from host profiles.
+    #[cfg(test)]
+    cleanup_override: Option<Box<ProfileCleanupOverride>>,
 }
 
 impl TemporaryParserArtifactProfile {
@@ -286,6 +295,8 @@ impl TemporaryParserArtifactProfile {
             pack_root: supervisor.pack_root().to_path_buf(),
             artifact: supervisor.artifact_identity().clone(),
             cleanup_pending: true,
+            #[cfg(test)]
+            cleanup_override: None,
         }
     }
 
@@ -296,10 +307,13 @@ impl TemporaryParserArtifactProfile {
             pack_root: pack_root.into(),
             artifact,
             cleanup_pending: true,
+            cleanup_override: None,
         }
     }
 
-    /// Perform the one explicit fallible artifact-profile cleanup attempt.
+    /// Consume the one explicit fallible artifact-profile cleanup attempt.
+    ///
+    /// A failure reaches the caller without another destructor attempt.
     ///
     /// # Errors
     ///
@@ -316,12 +330,14 @@ impl TemporaryParserArtifactProfile {
 
     /// Run cleanup at most once while the temporary pack root still exists.
     fn cleanup_pending_profile(&mut self) -> Result<(), OptionalParserPackLifecycleError> {
-        if !self.cleanup_pending {
+        if !std::mem::take(&mut self.cleanup_pending) {
             return Ok(());
         }
-        cleanup_platform_profile(&self.pack_root, &self.artifact)?;
-        self.cleanup_pending = false;
-        Ok(())
+        #[cfg(test)]
+        if let Some(cleanup) = self.cleanup_override.as_mut() {
+            return cleanup(&self.pack_root, &self.artifact);
+        }
+        cleanup_platform_profile(&self.pack_root, &self.artifact)
     }
 }
 
@@ -2506,9 +2522,9 @@ fn supervise_cleanup_broker(
             }
         }
         if status.is_none() && Instant::now() >= operation_deadline {
-            operation_failure = Some(invalid_data(format!(
-                "profile {profile_name} cleanup exceeded its deadline"
-            )));
+            operation_failure = Some(OptionalParserPackLifecycleError::CleanupIncomplete {
+                message: format!("profile {profile_name} cleanup exceeded its deadline"),
+            });
         }
         if operation_failure.is_none() && status.is_none() {
             thread::sleep(Duration::from_millis(10));
@@ -3304,6 +3320,10 @@ fn io_error(
 mod tests {
     use super::*;
     use std::error::Error;
+    use std::sync::Arc;
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Child-only storage root used to prove lease release without running destructors.
     const ABRUPT_LEASE_STORAGE_ENV: &str = "PROJECTATLAS_TEST_ABRUPT_LEASE_STORAGE";
@@ -3371,20 +3391,77 @@ mod tests {
         )
     }
 
+    /// Count actual guard cleanup calls without invoking platform profiles.
+    fn counted_temporary_profile(
+        root: &Path,
+        fail: bool,
+    ) -> (TemporaryParserArtifactProfile, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&attempts);
+        let mut profile = TemporaryParserArtifactProfile::new(
+            root,
+            ParserArtifactIdentity::for_bytes(b"artifact-manifest"),
+        );
+        profile.cleanup_override = Some(Box::new(move |_, _| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            if fail {
+                Err(invalid_data("injected profile cleanup failure"))
+            } else {
+                Ok(())
+            }
+        }));
+        (profile, attempts)
+    }
+
+    #[test]
+    fn explicit_temporary_profile_cleanup_failure_runs_once() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let (profile, attempts) = counted_temporary_profile(directory.path(), true);
+        let error = require_lifecycle_error(profile.cleanup(), "injected cleanup was accepted")?;
+        require(
+            matches!(error, OptionalParserPackLifecycleError::InvalidData { reason }
+                if reason == "injected profile cleanup failure"),
+            "explicit cleanup lost its original typed failure",
+        )?;
+        let observed = attempts.load(Ordering::Relaxed);
+        require(
+            observed == 1,
+            &format!("explicit cleanup plus Drop made {observed} attempts instead of one"),
+        )
+    }
+
+    #[test]
+    fn temporary_profile_success_and_forgotten_cleanup_run_once() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        for explicit in [true, false] {
+            let (profile, attempts) = counted_temporary_profile(directory.path(), false);
+            if explicit {
+                profile.cleanup()?;
+            } else {
+                drop(profile);
+            }
+            require(
+                attempts.load(Ordering::Relaxed) == 1,
+                "successful or forgotten cleanup did not use exactly one attempt",
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn installed_slot_transfer_disarms_temporary_profile_cleanup() -> TestResult {
         let directory = tempfile::tempdir()?;
-        let mut profile = TemporaryParserArtifactProfile::new(
-            directory.path(),
-            ParserArtifactIdentity::for_bytes(b"artifact-manifest"),
-        );
+        let (mut profile, attempts) = counted_temporary_profile(directory.path(), false);
         profile.transfer_to_installed_slot();
         require(
             !profile.cleanup_pending,
             "installed-slot transfer retained temporary cleanup ownership",
         )?;
         profile.cleanup()?;
-        Ok(())
+        require(
+            attempts.load(Ordering::Relaxed) == 0,
+            "installed-slot transfer still invoked temporary profile cleanup",
+        )
     }
 
     #[test]
@@ -3392,12 +3469,24 @@ mod tests {
         let error = require_lifecycle_error(
             finish_with_cleanup::<()>(
                 Err(invalid_data("operation failed")),
-                Err(invalid_data("cleanup failed")),
+                Err(OptionalParserPackLifecycleError::CleanupIncomplete {
+                    message: "cleanup failed".to_owned(),
+                }),
             ),
             "dual lifecycle failure was accepted",
         )?;
         match error {
             OptionalParserPackLifecycleError::OperationAndCleanup { operation, cleanup } => {
+                require(
+                    matches!(
+                        &*operation,
+                        OptionalParserPackLifecycleError::InvalidData { .. }
+                    ) && matches!(
+                        &*cleanup,
+                        OptionalParserPackLifecycleError::CleanupIncomplete { .. }
+                    ),
+                    "dual lifecycle failure changed the validation or cleanup error kind",
+                )?;
                 require(
                     operation.to_string().contains("operation failed")
                         && cleanup.to_string().contains("cleanup failed"),
@@ -4224,23 +4313,57 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()?;
         let broker = PathBuf::from("cleanup-timeout-test");
-        let error = require_lifecycle_error(
-            supervise_cleanup_broker(
+        let operation_timeout = Duration::from_millis(50);
+        let cleanup_timeout = Duration::from_secs(2);
+        let directory = tempfile::tempdir()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&attempts);
+        let reaped = Arc::new(AtomicBool::new(false));
+        let observed_reaped = Arc::clone(&reaped);
+        let mut profile = TemporaryParserArtifactProfile::new(
+            directory.path(),
+            ParserArtifactIdentity::for_bytes(b"cleanup-timeout-artifact"),
+        );
+        profile.cleanup_override = Some(Box::new(move |_, _| {
+            observed_attempts.fetch_add(1, Ordering::Relaxed);
+            let result = supervise_cleanup_broker(
                 &mut child,
                 &broker,
                 "test-profile",
-                Duration::from_millis(50),
-                Duration::from_secs(2),
-            ),
+                operation_timeout,
+                cleanup_timeout,
+            );
+            observed_reaped.store(
+                child
+                    .try_wait()
+                    .map_err(|source| io_error("observe test cleanup broker", &broker, source))?
+                    .is_some(),
+                Ordering::Relaxed,
+            );
+            result
+        }));
+        let started = Instant::now();
+        let error = require_lifecycle_error(
+            profile.cleanup(),
             "hung cleanup broker unexpectedly succeeded",
         )?;
+        let elapsed = started.elapsed();
         require(
-            matches!(error, OptionalParserPackLifecycleError::InvalidData { .. }),
-            "timeout operation was misclassified as a cleanup failure",
+            matches!(&error, OptionalParserPackLifecycleError::CleanupIncomplete { message }
+                if message.contains("test-profile") && message.contains("deadline")),
+            &format!("timeout was not an operational cleanup failure: {error}"),
         )?;
         require(
-            child.try_wait()?.is_some(),
+            attempts.load(Ordering::Relaxed) == 1,
+            "timed-out explicit cleanup was repeated by Drop",
+        )?;
+        require(
+            reaped.load(Ordering::Relaxed),
             "hung cleanup broker was not reaped",
+        )?;
+        require(
+            elapsed <= operation_timeout + cleanup_timeout + Duration::from_secs(1),
+            "cleanup and destructor exceeded one timeout and reap/drain allowance",
         )
     }
 
