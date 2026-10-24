@@ -1803,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_hash_loop_observes_cancellation_between_chunks() {
+    fn exact_hash_loop_observes_work_bounds() {
         let exact_budget = ScanBudget::new(
             ScanLimits::new(8, (HASH_BUFFER_BYTES * 2) as u64, 1),
             IndexWorkControl::new(IndexCancellation::new(), None),
@@ -1840,6 +1840,23 @@ mod tests {
         assert!(matches!(
             result,
             Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::SourceHash,
+            }))
+        ));
+
+        let expired_budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now()),
+        );
+        let expired = hash_reader(
+            Path::new("deadline-source.rs"),
+            io::Cursor::new(vec![7_u8; HASH_BUFFER_BYTES * 2]),
+            &expired_budget,
+            false,
+        );
+        assert!(matches!(
+            expired,
+            Err(FsError::IndexWork(IndexWorkFailure::DeadlineExceeded {
                 stage: IndexWorkStage::SourceHash,
             }))
         ));

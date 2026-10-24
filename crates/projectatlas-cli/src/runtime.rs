@@ -10488,14 +10488,16 @@ mod tests {
     }
 
     #[test]
-    fn operation_deadline_starts_with_default_or_shorter_explicit_timeout() {
+    fn operation_deadline_preserves_default_ceiling_and_fail_closed_bounds() {
         for (timeout_seconds, expected) in [
             (None, DEFAULT_INDEX_WORK_TIMEOUT),
+            (Some(0), Duration::ZERO),
             (Some(1), Duration::from_secs(1)),
             (
                 Some(DEFAULT_INDEX_WORK_TIMEOUT.as_secs() + 1),
                 DEFAULT_INDEX_WORK_TIMEOUT,
             ),
+            (Some(u64::MAX), Duration::ZERO),
         ] {
             let options = SymbolBuildOptions::new(1_024, Some(1), timeout_seconds);
             let control = index_work_control(&options);
@@ -12487,7 +12489,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
-    fn canceled_watcher_batch_preserves_last_valid_and_retries_one_generation()
+    fn stopped_watcher_batch_preserves_last_valid_and_retries_one_generation()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let atlas_dir = temp.path().join(".projectatlas");
@@ -12510,6 +12512,9 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         let before = store
             .index_publication()?
             .ok_or_else(|| io::Error::other("initial publication missing"))?;
+        let before_identity = store
+            .project_root_identity()?
+            .ok_or_else(|| io::Error::other("initial project identity missing"))?;
         let before_node = store
             .load_node_by_path("changed.rs")?
             .ok_or_else(|| io::Error::other("initial changed node missing"))?;
@@ -12536,6 +12541,43 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         fs::remove_file(&deleted_path)?;
         fs::remove_dir_all(&deleted_dir)?;
         fs::write(&reserved_purpose_path, "nonsource_files[]:\n\n")?;
+        let expired = IndexWorkControl::new(IndexCancellation::new(), Some(Duration::ZERO));
+        if !matches!(
+            refresh_index_controlled(&mut store, &plan, &symbol_options, &expired),
+            Err(CliError::IndexWork(
+                IndexWorkFailure::DeadlineExceeded { .. }
+            ))
+        ) {
+            return Err(io::Error::other("expired refresh did not refuse before parsing").into());
+        }
+        require_eq(
+            &store.index_publication()?.map(|state| state.generation),
+            &Some(before.generation),
+            "generation after pre-parser deadline refusal",
+        )?;
+        require_eq(
+            &store.project_root_identity()?.as_ref(),
+            &Some(&before_identity),
+            "project identity after deadline refusal",
+        )?;
+        require_eq(
+            &store.load_node_by_path("changed.rs")?.as_ref(),
+            &Some(&before_node),
+            "last-valid node after deadline refusal",
+        )?;
+        let retained_purpose = store
+            .load_node_by_path(".projectatlas/projectatlas-nonsource-files.toon")?
+            .ok_or_else(|| io::Error::other("reviewed purpose missing after deadline refusal"))?;
+        require_eq(
+            &retained_purpose.purpose.purpose.as_deref(),
+            &Some(reviewed_reserved_purpose),
+            "reviewed purpose after deadline refusal",
+        )?;
+        require_eq(
+            &retained_purpose.purpose.status,
+            &PurposeStatus::Approved,
+            "approved purpose state after deadline refusal",
+        )?;
         let preparation_control = standalone_index_work_control();
         let staged_batch = stage_full_index_publication(
             &store,

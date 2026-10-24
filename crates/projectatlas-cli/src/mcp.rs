@@ -975,7 +975,10 @@ struct AtlasScanParams {
     max_bytes: Option<u64>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
-    /// Stop starting parser work after this many seconds.
+    /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
+    /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
+    /// Covers root/config/store setup after work-control creation, traversal, source hashing,
+    /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
     timeout_seconds: Option<u64>,
     /// Maximum UTF-8 file size persisted into `SQLite` text search.
     text_index_max_bytes: Option<u64>,
@@ -996,7 +999,10 @@ struct AtlasWatchOnceParams {
     nearest_project: Option<bool>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
-    /// Stop starting parser work after this many seconds.
+    /// Cooperative indexing-work budget for this refresh in seconds (30-minute default and ceiling).
+    /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
+    /// Covers root/config/store setup after work-control creation, traversal, source hashing,
+    /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
     timeout_seconds: Option<u64>,
     /// Maximum UTF-8 file size persisted into `SQLite` text search.
     text_index_max_bytes: Option<u64>,

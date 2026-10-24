@@ -2545,6 +2545,24 @@ fn mcp_tools_list_preserves_frozen_contracts_without_index_state() -> Result<(),
         .and_then(Value::as_array)
         .ok_or_else(|| io::Error::other("MCP tools/list response omitted tools"))?;
     assert_codex_bridge_compatible_input_schemas(tools)?;
+    for name in ["atlas_scan", "atlas_symbols_build", "atlas_watch_once"] {
+        let mut regressed = response.clone();
+        let regressed_tools = regressed["result"]["tools"]
+            .as_array_mut()
+            .ok_or_else(|| io::Error::other("regression control omitted tools"))?;
+        let tool = regressed_tools
+            .iter_mut()
+            .find(|tool| tool["name"] == name)
+            .ok_or_else(|| io::Error::other(format!("regression control omitted {name}")))?;
+        tool["inputSchema"]["properties"]["timeout_seconds"]["description"] =
+            json!("Stop starting parser work after this many seconds.");
+        if assert_frozen_mcp_surfaces_compatible(&serde_json::to_string(&regressed)?).is_ok() {
+            return Err(io::Error::other(format!(
+                "indexing timeout contract admitted parser-only prose for {name}"
+            ))
+            .into());
+        }
+    }
 
     if database.exists() || fs::read_dir(&atlas_dir)?.next().is_some() {
         return Err(io::Error::other(
@@ -9208,6 +9226,41 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
         let normalized_schema = if name == "atlas_purpose_review" {
             Some(inline_legacy_purpose_review_item_schema(baseline_schema)?)
+        } else if matches!(
+            name,
+            "atlas_scan" | "atlas_symbols_build" | "atlas_watch_once"
+        ) {
+            let mut schema = baseline_schema.clone();
+            // Admit the corrected budget prose while retaining every frozen parameter constraint.
+            let description = schema
+                .pointer_mut("/properties/timeout_seconds/description")
+                .ok_or_else(|| io::Error::other("frozen indexing timeout description missing"))?;
+            let current_description = current_tool
+                .pointer("/inputSchema/properties/timeout_seconds/description")
+                .and_then(Value::as_str)
+                .ok_or_else(|| io::Error::other("current indexing timeout description missing"))?;
+            let normalized = current_description.to_lowercase();
+            for fragment in [
+                "cooperative indexing-work budget",
+                "30-minute default and ceiling",
+                "clamped",
+                "fail closed",
+                "setup after work-control creation",
+                "traversal",
+                "source hashing",
+                "parsing",
+                "publication checkpoints",
+                "earlier startup/target selection is outside",
+            ] {
+                if !normalized.contains(fragment) {
+                    return Err(io::Error::other(format!(
+                        "indexing timeout description for {name} omitted {fragment:?}"
+                    ))
+                    .into());
+                }
+            }
+            *description = json!(current_description);
+            Some(schema)
         } else if name == "atlas_map" {
             let mut schema = baseline_schema.clone();
             schema["properties"]["json"]["description"] =
