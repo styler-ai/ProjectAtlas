@@ -142,7 +142,7 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 The automatic `03-auto-release.yml` dispatch uses `prepublish_only=false`. For a new candidate, its native Codex plugin-convergence proof needs a marketplace tag that does not yet exist. Do not count that dispatch as release acceptance. Bootstrap a tag-only ref before the normal release run. For example:
 
 ```bash
-RELEASE_VERSION=v0.5.0-rc3
+RELEASE_VERSION=v0.5.0-rc4
 ```
 
 1. Keep the exact reviewed, merged `main` commit fixed, with its child issues accepted. Dispatch a clean parser-pack build:
