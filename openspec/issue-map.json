@@ -75,11 +75,17 @@
         "310": { "blocked_by": [] },
         "314": { "blocked_by": [310] },
         "388": { "blocked_by": [] },
-        "493": { "blocked_by": [310, 314, 388] }
+        "493": { "blocked_by": [310, 314, 388, 708] },
+        "708": { "blocked_by": [] }
       }
     }
   },
   "changes": {
+    "accelerate-incremental-refresh": {
+      "contract": "checklist-v1",
+      "primary_issue": 708,
+      "owners": [{ "issue": 708, "first_task": "1.1", "last_task": "3.2" }]
+    },
     "stabilize-v050-search-cleanup-timeouts": {
       "contract": "checklist-v1",
       "primary_issue": 697,
