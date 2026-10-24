@@ -12,7 +12,7 @@
 ## 3. Parser profile cleanup (#698)
 
 - [x] 3.1 Consume one explicit temporary-profile cleanup attempt before fallible execution and classify cleanup timeout operationally; prove attempt count, complete timeout/reap/drain bounds, successful disarming and early-error fallback with deterministic regressions.
-- [ ] 3.2 Pass affected local and hosted checks and Windows installed matching-archive verify/install/enable/update/disable/remove proof, including failure, containment, safe retry and no partial publication; reconcile documentation and specification.
+- [x] 3.2 Pass affected local and hosted checks and Windows installed matching-archive verify/install/enable/update/disable/remove proof, including failure, containment, safe retry and no partial publication; reconcile documentation and specification.
 
 ## 4. Indexing timeout contract (#699)
 
