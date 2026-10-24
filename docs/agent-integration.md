@@ -149,8 +149,9 @@ checkpoints. MCP `atlas_scan`, `atlas_symbols_build` and `atlas_watch_once` expo
 `timeout_seconds`; CLI `symbols build` and `watch` expose `--timeout-seconds`. The default and ceiling
 are 30 minutes: larger representable budgets are clamped, while unrepresentable deadlines fail
 closed. Continuous `watch` applies the budget to each refresh, rather than the whole watch session.
-Process startup and initial root/input setup are separate, and checkpoint-based stopping can exceed
-the requested wall time. A deadline refusal preserves the last valid index, identity and approved purposes;
+The clock starts when indexing work control is created. Root/config/store setup performed afterward
+consumes it; earlier startup/target selection is outside the budget. Checkpoint-based stopping can
+exceed the requested wall time. A deadline refusal preserves the last valid index, identity and approved purposes;
 retry with an adequate budget to refresh it.
 
 The plugin no longer ships a PATH-based fallback `.mcp.json`. Registering a plugin-level MCP file with

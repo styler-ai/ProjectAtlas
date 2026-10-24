@@ -490,7 +490,7 @@ const SHORT_CLI_FILE_NAME: &str = "short-cli.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "7963b4ce5d4e57cb62a768a3b1ab0f59e575c71bd5707b0c84a8aab090f7faf4";
+const MCP_TOOLS_SHA256: &str = "40fc803fcc36e5044cdf9248518afc8276348a1c98ac8732429b6796e3bd54d3";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -22892,6 +22892,32 @@ fn cli_help_surface(executable: &Path, route: &str) -> Result<CliHelpSurface, Bo
         .into());
     }
     let help = String::from_utf8(output.stdout)?.replace("\r\n", "\n");
+    if matches!(route, "watch" | "symbols build") {
+        let normalized = help
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for fragment in [
+            "cooperative indexing-work budget",
+            "30-minute default and ceiling",
+            "clamped",
+            "fail closed",
+            "setup after work-control creation",
+            "traversal",
+            "source hashing",
+            "parsing",
+            "publication checkpoints",
+            "earlier startup/target selection is outside",
+        ] {
+            if !normalized.contains(fragment) {
+                return Err(io::Error::other(format!(
+                    "indexing timeout help for {route:?} omitted {fragment:?}"
+                ))
+                .into());
+            }
+        }
+    }
     let mut subcommands = Vec::new();
     let mut help_present = false;
     let mut in_commands = false;
@@ -26312,11 +26338,31 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             let description = schema
                 .pointer_mut("/properties/timeout_seconds/description")
                 .ok_or_else(|| io::Error::other("frozen indexing timeout description missing"))?;
-            *description = current_tool
+            let current_description = current_tool
                 .pointer("/inputSchema/properties/timeout_seconds/description")
-                .filter(|value| value.is_string())
-                .cloned()
+                .and_then(Value::as_str)
                 .ok_or_else(|| io::Error::other("current indexing timeout description missing"))?;
+            let normalized = current_description.to_lowercase();
+            for fragment in [
+                "cooperative indexing-work budget",
+                "30-minute default and ceiling",
+                "clamped",
+                "fail closed",
+                "setup after work-control creation",
+                "traversal",
+                "source hashing",
+                "parsing",
+                "publication checkpoints",
+                "earlier startup/target selection is outside",
+            ] {
+                if !normalized.contains(fragment) {
+                    return Err(io::Error::other(format!(
+                        "indexing timeout description for {name} omitted {fragment:?}"
+                    ))
+                    .into());
+                }
+            }
+            *description = json!(current_description);
             Some(schema)
         } else if name == "atlas_map" {
             let mut schema = baseline_schema.clone();

@@ -1251,8 +1251,8 @@ enum Command {
         max_workers: Option<usize>,
         /// Cooperative indexing-work budget per refresh in seconds (30-minute default and ceiling).
         /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
-        /// Covers traversal, source hashing, parsing and publication checkpoints.
-        /// Process startup and initial root/input setup are separate from this budget.
+        /// Covers root/config/store setup after work-control creation, traversal, source hashing,
+        /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
         #[arg(long)]
         timeout_seconds: Option<u64>,
         /// Maximum UTF-8 file size persisted into `SQLite` text search.
@@ -1638,8 +1638,8 @@ enum SymbolsCommand {
         max_workers: Option<usize>,
         /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
         /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
-        /// Covers traversal, source hashing, parsing and publication checkpoints.
-        /// Process startup and initial root/input setup are separate from this budget.
+        /// Covers root/config/store setup after work-control creation, traversal, source hashing,
+        /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
