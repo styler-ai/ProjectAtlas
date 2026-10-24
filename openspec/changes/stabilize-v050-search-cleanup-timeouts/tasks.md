@@ -17,4 +17,4 @@
 ## 4. Indexing timeout contract (#699)
 
 - [x] 4.1 Align MCP descriptions/generated schema, applicable CLI help and agent guidance with cooperative whole-operation phases, 30-minute default/maximum and clamping; prove the pre-parser deadline preserves the last valid index, identity and approved purposes and permits recovery.
-- [ ] 4.2 Pass affected local and hosted checks and installed schema/help/refusal controls; reconcile documentation and specification without changing timeout or publication policy.
+- [x] 4.2 Pass affected local and hosted checks and installed schema/help/refusal controls; reconcile documentation and specification without changing timeout or publication policy.
