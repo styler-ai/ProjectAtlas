@@ -2191,7 +2191,7 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails or stored counts are invalid.
     pub fn load_file_text(&self, path: &str) -> DbResult<Option<IndexedFileText>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "
             SELECT path, content_hash, byte_count, line_count, content
             FROM file_texts
@@ -2395,8 +2395,9 @@ impl AtlasStore {
 
     /// Load indexed text rows for search.
     ///
-    /// When `literal_pattern` is supplied, `SQLite` prefilters candidate files
-    /// with a substring search before the service performs line-level matching.
+    /// For a nonempty case-sensitive `literal_pattern`, `SQLite` prefilters
+    /// candidate files with an exact substring search. Case-insensitive visits
+    /// admit all rows because SQLite's built-in `lower()` is ASCII-only.
     /// Regex and fuzzy searches pass `None` and still use the persisted text
     /// index instead of reopening source files from disk.
     ///
@@ -2418,8 +2419,9 @@ impl AtlasStore {
 
     /// Visit indexed text rows for search without materializing all rows.
     ///
-    /// When `literal_pattern` is supplied, `SQLite` prefilters candidate files
-    /// with a substring search before the service performs line-level matching.
+    /// For a nonempty case-sensitive `literal_pattern`, `SQLite` prefilters
+    /// candidate files with an exact substring search. Case-insensitive visits
+    /// admit all rows because SQLite's built-in `lower()` is ASCII-only.
     /// Returning `false` from `visitor` stops iteration early.
     ///
     /// # Errors
@@ -2435,37 +2437,21 @@ impl AtlasStore {
     where
         F: FnMut(IndexedFileText) -> DbResult<bool>,
     {
-        if let Some(pattern) = literal_pattern.filter(|pattern| !pattern.is_empty()) {
-            if case_sensitive {
-                let mut statement = self.connection.prepare(
-                    "
-                    SELECT path, content_hash, byte_count, line_count, content
-                    FROM file_texts
-                    WHERE instr(content, ?1) > 0
-                    ORDER BY path
-                    ",
-                )?;
-                let mut rows = statement.query([pattern])?;
-                while let Some(row) = rows.next()? {
-                    if !visitor(file_text_from_row(row)?)? {
-                        return Ok(());
-                    }
-                }
-            } else {
-                let pattern = pattern.to_ascii_lowercase();
-                let mut statement = self.connection.prepare(
-                    "
-                    SELECT path, content_hash, byte_count, line_count, content
-                    FROM file_texts
-                    WHERE instr(lower(content), ?1) > 0
-                    ORDER BY path
-                    ",
-                )?;
-                let mut rows = statement.query([pattern])?;
-                while let Some(row) = rows.next()? {
-                    if !visitor(file_text_from_row(row)?)? {
-                        return Ok(());
-                    }
+        if let Some(pattern) =
+            literal_pattern.filter(|pattern| case_sensitive && !pattern.is_empty())
+        {
+            let mut statement = self.connection.prepare(
+                "
+                SELECT path, content_hash, byte_count, line_count, content
+                FROM file_texts
+                WHERE instr(content, ?1) > 0
+                ORDER BY path
+                ",
+            )?;
+            let mut rows = statement.query([pattern])?;
+            while let Some(row) = rows.next()? {
+                if !visitor(file_text_from_row(row)?)? {
+                    return Ok(());
                 }
             }
         } else {
@@ -11984,10 +11970,61 @@ mod tests {
         )?;
         let texts = store.load_file_texts_for_search(Some("needle"), true)?;
         require_eq(&texts.len(), &1, "indexed text row count")?;
+        require_eq(
+            &store.load_file_text("src/main.rs")?,
+            &texts.first().cloned(),
+            "initial persisted-text read",
+        )?;
 
         store.replace_file_texts_for_paths(&["src/main.rs".to_string()], &[])?;
         let missing = store.load_file_text("src/main.rs")?;
         require_eq(&missing.is_none(), &true, "cleared stale indexed text")?;
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_text_candidates_preserve_unicode_folding_and_early_stop()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let paths = ["src/a.rs".to_string(), "src/b.rs".to_string()];
+        store.replace_scan(&[
+            test_file_node(&paths[0], "hash-a"),
+            test_file_node(&paths[1], "hash-b"),
+        ])?;
+        let content = "für \u{212a}elvin ſource\n";
+        let texts = paths
+            .iter()
+            .map(|path| IndexedFileText {
+                path: path.clone(),
+                content_hash: None,
+                byte_count: content.len(),
+                line_count: 1,
+                content: content.to_string(),
+            })
+            .collect::<Vec<_>>();
+        store.replace_file_texts_for_paths(&paths, &texts)?;
+        for pattern in ["FÜR", "kelvin", "source"] {
+            let mut visited = Vec::new();
+            store.visit_file_texts_for_search(Some(pattern), false, |text| {
+                visited.push(text.path);
+                Ok(false)
+            })?;
+            require_eq(
+                &visited,
+                &vec![paths[0].clone()],
+                "Unicode candidate early stop",
+            )?;
+            require_eq(
+                &store.load_file_texts_for_search(Some(pattern), true)?.len(),
+                &0,
+                "case-sensitive candidate filter",
+            )?;
+        }
+        require_eq(
+            &store.load_file_texts_for_search(Some("für"), true)?.len(),
+            &2,
+            "exact substring candidates",
+        )?;
         Ok(())
     }
 
@@ -12344,6 +12381,11 @@ mod tests {
         store.replace_file_texts_for_paths(
             std::slice::from_ref(&replacement.path),
             std::slice::from_ref(&replacement),
+        )?;
+        require_eq(
+            &store.load_file_text(&replacement.path)?,
+            &Some(replacement.clone()),
+            "replacement read after repeated hydration",
         )?;
         require_eq(
             &store

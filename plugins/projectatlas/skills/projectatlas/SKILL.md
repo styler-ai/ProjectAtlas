@@ -111,6 +111,8 @@ Use this table after selecting MCP for its alias, compact-brief, or federation b
 
 Search is lexical by default. Literal/token acceleration must preserve exact results; regex, fuzzy, short, punctuation-sensitive, or Unicode-unsafe queries may use bounded persisted-text fallback. Inspect searched files/bytes, completeness, and truncation before widening. Semantic or hybrid retrieval is explicit and may return typed unavailable/stale lifecycle state.
 
+Case-insensitive literal, fuzzy and regex matching uses locale-independent Unicode simple case folding. It does not normalize canonically equivalent text or expand multi-character folds such as `ß` to `ss`. Results retain original source lines; case-sensitive matching keeps exact scalar distinctions.
+
 ## Freshness, Trust, and Bounds
 
 - Exact slices read current source bytes. Indexed selectors and summaries must be fresh or return typed `refresh_required` guidance.

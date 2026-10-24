@@ -20,6 +20,12 @@ Literal and fuzzy case-insensitive searches SHALL use locale-independent Unicode
 - **THEN** literal and fuzzy modes agree with the Unicode case-insensitive regex control
 - **AND** an ASCII query cannot lose its Unicode source candidate in storage or acceleration
 
+#### Scenario: Repeated persisted-text reads remain current
+
+- **WHEN** a connection repeatedly hydrates persisted text and the text is replaced, a write rolls back or a row is deleted
+- **THEN** later reads observe the current committed text or absence, preserve typed failures and maintain the existing search outputs and resource limits
+- **AND** reuse of a prepared query does not retain source results between executions
+
 #### Scenario: Bounded or invalid search
 
 - **WHEN** selection or output reaches an existing limit, or a caller selects a wrong root or missing index

@@ -4,8 +4,10 @@
 
 ## 2. Unicode search (#697)
 
-- [ ] 2.1 Correct shared literal/fuzzy Unicode case matching and conservative storage candidate admission; prove accented Latin and Cyrillic matches, case-sensitive negatives, exact lines, early stop and accelerated/fallback equivalence with real SQLite regressions.
-- [ ] 2.2 Pass the issue's affected local and hosted checks and installed CLI/atlas/MCP reproduction; reconcile documentation and specification with the final search behavior.
+- [x] 2.1 Correct shared literal/fuzzy Unicode case matching and conservative storage candidate admission; prove accented Latin and Cyrillic matches, case-sensitive negatives, exact lines, early stop and accelerated/fallback equivalence with real SQLite regressions.
+- [x] 2.2 Pass the issue's affected local and hosted checks and installed CLI/atlas/MCP reproduction; reconcile documentation and specification with the final search behavior.
+
+- [x] 2.3 Reuse the existing prepared-statement cache for repeated persisted-text hydration after repeatable optimized CLI/MCP measurement; prove same-connection reads observe replacement, rollback and deletion while preserving search outputs and bounds.
 
 ## 3. Parser profile cleanup (#698)
 

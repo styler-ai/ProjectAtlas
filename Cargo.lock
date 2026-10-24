@@ -1973,6 +1973,7 @@ dependencies = [
  "projectatlas-db",
  "projectatlas-symbols",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "tempfile",

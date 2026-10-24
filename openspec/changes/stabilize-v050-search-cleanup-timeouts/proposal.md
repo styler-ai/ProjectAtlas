@@ -4,7 +4,7 @@ RC3 has three confirmed defects: Unicode case-insensitive search silently misses
 
 ## What Changes
 
-- Fix shared literal/fuzzy matching and conservative persisted-text candidate selection (#697).
+- Fix shared literal/fuzzy matching and conservative persisted-text candidate selection, and reuse prepared persisted-text lookups after measured CLI/MCP improvement (#697).
 - Make temporary artifact cleanup attempt ownership explicit and report operational cleanup failures truthfully (#698).
 - Align MCP schema, applicable help and guidance with the existing cooperative whole-indexing budget (#699).
 - Reopen existing release owner #492 and milestone v0.5.0-00 for exact RC4 acceptance after the three fixes merge. Preserve completed RC1-RC3 tasks and keep stable promotion in #602.
