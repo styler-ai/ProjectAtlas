@@ -142,7 +142,7 @@ Initialize each repository once with `atlas init`. After edits, use `atlas watch
 
 ## Documentation
 
-[Agent setup and MCP](docs/agent-integration.md) · [CLI workflow](docs/workflow.md) · [Configuration](docs/configuration.md) · [Worktrees](docs/worktree-lifecycle.md) · [Graph navigation](docs/agent-navigation.md) · [Architecture](docs/projectatlas-3-architecture.md) · [Language coverage](docs/language-support.md) · [Published docs and Rust API](https://styler-ai.github.io/ProjectAtlas/)
+[Agent setup and MCP](docs/agent-integration.md) · [CLI workflow](docs/workflow.md) · [Configuration](docs/configuration.md) · [Worktrees](docs/worktree-lifecycle.md) · [Graph navigation](docs/agent-navigation.md) · [Architecture](docs/projectatlas-3-architecture.md) · [Language coverage](docs/language-support.md) · [Ecosystem catalog](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Published docs and Rust API](https://styler-ai.github.io/ProjectAtlas/)
 
 ## License
 
