@@ -2126,10 +2126,10 @@ fn plugin_installers_require_matching_runtime_version() -> Result<(), Box<dyn Er
     } else {
         for required in [
             format!("releases/tag/{release_tag}"),
-            format!("badge/release-{release_tag}-blue"),
+            format!("badge/release-{}-", env!("CARGO_PKG_VERSION")),
             format!("--ref {release_tag}"),
             format!("--tag {release_tag}"),
-            format!("`{release_tag}` ships through the full release matrix"),
+            format!("docs/{release_tag}-release-notes.md"),
         ] {
             if !readme.contains(&required) {
                 return Err(io::Error::other(format!(
@@ -27521,12 +27521,10 @@ fn assert_json_contract_subset(
     }
 }
 
-fn assert_packaged_readme_command_order(readme: &str) -> io::Result<()> {
+fn assert_packaged_readme_command_order(readme: &str, package_version: &str) -> io::Result<()> {
     let readme = readme.replace("\r\n", "\n");
-    let release_command = format!(
-        "\nprojectatlas --require-version {} --format json runtime-info\n",
-        env!("CARGO_PKG_VERSION")
-    );
+    let release_command =
+        format!("\nprojectatlas --require-version {package_version} --format json runtime-info\n");
     let mut offset = 0;
     for command in [
         release_command.as_str(),
@@ -27595,7 +27593,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
         &script,
         format!("$ErrorActionPreference = 'Stop'\n{producer}"),
     )?;
-    let package_version = env!("CARGO_PKG_VERSION");
+    let package_version = "0.5.0-rc1";
     let release_version = format!("v{package_version}");
     let run = |runner: &Path,
                version: &str,
@@ -27655,7 +27653,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
-    assert_packaged_readme_command_order(&readme)?;
+    assert_packaged_readme_command_order(&readme, package_version)?;
     if readme.contains("](docs/") {
         return Err(
             io::Error::other("packaged Windows README retained a broken local docs link").into(),
@@ -27688,6 +27686,7 @@ fn assert_windows_packaged_digest_admission() -> Result<(), Box<dyn Error>> {
     stable_reader
         .by_name("README.md")?
         .read_to_string(&mut stable_readme)?;
+    assert_packaged_readme_command_order(&stable_readme, "0.5.0")?;
     if !stable_readme.contains("This archive is the v0.5.0 stable release.")
         || stable_readme.contains("prerelease")
         || stable_readme.contains("For the stable channel")
@@ -27777,7 +27776,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
     )?;
     let script = temp.path().join("package.sh");
     fs::write(&script, format!("set -eu\n{producer}"))?;
-    let package_version = env!("CARGO_PKG_VERSION");
+    let package_version = "0.5.0-rc1";
     let release_version = format!("v{package_version}");
     let output = StdCommand::new("bash")
         .current_dir(temp.path())
@@ -27823,7 +27822,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
             .into());
         }
     }
-    assert_packaged_readme_command_order(&readme)?;
+    assert_packaged_readme_command_order(&readme, package_version)?;
     if readme.contains("runtime for Windows")
         || readme.contains("```powershell")
         || readme.contains("](docs/")
@@ -27861,6 +27860,7 @@ fn assert_unix_packaged_readme_admission() -> Result<(), Box<dyn Error>> {
         .into());
     }
     let stable_readme = String::from_utf8(stable_output.stdout)?;
+    assert_packaged_readme_command_order(&stable_readme, "0.5.0")?;
     if !stable_readme.contains("This archive is the v0.5.0 stable release.")
         || stable_readme.contains("prerelease")
         || stable_readme.contains("For the stable channel")
