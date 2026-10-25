@@ -3,19 +3,24 @@
 use crate::project_identity::{load_graph_generation, load_project_identity};
 use crate::repository_graph;
 use crate::schema::SCHEMA_VERSION;
-use crate::{AtlasStore, DbError, DbResult, IndexPublicationState, load_index_publication};
+use crate::{
+    AtlasStore, DbError, DbResult, FileContentClassification, IndexPublicationState,
+    MAX_FILE_CONTENT_CLASSIFICATION_PATHS, load_index_publication,
+};
 use blake3::Hasher;
 use projectatlas_core::IndexGeneration;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
-    CoverageState, EntityResolutionKey, EntitySelector, GraphEntity, GraphIdentityText,
-    GraphLimitKind, GraphRelationKind, LogicalRelation, PortableResolutionKey, ProjectInstanceId,
+    CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
+    ExtendedRelationKind, GraphEntity, GraphIdentityText, GraphLimitKind, GraphRelationKind,
+    LogicalRelation, LogicalRelationKey, PortableResolutionKey, ProjectInstanceId,
     RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath, SourceSpan,
 };
+use projectatlas_core::language::ContentClassification;
 use rusqlite::Connection;
 use rusqlite::backup::Backup;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -201,10 +206,14 @@ pub struct DerivedGraphSnapshotImport {
 
 /// Complete typed graph collected from one private `SQLite` backup.
 pub(crate) struct CapturedGraph {
+    /// Captured file classifications in exact repository-path order.
+    pub(crate) file_classifications: Vec<FileContentClassification>,
     /// Captured graph entities.
     pub(crate) entities: Vec<GraphEntity>,
     /// Captured logical relations.
     pub(crate) relations: Vec<LogicalRelation>,
+    /// Closed reasons for captured unresolved document relations.
+    pub(crate) document_unresolved_reasons: Vec<([u8; 32], DocumentTargetUnresolvedReason)>,
     /// Captured exact relation occurrences.
     pub(crate) occurrences: Vec<RelationOccurrence>,
     /// Captured graph coverage.
@@ -275,43 +284,89 @@ impl AtlasStore {
             let backup = Backup::new(&self.connection, &mut capture)?;
             backup.run_to_completion(256, Duration::from_millis(1), None)?;
         }
-        let quick_check =
-            capture.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
-        if quick_check != "ok" {
-            return invalid("private SQLite capture failed integrity check");
-        }
+        snapshot_from_stable_capture(&capture)
+    }
 
-        let publication = load_index_publication(&capture)?
-            .filter(|publication| {
-                publication.state == IndexPublicationState::Complete
-                    && publication.generation != IndexGeneration::ZERO
-            })
-            .ok_or(DbError::GraphPublicationUnavailable)?;
-        let capability_fingerprint = publication
-            .contract_fingerprint
-            .filter(|value| !value.is_empty())
-            .ok_or(DbError::DerivedSnapshotInvalid {
-                reason: "complete publication has no capability fingerprint",
-            })?;
-        let project =
-            load_project_identity(&capture)?.ok_or(DbError::ProjectInstanceIdentityMissing)?;
-        if load_graph_generation(&capture)? != Some(publication.generation) {
-            return invalid("private capture graph generation is not complete");
+    /// Build a portable graph snapshot from a private stable database copy.
+    pub(crate) fn export_derived_graph_snapshot_from_stable_copy(
+        &self,
+    ) -> DbResult<DerivedGraphSnapshot> {
+        snapshot_from_stable_capture(&self.connection)
+    }
+
+    /// Rebind and publish a source-exact baseline into a detached hydration candidate.
+    pub(crate) fn import_worktree_hydration_snapshot(
+        &mut self,
+        snapshot: &DerivedGraphSnapshot,
+    ) -> DbResult<DerivedGraphSnapshotImport> {
+        snapshot.validate()?;
+        if self.index_publication()?.is_some()
+            || load_graph_generation(&self.connection)? != Some(IndexGeneration::ZERO)
+        {
+            return invalid("worktree hydration destination is already published");
         }
-        let source_state_digest = source_state_digest(&capture)?;
-        let mut budget = SnapshotBudget::new();
-        let captured = repository_graph::capture_derived_graph(
-            &capture,
+        if source_state_digest(&self.connection)? != snapshot.metadata.source_state_digest {
+            return invalid("worktree hydration source state changed before rebinding");
+        }
+        let project = self
+            .project_instance_id()?
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        self.publish_snapshot(snapshot, project, IndexGeneration::ZERO, false, || Ok(()))
+    }
+
+    /// Publish a validated graph snapshot through the full or projection contract.
+    fn publish_snapshot(
+        &mut self,
+        snapshot: &DerivedGraphSnapshot,
+        project: ProjectInstanceId,
+        base_generation: IndexGeneration,
+        projection: bool,
+        before_publication: impl FnOnce() -> DbResult<()>,
+    ) -> DbResult<DerivedGraphSnapshotImport> {
+        let next_generation = base_generation
+            .checked_next()
+            .ok_or(DbError::PublicationGenerationOverflow)?;
+        let graph = snapshot.graph.bind(project, next_generation)?;
+        validate_snapshot_classification_coverage(&self.connection, &graph.file_classifications)?;
+        before_publication()?;
+        let mut guard = if projection {
+            self.begin_index_projection_refresh_from(
+                &snapshot.metadata.capability_fingerprint,
+                base_generation,
+            )?
+        } else {
+            self.begin_index_publication_from(
+                &snapshot.metadata.capability_fingerprint,
+                base_generation,
+            )?
+        };
+        if source_state_digest(&guard.connection)? != snapshot.metadata.source_state_digest {
+            return invalid("destination source state does not match the snapshot");
+        }
+        validate_snapshot_classification_coverage(&guard.connection, &graph.file_classifications)?;
+        for rows in graph
+            .file_classifications
+            .chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS)
+        {
+            guard.upsert_file_content_classification_batch(rows)?;
+        }
+        guard.replace_repository_graph_with_resolution_keys(
             project,
-            publication.generation,
-            &mut budget,
+            &graph.entities,
+            &graph.relations,
+            &graph.occurrences,
+            &graph.coverage,
+            &graph.entity_exports,
+            &graph.relation_dependencies,
         )?;
-        DerivedGraphSnapshot::from_capture(
-            captured,
-            publication.generation,
-            source_state_digest,
-            capability_fingerprint,
-        )
+        guard.set_document_unresolved_reasons(&graph.document_unresolved_reasons)?;
+        guard.complete()?;
+        Ok(DerivedGraphSnapshotImport {
+            previous_generation: base_generation,
+            published_generation: next_generation,
+            digest: snapshot.digest.clone(),
+            content: snapshot.content.clone(),
+        })
     }
 
     /// Validate and atomically publish a portable graph into this project.
@@ -358,36 +413,55 @@ impl AtlasStore {
         let project = self
             .project_instance_id()?
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
-        let next_generation = publication
-            .generation
-            .checked_next()
-            .ok_or(DbError::PublicationGenerationOverflow)?;
-        let graph = snapshot.graph.bind(project, next_generation)?;
-        before_publication()?;
-        let mut guard = self.begin_index_projection_refresh_from(
-            &snapshot.metadata.capability_fingerprint,
-            publication.generation,
-        )?;
-        if source_state_digest(&guard.connection)? != snapshot.metadata.source_state_digest {
-            return invalid("destination source state does not match the snapshot");
-        }
-        guard.replace_repository_graph_with_resolution_keys(
+        self.publish_snapshot(
+            snapshot,
             project,
-            &graph.entities,
-            &graph.relations,
-            &graph.occurrences,
-            &graph.coverage,
-            &graph.entity_exports,
-            &graph.relation_dependencies,
-        )?;
-        guard.complete()?;
-        Ok(DerivedGraphSnapshotImport {
-            previous_generation: publication.generation,
-            published_generation: next_generation,
-            digest: snapshot.digest.clone(),
-            content: snapshot.content.clone(),
-        })
+            publication.generation,
+            true,
+            before_publication,
+        )
     }
+}
+
+/// Validate and decode one stable private `SQLite` capture.
+fn snapshot_from_stable_capture(capture: &Connection) -> DbResult<DerivedGraphSnapshot> {
+    require_private_capture_size(capture)?;
+    let quick_check = capture.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
+    if quick_check != "ok" {
+        return invalid("private SQLite capture failed integrity check");
+    }
+
+    let publication = load_index_publication(capture)?
+        .filter(|publication| {
+            publication.state == IndexPublicationState::Complete
+                && publication.generation != IndexGeneration::ZERO
+        })
+        .ok_or(DbError::GraphPublicationUnavailable)?;
+    let capability_fingerprint = publication
+        .contract_fingerprint
+        .filter(|value| !value.is_empty())
+        .ok_or(DbError::DerivedSnapshotInvalid {
+            reason: "complete publication has no capability fingerprint",
+        })?;
+    let project = load_project_identity(capture)?.ok_or(DbError::ProjectInstanceIdentityMissing)?;
+    if load_graph_generation(capture)? != Some(publication.generation) {
+        return invalid("private capture graph generation is not complete");
+    }
+    let source_state_digest = source_state_digest(capture)?;
+    let mut budget = SnapshotBudget::new();
+    let mut captured = repository_graph::capture_derived_graph(
+        capture,
+        project,
+        publication.generation,
+        &mut budget,
+    )?;
+    captured.file_classifications = capture_file_classifications(capture, &mut budget)?;
+    DerivedGraphSnapshot::from_capture(
+        captured,
+        publication.generation,
+        source_state_digest,
+        capability_fingerprint,
+    )
 }
 
 impl DerivedGraphSnapshot {
@@ -424,6 +498,8 @@ impl DerivedGraphSnapshot {
 /// Project-independent normalized graph.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct PortableGraph {
+    /// One closed content role for every admitted repository file.
+    file_classifications: Vec<PortableFileClassification>,
     /// Entity selectors in portable index order.
     entities: Vec<EntitySelector>,
     /// Logical relations using portable entity indexes.
@@ -441,6 +517,11 @@ struct PortableGraph {
 impl PortableGraph {
     /// Convert a project-bound graph capture into a portable graph.
     fn from_capture(captured: CapturedGraph) -> DbResult<Self> {
+        let file_classifications = captured
+            .file_classifications
+            .into_iter()
+            .map(PortableFileClassification::from)
+            .collect();
         let mut entity_indexes = BTreeMap::new();
         for (index, entity) in captured.entities.iter().enumerate() {
             let index = usize_to_u32(index)?;
@@ -461,6 +542,10 @@ impl PortableGraph {
                 return invalid("snapshot contains duplicate relation identities");
             }
         }
+        let document_unresolved_reasons = captured
+            .document_unresolved_reasons
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         let entities = captured
             .entities
             .iter()
@@ -469,7 +554,15 @@ impl PortableGraph {
         let relations = captured
             .relations
             .iter()
-            .map(|relation| PortableRelation::from_relation(relation, &entity_indexes))
+            .map(|relation| {
+                PortableRelation::from_relation(
+                    relation,
+                    document_unresolved_reasons
+                        .get(&relation.key().digest_bytes()?)
+                        .copied(),
+                    &entity_indexes,
+                )
+            })
             .collect::<DbResult<Vec<_>>>()?;
         let occurrences = captured
             .occurrences
@@ -520,6 +613,7 @@ impl PortableGraph {
             })
             .collect::<DbResult<Vec<_>>>()?;
         Ok(Self {
+            file_classifications,
             entities,
             relations,
             occurrences,
@@ -532,6 +626,7 @@ impl PortableGraph {
     /// Validate row limits and all portable indexes.
     fn validate(&self) -> DbResult<()> {
         let total = [
+            self.file_classifications.len(),
             self.entities.len(),
             self.relations.len(),
             self.occurrences.len(),
@@ -548,6 +643,13 @@ impl PortableGraph {
                 })
         })?;
         require_limit("decoded rows", total, MAX_DERIVED_SNAPSHOT_ROWS)?;
+        let mut classified_paths = BTreeSet::new();
+        for row in &self.file_classifications {
+            RepositoryFilePath::new(std::path::Path::new(&row.path))?;
+            if !classified_paths.insert(row.path.as_str()) {
+                return invalid("snapshot contains duplicate file classifications");
+            }
+        }
         for relation in &self.relations {
             require_vector_index(
                 relation.source,
@@ -563,6 +665,17 @@ impl PortableGraph {
                 )?,
                 PortableRelationResolution::Ambiguous { .. }
                 | PortableRelationResolution::Unresolved { .. } => {}
+            }
+            let requires_reason = relation.kind
+                == GraphRelationKind::Extended(ExtendedRelationKind::Documents)
+                && matches!(
+                    relation.resolution,
+                    PortableRelationResolution::Unresolved { .. }
+                );
+            if requires_reason != relation.document_unresolved_reason.is_some() {
+                return invalid(
+                    "snapshot document reason contradicts relation family or resolution",
+                );
             }
         }
         for occurrence in &self.occurrences {
@@ -602,6 +715,12 @@ impl PortableGraph {
             .cloned()
             .map(|selector| GraphEntity::new(project, selector, generation).map_err(Into::into))
             .collect::<DbResult<Vec<_>>>()?;
+        let file_classifications = self
+            .file_classifications
+            .iter()
+            .cloned()
+            .map(FileContentClassification::from)
+            .collect();
         let relations = self
             .relations
             .iter()
@@ -664,14 +783,53 @@ impl PortableGraph {
                 .map_err(Into::into)
             })
             .collect::<DbResult<Vec<_>>>()?;
+        let document_unresolved_reasons = self
+            .relations
+            .iter()
+            .zip(&relations)
+            .filter_map(|(portable, relation)| {
+                portable
+                    .document_unresolved_reason
+                    .map(|reason| (relation.key().clone(), reason))
+            })
+            .collect();
         Ok(BoundGraph {
+            file_classifications,
             entities,
             relations,
             occurrences,
             coverage,
             entity_exports,
             relation_dependencies,
+            document_unresolved_reasons,
         })
+    }
+}
+
+/// Project-independent file classification row.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PortableFileClassification {
+    /// Exact repository-relative file path.
+    path: String,
+    /// Registry-owned closed content role.
+    classification: ContentClassification,
+}
+
+impl From<FileContentClassification> for PortableFileClassification {
+    fn from(row: FileContentClassification) -> Self {
+        Self {
+            path: row.path,
+            classification: row.classification,
+        }
+    }
+}
+
+impl From<PortableFileClassification> for FileContentClassification {
+    fn from(row: PortableFileClassification) -> Self {
+        Self {
+            path: row.path,
+            classification: row.classification,
+        }
     }
 }
 
@@ -688,12 +846,16 @@ struct PortableRelation {
     confidence: ConfidenceClass,
     /// Relation completeness.
     completeness: Completeness,
+    /// Closed reason retained only for an unresolved document relation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_unresolved_reason: Option<DocumentTargetUnresolvedReason>,
 }
 
 impl PortableRelation {
     /// Convert one project-bound relation to portable entity indexes.
     fn from_relation(
         relation: &LogicalRelation,
+        document_unresolved_reason: Option<DocumentTargetUnresolvedReason>,
         entity_indexes: &BTreeMap<[u8; 32], u32>,
     ) -> DbResult<Self> {
         let resolution = match relation.resolution() {
@@ -734,6 +896,7 @@ impl PortableRelation {
             resolution,
             confidence: relation.confidence(),
             completeness: relation.completeness(),
+            document_unresolved_reason,
         })
     }
 
@@ -897,6 +1060,8 @@ struct PortableRelationResolutionKey {
 
 /// Destination-bound graph ready for the existing publication transaction.
 struct BoundGraph {
+    /// Destination-path file classifications.
+    file_classifications: Vec<FileContentClassification>,
     /// Destination-bound graph entities.
     entities: Vec<GraphEntity>,
     /// Destination-bound logical relations.
@@ -909,6 +1074,8 @@ struct BoundGraph {
     entity_exports: Vec<EntityResolutionKey>,
     /// Destination-bound relation dependencies.
     relation_dependencies: Vec<RelationDependencyKey>,
+    /// Destination-bound closed unresolved-document reasons.
+    document_unresolved_reasons: Vec<(LogicalRelationKey, DocumentTargetUnresolvedReason)>,
 }
 
 /// Digest body used to avoid hashing the digest field itself.
@@ -944,6 +1111,11 @@ fn snapshot_digest(
 /// Construct the exact allowlisted content inventory.
 fn expected_content(graph: &PortableGraph) -> DbResult<Vec<DerivedSnapshotContent>> {
     Ok(vec![
+        content(
+            "file_content_classifications",
+            &["path", "classification"],
+            graph.file_classifications.len(),
+        )?,
         content("graph_entities", &["entity_selector"], graph.entities.len())?,
         content(
             "graph_relations",
@@ -951,6 +1123,7 @@ fn expected_content(graph: &PortableGraph) -> DbResult<Vec<DerivedSnapshotConten
                 "source_entity",
                 "relation_kind",
                 "resolution",
+                "document_unresolved_reason",
                 "confidence",
                 "completeness",
             ],
@@ -998,6 +1171,65 @@ fn content(table: &str, columns: &[&str], rows: usize) -> DbResult<DerivedSnapsh
         columns: columns.iter().map(|column| (*column).to_string()).collect(),
         rows: usize_to_u64(rows)?,
     })
+}
+
+/// Capture the complete closed file-role projection from the private backup.
+fn capture_file_classifications(
+    connection: &Connection,
+    budget: &mut SnapshotBudget,
+) -> DbResult<Vec<FileContentClassification>> {
+    let mut statement = connection.prepare(
+        "SELECT path, classification
+           FROM file_content_classifications
+          ORDER BY path",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut captured = Vec::new();
+    while let Some(row) = rows.next()? {
+        let path = row.get::<_, String>(0)?;
+        let raw = row.get::<_, String>(1)?;
+        let classification =
+            ContentClassification::from_db(&raw).ok_or_else(|| DbError::InvalidEnum {
+                field: "file_content_classifications.classification",
+                value: raw.clone(),
+            })?;
+        budget.admit(
+            usize_to_u64(path.len())?
+                .saturating_add(usize_to_u64(raw.len())?)
+                .saturating_add(DERIVED_SNAPSHOT_DECODE_OBJECT_BYTES),
+        )?;
+        captured.push(FileContentClassification {
+            path,
+            classification,
+        });
+    }
+    Ok(captured)
+}
+
+/// Require snapshot classifications to cover the destination's exact current file set.
+fn validate_snapshot_classification_coverage(
+    connection: &Connection,
+    classifications: &[FileContentClassification],
+) -> DbResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT path
+           FROM nodes
+          WHERE exists_now = 1 AND kind = 'file'
+          ORDER BY path",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut index = 0_usize;
+    while let Some(row) = rows.next()? {
+        let path = row.get::<_, String>(0)?;
+        if classifications.get(index).map(|row| row.path.as_str()) != Some(path.as_str()) {
+            return invalid("snapshot classifications do not exactly cover current files");
+        }
+        index = index.saturating_add(1);
+    }
+    if index != classifications.len() {
+        return invalid("snapshot classifications do not exactly cover current files");
+    }
+    Ok(())
 }
 
 /// Hash the current repository-relative source state.
@@ -1057,8 +1289,16 @@ fn hash_field(hasher: &mut Hasher, value: &[u8]) -> DbResult<()> {
 
 /// Reject a private capture larger than the explicit snapshot ceiling.
 fn require_private_capture_size(connection: &Connection) -> DbResult<()> {
-    let page_count = connection.query_row("PRAGMA page_count", [], |row| row.get::<_, u64>(0))?;
-    let page_size = connection.query_row("PRAGMA page_size", [], |row| row.get::<_, u64>(0))?;
+    let page_count =
+        u64::try_from(connection.query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))?)
+            .map_err(|_source| DbError::DerivedSnapshotInvalid {
+            reason: "private SQLite capture page count was negative",
+        })?;
+    let page_size =
+        u64::try_from(connection.query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))?)
+            .map_err(|_source| DbError::DerivedSnapshotInvalid {
+                reason: "private SQLite capture page size was negative",
+            })?;
     let bytes = page_count
         .checked_mul(page_size)
         .ok_or(DbError::DerivedSnapshotInvalid {
@@ -1085,10 +1325,7 @@ fn required_index(
 
 /// Validate that a portable index addresses the supplied vector.
 fn require_vector_index(index: u32, length: usize, reason: &'static str) -> DbResult<()> {
-    if usize::try_from(index)
-        .ok()
-        .is_some_and(|index| index < length)
-    {
+    if usize::try_from(index).is_ok_and(|index| index < length) {
         Ok(())
     } else {
         invalid(reason)
@@ -1228,13 +1465,15 @@ mod tests {
         DerivedGraphSnapshot, MAX_DERIVED_SNAPSHOT_JSON_STRING_BYTES, expected_content, invalid,
         snapshot_digest,
     };
-    use crate::{AtlasStore, DbError};
+    use crate::{AtlasStore, DbError, FileContentClassification};
     use projectatlas_core::graph::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
-        CoverageState, EntityResolutionKey, EntitySelector, GraphEntity, GraphIdentityText,
-        GraphRelationKind, LogicalRelation, RelationDependencyKey, RelationOccurrence,
-        RelationResolution, RepositoryFilePath, ResolutionKeyDomain, SourceSpan, SymbolSelector,
+        CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
+        ExtendedRelationKind, GraphEntity, GraphIdentityText, GraphRelationKind, LogicalRelation,
+        RelationDependencyKey, RelationOccurrence, RelationResolution, RepositoryFilePath,
+        ResolutionKeyDomain, SourceSpan, SymbolSelector,
     };
+    use projectatlas_core::language::ContentClassification;
     use projectatlas_core::symbols::{RelationKind, SymbolKind};
     use projectatlas_core::telemetry::UsageEvent;
     use projectatlas_core::{IndexGeneration, Node, NodeKind, PurposeSource};
@@ -1296,6 +1535,14 @@ mod tests {
             ),
         ])?;
         publication.finish_scan_replacement()?;
+        publication.upsert_file_content_classification_batch(&[FileContentClassification {
+            path: "src/lib.rs".to_string(),
+            classification: if with_graph {
+                ContentClassification::Source
+            } else {
+                ContentClassification::Documentation
+            },
+        }])?;
         if with_graph {
             let project_entity = GraphEntity::new(project, EntitySelector::Project, generation)?;
             let file = GraphEntity::new(
@@ -1326,10 +1573,26 @@ mod tests {
                 Completeness::Complete,
                 generation,
             )?;
+            let unresolved_document = LogicalRelation::new(
+                &file,
+                GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new("docs/missing.md")?,
+                },
+                ConfidenceClass::High,
+                Completeness::Complete,
+                generation,
+            )?;
             let occurrence = RelationOccurrence::new(
                 &relation,
                 RepositoryFilePath::new(Path::new("src/lib.rs"))?,
                 SourceSpan::new(1, 0, 1, 6)?,
+                generation,
+            )?;
+            let document_occurrence = RelationOccurrence::new(
+                &unresolved_document,
+                RepositoryFilePath::new(Path::new("src/lib.rs"))?,
+                SourceSpan::new(2, 0, 2, 15)?,
                 generation,
             )?;
             let coverage = CoverageRecord::new(
@@ -1355,12 +1618,16 @@ mod tests {
             publication.replace_repository_graph_with_resolution_keys(
                 project,
                 &[project_entity, file, symbol.clone()],
-                std::slice::from_ref(&relation),
-                &[occurrence],
+                &[relation.clone(), unresolved_document.clone()],
+                &[occurrence, document_occurrence],
                 &[coverage],
                 &[EntityResolutionKey::new(symbol.key().clone(), key.clone())?],
                 &[RelationDependencyKey::new(relation.key().clone(), key)?],
             )?;
+            publication.set_document_unresolved_reasons(&[(
+                unresolved_document.key().clone(),
+                DocumentTargetUnresolvedReason::Missing,
+            )])?;
         } else {
             publication.replace_repository_graph_with_resolution_keys(
                 project,
@@ -1505,7 +1772,7 @@ mod tests {
         assert!(!encoded_text.contains(escaped_source_root.trim_matches('"')));
         assert_eq!(
             exported.content().iter().map(|row| row.rows).sum::<u64>(),
-            8
+            11
         );
 
         let decoded = DerivedGraphSnapshot::from_json(&encoded)?;
@@ -1522,6 +1789,23 @@ mod tests {
             10,
         )?;
         assert_eq!(entities.rows.len(), 2);
+        assert_eq!(
+            destination.file_content_classifications_for_paths(&["src/lib.rs".to_string()])?[0]
+                .classification,
+            ContentClassification::Source
+        );
+        assert_eq!(
+            destination.connection.query_row(
+                "SELECT COUNT(*) FROM graph_relations
+                  WHERE relation_scope = 'extended'
+                    AND relation_kind = 'documents'
+                    AND resolution_status = 'unresolved'
+                    AND document_unresolved_reason = 'missing'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            1
+        );
         let indexed = destination.load_nodes_by_paths(&["src/lib.rs".to_string()])?;
         assert_eq!(
             indexed[0].purpose.purpose.as_deref(),
@@ -1559,6 +1843,88 @@ mod tests {
                 |row| row.get::<_, String>(0),
             )?,
             PRIVATE_SENTINEL
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::panic_in_result_fn)]
+    fn derived_snapshot_rejects_document_reason_drift_and_rolls_back_update_failure()
+    -> Result<(), Box<dyn Error>> {
+        let source_root = tempfile::tempdir()?;
+        let destination_root = tempfile::tempdir()?;
+        let mut source = open_store(source_root.path())?;
+        let mut destination = open_store(destination_root.path())?;
+        publish_fixture(&mut source, "same-content", true)?;
+        publish_fixture(&mut destination, "same-content", false)?;
+
+        let snapshot = source.export_derived_graph_snapshot()?;
+        let mut malformed = snapshot.clone();
+        let document = malformed
+            .graph
+            .relations
+            .iter_mut()
+            .find(|relation| {
+                relation.kind == GraphRelationKind::Extended(ExtendedRelationKind::Documents)
+            })
+            .ok_or("document relation is missing")?;
+        document.document_unresolved_reason = None;
+        malformed.content = expected_content(&malformed.graph)?;
+        malformed.digest =
+            snapshot_digest(&malformed.metadata, &malformed.content, &malformed.graph)?;
+        assert!(matches!(
+            malformed.to_json(),
+            Err(DbError::DerivedSnapshotInvalid {
+                reason: "snapshot document reason contradicts relation family or resolution"
+            })
+        ));
+
+        let mut forbidden = snapshot.clone();
+        let calls = forbidden
+            .graph
+            .relations
+            .iter_mut()
+            .find(|relation| relation.kind == GraphRelationKind::Legacy(RelationKind::Calls))
+            .ok_or("calls relation is missing")?;
+        calls.document_unresolved_reason = Some(DocumentTargetUnresolvedReason::Missing);
+        forbidden.content = expected_content(&forbidden.graph)?;
+        forbidden.digest =
+            snapshot_digest(&forbidden.metadata, &forbidden.content, &forbidden.graph)?;
+        assert!(matches!(
+            forbidden.to_json(),
+            Err(DbError::DerivedSnapshotInvalid {
+                reason: "snapshot document reason contradicts relation family or resolution"
+            })
+        ));
+
+        destination.connection.execute_batch(
+            "CREATE TEMP TRIGGER fail_snapshot_document_reason
+             BEFORE UPDATE OF document_unresolved_reason ON graph_relations
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected snapshot reason failure');
+             END;",
+        )?;
+        let before = destination
+            .index_publication()?
+            .ok_or("destination publication is missing")?;
+        assert!(
+            destination
+                .import_derived_graph_snapshot(&snapshot)
+                .is_err()
+        );
+        assert_eq!(
+            destination
+                .index_publication()?
+                .ok_or("destination publication is missing")?,
+            before
+        );
+        assert_eq!(
+            destination.connection.query_row(
+                "SELECT COUNT(*) FROM graph_relations",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )?,
+            0
         );
         Ok(())
     }

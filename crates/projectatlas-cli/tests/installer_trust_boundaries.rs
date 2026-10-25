@@ -110,13 +110,11 @@ fn powershell_bootstrap_rejects_project_state_reparse_points_before_writing()
         !output.status.success(),
         "PowerShell bootstrap accepted a project-state reparse point",
     )?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let normalized_stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
     require(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("must not be a symlink, junction, or reparse point"),
-        format!(
-            "PowerShell bootstrap did not explain the rejected reparse point: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
+        normalized_stderr.contains("must not be a symlink, junction, or reparse point"),
+        format!("PowerShell bootstrap did not explain the rejected reparse point: {stderr}"),
     )?;
     require(
         fs::read_to_string(sentinel)? == "unchanged\n"
@@ -159,12 +157,12 @@ fn powershell_bootstrap_rejects_redirected_config_outputs() -> Result<(), Box<dy
             !output.status.success(),
             format!("PowerShell bootstrap accepted redirected output {config_name}"),
         )?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let normalized_stderr = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
         require(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("must not be a symlink, junction, or reparse point"),
+            normalized_stderr.contains("must not be a symlink, junction, or reparse point"),
             format!(
-                "PowerShell bootstrap did not explain redirected output {config_name}: {}",
-                String::from_utf8_lossy(&output.stderr)
+                "PowerShell bootstrap did not explain redirected output {config_name}: {stderr}"
             ),
         )?;
         require(
@@ -419,6 +417,7 @@ fn run_powershell_runtime_install(
     isolated_root: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let installer = workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.ps1");
+    let runtime = isolated_runtime_path(isolated_root)?;
     let mut command = isolated_command("powershell", isolated_root)?;
     command
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
@@ -426,7 +425,7 @@ fn run_powershell_runtime_install(
         .arg("-ProjectRoot")
         .arg(project_root)
         .arg("-RuntimePath")
-        .arg(assert_cmd::cargo::cargo_bin("projectatlas"))
+        .arg(runtime)
         .arg("-ProjectAtlasVersion")
         .arg(release_version());
     Ok(command.output()?)
@@ -439,16 +438,35 @@ fn run_posix_runtime_install(
     isolated_root: &Path,
 ) -> Result<std::process::Output, Box<dyn Error>> {
     let installer = workspace_root()?.join("plugins/projectatlas/scripts/install-runtime.sh");
+    let runtime = isolated_runtime_path(isolated_root)?;
     let mut command = isolated_command("bash", isolated_root)?;
     command
         .arg(installer)
         .arg(project_root)
-        .env(
-            "PROJECTATLAS_RUNTIME_PATH",
-            assert_cmd::cargo::cargo_bin("projectatlas"),
-        )
+        .env("PROJECTATLAS_RUNTIME_PATH", runtime)
         .env("PROJECTATLAS_VERSION", release_version());
     Ok(command.output()?)
+}
+
+/// Copy the built runtime into the fixture authority before invoking a bootstrap.
+fn isolated_runtime_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let runtime_dir = root.join("runtime-bin");
+    fs::create_dir_all(&runtime_dir)?;
+    let runtime = runtime_dir.join(if cfg!(windows) {
+        "projectatlas.exe"
+    } else {
+        "projectatlas"
+    });
+    fs::copy(assert_cmd::cargo::cargo_bin("projectatlas"), &runtime)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&runtime)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime, permissions)?;
+    }
+    Ok(runtime)
 }
 
 /// Create a subprocess with all installer-owned host state redirected into a fixture root.
@@ -476,6 +494,7 @@ fn configure_isolated_environment(
         .env("APPDATA", app_data)
         .env("LOCALAPPDATA", local_app_data)
         .env("CODEX_HOME", codex_home)
+        .env("PATH", filtered_inherited_path()?)
         .env("PROJECTATLAS_SKIP_USER_PATH_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE", "1")
         .env("PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE", "1")
@@ -486,8 +505,117 @@ fn configure_isolated_environment(
 /// Prepend one fixture executable directory to the inherited process path.
 fn prepend_path(path: &Path) -> Result<OsString, env::JoinPathsError> {
     let mut paths = vec![path.to_path_buf()];
-    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    paths.extend(filtered_path_entries(env::split_paths(
+        &env::var_os("PATH").unwrap_or_default(),
+    )));
     env::join_paths(paths)
+}
+
+/// Return the inherited PATH without shared or installed Atlas command authorities.
+fn filtered_inherited_path() -> Result<OsString, env::JoinPathsError> {
+    env::join_paths(filtered_path_entries(env::split_paths(
+        &env::var_os("PATH").unwrap_or_default(),
+    )))
+}
+
+/// Exclude command directories that can leak another installation's authority.
+fn filtered_path_entries<I>(paths: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    paths
+        .into_iter()
+        .filter(|path| {
+            !is_shared_cargo_runtime_directory(path)
+                && ![
+                    "atlas",
+                    "atlas.exe",
+                    "atlas.cmd",
+                    "atlas.bat",
+                    "atlas.ps1",
+                    "atlas.com",
+                    "projectatlas",
+                    "projectatlas.exe",
+                    "projectatlas.cmd",
+                    "projectatlas.bat",
+                    "projectatlas.ps1",
+                    "projectatlas.com",
+                ]
+                .iter()
+                .any(|name| path.join(name).is_file())
+        })
+        .collect()
+}
+
+/// Identify Cargo's shared runtime directory and its sibling dependency directory.
+fn is_shared_cargo_runtime_directory(path: &Path) -> bool {
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let Some(runtime_directory) = runtime.parent() else {
+        return false;
+    };
+    let normalize = |value: &Path| {
+        value
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    if normalize(path) == normalize(runtime_directory)
+        || normalize(path) == normalize(&runtime_directory.join("deps"))
+    {
+        return true;
+    }
+    runtime_directory
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("deps"))
+        && runtime_directory
+            .parent()
+            .is_some_and(|parent| normalize(path) == normalize(parent))
+}
+
+#[test]
+fn isolated_installer_path_filters_shared_cargo_runtime_and_keeps_fixture_tools()
+-> Result<(), Box<dyn Error>> {
+    let root = tempfile::tempdir()?;
+    let fake_bin = root.path().join("fake-bin");
+    let second_fake_bin = root.path().join("second-fake-bin");
+    let installed_bin = root.path().join("installed-bin");
+    let installed_cli_bin = root.path().join("installed-cli-bin");
+    fs::create_dir(&fake_bin)?;
+    fs::create_dir(&second_fake_bin)?;
+    fs::create_dir(&installed_bin)?;
+    fs::create_dir(&installed_cli_bin)?;
+    fs::write(
+        installed_bin.join(if cfg!(windows) { "atlas.cmd" } else { "atlas" }),
+        "",
+    )?;
+    fs::write(
+        installed_cli_bin.join(if cfg!(windows) {
+            "projectatlas.cmd"
+        } else {
+            "projectatlas"
+        }),
+        "",
+    )?;
+    let runtime = assert_cmd::cargo::cargo_bin("projectatlas");
+    let runtime_directory = runtime
+        .parent()
+        .ok_or_else(|| io::Error::other("Cargo runtime has no parent directory"))?;
+    let dependencies = runtime_directory.join("deps");
+    let filtered = filtered_path_entries([
+        fake_bin.clone(),
+        runtime_directory.to_path_buf(),
+        dependencies,
+        installed_bin,
+        installed_cli_bin,
+        second_fake_bin.clone(),
+    ]);
+    require(
+        filtered == [fake_bin, second_fake_bin],
+        format!(
+            "isolated installer PATH did not retain fixture tools while excluding shared Cargo directories: {filtered:?}"
+        ),
+    )?;
+    Ok(())
 }
 
 /// Return the release version expected by the checked-in bootstraps.

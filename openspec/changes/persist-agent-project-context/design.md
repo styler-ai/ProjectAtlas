@@ -4,7 +4,7 @@ ProjectAtlas already solves source orientation with a purpose-led funnel and an 
 
 The Cline Memory Bank demonstrates the value of separating project brief, product context, active context, system patterns, technical context, and progress. Its Markdown hierarchy is intentionally simple, but it asks the agent to reread every file and can grow or drift without transactional bounds. The Memory Atlas keeps the useful responsibility separation while adapting it to ProjectAtlas: typed SQLite records, stable keys, bounded recovery, exact local-root ownership, and direct links back into purpose/graph/summary/slice navigation.
 
-Current Codex capabilities narrow the gap but do not remove it. Codex can resume sessions, compact conversation history, persist a task goal, optionally generate personal memories, load `AGENTS.md`, discover skills progressively, connect MCP servers, and run trusted lifecycle hooks for startup, resume, clear, compact, and subagent start. These surfaces have different owners:
+Current host capabilities narrow the gap but do not remove it. A supported host may resume sessions, compact conversation history, persist a task goal, load repository instructions, discover skills, connect MCP servers, and expose documented lifecycle events. Task 6.1 must verify each supported host version and record only its official event names and payload contract before automatic integration is claimed. These surfaces have different owners:
 
 - transcript resume and compaction preserve recent conversational continuity;
 - native goals preserve a current execution target;
@@ -15,7 +15,7 @@ Current Codex capabilities narrow the gap but do not remove it. Codex can resume
 
 The Memory Atlas fills only the remaining project-local bird's-eye role. It must work for hosts with weaker native memory/goal support, but it must not become a second transcript, rule system, task tracker, or private host-memory writer.
 
-Implementation is dependency-gated behind #308. The storage migration, authored/derived-state boundary, fresh read snapshot, selected-root rules, session brief, and streamlined MCP inventory must be stable before #314 lands.
+Implementation is dependency-gated behind stable v0.5.0 and #310. The already-landed #308 storage migration, authored/derived-state boundary, fresh read snapshot, selected-root rules, session brief, and MCP foundations must be revalidated against the released baseline before #314 lands. #314 is a direct native child of feature-free release owner #493 and completes before #493 performs holistic v0.6.0 acceptance.
 
 ## Goals / Non-Goals
 
@@ -156,8 +156,8 @@ The Memory Atlas does not decide which source is current. #308 freshness remains
 
 Host integration is capability-driven and truthful:
 
-- Codex: use `SessionStart` for `startup`, `resume`, `clear`, and `compact` plus `SubagentStart` when the plugin hook is trusted and enabled. The hook injects a fixed instruction to request read-only recovery; it does not write memory or goals. Recovery directs the agent to resolve and completely read the required project-goal skills followed by active-issue skills before implementation. Stable native goals may carry the current execution target. Experimental memories remain host-owned and optional. `AGENTS.md`, skills, and plugins remain their own instruction/workflow surfaces.
-- Claude Code and OpenCode: use only documented skill/plugin/MCP/task lifecycle capabilities. Where automatic startup recovery is unavailable, packaged guidance makes the manual `atlas_session_brief` recovery explicit.
+- Codex: after task 6.1 verifies the supported version's official lifecycle contract, a trusted enabled hook may inject a fixed instruction to request read-only recovery on the documented startup/resume/compaction or subagent boundary. The specification does not invent event names or payload fields. Recovery directs the agent to resolve and completely read required project-goal skills followed by active-issue skills before implementation. Stable native goals may carry the current execution target. Experimental memories remain host-owned and optional. `AGENTS.md`, skills, and plugins remain their own instruction/workflow surfaces.
+- Claude Code and OpenCode: use only capabilities and event contracts verified from their supported official versions. Where automatic startup recovery is unavailable, untrusted, or undocumented, packaged guidance makes the manual `atlas_session_brief` recovery explicit.
 - Generic MCP: use the two Memory Atlas tools and session brief without assuming any native memory or goal API.
 
 Successful recovery and routine checkpoint updates stay out of user-facing narration unless they change the plan, reveal pressure/conflict, or fail. No host integration reads transcript paths, personal memory directories, global config, or private caches.
@@ -196,13 +196,13 @@ Concrete structs/enums and existing service boundaries are sufficient. No trait 
 
 ## Migration Plan
 
-1. Land the lean OpenSpec and synchronized issue without Memory Atlas runtime code.
-2. After #308 stabilizes, add typed contracts, measured budgets, and migration/storage in one behavior slice.
+1. Land the lean OpenSpec and synchronized issue without Memory Atlas runtime code; retain #314 as one direct child of #493 and blocked by #310.
+2. After stable v0.5.0 and #310 land, revalidate the released #308 foundation, then add typed contracts, measured budgets, and migration/storage in one behavior slice.
 3. Add shared service lifecycle, reflection batches, bounded reads, and recovery projection with shared tests.
 4. Add CLI/MCP/settings and replay every existing request/default.
 5. Add host guidance/hooks and ProjectAtlas dogfooding through the public tools.
 6. Run focused tests after each significant slice; run the complete workspace, line-coverage, and mutation campaign once after all #314 behavior is finished.
-7. Merge only when OpenSpec/GitHub tasks are synchronized and the combined issue is reviewed.
+7. Merge only when OpenSpec/GitHub tasks are synchronized and the combined issue is reviewed; then let #493 execute holistic installed-product acceptance and close last.
 
 Before release, rollback removes the unshipped migration and additive surfaces together. After release, supported rollback uses the existing verified database backup/restore path; older runtimes reject the newer schema rather than downgrading it.
 

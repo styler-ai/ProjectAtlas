@@ -10,8 +10,8 @@ mod token_tui;
 
 use atlas_map::{
     AtlasMapConfig, IgnoreEntryKind, LintOptions, add_ignore_entry, effective_config_report,
-    init_gitignore, init_project_with_config, lint_map, list_ignore_entries, load_atlas_config,
-    remove_ignore_entry, write_map,
+    init_gitignore, init_project_with_config, list_ignore_entries, load_atlas_config,
+    remove_ignore_entry,
 };
 use clap::parser::ValueSource;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -20,18 +20,18 @@ use projectatlas_cli::optional_parser_lifecycle::{
     OptionalParserPackLifecycle, OptionalParserPackLifecycleError,
 };
 use projectatlas_core::graph::{
-    ConfidenceClass, GraphEntityKey, GraphLimits, GraphRelationKind, LogicalRelation,
-    RepositoryFilePath,
+    ConfidenceClass, GraphLimits, GraphRelationKind, LogicalRelation, RepositoryFilePath,
 };
 use projectatlas_core::health::Severity;
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::build_outline;
 use projectatlas_core::telemetry::{
     TokenCalibrationOverview, TokenTrendWindow as CoreTokenTrendWindow, UsageInstanceOwner,
 };
 use projectatlas_core::toon::{
     encode_agent_payload, encode_error_text, render_outline, render_overview,
-    render_ranked_node_rows, render_ranked_nodes, render_symbol_relations, render_symbols,
-    render_token_overview, render_token_trends,
+    render_ranked_node_rows, render_ranked_nodes, render_symbol_relations, render_token_overview,
+    render_token_trends,
 };
 use projectatlas_core::{
     IndexWorkControl, IndexWorkStage, PurposeSource, PurposeStatus, normalize_native_path_display,
@@ -39,37 +39,45 @@ use projectatlas_core::{
 };
 use projectatlas_db::{
     AtlasStore, DbError, HealthQuery, HealthResolution, HealthScope, ProjectRootTransition,
-    ProjectRootTransitionResult, RepositoryCoverageQuery, RepositoryGraphDirection,
-    RepositoryGraphRelationQuery, verify_project_database,
+    ProjectRootTransitionResult, PurposeMutationTransaction, RepositoryCoverageQuery,
+    RepositoryGraphDirection, verify_project_database,
+};
+use projectatlas_fs::worktree::{
+    GitManagerSourceSelection, GitRepositorySelection, GitWorktreeRole, GitWorktreeState,
+    RepositoryStructure, discover_repository_structure,
 };
 use projectatlas_service::{
     COVERAGE_PAGE_MAX_LIMIT, CodeSlice, CodeSliceBudget, CodeSliceDraft, CoverageDiscoveryReport,
-    DetailedRelationBudget, DetailedRelationQuery, FederatedStore, FileSummaryReport,
-    GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery, RelationAnchor,
-    RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport, SearchRetrievalMode,
-    ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
-    build_file_summary_from_source, load_coverage_discovery, load_detailed_relation_page,
-    load_federated_detailed_relations, load_federated_relation_analysis, load_relation_analysis,
-    load_token_report, parse_coverage_parser, parse_coverage_relation, parse_coverage_state,
-    parse_symbol_kind, read_indexed_code_slice_from_source_bounded,
-    read_symbol_slice_from_source_bounded, search_indexed_files_with_control,
+    DetailedRelationBudget, DetailedRelationQuery, EntrypointProfile, FederatedStore,
+    FileSummaryReport, GitImpactSelection, RelationAnalysisMode, RelationAnalysisQuery,
+    RelationAnchor, RelationDirection, RelationResolutionFilter, SearchQuery, SearchReport,
+    SearchRetrievalMode, ServiceError, SymbolSliceSelector, TokenReport, TokenReportRequest,
+    build_file_summary_from_source_with_selection, load_coverage_discovery,
+    load_detailed_relation_page, load_federated_detailed_relations,
+    load_federated_relation_analysis, load_relation_analysis, load_token_report,
+    parse_coverage_parser, parse_coverage_relation, parse_coverage_state, parse_symbol_kind,
+    read_indexed_code_slice_from_source_bounded_with_selection,
+    read_symbol_slice_from_source_bounded_with_selection, search_indexed_files_with_control,
 };
 use rmcp::schemars;
 use runtime::{
     DEFAULT_HEALTH_LIMIT, InitBootstrapOptions, InitHostConfigStatus, InitSetupReport,
     MAX_HEALTH_LIMIT, MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES, MAX_SYMBOL_FILE_BYTES, PurposeLintLevel,
-    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SymbolBuildOptions,
-    UsageRuntimeInstance, WatchStatusReport, absolute_path, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
+    PurposeReviewRequest, ScanRuntimePlan, SettingsReport, SourceObservationRegistry,
+    SymbolBuildOptions, UsageRuntimeInstance, WatchStatusReport, absolute_path,
+    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    canonical_source_project_root, classified_ranked_file_nodes_with_reasons,
     config_root_mismatch_error, default_cli_project_root, default_mcp_project_root,
     defaultable_cli_project_root, estimated_source_tokens_for_indexed_files,
     estimated_source_tokens_for_paths, index_work_control, init_config_path, init_path_status,
-    lint_database_if_present, next_step_report, next_step_report_payload, normalized_folder_filter,
-    open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    lint_project, load_synchronized_repository_token_report, lossless_native_path_display,
+    lossless_project_root_display, next_step_report_payload, next_step_report_with_selection,
+    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
     open_federated_atlas_stores_for_project, open_fresh_atlas_store_for_project,
-    purpose_curation_page, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    preflight_existing_project_binding, purpose_curation_page, ranked_folder_nodes_with_reasons,
     read_indexed_file_content, record_directory_walk_usage_estimate, record_usage_estimate,
-    record_usage_text, render_coverage_report, render_health_page, render_purpose_curation_page,
+    record_usage_text, render_classified_ranked_file_rows, render_classified_symbol_rows,
+    render_coverage_report, render_health_page, render_purpose_curation_page,
     render_purpose_review_report, reset_index_files, resolved_mcp_config_path, review_purposes,
     run_init_bootstrap, run_scan_pipeline_controlled, run_single_watch_refresh_controlled,
     run_symbol_build_pipeline_controlled, run_watch_loop, standalone_index_work_control,
@@ -81,19 +89,33 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsFd;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use thiserror::Error;
-#[cfg(test)]
-use token_tui::render_token_dashboard;
 use token_tui::{
-    TokenAtlasPreview, TokenDashboardTheme, render_token_dashboard_with_atlas,
-    render_token_trend_dashboard_with_theme, token_atlas_network_relation,
-    token_dashboard_wants_atlas,
+    TokenAtlasPreview, TokenDashboardTheme, capture_token_dashboard_viewport,
+    render_token_dashboard_with_atlas, render_token_trend_dashboard_with_theme,
+    token_atlas_network_relation, token_dashboard_wants_atlas,
 };
+#[cfg(test)]
+use token_tui::{render_token_dashboard, render_token_dashboard_with_atlas_at_width};
 
 /// Default relative path for the `SQLite` index.
 const DEFAULT_DB_PATH: &str = ".projectatlas/projectatlas.db";
+/// Whole-operation deadline for the optional live token-dashboard graph read.
+const TOKEN_ATLAS_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum time the installer waits for another updater.
+#[cfg(unix)]
+const INSTALLER_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// Poll cadence for the standard-library nonblocking file lock.
+#[cfg(unix)]
+const INSTALLER_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// `ProjectAtlas` major architecture version.
 const PROJECTATLAS_MAJOR_VERSION: u8 = 3;
 /// Default caller-visible compatibility label for token telemetry.
@@ -102,12 +124,18 @@ const DEFAULT_CALLER_LABEL: &str = "default";
 const DEFAULT_FILE_SUMMARY_LIMIT: usize = 25;
 /// CLI top-level field for detailed and analysis relation responses.
 const CLI_PAYLOAD_SYMBOL_RELATIONS: &str = "symbol_relations";
+/// Federated analysis does not support single-root entrypoint profiling.
+const CLI_ERROR_ENTRYPOINT_FEDERATED: &str = "entrypoint profiles require one project root";
 /// One-shot watcher refresh mode.
 const WATCH_MODE_ONCE: &str = "single-refresh";
 /// Event-backed watcher mode.
 const WATCH_MODE_NOTIFY: &str = "notify";
 /// Recovery guidance for a database whose local WAL-safe placement was rejected.
 const DATABASE_FILESYSTEM_RECOVERY: &str = "Place the selected local source tree and its .projectatlas database on a supported local filesystem, resolve any mount or permission uncertainty, and retry; ProjectAtlas will not weaken the WAL durability profile.";
+/// Recovery guidance for a database owned by another schema version.
+const SCHEMA_VERSION_MISMATCH_RECOVERY: &str = "Use a ProjectAtlas runtime that supports this database schema; do not reset, downgrade, or repair the database with this runtime.";
+/// Recovery guidance for an admitted predecessor database.
+const SCHEMA_MIGRATION_REQUIRED_RECOVERY: &str = "Apply the supported database-owned migration without changing the selected database: for CLI, use the `projectatlas init` action from the selected project root while preserving the same global `--db`/`--config` selection; for MCP, call `atlas_init` through the same MCP server/database binding. Do not reset or replace the database.";
 /// Existing CLI command that performs one bounded refresh pass.
 const CLI_REFRESH_COMMAND: &str = "watch";
 /// Existing CLI command that initializes one selected project root.
@@ -206,6 +234,14 @@ enum CliError {
         /// Cleanup failure observed before releasing process ownership.
         cleanup: Box<Self>,
     },
+    /// Purpose mutation failed and its mandatory rollback also failed.
+    #[error("purpose mutation failed: {operation}; mandatory rollback also failed: {rollback}")]
+    PurposeMutationRollback {
+        /// Original mutation, freshness, or cancellation failure.
+        operation: Box<Self>,
+        /// Storage failure observed while rolling the transaction back.
+        rollback: DbError,
+    },
     /// User input was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -225,14 +261,14 @@ enum CliError {
     #[error("{0}")]
     ProjectMismatch(Box<runtime::IndexProjectMismatch>),
     /// A durable root transition committed before generated configuration failed.
-    #[error(
-        "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition: {source}"
-    )]
+    #[error("{message}: {source}")]
     RootTransitionFollowup {
-        /// Canonical root already committed to the database.
-        root: String,
+        /// Lossless root display when the host can represent the committed native identity.
+        root: Option<String>,
         /// Durable transition that already completed.
         transition: RootTransition,
+        /// Recovery guidance that never substitutes a lossy root display.
+        message: String,
         /// Follow-up configuration failure.
         #[source]
         source: Box<CliError>,
@@ -299,18 +335,24 @@ enum AgentErrorKind {
     DatabaseFilesystemUnsupported,
     /// The database's required local filesystem guarantees could not be established.
     DatabaseFilesystemUncertain,
+    /// The selected database schema is unsupported by this runtime.
+    SchemaVersionMismatch,
+    /// The selected database schema has a supported migration route.
+    SchemaMigrationRequired,
     /// The host has no accepted optional parser containment adapter.
     #[cfg(feature = "optional-parser-supervisor")]
     UnsupportedContainment,
     /// The requested optional search mode has no ready generation.
     SearchCapabilityUnavailable,
+    /// A complete map cannot fit in the supported response budget.
+    ResponseLimitExceeded,
 }
 
 /// Content-free database placement details with direct recovery guidance.
 #[derive(Clone, Debug, Serialize)]
 struct DatabaseFilesystemErrorPayload {
     /// Database path rejected before mutation.
-    path: String,
+    path: Option<String>,
     /// Resolved owning mount when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     mount_point: Option<String>,
@@ -322,6 +364,82 @@ struct DatabaseFilesystemErrorPayload {
     reason: Option<String>,
     /// Safe recovery action.
     recovery: &'static str,
+}
+
+/// Typed schema-version mismatch shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SchemaVersionMismatchPayload {
+    /// Schema version stored by the database owner.
+    found_schema_version: i64,
+    /// Schema version supported by this runtime.
+    supported_schema_version: i64,
+    /// Public `ProjectAtlas` package version executing the request.
+    runtime_version: &'static str,
+    /// Safe recovery action.
+    recovery: &'static str,
+}
+
+/// CLI error details for an incompatible database schema.
+#[derive(Serialize)]
+struct SchemaVersionMismatchErrorPayload {
+    /// Machine-readable error kind.
+    kind: AgentErrorKind,
+    /// Human-readable recovery guidance.
+    message: String,
+    /// Content-free incompatible schema details.
+    schema_version_mismatch: SchemaVersionMismatchPayload,
+}
+
+/// Structured CLI response for an incompatible database schema.
+#[derive(Serialize)]
+struct SchemaVersionMismatchErrorResponse {
+    /// Typed error details.
+    error: SchemaVersionMismatchErrorPayload,
+}
+
+/// Typed supported-schema migration handoff shared by CLI and MCP adapters.
+#[derive(Clone, Debug, Serialize)]
+struct SchemaMigrationRequiredPayload {
+    /// Schema version stored by the database owner.
+    found_schema_version: i64,
+    /// Schema version supported by this runtime.
+    supported_schema_version: i64,
+    /// Remaining ordered database-owned migration steps.
+    migration_steps_remaining: u32,
+    /// Public `ProjectAtlas` package version executing the request.
+    runtime_version: &'static str,
+    /// Safe migration action.
+    recovery: &'static str,
+}
+
+impl SchemaMigrationRequiredPayload {
+    /// Render one content-free explanation for a command that requires the current schema.
+    fn message(&self) -> String {
+        format!(
+            "database schema version {} requires {} supported migration step(s) to version {} before this command can run",
+            self.found_schema_version,
+            self.migration_steps_remaining,
+            self.supported_schema_version
+        )
+    }
+}
+
+/// CLI error details for an admitted predecessor schema.
+#[derive(Serialize)]
+struct SchemaMigrationRequiredErrorPayload {
+    /// Machine-readable error kind.
+    kind: AgentErrorKind,
+    /// Human-readable migration handoff.
+    message: String,
+    /// Content-free supported migration details.
+    schema_migration_required: SchemaMigrationRequiredPayload,
+}
+
+/// Structured CLI response for an admitted predecessor schema.
+#[derive(Serialize)]
+struct SchemaMigrationRequiredErrorResponse {
+    /// Typed error details.
+    error: SchemaMigrationRequiredErrorPayload,
 }
 
 /// Typed optional search-capability failure shared by CLI and MCP adapters.
@@ -341,14 +459,16 @@ struct CliNextCall<'a> {
     /// Command family accepted by the current runtime.
     command: &'static str,
     /// Selected project root to refresh.
-    project_path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_path: Option<&'a str>,
     /// Run exactly one refresh cycle.
     #[serde(skip_serializing_if = "Option::is_none")]
     once: Option<bool>,
 }
 
 /// CLI output serialization format.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
 enum OutputFormat {
     /// Token-efficient object notation for agent-facing responses.
     Toon,
@@ -376,6 +496,8 @@ enum RelationAnalysisModeArg {
     Impact,
     /// One node-simple static relationship path.
     Trace,
+    /// Bounded reachability from an explicit entrypoint profile.
+    Entrypoint,
 }
 
 impl From<RelationAnalysisModeArg> for RelationAnalysisMode {
@@ -384,6 +506,7 @@ impl From<RelationAnalysisModeArg> for RelationAnalysisMode {
             RelationAnalysisModeArg::Architecture => Self::Architecture,
             RelationAnalysisModeArg::Impact => Self::Impact,
             RelationAnalysisModeArg::Trace => Self::Trace,
+            RelationAnalysisModeArg::Entrypoint => Self::Entrypoint,
         }
     }
 }
@@ -486,6 +609,15 @@ struct RelationAnalysisArgs {
     /// Closed analysis projection computed over the bounded relation traversal.
     #[arg(long, value_enum)]
     analysis_mode: Option<RelationAnalysisModeArg>,
+    /// Stable name for an explicit entrypoint profile.
+    #[arg(long)]
+    profile_name: Option<String>,
+    /// JSON `RelationAnchor` value; repeat for multiple entrypoints.
+    #[arg(long = "entrypoint")]
+    entrypoints: Vec<String>,
+    /// Relation family admitted by an entrypoint profile; repeat to add families.
+    #[arg(long = "profile-relation")]
+    profile_relations: Vec<String>,
     /// Exact JSON `RelationAnchor` (`file` or fully disambiguated `symbol`) for trace mode.
     #[arg(long)]
     trace_target: Option<String>,
@@ -523,6 +655,9 @@ struct DetailedRelationAnchorArgs {
 /// Direction and trust filters for detailed relation navigation.
 #[derive(Args, Debug)]
 struct DetailedRelationFilterArgs {
+    /// Optional classified-content selection: source, documentation, or both.
+    #[arg(long, value_name = "source|documentation|both")]
+    content_selection: Option<ContentSelection>,
     /// Direction followed from every detailed frontier.
     #[arg(long, value_enum, default_value_t = RelationDirectionArg::Outbound)]
     direction: RelationDirectionArg,
@@ -770,6 +905,8 @@ enum RootTransition {
     Move,
     /// Rotate identity for an independent copy, clone, or worktree.
     Detach,
+    /// Explicitly adopt the selected native root for an intact schema-19 database.
+    AdoptLegacy,
 }
 
 impl From<RootTransition> for ProjectRootTransition {
@@ -778,6 +915,7 @@ impl From<RootTransition> for ProjectRootTransition {
             RootTransition::Bind => Self::Bind,
             RootTransition::Move => Self::Move,
             RootTransition::Detach => Self::Detach,
+            RootTransition::AdoptLegacy => Self::AdoptLegacy,
         }
     }
 }
@@ -788,6 +926,7 @@ impl From<ProjectRootTransition> for RootTransition {
             ProjectRootTransition::Bind => Self::Bind,
             ProjectRootTransition::Move => Self::Move,
             ProjectRootTransition::Detach => Self::Detach,
+            ProjectRootTransition::AdoptLegacy => Self::AdoptLegacy,
         }
     }
 }
@@ -846,6 +985,25 @@ struct Cli {
 }
 
 impl Cli {
+    /// Rebase the conventional database path to the structurally selected source root.
+    fn resolve_implicit_database_path(&mut self) -> Result<(), CliError> {
+        if self.database_path_is_explicit || !command_uses_implicit_database(self.command.as_ref())
+        {
+            return Ok(());
+        }
+        let root = if let Some(config_path) = self.config.as_deref() {
+            canonical_source_project_root(&load_atlas_config(Some(config_path))?.root)?
+        } else {
+            let current_dir = std::env::current_dir().map_err(|source| CliError::Io {
+                path: PathBuf::from("."),
+                source,
+            })?;
+            canonical_source_project_root(&current_dir)?
+        };
+        self.db = root.join(DEFAULT_DB_PATH);
+        Ok(())
+    }
+
     /// Resolve this invocation's selected source root before opening an implicit database.
     fn project_root(&self) -> Result<PathBuf, CliError> {
         default_cli_project_root(
@@ -889,12 +1047,12 @@ enum Command {
         #[arg(long)]
         text_index_max_bytes: Option<u64>,
     },
-    /// Generate the `ProjectAtlas` TOON map.
+    /// Return the current `ProjectAtlas` map without writing a TOON file.
     Map {
-        /// Also write JSON next to the TOON map.
+        /// Also write an adjacent JSON sidecar independently of stdout format.
         #[arg(long)]
         json: bool,
-        /// Run map generation even when CI environment variables are present.
+        /// Write the requested JSON sidecar even in CI.
         #[arg(long)]
         force: bool,
     },
@@ -930,6 +1088,9 @@ enum Command {
         /// Include indexed file text as a bounded fallback ranking signal.
         #[arg(long, default_value_t = false)]
         include_content: bool,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Maximum number of files to return.
         #[arg(long, default_value_t = 10)]
         limit: usize,
@@ -941,6 +1102,9 @@ enum Command {
         /// Maximum number of folders and files to return.
         #[arg(long, default_value_t = 3)]
         limit: usize,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
     },
     /// Build a compact outline for a chosen file.
     Outline {
@@ -957,6 +1121,9 @@ enum Command {
         /// Maximum rows per functions/methods/classes/types/calls section.
         #[arg(long, default_value_t = DEFAULT_FILE_SUMMARY_LIMIT)]
         limit: usize,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
     },
     /// Search indexed files with literal, regex, or fuzzy matching.
     Search {
@@ -986,6 +1153,9 @@ enum Command {
         /// Maximum matches to return.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
     },
     /// Return an exact source line slice after a file has been selected.
     Slice {
@@ -997,6 +1167,9 @@ enum Command {
         /// Optional one-based end line.
         #[arg(long)]
         end_line: Option<usize>,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Optional exact declaration selector.
         #[command(flatten)]
         selector: OptionalSymbolSelectorArgs,
@@ -1076,60 +1249,31 @@ enum Command {
         /// Maximum parser worker threads during refresh.
         #[arg(long)]
         max_workers: Option<usize>,
-        /// Stop starting parser work after this many seconds during refresh.
+        /// Cooperative indexing-work budget per refresh in seconds (30-minute default and ceiling).
+        /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
+        /// Covers root/config/store setup after work-control creation, traversal, source hashing,
+        /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
         #[arg(long)]
         timeout_seconds: Option<u64>,
         /// Maximum UTF-8 file size persisted into `SQLite` text search.
         #[arg(long)]
         text_index_max_bytes: Option<u64>,
     },
-    /// Report structural health findings.
+    /// Report structural health findings (the `health-check` compatibility command).
     HealthCheck {
-        /// Pagination start index after filters are applied.
-        #[arg(long, default_value_t = 0)]
-        start_index: usize,
-        /// Maximum findings to return.
-        #[arg(long, default_value_t = DEFAULT_HEALTH_LIMIT)]
-        limit: usize,
-        /// Optional finding category filter.
-        #[arg(long)]
-        category: Option<String>,
-        /// Optional severity filter.
-        #[arg(long, value_enum)]
-        severity: Option<HealthSeverityArg>,
-        /// Optional repository-relative primary or related path prefix.
-        #[arg(long)]
-        path_prefix: Option<String>,
-        /// Return counts and paging metadata without finding rows.
-        #[arg(long)]
-        summary_only: bool,
-        /// Restrict findings to source files and folders that contain source files.
-        #[arg(long)]
-        source_only: bool,
-        /// Opt in to bounded current coverage discovery instead of structural findings.
-        #[arg(long)]
-        coverage: bool,
-        /// Optional source parser coverage filter.
-        #[arg(long, requires = "coverage")]
-        parser: Option<String>,
-        /// Optional derived-fact provider coverage filter.
-        #[arg(long, requires = "coverage")]
-        provider: Option<String>,
-        /// Optional relationship-family coverage filter.
-        #[arg(long, requires = "coverage")]
-        relation: Option<String>,
-        /// Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.
-        #[arg(long, requires = "coverage")]
-        coverage_state: Option<String>,
-        /// Optional exact coverage reason filter.
-        #[arg(long, requires = "coverage")]
-        reason: Option<String>,
+        /// Read-only health report filters.
+        #[command(flatten)]
+        report: HealthReportArgs,
     },
-    /// Resolve a deterministic health finding with agent rationale.
+    /// Report health findings or resolve one with agent rationale.
+    #[command(args_conflicts_with_subcommands = true)]
     Health {
+        /// Read-only health report filters when no administrative subcommand is selected.
+        #[command(flatten)]
+        report: HealthReportArgs,
         /// Health subcommand to run.
         #[command(subcommand)]
-        command: HealthCommand,
+        command: Option<HealthCommand>,
     },
     /// Validate database purpose metadata, untracked files, and structure drift.
     Lint {
@@ -1223,6 +1367,20 @@ enum Command {
     },
     /// Print structured runtime identity and capability information.
     RuntimeInfo,
+    /// Acquire the POSIX installer's update-lock descriptor inherited through stdin.
+    #[cfg(unix)]
+    #[command(hide = true)]
+    AcquireInstallerLock {
+        /// Device identity captured from the trusted lock path before it was opened.
+        expected_device: u64,
+        /// Inode identity captured from the trusted lock path before it was opened.
+        expected_inode: u64,
+        /// Optional bounded wait supplied by the installer lock-set deadline.
+        timeout_milliseconds: Option<u64>,
+        /// Print the monotonic elapsed wait after successful acquisition.
+        #[arg(long)]
+        report_elapsed: bool,
+    },
     /// Manage purpose metadata stored in the durable index.
     Purpose {
         /// Purpose subcommand to run.
@@ -1296,8 +1454,21 @@ enum RootCommand {
     },
     /// Show the root, DB, config, and runtime identity `ProjectAtlas` will use.
     Show,
+    /// Show bounded structural Git worktree routing state without opening an atlas.
+    Status {
+        /// Checkout, descendant, or Git common directory to inspect.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Verify DB/config/root identity agree.
-    Verify,
+    Verify {
+        /// Check schema and root binding without scanning database integrity.
+        #[arg(long, requires = "project_root")]
+        binding_only: bool,
+        /// Exact selected root for a binding-only check.
+        #[arg(long, requires = "binding_only")]
+        project_root: Option<PathBuf>,
+    },
 }
 
 /// Manual ignore management subcommands.
@@ -1407,6 +1578,50 @@ enum HealthCommand {
     },
 }
 
+/// Read-only health report filters shared by `health` and `health-check`.
+#[derive(Debug, Args)]
+struct HealthReportArgs {
+    /// Pagination start index after filters are applied.
+    #[arg(long, default_value_t = 0)]
+    start_index: usize,
+    /// Maximum findings to return.
+    #[arg(long, default_value_t = DEFAULT_HEALTH_LIMIT)]
+    limit: usize,
+    /// Optional finding category filter.
+    #[arg(long)]
+    category: Option<String>,
+    /// Optional severity filter.
+    #[arg(long, value_enum)]
+    severity: Option<HealthSeverityArg>,
+    /// Optional repository-relative primary or related path prefix.
+    #[arg(long)]
+    path_prefix: Option<String>,
+    /// Return counts and paging metadata without finding rows.
+    #[arg(long)]
+    summary_only: bool,
+    /// Restrict findings to source files and folders that contain source files.
+    #[arg(long)]
+    source_only: bool,
+    /// Opt in to bounded current coverage discovery instead of structural findings.
+    #[arg(long)]
+    coverage: bool,
+    /// Optional source parser coverage filter.
+    #[arg(long, requires = "coverage")]
+    parser: Option<String>,
+    /// Optional derived-fact provider coverage filter.
+    #[arg(long, requires = "coverage")]
+    provider: Option<String>,
+    /// Optional relationship-family coverage filter.
+    #[arg(long, requires = "coverage")]
+    relation: Option<String>,
+    /// Optional complete, `no_candidates`, partial, failed, ignored, oversized, quarantined, or stale filter.
+    #[arg(long, requires = "coverage")]
+    coverage_state: Option<String>,
+    /// Optional exact coverage reason filter.
+    #[arg(long, requires = "coverage")]
+    reason: Option<String>,
+}
+
 /// Symbol graph subcommands.
 #[derive(Debug, Subcommand)]
 enum SymbolsCommand {
@@ -1421,7 +1636,10 @@ enum SymbolsCommand {
         /// Maximum parser worker threads. Defaults to Rayon automatic sizing.
         #[arg(long)]
         max_workers: Option<usize>,
-        /// Stop starting parser work after this many seconds.
+        /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
+        /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
+        /// Covers root/config/store setup after work-control creation, traversal, source hashing,
+        /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
@@ -1433,6 +1651,9 @@ enum SymbolsCommand {
         /// Optional symbol or signature query.
         #[arg(long)]
         query: Option<String>,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Maximum symbols to return.
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -1459,6 +1680,9 @@ enum SymbolsCommand {
     Slice {
         /// Repository-relative file path.
         file: PathBuf,
+        /// Optional classified-content selection: source, documentation, or both.
+        #[arg(long, value_name = "source|documentation|both")]
+        content_selection: Option<ContentSelection>,
         /// Exact declaration selector.
         #[command(flatten)]
         selector: RequiredSymbolSelectorArgs,
@@ -1467,8 +1691,8 @@ enum SymbolsCommand {
 
 /// Parse arguments, execute the command, and convert failures to process exit.
 fn main() {
-    let cli = parse_cli();
-    if let Err(error) = run(&cli) {
+    let mut cli = parse_cli();
+    if let Err(error) = run(&mut cli) {
         let rendered =
             render_cli_error(cli.format, &error).unwrap_or_else(|_| format!("error: {error}\n"));
         if write_stderr(&rendered).is_err() {
@@ -1496,11 +1720,80 @@ fn load_cli_atlas_config(cli: &Cli) -> Result<AtlasMapConfig, CliError> {
     Ok(config)
 }
 
+/// Execute the read-only health report shared by `health` and `health-check`.
+fn run_health_report(
+    cli: &Cli,
+    report: &HealthReportArgs,
+    usage_instance: Option<UsageRuntimeInstance>,
+    command_name: &str,
+) -> Result<(), CliError> {
+    let store = open_index_for_read(cli)?;
+    if report.coverage {
+        let query = coverage_query_from_cli(
+            report.start_index,
+            report.limit,
+            &CoverageCliFilters {
+                path_prefix: report.path_prefix.as_deref(),
+                parser: report.parser.as_deref(),
+                provider: report.provider.as_deref(),
+                relation: report.relation.as_deref(),
+                state: report.coverage_state.as_deref(),
+                reason: report.reason.as_deref(),
+            },
+        )?;
+        let mut coverage_report = load_coverage_discovery(&store, query)?;
+        let toon = finalize_coverage_output(cli.format, &mut coverage_report)?;
+        print_tracked_directory_output_estimate(
+            cli.format,
+            &store,
+            usage_instance,
+            &cli.session,
+            command_name,
+            None,
+            None,
+            || estimated_source_tokens_for_indexed_files(&store, None, None),
+            &toon,
+            &coverage_report,
+        )?;
+        return Ok(());
+    }
+
+    let query = health_query_from_cli(
+        report.start_index,
+        report.limit,
+        report.category.as_deref(),
+        report.severity,
+        report.path_prefix.as_deref(),
+        report.summary_only,
+        if report.source_only {
+            HealthScope::source_only()
+        } else {
+            HealthScope::all()
+        },
+    );
+    let page = store.unresolved_health_findings_page_current(&query)?;
+    let toon = render_health_page(&page, &query);
+    print_tracked_directory_output_estimate(
+        cli.format,
+        &store,
+        usage_instance,
+        &cli.session,
+        command_name,
+        None,
+        None,
+        || estimated_source_tokens_for_indexed_files(&store, None, None),
+        &toon,
+        &page,
+    )?;
+    Ok(())
+}
+
 /// Execute the selected CLI command.
-fn run(cli: &Cli) -> Result<(), CliError> {
+fn run(cli: &mut Cli) -> Result<(), CliError> {
     if let Some(required_version) = cli.require_version.as_deref() {
         validate_required_runtime_version(required_version)?;
     }
+    cli.resolve_implicit_database_path()?;
     let usage_instance = UsageRuntimeInstance::new(UsageInstanceOwner::CliInvocation);
     match cli.command.as_ref() {
         Command::Init {
@@ -1512,7 +1805,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 path: PathBuf::from("."),
                 source,
             })?;
-            let root = canonical_project_root(&current_dir)?;
+            let root = canonical_source_project_root(&current_dir)?;
             let db_path = if cli.db.is_absolute() {
                 cli.db.clone()
             } else {
@@ -1548,13 +1841,16 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
         }
         Command::Map { json, force } => {
-            if !force && (truthy_env("CI") || truthy_env("GITHUB_ACTIONS")) {
-                write_stderr("Skipping ProjectAtlas map update in CI.\n")?;
-                return Ok(());
-            }
             cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
-            write_map(&config, *json)?;
+            let write_json =
+                *json && (*force || !(truthy_env("CI") || truthy_env("GITHUB_ACTIONS")));
+            let response =
+                atlas_map::render_map(&config, cli.format == OutputFormat::Json, write_json)?;
+            if *json && !write_json {
+                write_stderr("Skipping ProjectAtlas JSON sidecar update in CI.\n")?;
+            }
+            write_stdout(&response.content)?;
         }
         Command::Scan {
             path,
@@ -1618,6 +1914,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             folder,
             file_pattern,
             include_content,
+            content_selection,
             limit,
         } => {
             let store = open_index_for_read(cli)?;
@@ -1626,16 +1923,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 .as_deref()
                 .map(normalized_folder_filter)
                 .transpose()?;
-            let selected = ranked_file_nodes_with_reasons(
+            let selected = classified_ranked_file_nodes_with_reasons(
                 &store,
                 query_text,
                 folder_filter.as_deref(),
                 file_pattern.as_deref(),
                 *limit,
                 *include_content,
+                content_selection.unwrap_or_default(),
             )?;
-            let toon = render_ranked_nodes("files", &selected);
-            let payload = render_ranked_node_rows("files", &selected);
+            let payload = render_classified_ranked_file_rows(&selected);
+            let toon = encode_agent_payload(&json!({ "files": &payload }));
             print_tracked_output_estimate(
                 cli.format,
                 &store,
@@ -1655,9 +1953,18 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 &payload,
             )?;
         }
-        Command::Next { query, limit } => {
+        Command::Next {
+            query,
+            limit,
+            content_selection,
+        } => {
             let store = open_index_for_read(cli)?;
-            let report = next_step_report(&store, query, Some(*limit))?;
+            let report = next_step_report_with_selection(
+                &store,
+                query,
+                Some(*limit),
+                content_selection.unwrap_or_default(),
+            )?;
             let payload = next_step_report_payload(&report);
             let toon = encode_agent_payload(&json!({ "next": payload }));
             print_tracked_directory_output_estimate(
@@ -1695,12 +2002,21 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 &outline,
             )?;
         }
-        Command::Summary { file, limit } => {
+        Command::Summary {
+            file,
+            limit,
+            content_selection,
+        } => {
             let store = open_index_for_read(cli)?;
             let file_key = validated_indexed_file_key(&store, file)?;
             let content = read_indexed_file_content(&store, &file_key)?;
-            let report =
-                build_file_summary_from_source(&store, Path::new(&file_key), *limit, &content)?;
+            let report = build_file_summary_from_source_with_selection(
+                &store,
+                Path::new(&file_key),
+                *limit,
+                &content,
+                content_selection.unwrap_or_default(),
+            )?;
             let toon = render_file_summary(&report);
             print_tracked_output_text(
                 cli.format,
@@ -1725,6 +2041,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             context_lines,
             start_index,
             limit,
+            content_selection,
         } => {
             let store = open_index_for_read(cli)?;
             let report = search_indexed_files_with_control(
@@ -1738,6 +2055,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     context_lines: *context_lines,
                     start_index: *start_index,
                     limit: *limit,
+                    content_selection: content_selection.unwrap_or_default(),
                     retrieval_mode: (*retrieval_mode).into(),
                 },
                 None,
@@ -1760,6 +2078,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             file,
             start_line,
             end_line,
+            content_selection,
             selector:
                 OptionalSymbolSelectorArgs {
                     symbol,
@@ -1775,7 +2094,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let content = read_indexed_file_content(&store, &file_key)?;
             let output_budget = CodeSliceBudget::new(*output_bytes)?;
             let report = if let Some(symbol) = symbol {
-                read_symbol_slice_from_source_bounded(
+                read_symbol_slice_from_source_bounded_with_selection(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
@@ -1787,6 +2106,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     },
                     &content,
                     output_budget,
+                    content_selection.unwrap_or_default(),
                 )?
             } else {
                 if symbol_parent.is_some()
@@ -1803,13 +2123,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "start-line is required unless --symbol is provided".to_string(),
                     )
                 })?;
-                read_indexed_code_slice_from_source_bounded(
+                read_indexed_code_slice_from_source_bounded_with_selection(
                     &store,
                     Path::new(&file_key),
                     start_line,
                     *end_line,
                     &content,
                     output_budget,
+                    content_selection.unwrap_or_default(),
                 )?
             };
             print_tracked_slice_output(
@@ -1850,10 +2171,23 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     &report,
                 )?;
             }
-            SymbolsCommand::List { file, query, limit } => {
+            SymbolsCommand::List {
+                file,
+                query,
+                content_selection,
+                limit,
+            } => {
                 let store = open_index_for_read(cli)?;
-                let symbols = store.load_symbols(file.as_deref(), query.as_deref(), *limit)?;
-                let toon = render_symbols(&symbols);
+                let symbols = store.load_classified_symbols(
+                    file.as_deref(),
+                    query.as_deref(),
+                    content_selection.unwrap_or_default(),
+                    *limit,
+                )?;
+                let symbol_rows = render_classified_symbol_rows(&symbols);
+                let toon = encode_agent_payload(&json!({
+                    "symbols": &symbol_rows,
+                }));
                 print_tracked_output_estimate(
                     cli.format,
                     &store,
@@ -1865,11 +2199,13 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     || {
                         estimated_source_tokens_for_paths(
                             &store,
-                            symbols.iter().map(|symbol| symbol.path.as_str()),
+                            symbols
+                                .iter()
+                                .map(|classified| classified.symbol.path.as_str()),
                         )
                     },
                     &toon,
-                    &symbols,
+                    &symbol_rows,
                 )?;
             }
             SymbolsCommand::Relations {
@@ -1893,6 +2229,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         DetailedRelationFilterArgs {
                             direction,
                             relation,
+                            content_selection,
                             minimum_confidence,
                             resolution,
                         },
@@ -1913,6 +2250,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 } = detailed.as_ref();
                 let RelationAnalysisArgs {
                     analysis_mode,
+                    profile_name,
+                    entrypoints,
+                    profile_relations,
                     trace_target,
                     vcs,
                     include_communities,
@@ -1920,6 +2260,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     include_dead_code,
                 } = analysis.as_ref();
                 let analysis_controls_explicit = analysis_mode.is_some()
+                    || profile_name.is_some()
+                    || !entrypoints.is_empty()
+                    || !profile_relations.is_empty()
                     || trace_target.is_some()
                     || vcs.is_some()
                     || *include_communities
@@ -1935,6 +2278,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         "--root requires --view detailed or --view analysis".to_string(),
                     )));
                 }
+                if *view == RelationViewArg::Legacy && content_selection.is_some() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "--content-selection requires --view detailed or --view analysis"
+                            .to_string(),
+                    )));
+                }
+                let mode = analysis_mode
+                    .unwrap_or(RelationAnalysisModeArg::Architecture)
+                    .into();
+                if mode == RelationAnalysisMode::Entrypoint && !roots.is_empty() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        CLI_ERROR_ENTRYPOINT_FEDERATED.to_string(),
+                    )));
+                }
                 let federation_control = (!roots.is_empty()).then(|| {
                     standalone_index_work_control()
                         .with_timeout_ceiling(Duration::from_millis(10_000))
@@ -1946,6 +2303,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         &selected_root,
                         cli.config.as_deref(),
                         roots,
+                        None,
                         control,
                     )?)
                 } else {
@@ -1993,16 +2351,58 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                                 .to_string(),
                         )));
                     }
-                    let file = file.as_deref().ok_or_else(|| {
-                        CliError::Service(ServiceError::InvalidInput(
-                            "detailed symbol relations require --file".to_string(),
-                        ))
-                    })?;
-                    let file = validated_indexed_file_key(store, Path::new(file))?;
+                    let parsed_entrypoints = if mode == RelationAnalysisMode::Entrypoint {
+                        entrypoints
+                            .iter()
+                            .map(|value| serde_json::from_str::<RelationAnchor>(value))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| {
+                                CliError::Service(ServiceError::InvalidInput(format!(
+                                    "--entrypoint must be an exact RelationAnchor JSON object: {error}"
+                                )))
+                            })?
+                    } else {
+                        Vec::new()
+                    };
+                    if mode == RelationAnalysisMode::Entrypoint
+                        && !parsed_entrypoints.is_empty()
+                        && (symbol.is_some()
+                            || symbol_parent.is_some()
+                            || symbol_kind.is_some()
+                            || symbol_signature.is_some())
+                    {
+                        return Err(CliError::Service(ServiceError::InvalidInput(
+                            "--entrypoint anchors cannot be combined with detailed symbol selectors"
+                                .to_string(),
+                        )));
+                    }
+                    let file = match file.as_deref() {
+                        Some(file) => file.to_string(),
+                        None if mode == RelationAnalysisMode::Entrypoint => parsed_entrypoints
+                            .first()
+                            .map(|anchor| match anchor {
+                                RelationAnchor::File { file }
+                                | RelationAnchor::Symbol { file, .. } => file.as_str().to_string(),
+                            })
+                            .ok_or_else(|| {
+                                CliError::Service(ServiceError::InvalidInput(
+                                    "entrypoint analysis requires --entrypoint or --file"
+                                        .to_string(),
+                                ))
+                            })?,
+                        None => {
+                            return Err(CliError::Service(ServiceError::InvalidInput(
+                                "detailed symbol relations require --file".to_string(),
+                            )));
+                        }
+                    };
+                    let file = validated_indexed_file_key(store, Path::new(&file))?;
                     let file = RepositoryFilePath::new(Path::new(&file)).map_err(|error| {
                         CliError::Service(ServiceError::InvalidInput(error.to_string()))
                     })?;
-                    let anchor = if let Some(symbol) = symbol {
+                    let anchor = if let Some(anchor) = parsed_entrypoints.first() {
+                        anchor.clone()
+                    } else if let Some(symbol) = symbol {
                         if symbol.is_empty() {
                             return Err(CliError::Service(ServiceError::InvalidInput(
                                 "detailed relation symbol must not be empty".to_string(),
@@ -2047,6 +2447,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             .transpose()?,
                         minimum_confidence: (*minimum_confidence).into(),
                         resolution: (*resolution).into(),
+                        content_selection: content_selection.unwrap_or_default(),
                         include_occurrences: *include_occurrences,
                         budget: DetailedRelationBudget::from_graph_limits(limits)
                             .with_aggregate_limits(
@@ -2112,9 +2513,6 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                                 }
                             }
                         };
-                        let mode: RelationAnalysisMode = analysis_mode
-                            .unwrap_or(RelationAnalysisModeArg::Architecture)
-                            .into();
                         let trace_target = trace_target
                             .as_deref()
                             .map(serde_json::from_str::<RelationAnchor>)
@@ -2124,6 +2522,39 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                                     "--trace-target must be an exact RelationAnchor JSON object: {error}"
                                 )))
                             })?;
+                        let entrypoint_profile = if mode == RelationAnalysisMode::Entrypoint {
+                            let anchors = if parsed_entrypoints.is_empty() {
+                                vec![relations.anchor.clone()]
+                            } else {
+                                parsed_entrypoints
+                            };
+                            let relation_families = if profile_relations.is_empty() {
+                                GraphRelationKind::ALL.to_vec()
+                            } else {
+                                profile_relations
+                                    .iter()
+                                    .map(|value| parse_coverage_relation(value))
+                                    .collect::<Result<Vec<_>, _>>()?
+                            };
+                            Some(EntrypointProfile {
+                                name: profile_name
+                                    .clone()
+                                    .unwrap_or_else(|| "entrypoint-profile".to_string()),
+                                anchors,
+                                relations: relation_families,
+                            })
+                        } else {
+                            if profile_name.is_some()
+                                || !entrypoints.is_empty()
+                                || !profile_relations.is_empty()
+                            {
+                                return Err(CliError::Service(ServiceError::InvalidInput(
+                                    "entrypoint profile controls require --analysis-mode entrypoint"
+                                        .to_string(),
+                                )));
+                            }
+                            None
+                        };
                         let query = RelationAnalysisQuery {
                             relations,
                             mode,
@@ -2133,6 +2564,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             include_communities: *include_communities,
                             include_cycles: *include_cycles,
                             include_dead_code: *include_dead_code,
+                            entrypoint_profile,
                         };
                         if let Some(stores) = federated_stores.take() {
                             let control = federation_control.as_ref().ok_or_else(|| {
@@ -2177,6 +2609,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             }
             SymbolsCommand::Slice {
                 file,
+                content_selection,
                 selector:
                     RequiredSymbolSelectorArgs {
                         symbol,
@@ -2190,7 +2623,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let store = open_index_for_read(cli)?;
                 let file_key = validated_indexed_file_key(&store, file)?;
                 let content = read_indexed_file_content(&store, &file_key)?;
-                let report = read_symbol_slice_from_source_bounded(
+                let report = read_symbol_slice_from_source_bounded_with_selection(
                     &store,
                     Path::new(&file_key),
                     &SymbolSliceSelector {
@@ -2202,6 +2635,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     },
                     &content,
                     CodeSliceBudget::new(*output_bytes)?,
+                    content_selection.unwrap_or_default(),
                 )?;
                 print_tracked_slice_output(
                     cli.format,
@@ -2303,16 +2737,53 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 let report = build_root_report(&cli.db, cli.config.as_deref())?;
                 print_output(cli.format, &render_root_report(&report), &report)?;
             }
-            Some(RootCommand::Verify) => {
+            Some(RootCommand::Status { path }) => {
+                let report = build_repository_control_report(path)?;
+                print_output(
+                    cli.format,
+                    &render_repository_control_report(&report),
+                    &report,
+                )?;
+            }
+            Some(RootCommand::Verify {
+                binding_only,
+                project_root,
+            }) => {
                 cli.preflight_implicit_project_root()?;
-                let report = build_root_report(&cli.db, cli.config.as_deref())?;
-                let verified = report.verified;
-                if verified {
-                    verify_project_database(&cli.db, Path::new(&report.root))?;
-                }
-                print_output(cli.format, &render_root_report(&report), &report)?;
-                if !verified {
-                    std::process::exit(1);
+                if *binding_only {
+                    let selected_root =
+                        canonical_source_project_root(project_root.as_deref().ok_or_else(
+                            || CliError::InvalidInput("binding-only root is required".to_string()),
+                        )?)?;
+                    let store = open_atlas_store_read_only_for_project(&cli.db, &selected_root)?;
+                    let config_root =
+                        projectatlas_core::CanonicalProjectRoot::from_path(&cli.project_root()?)
+                            .map_err(|source| {
+                                CliError::InvalidInput(format!(
+                                    "project config root is invalid: {source}"
+                                ))
+                            })?;
+                    if !store.project_root_identity_matches(&config_root) {
+                        return Err(CliError::InvalidInput(
+                            "selected root disagrees with the project config".to_string(),
+                        ));
+                    }
+                    print_output(
+                        cli.format,
+                        "binding_verified: true",
+                        &json!({ "binding_verified": true }),
+                    )?;
+                } else {
+                    let report = build_root_report(&cli.db, cli.config.as_deref())?;
+                    let verified = report.verified;
+                    if verified {
+                        let root = cli.project_root()?;
+                        verify_project_database(&cli.db, &root)?;
+                    }
+                    print_output(cli.format, &render_root_report(&report), &report)?;
+                    if !verified {
+                        std::process::exit(1);
+                    }
                 }
             }
         },
@@ -2416,87 +2887,17 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 &report,
             )?;
         }
-        Command::HealthCheck {
-            start_index,
-            limit,
-            category,
-            severity,
-            path_prefix,
-            summary_only,
-            source_only,
-            coverage,
-            parser,
-            provider,
-            relation,
-            coverage_state,
-            reason,
-        } => {
-            let store = open_index_for_read(cli)?;
-            if *coverage {
-                let query = coverage_query_from_cli(
-                    *start_index,
-                    *limit,
-                    &CoverageCliFilters {
-                        path_prefix: path_prefix.as_deref(),
-                        parser: parser.as_deref(),
-                        provider: provider.as_deref(),
-                        relation: relation.as_deref(),
-                        state: coverage_state.as_deref(),
-                        reason: reason.as_deref(),
-                    },
-                )?;
-                let mut report = load_coverage_discovery(&store, query)?;
-                let toon = finalize_coverage_output(cli.format, &mut report)?;
-                print_tracked_directory_output_estimate(
-                    cli.format,
-                    &store,
-                    usage_instance,
-                    &cli.session,
-                    "health-check",
-                    None,
-                    None,
-                    || estimated_source_tokens_for_indexed_files(&store, None, None),
-                    &toon,
-                    &report,
-                )?;
-                return Ok(());
-            }
-            let query = health_query_from_cli(
-                *start_index,
-                *limit,
-                category.as_deref(),
-                *severity,
-                path_prefix.as_deref(),
-                *summary_only,
-                if *source_only {
-                    HealthScope::source_only()
-                } else {
-                    HealthScope::all()
-                },
-            );
-            let page = store.unresolved_health_findings_page_current(&query)?;
-            let toon = render_health_page(&page, &query);
-            print_tracked_directory_output_estimate(
-                cli.format,
-                &store,
-                usage_instance,
-                &cli.session,
-                "health-check",
-                None,
-                None,
-                || estimated_source_tokens_for_indexed_files(&store, None, None),
-                &toon,
-                &page,
-            )?;
+        Command::HealthCheck { report } => {
+            run_health_report(cli, report, usage_instance, "health-check")?;
         }
-        Command::Health { command } => match command {
-            HealthCommand::Resolve {
+        Command::Health { report, command } => match command {
+            Some(HealthCommand::Resolve {
                 finding_id,
                 category,
                 path,
                 related_path,
                 rationale,
-            } => {
+            }) => {
                 let store = open_index_for_mutation(cli)?;
                 let resolution = HealthResolution {
                     finding_id: finding_id.clone(),
@@ -2512,6 +2913,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     &resolution,
                 )?;
             }
+            None => run_health_report(cli, report, usage_instance, "health")?,
         },
         Command::Lint {
             strict_folders,
@@ -2521,30 +2923,28 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         } => {
             cli.preflight_implicit_project_root()?;
             let config = load_cli_atlas_config(cli)?;
-            let (mut report, mut exit_code) = lint_map(
+            let report = lint_project(
                 &config,
+                &cli.db,
+                cli.config.as_deref(),
                 LintOptions {
                     strict_folders: *strict_folders,
                     report_untracked: *report_untracked,
                     strict_untracked: *strict_untracked,
                 },
-            )?;
-            let (db_report, db_exit_code) = lint_database_if_present(
-                &cli.db,
-                &config.root,
-                cli.config.as_deref(),
                 (*purpose_level).into(),
             )?;
-            if !db_report.is_empty() {
-                if !report.ends_with('\n') {
-                    report.push('\n');
-                }
-                report.push_str(&db_report);
-            }
-            exit_code = exit_code.max(db_exit_code);
-            write_stderr(&report)?;
-            if exit_code != 0 {
-                std::process::exit(exit_code);
+            let payload = NamedPayload {
+                key: "lint",
+                payload: &report,
+            };
+            let output = match cli.format {
+                OutputFormat::Toon => encode_agent_payload(&payload),
+                OutputFormat::Json => format!("{}\n", serde_json::to_string_pretty(&payload)?),
+            };
+            write_stdout(&output)?;
+            if report.exit_code != 0 {
+                std::process::exit(report.exit_code);
             }
         }
         Command::Token {
@@ -2556,6 +2956,18 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             theme,
         } => {
             let store = open_index_for_current_read(cli)?;
+            let load_report = |request: TokenReportRequest<'_>| {
+                if session.is_none() {
+                    load_synchronized_repository_token_report(
+                        &cli.db,
+                        &cli.project_root()?,
+                        None,
+                        request,
+                    )
+                } else {
+                    load_token_report(&store, request).map_err(CliError::from)
+                }
+            };
             if let Some(window) = trend {
                 if tokenizer.is_some() {
                     return Err(CliError::InvalidInput(
@@ -2568,13 +2980,16 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                             .to_string(),
                     ));
                 }
-                let report = match load_token_report(
-                    &store,
-                    TokenReportRequest::Trends {
-                        caller_label: session.as_deref(),
+                let request = session.as_deref().map_or_else(
+                    || TokenReportRequest::RepositoryTrends {
                         window: (*window).into(),
                     },
-                )? {
+                    |caller_label| TokenReportRequest::Trends {
+                        caller_label: Some(caller_label),
+                        window: (*window).into(),
+                    },
+                );
+                let report = match load_report(request)? {
                     TokenReport::Trends(report) => report,
                     TokenReport::Overview(_) => {
                         return Err(CliError::InvalidInput(
@@ -2587,20 +3002,22 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         print_output(cli.format, &render_token_trends(&report), &report)?;
                     }
                     TokenView::Tui => {
-                        write_stdout(&render_token_trend_dashboard_with_theme(
-                            &report,
-                            (*theme).into(),
-                        ))?;
+                        let dashboard =
+                            render_token_trend_dashboard_with_theme(&report, (*theme).into())?;
+                        write_stdout(&dashboard)?;
                     }
                 }
             } else {
-                let mut overview = match load_token_report(
-                    &store,
-                    TokenReportRequest::Overview {
-                        caller_label: session.as_deref(),
+                let request = session.as_deref().map_or_else(
+                    || TokenReportRequest::RepositoryOverview {
                         benchmark_results: benchmark_results.as_deref(),
                     },
-                )? {
+                    |caller_label| TokenReportRequest::Overview {
+                        caller_label: Some(caller_label),
+                        benchmark_results: benchmark_results.as_deref(),
+                    },
+                );
+                let mut overview = match load_report(request)? {
                     TokenReport::Overview(overview) => overview,
                     TokenReport::Trends(_) => {
                         return Err(CliError::InvalidInput(
@@ -2616,17 +3033,20 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                         print_output(cli.format, &render_token_overview(&overview), &overview)?;
                     }
                     TokenView::Tui => {
-                        let atlas = if token_dashboard_wants_atlas() {
+                        let viewport = capture_token_dashboard_viewport();
+                        let atlas = if token_dashboard_wants_atlas(viewport) {
                             load_token_atlas_preview(&store)
                         } else {
                             TokenAtlasPreview::empty()
                         };
-                        write_stdout(&render_token_dashboard_with_atlas(
+                        let dashboard = render_token_dashboard_with_atlas(
                             &overview,
                             session.as_deref(),
                             &atlas,
                             (*theme).into(),
-                        ))?;
+                            viewport,
+                        )?;
+                        write_stdout(&dashboard)?;
                     }
                 }
             }
@@ -2705,29 +3125,74 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             let report = build_runtime_info();
             print_output(cli.format, &render_runtime_info(&report), &report)?;
         }
+        #[cfg(unix)]
+        Command::AcquireInstallerLock {
+            expected_device,
+            expected_inode,
+            timeout_milliseconds,
+            report_elapsed,
+        } => {
+            let started = Instant::now();
+            let result = io::stdin()
+                .as_fd()
+                .try_clone_to_owned()
+                .map(fs::File::from)
+                .and_then(|lock_file| {
+                    acquire_installer_lock(
+                        &lock_file,
+                        *expected_device,
+                        *expected_inode,
+                        timeout_milliseconds.map_or(INSTALLER_LOCK_TIMEOUT, |milliseconds| {
+                            Duration::from_millis(milliseconds)
+                        }),
+                    )
+                });
+            if result.is_ok() && *report_elapsed {
+                write_stdout(&format!("{}\n", started.elapsed().as_millis()))?;
+            }
+            result.map_err(|source| CliError::Io {
+                path: PathBuf::from("inherited installer lock standard input"),
+                source,
+            })?;
+        }
         Command::Purpose { command } => match command {
             PurposeCommand::Set { path, purpose } => {
-                let store = open_index_for_mutation(cli)?;
-                store.set_purpose(path, purpose, PurposeSource::Agent)?;
-                let report = PurposeSetReport {
-                    purpose_set: PurposeSetPayload {
-                        path: path.clone(),
-                        status: PurposeStatus::Approved,
-                        source: PurposeSource::Agent,
-                        agent_reviewed: true,
-                    },
-                };
+                let report = with_admitted_purpose_mutation(cli, |store| {
+                    store.set_purpose(path, purpose, PurposeSource::Agent)?;
+                    let classification = if store
+                        .load_node_by_path(path)?
+                        .is_some_and(|node| node.node.kind == projectatlas_core::NodeKind::File)
+                    {
+                        store
+                            .file_content_classifications_for_paths(std::slice::from_ref(path))?
+                            .first()
+                            .map(|row| row.classification)
+                    } else {
+                        None
+                    };
+                    Ok(PurposeSetReport {
+                        purpose_set: PurposeSetPayload {
+                            path: path.clone(),
+                            classification,
+                            status: PurposeStatus::Approved,
+                            source: PurposeSource::Agent,
+                            agent_reviewed: true,
+                        },
+                    })
+                })?;
                 print_output(cli.format, &encode_agent_payload(&report), &report)?;
             }
             PurposeCommand::Review { from_file, apply } => {
                 let requests = load_purpose_review_requests(from_file)?;
                 validate_purpose_review_admission(&requests)?;
-                let store = if *apply {
-                    open_index_for_mutation(cli)?
+                let report = if *apply {
+                    with_admitted_purpose_mutation(cli, |store| {
+                        review_purposes(store, &requests, true)
+                    })?
                 } else {
-                    open_index_for_read(cli)?
+                    let store = open_index_for_read(cli)?;
+                    review_purposes(&store, &requests, false)?
                 };
-                let report = review_purposes(&store, &requests, *apply)?;
                 print_output(cli.format, &render_purpose_review_report(&report), &report)?;
                 if report.failed > 0 {
                     std::process::exit(1);
@@ -2768,6 +3233,22 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Return whether this command consumes the conventional project database selection.
+fn command_uses_implicit_database(command: &Command) -> bool {
+    match command {
+        #[cfg(feature = "optional-parser-supervisor")]
+        Command::ParserPack { .. } => false,
+        Command::Init { .. }
+        | Command::Root {
+            command: Some(RootCommand::Set { .. } | RootCommand::Status { .. }),
+        }
+        | Command::RuntimeInfo => false,
+        #[cfg(unix)]
+        Command::AcquireInstallerLock { .. } => false,
+        _ => true,
+    }
+}
+
 /// Execute one explicit optional parser-pack lifecycle command from the selected project root.
 #[cfg(feature = "optional-parser-supervisor")]
 fn run_parser_pack_command(
@@ -2795,7 +3276,56 @@ fn run_parser_pack_command(
 
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
+    if let Some(schema_version_mismatch) = schema_version_mismatch_payload(error) {
+        let response = SchemaVersionMismatchErrorResponse {
+            error: SchemaVersionMismatchErrorPayload {
+                kind: AgentErrorKind::SchemaVersionMismatch,
+                message: error.to_string(),
+                schema_version_mismatch,
+            },
+        };
+        return match format {
+            OutputFormat::Toon => {
+                serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+            }
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+            }
+        };
+    }
+    if let Some(schema_migration_required) = schema_migration_required_payload(error) {
+        let message = schema_migration_required.message();
+        let response = SchemaMigrationRequiredErrorResponse {
+            error: SchemaMigrationRequiredErrorPayload {
+                kind: AgentErrorKind::SchemaMigrationRequired,
+                message,
+                schema_migration_required,
+            },
+        };
+        return match format {
+            OutputFormat::Toon => {
+                serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+            }
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+            }
+        };
+    }
     let details = match error {
+        CliError::AtlasMap(atlas_map::AtlasMapError::ResponseLimitExceeded { .. }) => {
+            Some(CliErrorPayload {
+                kind: AgentErrorKind::ResponseLimitExceeded,
+                message: error.to_string(),
+                refresh_required: None,
+                init_required: None,
+                worktree_required: None,
+                verification_incomplete: None,
+                project_mismatch: None,
+                database_filesystem: None,
+                search_capability: None,
+                next: None,
+            })
+        }
         #[cfg(feature = "optional-parser-supervisor")]
         CliError::ParserPack(source) if source.is_unsupported_containment() => {
             Some(CliErrorPayload {
@@ -2823,7 +3353,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             search_capability: None,
             next: Some(CliNextCall {
                 command: CLI_INIT_COMMAND,
-                project_path: &report.project_root,
+                project_path: report.project_root.as_deref(),
                 once: None,
             }),
         }),
@@ -2851,7 +3381,7 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             search_capability: None,
             next: Some(CliNextCall {
                 command: CLI_REFRESH_COMMAND,
-                project_path: &report.project_root,
+                project_path: report.project_root.as_deref(),
                 once: Some(true),
             }),
         }),
@@ -2961,15 +3491,50 @@ fn database_filesystem_error_payload(
     Some((
         kind,
         DatabaseFilesystemErrorPayload {
-            path: path.display().to_string(),
+            path: lossless_native_path_display(path),
             mount_point: mount_point
                 .as_deref()
-                .map(|mount| mount.display().to_string()),
+                .and_then(lossless_native_path_display),
             filesystem_type: filesystem_type.clone(),
             reason,
             recovery: DATABASE_FILESYSTEM_RECOVERY,
         },
     ))
+}
+
+/// Extract one privacy-safe schema mismatch from the shared database error.
+fn schema_version_mismatch_payload(error: &CliError) -> Option<SchemaVersionMismatchPayload> {
+    let (CliError::Db(database_error) | CliError::Service(ServiceError::Db(database_error))) =
+        error
+    else {
+        return None;
+    };
+    let (found_schema_version, supported_schema_version) =
+        database_error.unsupported_schema_version()?;
+    Some(SchemaVersionMismatchPayload {
+        found_schema_version,
+        supported_schema_version,
+        runtime_version: env!("CARGO_PKG_VERSION"),
+        recovery: SCHEMA_VERSION_MISMATCH_RECOVERY,
+    })
+}
+
+/// Extract one privacy-safe migration handoff from the shared database error.
+fn schema_migration_required_payload(error: &CliError) -> Option<SchemaMigrationRequiredPayload> {
+    let (CliError::Db(database_error) | CliError::Service(ServiceError::Db(database_error))) =
+        error
+    else {
+        return None;
+    };
+    let (found_schema_version, supported_schema_version, migration_steps_remaining) =
+        database_error.supported_schema_migration()?;
+    Some(SchemaMigrationRequiredPayload {
+        found_schema_version,
+        supported_schema_version,
+        migration_steps_remaining,
+        runtime_version: env!("CARGO_PKG_VERSION"),
+        recovery: SCHEMA_MIGRATION_REQUIRED_RECOVERY,
+    })
 }
 
 /// Open the selected current index through one root-bound read snapshot.
@@ -2997,6 +3562,50 @@ fn open_index_for_mutation(cli: &Cli) -> Result<AtlasStore, CliError> {
         return Err(runtime::index_init_required(&root, &cli.db));
     }
     open_atlas_store_for_project(&cli.db, &root)
+}
+
+/// Apply one purpose mutation under a source witness retained through commit.
+fn with_admitted_purpose_mutation<T>(
+    cli: &Cli,
+    mutation: impl FnOnce(&AtlasStore) -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let root = cli.project_root()?;
+    if !cli.db.is_file() {
+        return Err(runtime::index_init_required(&root, &cli.db));
+    }
+    let control = index_work_control(&SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None));
+    let observations = SourceObservationRegistry::default();
+    let database = absolute_path(&cli.db)?;
+    let config = cli.config.as_deref().map(absolute_path).transpose()?;
+    let admission = observations.admit_mutation(&database, &root, config.as_deref(), &control)?;
+    let store = open_index_for_mutation(cli)?;
+    let transaction = store.begin_purpose_mutation()?;
+    let operation = (|| {
+        let value = mutation(&store)?;
+        admission.verify()?;
+        Ok(value)
+    })();
+    match operation {
+        Ok(value) => {
+            transaction.commit()?;
+            Ok(value)
+        }
+        Err(operation) => Err(rollback_rejected_purpose_mutation(transaction, operation)),
+    }
+}
+
+/// Preserve a rejected purpose mutation when its explicit rollback also fails.
+fn rollback_rejected_purpose_mutation(
+    transaction: PurposeMutationTransaction<'_>,
+    operation: CliError,
+) -> CliError {
+    match transaction.rollback() {
+        Ok(()) => operation,
+        Err(rollback) => CliError::PurposeMutationRollback {
+            operation: Box::new(operation),
+            rollback,
+        },
+    }
 }
 
 /// Build a harness-specific MCP configuration document for this binary.
@@ -3063,12 +3672,12 @@ fn build_mcp_config_report(
         "--require-version".to_string(),
         env!("CARGO_PKG_VERSION").to_string(),
         "--db".to_string(),
-        mcp_launch_path(&absolute_db),
+        mcp_launch_path(&absolute_db)?,
     ];
     let resolved_config = resolved_mcp_config_path(&absolute_db, config)?;
     if let Some(config_path) = resolved_config.as_ref() {
         args.push("--config".to_string());
-        args.push(mcp_launch_path(config_path));
+        args.push(mcp_launch_path(config_path)?);
     }
     args.push("mcp".to_string());
     if nearest_project {
@@ -3079,9 +3688,9 @@ fn build_mcp_config_report(
     mcp_servers.insert(
         server_name.to_string(),
         McpServerConfig {
-            command: mcp_launch_path(&executable),
+            command: mcp_launch_path(&executable)?,
             args,
-            cwd: mcp_launch_path(&project_root),
+            cwd: mcp_launch_path(&project_root)?,
         },
     );
     Ok(McpConfigDocument { mcp_servers })
@@ -3100,12 +3709,19 @@ fn validate_required_runtime_version(required_version: &str) -> Result<(), CliEr
     }
 }
 
-/// Render a native path for MCP launch config without Windows extended prefixes.
-fn mcp_launch_path(path: &Path) -> String {
-    native_launch_path(&normalize_native_path_display(path))
+/// Render a lossless native path for an MCP launch config.
+fn mcp_launch_path(path: &Path) -> Result<String, CliError> {
+    let value = projectatlas_core::lossless_native_path_display(path)
+        .ok()
+        .ok_or_else(|| {
+            CliError::InvalidInput(
+                "native MCP configuration path has no lossless UTF-8 representation".to_string(),
+            )
+        })?;
+    Ok(native_launch_path(&value))
 }
 
-/// Render a normalized diagnostic path as a Windows-native launcher path.
+/// Convert a lossless projected path to a Windows-native launcher path.
 #[cfg(windows)]
 fn native_launch_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("//") {
@@ -3134,7 +3750,7 @@ fn build_runtime_info() -> RuntimeInfoReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         executable: std::env::current_exe()
             .ok()
-            .map(|path| normalize_native_path_display(&path)),
+            .and_then(|path| lossless_native_path_display(&path)),
         repository: env!("CARGO_PKG_REPOSITORY").to_string(),
         capabilities: vec![
             "cli".to_string(),
@@ -3195,6 +3811,7 @@ fn bind_project_root(
         ));
     }
     if !database_exists {
+        preflight_existing_project_binding(&db_path, &root)?;
         init_project_with_config(&root, Some(&config_path))?;
     }
     let transition_result = AtlasStore::transition_project_root(&db_path, &root, transition.into())
@@ -3227,10 +3844,26 @@ fn bind_project_root(
         )?;
         Ok(())
     })();
-    configuration_result.map_err(|source| CliError::RootTransitionFollowup {
-        root: normalize_native_path_display(root),
-        transition,
-        source: Box::new(source),
+    configuration_result.map_err(|source| {
+        let root_display = lossless_project_root_display(&root);
+        let message = root_display.as_deref().map_or_else(
+            || {
+                format!(
+                    "root transition {transition:?} committed, but generated project configuration is incomplete: the native project root has no lossless UTF-8 representation; rerun from the actual selected directory or provide an explicit native project selection"
+                )
+            },
+            |root| {
+                format!(
+                    "root transition {transition:?} committed for {root:?}, but generated project configuration is incomplete; rerun `projectatlas root set {root:?}` with the default bind transition to repair it without repeating the transition"
+                )
+            },
+        );
+        CliError::RootTransitionFollowup {
+            root: root_display,
+            transition,
+            message,
+            source: Box::new(source),
+        }
     })?;
     build_root_report_with_transition(&db_path, Some(&config_path), Some(&transition_result))
 }
@@ -3269,7 +3902,7 @@ fn write_init_mcp_config_files(
         report.host_configs.push(InitHostConfigStatus {
             harness: harness_name,
             status,
-            path: normalize_native_path_display(path),
+            path: lossless_native_path_display(&path),
             error,
         });
     }
@@ -3362,7 +3995,8 @@ fn build_root_report_with_transition(
         .index
         .as_ref()
         .and_then(|index| index.project_root.clone());
-    let atlas_dir = Path::new(&settings.db.path)
+    let absolute_db = absolute_path(db)?;
+    let atlas_dir = absolute_db
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let runtime = build_runtime_info();
@@ -3381,14 +4015,14 @@ fn build_root_report_with_transition(
         config_project_root: settings
             .config_path
             .as_ref()
-            .map(|_| settings.repo_root.clone()),
+            .and(settings.repo_root.clone()),
         db_project_root,
         mcp_config_path: settings.mcp_config.path.clone(),
-        claude_mcp_config_path: normalize_native_path_display(
-            atlas_dir.join("projectatlas.claude.mcp.json"),
+        claude_mcp_config_path: lossless_native_path_display(
+            &atlas_dir.join("projectatlas.claude.mcp.json"),
         ),
-        opencode_config_path: normalize_native_path_display(
-            atlas_dir.join("projectatlas.opencode.json"),
+        opencode_config_path: lossless_native_path_display(
+            &atlas_dir.join("projectatlas.opencode.json"),
         ),
         runtime_executable: runtime.executable,
         runtime_version: runtime.version,
@@ -3867,6 +4501,9 @@ struct PurposeSetReport {
 struct PurposeSetPayload {
     /// Indexed repository-relative path whose purpose was updated.
     path: String,
+    /// Registry-owned content role when the selected path is a file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classification: Option<ContentClassification>,
     /// Durable purpose status after the update.
     status: PurposeStatus,
     /// Source of the durable purpose after the update.
@@ -4072,11 +4709,13 @@ impl RequiredCliCommand {
                 folder: None,
                 file_pattern: None,
                 include_content: false,
+                content_selection: None,
                 limit: 1,
             },
             Self::Next => Command::Next {
                 query: String::new(),
                 limit: 1,
+                content_selection: None,
             },
             Self::Outline => Command::Outline {
                 file: PathBuf::from("src/lib.rs"),
@@ -4085,6 +4724,7 @@ impl RequiredCliCommand {
             Self::Summary => Command::Summary {
                 file: PathBuf::from("src/lib.rs"),
                 limit: 1,
+                content_selection: None,
             },
             Self::Search => Command::Search {
                 pattern: String::new(),
@@ -4096,11 +4736,13 @@ impl RequiredCliCommand {
                 context_lines: 0,
                 start_index: 0,
                 limit: 1,
+                content_selection: None,
             },
             Self::Slice => Command::Slice {
                 file: PathBuf::from("src/lib.rs"),
                 start_line: Some(1),
                 end_line: None,
+                content_selection: None,
                 selector: OptionalSymbolSelectorArgs {
                     symbol: None,
                     symbol_parent: None,
@@ -4114,6 +4756,7 @@ impl RequiredCliCommand {
                 command: Box::new(SymbolsCommand::List {
                     file: None,
                     query: None,
+                    content_selection: None,
                     limit: 1,
                 }),
             },
@@ -4151,28 +4794,39 @@ impl RequiredCliCommand {
                 text_index_max_bytes: None,
             },
             Self::HealthCheck => Command::HealthCheck {
-                start_index: 0,
-                limit: 1,
-                category: None,
-                severity: None,
-                path_prefix: None,
-                summary_only: true,
-                source_only: false,
-                coverage: false,
-                parser: None,
-                provider: None,
-                relation: None,
-                coverage_state: None,
-                reason: None,
+                report: HealthReportArgs {
+                    start_index: 0,
+                    limit: 1,
+                    category: None,
+                    severity: None,
+                    path_prefix: None,
+                    summary_only: true,
+                    source_only: false,
+                    coverage: false,
+                    parser: None,
+                    provider: None,
+                    relation: None,
+                    coverage_state: None,
+                    reason: None,
+                },
             },
             Self::Health => Command::Health {
-                command: HealthCommand::Resolve {
-                    finding_id: String::new(),
-                    category: String::new(),
-                    path: String::new(),
-                    related_path: None,
-                    rationale: String::new(),
+                report: HealthReportArgs {
+                    start_index: 0,
+                    limit: 1,
+                    category: None,
+                    severity: None,
+                    path_prefix: None,
+                    summary_only: true,
+                    source_only: false,
+                    coverage: false,
+                    parser: None,
+                    provider: None,
+                    relation: None,
+                    coverage_state: None,
+                    reason: None,
                 },
+                command: None,
             },
             Self::Lint => Command::Lint {
                 strict_folders: false,
@@ -4314,15 +4968,192 @@ struct RuntimeInfoReport {
     mcp_tools: Vec<String>,
 }
 
+/// Bounded structural routing state for agents operating across Git worktrees.
+#[derive(Debug, Serialize)]
+pub(crate) struct RepositoryControlReport {
+    /// Canonical checkout or Git common directory that owns the inventory.
+    control_root: Option<String>,
+    /// How the supplied path selected source.
+    source_selection: &'static str,
+    /// Exact source root selected without guessing, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_root: Option<String>,
+    /// Whether source operations require an explicit exact worktree root.
+    worktree_required: bool,
+    /// Bounded deterministic worktree inventory.
+    worktrees: Vec<RepositoryWorktreeReport>,
+    /// Whether additional structurally registered entries were omitted.
+    truncated: bool,
+    /// Closed diagnostics that prevent safe implicit selection.
+    blockers: Vec<String>,
+}
+
+/// One content-free structural worktree row.
+#[derive(Debug, Serialize)]
+struct RepositoryWorktreeReport {
+    /// Primary, linked, or non-Git source role.
+    role: &'static str,
+    /// Active, missing, or invalid structural state.
+    state: &'static str,
+    /// Exact source root when active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+    /// Git-owned administrative directory when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    administrative_directory: Option<String>,
+    /// Bounded structural failure when invalid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker: Option<String>,
+}
+
+/// Maximum structural worktree rows returned through CLI or MCP status.
+const REPOSITORY_CONTROL_WORKTREE_LIMIT: usize = 256;
+
+/// Build one mutation-free structural repository/worktree status report.
+pub(crate) fn build_repository_control_report(
+    path: &Path,
+) -> Result<RepositoryControlReport, CliError> {
+    let structure = discover_repository_structure(path)?;
+    match structure {
+        RepositoryStructure::NonGit { selected_root } => Ok(RepositoryControlReport {
+            control_root: lossless_project_root_display(&selected_root),
+            source_selection: "exact_non_git",
+            selected_root: lossless_project_root_display(&selected_root),
+            worktree_required: false,
+            worktrees: vec![RepositoryWorktreeReport {
+                role: "non_git",
+                state: "active",
+                root: lossless_project_root_display(&selected_root),
+                administrative_directory: None,
+                blocker: None,
+            }],
+            truncated: false,
+            blockers: Vec::new(),
+        }),
+        RepositoryStructure::InvalidGit {
+            selected_root,
+            issue,
+        } => Ok(RepositoryControlReport {
+            control_root: lossless_project_root_display(&selected_root),
+            source_selection: "invalid_git",
+            selected_root: None,
+            worktree_required: true,
+            worktrees: Vec::new(),
+            truncated: false,
+            blockers: vec![format!(
+                "{:?}:{}",
+                issue.kind,
+                normalize_native_path_display(issue.path)
+            )],
+        }),
+        RepositoryStructure::Git(repository) => {
+            let (source_selection, selected_root, worktree_required, mut blockers) =
+                match repository.selection {
+                    GitRepositorySelection::Worktree { root, .. } => (
+                        "exact_worktree",
+                        lossless_project_root_display(&root),
+                        false,
+                        Vec::new(),
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Unambiguous { root },
+                    } => (
+                        "single_worktree",
+                        lossless_project_root_display(&root),
+                        false,
+                        Vec::new(),
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::None,
+                    } => (
+                        "worktree_unavailable",
+                        None,
+                        true,
+                        vec!["active_worktree_unavailable".to_string()],
+                    ),
+                    GitRepositorySelection::CommonManager {
+                        source_selection: GitManagerSourceSelection::Ambiguous { .. },
+                    } => (
+                        "explicit_worktree_required",
+                        None,
+                        true,
+                        vec!["exact_worktree_selection_required".to_string()],
+                    ),
+                };
+            let truncated = repository.worktrees.len() > REPOSITORY_CONTROL_WORKTREE_LIMIT;
+            let worktrees = repository
+                .worktrees
+                .into_iter()
+                .take(REPOSITORY_CONTROL_WORKTREE_LIMIT)
+                .map(|entry| {
+                    let role = match entry.role {
+                        GitWorktreeRole::Primary => "primary",
+                        GitWorktreeRole::Linked => "linked",
+                    };
+                    let administrative_directory =
+                        lossless_native_path_display(&entry.administrative_directory);
+                    match entry.state {
+                        GitWorktreeState::Active { root, .. } => RepositoryWorktreeReport {
+                            role,
+                            state: "active",
+                            root: lossless_project_root_display(&root),
+                            administrative_directory,
+                            blocker: None,
+                        },
+                        GitWorktreeState::Missing { git_control_path } => {
+                            RepositoryWorktreeReport {
+                                role,
+                                state: "missing",
+                                root: git_control_path
+                                    .parent()
+                                    .and_then(lossless_project_root_display),
+                                administrative_directory,
+                                blocker: None,
+                            }
+                        }
+                        GitWorktreeState::Invalid { issue } => RepositoryWorktreeReport {
+                            role,
+                            state: "invalid",
+                            root: None,
+                            administrative_directory,
+                            blocker: Some(format!(
+                                "{:?}:{}",
+                                issue.kind,
+                                normalize_native_path_display(issue.path)
+                            )),
+                        },
+                    }
+                })
+                .collect();
+            blockers.sort();
+            blockers.dedup();
+            Ok(RepositoryControlReport {
+                control_root: lossless_project_root_display(&repository.common_directory),
+                source_selection,
+                selected_root,
+                worktree_required,
+                worktrees,
+                truncated,
+                blockers,
+            })
+        }
+    }
+}
+
+/// Render structural worktree status for agent-facing text output.
+pub(crate) fn render_repository_control_report(report: &RepositoryControlReport) -> String {
+    encode_agent_payload(&json!({ "worktree_status": report }))
+}
+
 /// Project-local root identity report.
 #[derive(Debug, Serialize)]
 struct RootReport {
     /// Canonical project root `ProjectAtlas` will use.
-    root: String,
+    root: Option<String>,
     /// Detection source for the selected root.
     detection_source: String,
     /// Durable `SQLite` database path.
-    db_path: String,
+    db_path: Option<String>,
     /// Config path used for project policy.
     config_path: Option<String>,
     /// Root stored in config, when config exists.
@@ -4330,11 +5161,11 @@ struct RootReport {
     /// Root stored in the DB metadata, when the DB exists.
     db_project_root: Option<String>,
     /// Generated generic MCP config path.
-    mcp_config_path: String,
+    mcp_config_path: Option<String>,
     /// Generated Claude Code MCP config path.
-    claude_mcp_config_path: String,
+    claude_mcp_config_path: Option<String>,
     /// Generated `OpenCode` MCP config path.
-    opencode_config_path: String,
+    opencode_config_path: Option<String>,
     /// Current runtime executable path, when available.
     runtime_executable: Option<String>,
     /// Current runtime version.
@@ -4420,76 +5251,56 @@ fn build_token_calibration(
 
 /// Load the tiny optional atlas preview through existing indexed relation-family reads.
 fn load_token_atlas_preview(store: &AtlasStore) -> TokenAtlasPreview {
-    let Some((relations, truncated)) = load_token_atlas_relations(store) else {
+    let control = IndexWorkControl::new(
+        projectatlas_core::IndexCancellation::new(),
+        Some(TOKEN_ATLAS_READ_TIMEOUT),
+    );
+    let Some((relations, truncated)) = load_token_atlas_relations(store, &control) else {
         return TokenAtlasPreview::unavailable();
     };
     TokenAtlasPreview::from_relations(&relations, truncated)
 }
 
 /// Load the bounded resolved-relation input owned by the optional atlas preview.
-fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation>, bool)> {
-    const RELATIONS_PER_FAMILY: u32 = 128;
+fn load_token_atlas_relations(
+    store: &AtlasStore,
+    control: &IndexWorkControl,
+) -> Option<(Vec<LogicalRelation>, bool)> {
     const ADJACENCY_ROWS_PER_ROUND: usize = 512;
     const ADJACENCY_ROUNDS: usize = 2;
     const ADJACENCY_FRONTIER_MAX: usize = 128;
     const SEEDS_PER_RELATION_FAMILY: usize = 4;
+    const FIRST_ROUND_ROWS_PER_SEED: usize = 16;
 
     let network_relation_kinds = GraphRelationKind::ALL
         .into_iter()
         .filter(|relation| token_atlas_network_relation(*relation))
         .collect::<Vec<_>>();
-    let mut relations = Vec::with_capacity(
-        network_relation_kinds.len() * usize::try_from(RELATIONS_PER_FAMILY).unwrap_or_default(),
-    );
+    let mut relations = Vec::new();
     let mut adjacency_relation_kinds = Vec::new();
+    let mut seeds = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut truncated = false;
     for &relation in &network_relation_kinds {
-        let Ok(page) = store.repository_graph_relations(
-            RepositoryGraphRelationQuery::Family { relation },
-            RELATIONS_PER_FAMILY,
+        let Ok(page) = store.repository_graph_resolved_relation_hubs(
+            relation,
+            u32::try_from(SEEDS_PER_RELATION_FAMILY).unwrap_or(1),
+            Some(control),
         ) else {
             return None;
         };
-        if page.truncated {
+        if !page.rows.is_empty() {
             adjacency_relation_kinds.push(relation);
         }
         truncated |= page.truncated;
-        relations.extend(page.rows);
-    }
-    let mut degrees_by_kind = BTreeMap::<String, BTreeMap<String, (GraphEntityKey, usize)>>::new();
-    for relation in &relations {
-        let Some(target) = relation.resolution().resolved_target() else {
-            continue;
-        };
-        let degrees = degrees_by_kind
-            .entry(relation.kind().as_str().to_string())
-            .or_default();
-        for endpoint in [relation.source(), target] {
-            let entry = degrees
-                .entry(endpoint.digest().to_string())
-                .or_insert_with(|| (endpoint.clone(), 0));
-            entry.1 += 1;
+        for seed in page.rows {
+            if seen.insert(seed.key().digest().to_string()) {
+                seeds.push(seed.key().clone());
+            }
         }
     }
-    let mut seeds = BTreeMap::new();
-    for degrees in degrees_by_kind.into_values() {
-        let mut ranked = degrees.into_values().collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            right
-                .1
-                .cmp(&left.1)
-                .then_with(|| left.0.digest().cmp(right.0.digest()))
-        });
-        for (seed, _) in ranked.into_iter().take(SEEDS_PER_RELATION_FAMILY) {
-            seeds.insert(seed.digest().to_string(), seed);
-        }
-    }
-    let mut frontier = seeds.into_values().collect::<Vec<_>>();
-    let mut seen = frontier
-        .iter()
-        .map(|seed| seed.digest().to_string())
-        .collect::<BTreeSet<_>>();
-    for _ in 0..ADJACENCY_ROUNDS {
+    let mut frontier = seeds;
+    for round in 0..ADJACENCY_ROUNDS {
         if frontier.is_empty() {
             break;
         }
@@ -4498,10 +5309,7 @@ fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation
             RepositoryGraphDirection::Outbound,
             RepositoryGraphDirection::Inbound,
         ] {
-            let page_limit = ((GraphLimits::MAX_ROWS as usize + 1) / frontier.len())
-                .saturating_sub(1)
-                .clamp(1, ADJACENCY_ROWS_PER_ROUND);
-            let mut remaining_rows = page_limit;
+            let mut remaining_rows = ADJACENCY_ROWS_PER_ROUND;
             for (index, &relation_kind) in adjacency_relation_kinds.iter().enumerate() {
                 if remaining_rows == 0 {
                     truncated = true;
@@ -4509,28 +5317,43 @@ fn load_token_atlas_relations(store: &AtlasStore) -> Option<(Vec<LogicalRelation
                 }
                 let remaining_families = adjacency_relation_kinds.len() - index;
                 let family_limit = remaining_rows.div_ceil(remaining_families);
-                let Ok(page) = store.repository_graph_adjacency_page_filtered(
-                    &frontier,
-                    direction,
-                    Some(relation_kind),
-                    None,
-                    u32::try_from(family_limit).unwrap_or(1),
-                    None,
-                ) else {
-                    return None;
-                };
-                truncated |= page.truncated;
-                remaining_rows = remaining_rows.saturating_sub(page.rows.len());
-                for row in page.rows {
-                    let relation = row.detail.relation;
-                    if let Some(target) = relation.resolution().resolved_target() {
-                        for endpoint in [relation.source(), target] {
-                            if seen.insert(endpoint.digest().to_string()) {
-                                next.insert(endpoint.digest().to_string(), endpoint.clone());
+                let frontier_batches: Vec<_> = frontier.iter().map(std::slice::from_ref).collect();
+                let mut family_rows = family_limit;
+                let mut remaining_batches = frontier_batches.len();
+                for batch in frontier_batches {
+                    if family_rows == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    let mut batch_limit = family_rows.div_ceil(remaining_batches);
+                    if round == 0 {
+                        batch_limit = batch_limit.min(FIRST_ROUND_ROWS_PER_SEED);
+                    }
+                    let Ok(page) = store.repository_graph_resolved_adjacency_page(
+                        batch,
+                        direction,
+                        relation_kind,
+                        None,
+                        u32::try_from(batch_limit).unwrap_or(1),
+                        Some(control),
+                    ) else {
+                        return None;
+                    };
+                    remaining_batches -= 1;
+                    truncated |= page.truncated;
+                    family_rows = family_rows.saturating_sub(page.rows.len());
+                    remaining_rows = remaining_rows.saturating_sub(page.rows.len());
+                    for row in page.rows {
+                        let relation = row.detail.relation;
+                        if let Some(target) = relation.resolution().resolved_target() {
+                            for endpoint in [relation.source(), target] {
+                                if seen.insert(endpoint.digest().to_string()) {
+                                    next.insert(endpoint.digest().to_string(), endpoint.clone());
+                                }
                             }
                         }
+                        relations.push(relation);
                     }
-                    relations.push(relation);
                 }
             }
         }
@@ -4577,8 +5400,8 @@ fn build_parity_report(store: &AtlasStore, profile: &str) -> Result<ParityReport
     push_check(
         &mut checks,
         "project-root",
-        store.project_root()?.is_some(),
-        "scan metadata records the canonical project root",
+        store.project_root_identity()?.is_some(),
+        "database records the authoritative native project root",
     );
     push_check(
         &mut checks,
@@ -4713,7 +5536,52 @@ fn cli_command_name(command: &Command) -> &'static str {
         Command::Mcp { .. } => "mcp",
         Command::McpConfig { .. } => "mcp-config",
         Command::RuntimeInfo => "runtime-info",
+        #[cfg(unix)]
+        Command::AcquireInstallerLock { .. } => "acquire-installer-lock",
         Command::Purpose { .. } => "purpose",
+    }
+}
+
+/// Acquire one inherited installer file lock without reopening its authority path.
+#[cfg(unix)]
+fn acquire_installer_lock(
+    file: &fs::File,
+    expected_device: u64,
+    expected_inode: u64,
+    timeout: Duration,
+) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited installer lock descriptor is not a regular file",
+        ));
+    }
+    if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "inherited installer lock descriptor identity changed",
+        ));
+    }
+    let started = Instant::now();
+    let deadline = started.checked_add(timeout).unwrap_or(started);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another installer owns the update lock",
+                    ));
+                }
+                std::thread::sleep(
+                    INSTALLER_LOCK_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                );
+            }
+            Err(fs::TryLockError::Error(source)) => return Err(source),
+        }
     }
 }
 
@@ -4722,9 +5590,11 @@ fn render_file_summary(report: &FileSummaryReport) -> String {
     encode_agent_payload(&json!({ "file_summary": report }))
 }
 
-/// Write text to stdout without using print macros.
+/// Write and flush text to stdout without using print macros.
 fn write_stdout(text: &str) -> Result<(), CliError> {
-    io::stdout().write_all(text.as_bytes())?;
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()?;
     Ok(())
 }
 
@@ -4740,6 +5610,11 @@ mod tests {
         ProjectAtlasMcpServer, REQUIRED_MCP_TOOL_NAMES, mcp_tool_route_present,
         required_mcp_surface_present,
     };
+    #[cfg(unix)]
+    use super::runtime::{
+        IndexProjectMismatch, IndexReadStatus, IndexRefreshReason, IndexRefreshRequired,
+        IndexRefreshScope, lossless_project_root_display,
+    };
     use super::runtime::{
         TextIndexOptions, byte_count_to_tokens, estimated_source_tokens_for_file_node,
         event_kind_affects_index, is_symbol_candidate, primary_symbol_names,
@@ -4749,18 +5624,25 @@ mod tests {
         watch_path_requires_full_scan, watcher_status_report,
     };
     use super::{
-        Cli, CliError, Command, GraphRelationKind, OutputFormat, SearchRetrievalMode,
-        SearchRetrievalModeArg, ServiceError, build_runtime_info, controlled_named_output,
-        load_token_atlas_relations, render_cli_error, render_token_dashboard, serialized_output,
+        Cli, CliError, Command, DEFAULT_HEALTH_LIMIT, GraphRelationKind, HealthCommand,
+        OutputFormat, SCHEMA_MIGRATION_REQUIRED_RECOVERY, SCHEMA_VERSION_MISMATCH_RECOVERY,
+        SearchRetrievalMode, SearchRetrievalModeArg, ServiceError, build_runtime_info,
+        controlled_named_output, load_token_atlas_preview, load_token_atlas_relations,
+        render_cli_error, render_token_dashboard, render_token_dashboard_with_atlas_at_width,
+        schema_migration_required_payload, schema_version_mismatch_payload, serialized_output,
         token_atlas_network_relation, truthy_env,
     };
     #[cfg(feature = "optional-parser-supervisor")]
     use super::{OptionalParserPackLifecycleError, ParserPackCommand};
+    #[cfg(unix)]
+    use super::{RootTransition, bind_project_root, build_repository_control_report};
     use clap::Parser as _;
     use notify::EventKind;
+    #[cfg(unix)]
+    use projectatlas_core::CanonicalProjectRoot;
     use projectatlas_core::graph::{
-        Completeness, ConfidenceClass, EntitySelector, GraphEntity, LogicalRelation,
-        RelationResolution, RepositoryFilePath,
+        Completeness, ConfidenceClass, EntitySelector, GraphEntity, GraphIdentityText,
+        LogicalRelation, RelationResolution, RepositoryFilePath,
     };
     use projectatlas_core::symbols::{
         CodeSymbol, ParserKind, RelationKind, SymbolGraph, SymbolKind, SymbolRelation,
@@ -4770,15 +5652,21 @@ mod tests {
         IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
         Node, NodeKind, normalize_native_path_display,
     };
-    use projectatlas_db::{AtlasStore, DbError, RepositoryGraphDirection};
+    use projectatlas_db::{AtlasStore, DbError, RepositoryGraphRelationQuery};
     use projectatlas_fs::ScanOptions;
-    use rmcp::model::{CallToolRequestParams, ClientInfo};
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
     use rmcp::{ClientHandler, ServiceExt};
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
     use std::error::Error;
+    #[cfg(unix)]
+    use std::ffi::OsString;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
 
     /// Minimal MCP client handler for in-process routing tests.
@@ -4786,8 +5674,8 @@ mod tests {
     struct TestMcpClient;
 
     impl ClientHandler for TestMcpClient {
-        fn get_info(&self) -> ClientInfo {
-            ClientInfo::default()
+        fn get_info(&self) -> ClientConfig {
+            ClientConfig::default()
         }
     }
 
@@ -4836,6 +5724,38 @@ mod tests {
             "{context} missing selected project audit root/db: {text}"
         ))
         .into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parity_uses_native_identity_for_non_utf8_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join(OsString::from_vec(b"parity-root-\x80".to_vec()));
+        let database = root.join(".projectatlas/projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("native parity database has no parent"))?,
+        )?;
+        let store = AtlasStore::open_for_project(&database, &root)?;
+        require_condition(
+            store.project_root()?.is_none() && store.project_root_identity()?.is_some(),
+            "parity fixture did not create a native-only root binding",
+        )?;
+
+        let report = super::build_parity_report(&store, super::REPOSITORY_INTELLIGENCE_PROFILE)?;
+        let root_check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "project-root")
+            .ok_or_else(|| io::Error::other("parity report omitted project-root check"))?;
+        require_condition(
+            root_check.status == super::ParityCheckStatus::Pass,
+            "parity report rejected a valid native-only root binding",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -4976,14 +5896,14 @@ mod tests {
     }
 
     #[test]
-    fn symbol_candidate_policy_keeps_structural_formats_out_of_symbol_scan() {
+    fn symbol_candidate_policy_admits_owned_formats_only() {
         assert!(is_symbol_candidate("Cargo.toml", Some("cargo-manifest")));
         assert!(is_symbol_candidate("src/lib.rs", Some("rust")));
         assert!(!is_symbol_candidate(
             "fixtures/baselines.toon",
             Some("toon")
         ));
-        assert!(!is_symbol_candidate("README.md", Some("markdown")));
+        assert!(is_symbol_candidate("README.md", Some("markdown")));
     }
 
     #[test]
@@ -5117,6 +6037,30 @@ mod tests {
     }
 
     #[test]
+    fn cli_map_response_limit_is_typed_in_json_and_toon() -> Result<(), Box<dyn Error>> {
+        let error = CliError::AtlasMap(super::atlas_map::AtlasMapError::ResponseLimitExceeded {
+            observed: 5,
+            limit: 4,
+        });
+        for format in [OutputFormat::Json, OutputFormat::Toon] {
+            let rendered = render_cli_error(format, &error)?;
+            let payload: Value = if format == OutputFormat::Json {
+                serde_json::from_str(&rendered)?
+            } else {
+                toon_format::decode_default(&rendered)?
+            };
+            require_condition(
+                payload["error"]["kind"] == "response_limit_exceeded"
+                    && payload["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("observed 5, limit 4")),
+                "CLI map response limit lost its typed error or exact byte counts",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn cli_database_filesystem_failures_are_typed_in_json_and_toon() -> Result<(), Box<dyn Error>> {
         let database = PathBuf::from("project")
             .join(".projectatlas")
@@ -5155,6 +6099,515 @@ mod tests {
                 && toon.contains("supported local filesystem"),
             "CLI TOON lost typed filesystem details",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_project_mismatch_preserves_lossless_store_roots() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let selected_root = temp.path().join("selected-root");
+        let indexed_root = temp.path().join("indexed-root");
+        fs::create_dir_all(&selected_root)?;
+        fs::create_dir_all(&indexed_root)?;
+        let database = indexed_root.join(".projectatlas").join("projectatlas.db");
+        fs::create_dir_all(
+            database
+                .parent()
+                .ok_or_else(|| io::Error::other("indexed database path has no parent"))?,
+        )?;
+        drop(AtlasStore::open_for_project(&database, &indexed_root)?);
+
+        let Err(error) = super::runtime::open_atlas_store_for_project(&database, &selected_root)
+        else {
+            return Err(io::Error::other("wrong-root store open unexpectedly succeeded").into());
+        };
+        let selected_display =
+            projectatlas_core::CanonicalProjectRoot::from_path(&selected_root)?.display_string()?;
+        let indexed_display =
+            projectatlas_core::CanonicalProjectRoot::from_path(&indexed_root)?.display_string()?;
+
+        let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+        require_condition(
+            json.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::String(selected_display.clone()))
+                && json.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::String(indexed_display.clone())),
+            "CLI JSON omitted lossless roots from a store mismatch",
+        )?;
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        let toon_value: Value = toon_format::decode_default(&toon)?;
+        require_condition(
+            toon_value.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::String(selected_display))
+                && toon_value.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::String(indexed_display)),
+            "CLI TOON omitted lossless roots from a store mismatch",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_project_mismatch_keeps_native_display_unavailable_typed() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp
+            .path()
+            .join(OsString::from_vec(b"raw-root-\x80".to_vec()));
+        let replacement_root = temp.path().join("raw-root-�");
+        fs::create_dir(&raw_root)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let replacement_identity = CanonicalProjectRoot::from_path(&replacement_root)?;
+        let replacement_display = replacement_identity.display_string()?;
+        let error = CliError::ProjectMismatch(Box::new(IndexProjectMismatch::from_native_roots(
+            &raw_identity,
+            &replacement_identity,
+        )));
+
+        let json_text = render_cli_error(OutputFormat::Json, &error)?;
+        let json: Value = serde_json::from_str(&json_text)?;
+        require_condition(
+            json.pointer("/error/project_mismatch/selected_project_root") == Some(&Value::Null)
+                && json
+                    .pointer("/error/project_mismatch/indexed_project_root")
+                    .and_then(Value::as_str)
+                    == Some(replacement_display.as_str()),
+            "CLI JSON collapsed native-unavailable and replacement-character roots",
+        )?;
+
+        let toon = render_cli_error(OutputFormat::Toon, &error)?;
+        require_condition(
+            toon.contains("selected_project_root: null")
+                && toon.contains("indexed_project_root: ")
+                && toon.contains("raw-root-�"),
+            "CLI TOON lost the typed unavailable root projection",
+        )?;
+
+        let mapped = super::runtime::project_store_error(DbError::ProjectRootMismatch {
+            expected: raw_root.to_string_lossy().into_owned(),
+            found: replacement_root.to_string_lossy().into_owned(),
+            identities: None,
+        });
+        let mapped_json: Value =
+            serde_json::from_str(&render_cli_error(OutputFormat::Json, &mapped)?)?;
+        require_condition(
+            mapped_json.pointer("/error/project_mismatch/selected_project_root")
+                == Some(&Value::Null)
+                && mapped_json.pointer("/error/project_mismatch/indexed_project_root")
+                    == Some(&Value::Null)
+                && mapped_json
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("does not match")),
+            "CLI promoted lossy store mismatch text into structured roots",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_recovery_reports_omit_unavailable_native_root_selectors() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        fs::create_dir_all(raw_root.join(".projectatlas"))?;
+        fs::create_dir_all(replacement_root.join(".projectatlas"))?;
+        let raw_db = raw_root.join(".projectatlas").join("projectatlas.db");
+        let replacement_db = replacement_root
+            .join(".projectatlas")
+            .join("projectatlas.db");
+        let replacement_display = lossless_project_root_display(&replacement_root)
+            .ok_or_else(|| io::Error::other("replacement root lost its UTF-8 display"))?;
+
+        let init_errors = [
+            (
+                super::runtime::index_init_required(&raw_root, &raw_db),
+                false,
+            ),
+            (
+                super::runtime::index_init_required(&replacement_root, &replacement_db),
+                true,
+            ),
+        ];
+        for (error, displayable) in init_errors {
+            let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+            let expected_root = if displayable {
+                Some(replacement_display.as_str())
+            } else {
+                None
+            };
+            require_condition(
+                json.pointer("/error/init_required/project_root")
+                    .and_then(Value::as_str)
+                    == expected_root,
+                "CLI init report did not preserve unavailable/displayable root state",
+            )?;
+            require_condition(
+                json.pointer("/error/next/project_path")
+                    .and_then(Value::as_str)
+                    == expected_root,
+                "CLI init recovery selector did not fail closed for a raw root",
+            )?;
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            let toon_value: Value = toon_format::decode_default(&toon)?;
+            if displayable {
+                let expected = Value::String(replacement_display.clone());
+                require_condition(
+                    toon_value.pointer("/error/init_required/project_root") == Some(&expected)
+                        && toon_value.pointer("/error/next/project_path") == Some(&expected),
+                    "CLI TOON init recovery lost a displayable root selector",
+                )?;
+            } else {
+                require_condition(
+                    toon_value
+                        .pointer("/error/init_required/project_root")
+                        .is_some_and(Value::is_null)
+                        && toon_value.pointer("/error/next/project_path").is_none()
+                        && !toon.contains("repo-�"),
+                    "CLI TOON init recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+
+        let refresh_errors = [
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&raw_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                false,
+            ),
+            (
+                CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: lossless_project_root_display(&replacement_root),
+                    worktree: None,
+                    status: IndexReadStatus::RefreshRequired,
+                    reason: IndexRefreshReason::SourceChanged,
+                    scope: IndexRefreshScope::Incremental,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                })),
+                true,
+            ),
+        ];
+        for (error, displayable) in refresh_errors {
+            let json: Value = serde_json::from_str(&render_cli_error(OutputFormat::Json, &error)?)?;
+            let expected_root = if displayable {
+                Some(replacement_display.as_str())
+            } else {
+                None
+            };
+            require_condition(
+                json.pointer("/error/refresh_required/project_root")
+                    .and_then(Value::as_str)
+                    == expected_root
+                    && json
+                        .pointer("/error/next/project_path")
+                        .and_then(Value::as_str)
+                        == expected_root,
+                "CLI refresh recovery did not preserve lossless root selector state",
+            )?;
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            let toon_value: Value = toon_format::decode_default(&toon)?;
+            if displayable {
+                let expected = Value::String(replacement_display.clone());
+                require_condition(
+                    toon_value.pointer("/error/refresh_required/project_root") == Some(&expected)
+                        && toon_value.pointer("/error/next/project_path") == Some(&expected),
+                    "CLI TOON refresh recovery lost a displayable root selector",
+                )?;
+            } else {
+                require_condition(
+                    toon_value
+                        .pointer("/error/refresh_required/project_root")
+                        .is_some_and(Value::is_null)
+                        && toon_value.pointer("/error/next/project_path").is_none()
+                        && !toon.contains("repo-�"),
+                    "CLI TOON refresh recovery exposed a lossy raw-root selector",
+                )?;
+            }
+        }
+        let control_report = build_repository_control_report(&raw_root)?;
+        let control_value = serde_json::to_value(control_report)?;
+        require_condition(
+            control_value.get("control_root") == Some(&Value::Null)
+                && control_value.get("selected_root").is_none()
+                && control_value.pointer("/worktrees/0/root").is_none()
+                && !control_value.to_string().contains("repo-�"),
+            "CLI repository-control report exposed a lossy raw-root projection",
+        )?;
+        let displayable_control =
+            serde_json::to_value(build_repository_control_report(&replacement_root)?)?;
+        let expected_display = Value::String(replacement_display);
+        require_condition(
+            displayable_control.get("control_root") == Some(&expected_display)
+                && displayable_control.get("selected_root") == Some(&expected_display)
+                && displayable_control.pointer("/worktrees/0/root") == Some(&expected_display),
+            "CLI repository-control report lost a displayable root",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_root_transition_config_failure_keeps_native_state_without_lossy_recovery()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let replacement_root = temp.path().join("repo-�");
+        let atlas_dir = raw_root.join(".projectatlas");
+        fs::create_dir_all(&atlas_dir)?;
+        fs::create_dir(&replacement_root)?;
+        let raw_db = atlas_dir.join("projectatlas.db");
+
+        let Err(error) = bind_project_root(&raw_root, RootTransition::Bind, false) else {
+            return Err(io::Error::other(
+                "generated configuration unexpectedly succeeded for a raw native root",
+            )
+            .into());
+        };
+        let message = error.to_string();
+        require_condition(
+            !message.contains("repo-�")
+                && !message.contains("projectatlas root set")
+                && message.contains("native project root has no lossless UTF-8 representation"),
+            "raw-root transition failure exposed a fabricated recovery selector",
+        )?;
+        for format in [OutputFormat::Json, OutputFormat::Toon] {
+            let rendered = render_cli_error(format, &error)?;
+            require_condition(
+                !rendered.contains("repo-�") && !rendered.contains("projectatlas root set"),
+                "serialized raw-root transition failure exposed a fabricated recovery selector",
+            )?;
+        }
+
+        let expected_identity = CanonicalProjectRoot::from_path(&raw_root)?;
+        let store = AtlasStore::open_for_project(&raw_db, &raw_root)?;
+        require_condition(
+            store.project_root_identity()?.as_ref() == Some(&expected_identity)
+                && store.project_root()?.is_none()
+                && store.project_instance_id()?.is_some(),
+            "native transition state was not retained after host-config failure",
+        )?;
+        require_condition(
+            !replacement_root.join(".projectatlas").exists()
+                && !replacement_root.join("projectatlas.toml").exists(),
+            "lossy recovery failure mutated the replacement-character sibling",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mcp_launch_config_preserves_volume_and_verbatim_paths() -> Result<(), Box<dyn Error>> {
+        let project_root =
+            PathBuf::from(r"\\?\Volume{01234567-89AB-CDEF-0123-456789ABCDEF}\ProjectAtlas\CON.");
+        let executable = project_root.join("projectatlas.exe");
+        let database = project_root.join(".projectatlas").join("projectatlas.db");
+        let config = project_root.join(".projectatlas").join("config.toml");
+
+        let expected = |path: &Path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| io::Error::other("synthetic Windows path was not UTF-8"))
+        };
+        let command = super::mcp_launch_path(&executable)?;
+        let database = super::mcp_launch_path(&database)?;
+        let config = super::mcp_launch_path(&config)?;
+        let cwd = super::mcp_launch_path(&project_root)?;
+        let server = super::McpServerConfig {
+            command: command.clone(),
+            args: vec![
+                "--require-version".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+                "--db".to_string(),
+                database.clone(),
+                "--config".to_string(),
+                config.clone(),
+                "mcp".to_string(),
+            ],
+            cwd: cwd.clone(),
+        };
+        let config_document = serde_json::to_value(super::McpConfigDocument {
+            mcp_servers: BTreeMap::from([("projectatlas".to_string(), server)]),
+        })?;
+        let server = config_document
+            .pointer("/mcpServers/projectatlas")
+            .ok_or_else(|| io::Error::other("serialized MCP server was missing"))?;
+        require_condition(
+            server.get("command") == Some(&Value::String(command.clone()))
+                && server.pointer("/args/3") == Some(&Value::String(database.clone()))
+                && server.pointer("/args/5") == Some(&Value::String(config.clone()))
+                && server.get("cwd") == Some(&Value::String(cwd.clone())),
+            "serialized MCP launch fields changed a verbatim path",
+        )?;
+        for (label, path) in [
+            ("command", command.as_str()),
+            ("database", database.as_str()),
+            ("config", config.as_str()),
+            ("cwd", cwd.as_str()),
+        ] {
+            require_condition(
+                Path::new(path).is_absolute(),
+                &format!("serialized MCP {label} path was not absolute"),
+            )?;
+        }
+        require_condition(
+            command == expected(&executable)?
+                && database
+                    == expected(&project_root.join(".projectatlas").join("projectatlas.db"))?
+                && config == expected(&project_root.join(".projectatlas").join("config.toml"))?
+                && cwd == expected(&project_root)?,
+            "MCP launch configuration lost volume-GUID/verbatim spelling",
+        )?;
+
+        let drive = super::mcp_launch_path(Path::new(r"\\?\C:\repo\projectatlas.exe"))?;
+        let unc = super::mcp_launch_path(Path::new(r"\\?\UNC\server\share\repo"))?;
+        require_condition(
+            drive == r"C:\repo\projectatlas.exe" && unc == r"\\server\share\repo",
+            "ordinary extended drive/UNC MCP launch compatibility changed",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_schema_version_mismatches_are_typed_and_content_free() -> Result<(), Box<dyn Error>> {
+        let supported = projectatlas_db::CURRENT_SCHEMA_VERSION;
+        let future = supported + 1;
+        for (error, found) in [
+            (
+                CliError::Db(DbError::SchemaVersion {
+                    found: future,
+                    expected: supported,
+                }),
+                future,
+            ),
+            (
+                CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                    found: future,
+                    expected: supported,
+                })),
+                future,
+            ),
+            (
+                CliError::Db(DbError::SchemaVersion {
+                    found: 7,
+                    expected: supported,
+                }),
+                7,
+            ),
+            (
+                CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                    found: 7,
+                    expected: supported,
+                })),
+                7,
+            ),
+        ] {
+            let expected_message =
+                format!("unsupported schema version {found}, expected {supported}");
+            let json_text = render_cli_error(OutputFormat::Json, &error)?;
+            let json: Value = serde_json::from_str(&json_text)?;
+            require_condition(
+                json.pointer("/error/kind").and_then(Value::as_str)
+                    == Some("schema_version_mismatch")
+                    && json
+                        .pointer("/error/schema_version_mismatch/found_schema_version")
+                        .and_then(Value::as_i64)
+                        == Some(found)
+                    && json
+                        .pointer("/error/schema_version_mismatch/supported_schema_version")
+                        .and_then(Value::as_i64)
+                        == Some(supported)
+                    && json
+                        .pointer("/error/schema_version_mismatch/runtime_version")
+                        .and_then(Value::as_str)
+                        == Some(env!("CARGO_PKG_VERSION"))
+                    && json
+                        .pointer("/error/schema_version_mismatch/recovery")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.contains("do not reset"))
+                    && json.pointer("/error/message").and_then(Value::as_str)
+                        == Some(expected_message.as_str()),
+                "CLI JSON lost the typed schema-version mismatch contract",
+            )?;
+            require_condition(
+                !json_text.contains(".projectatlas")
+                    && !json_text.contains("session_id")
+                    && !json_text.contains("project_root"),
+                "CLI schema mismatch exposed private database context",
+            )?;
+
+            let toon = render_cli_error(OutputFormat::Toon, &error)?;
+            require_condition(
+                toon.contains("kind: schema_version_mismatch")
+                    && toon.contains(&format!("found_schema_version: {found}"))
+                    && toon.contains(&format!("supported_schema_version: {supported}"))
+                    && toon.contains(env!("CARGO_PKG_VERSION"))
+                    && toon.contains("do not reset"),
+                "CLI TOON lost typed schema-version details or recovery guidance",
+            )?;
+        }
+        for error in [
+            CliError::Db(DbError::SchemaVersion {
+                found: 8,
+                expected: supported,
+            }),
+            CliError::Service(ServiceError::Db(DbError::SchemaVersion {
+                found: 15,
+                expected: supported,
+            })),
+        ] {
+            require_condition(
+                schema_version_mismatch_payload(&error).is_none(),
+                "CLI treated an admitted predecessor as unsupported",
+            )?;
+            let migration = schema_migration_required_payload(&error).ok_or_else(|| {
+                std::io::Error::other("CLI omitted the admitted-predecessor migration handoff")
+            })?;
+            let expected_steps = u32::try_from(supported - migration.found_schema_version)?;
+            require_condition(
+                migration.supported_schema_version == supported
+                    && migration.migration_steps_remaining == expected_steps,
+                "CLI migration handoff drifted from the database migration inventory",
+            )?;
+            let rendered = render_cli_error(OutputFormat::Json, &error)?;
+            let json: Value = serde_json::from_str(&rendered)?;
+            require_condition(
+                json.pointer("/error/kind").and_then(Value::as_str)
+                    == Some("schema_migration_required")
+                    && json
+                        .pointer("/error/schema_migration_required/migration_steps_remaining")
+                        .and_then(Value::as_u64)
+                        == Some(u64::from(expected_steps))
+                    && json
+                        .pointer("/error/schema_migration_required/recovery")
+                        .and_then(Value::as_str)
+                        == Some(SCHEMA_MIGRATION_REQUIRED_RECOVERY)
+                    && rendered.contains("same global `--db`/`--config` selection")
+                    && rendered.contains("same MCP server/database binding")
+                    && json
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("supported migration step"))
+                    && !rendered.contains("schema_version_mismatch")
+                    && !rendered.contains(SCHEMA_VERSION_MISMATCH_RECOVERY)
+                    && !rendered.contains(".projectatlas")
+                    && !rendered.contains("project_root"),
+                "CLI did not return a private, actionable supported-migration handoff",
+            )?;
+        }
         Ok(())
     }
 
@@ -5211,6 +6664,206 @@ mod tests {
                 && toon.contains("not-installed")
                 && toon.contains("compatible semantic"),
             "CLI TOON lost typed semantic capability state",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_rejects_federated_entrypoint_analysis_before_opening_roots() -> Result<(), Box<dyn Error>>
+    {
+        let mut cli = Cli::try_parse_from([
+            "projectatlas",
+            "--db",
+            "unused.sqlite",
+            "symbols",
+            "relations",
+            "--view",
+            "analysis",
+            "--root",
+            "missing-a",
+            "--root",
+            "missing-b",
+            "--analysis-mode",
+            "entrypoint",
+            "--file",
+            "src/a.rs",
+        ])?;
+        cli.database_path_is_explicit = true;
+        let error = match super::run(&mut cli) {
+            Ok(()) => {
+                return Err(io::Error::other("federated entrypoint analysis was accepted").into());
+            }
+            Err(error) => error,
+        };
+        require_condition(
+            error
+                .to_string()
+                .contains(super::CLI_ERROR_ENTRYPOINT_FEDERATED),
+            "federated entrypoint rejection did not preserve its typed boundary",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn health_report_and_resolve_are_structurally_exclusive() -> Result<(), Box<dyn Error>> {
+        let default = Cli::try_parse_from(["projectatlas", "health"])?;
+        require_condition(
+            matches!(
+                default.command.as_ref(),
+                Command::Health {
+                    report,
+                    command: None,
+                } if report.start_index == 0
+                    && report.limit == DEFAULT_HEALTH_LIMIT
+                    && !report.summary_only
+            ),
+            "health without a subcommand did not select the read-only report",
+        )?;
+
+        let resolve = Cli::try_parse_from([
+            "projectatlas",
+            "health",
+            "resolve",
+            "finding-id",
+            "category",
+            "src/lib.rs",
+            "--rationale",
+            "fixed",
+        ])?;
+        require_condition(
+            matches!(
+                resolve.command.as_ref(),
+                Command::Health {
+                    report,
+                    command: Some(HealthCommand::Resolve { finding_id, .. }),
+                } if finding_id == "finding-id"
+                    && report.start_index == 0
+                    && report.limit == DEFAULT_HEALTH_LIMIT
+            ),
+            "health resolve did not remain an administrative subcommand",
+        )?;
+
+        let Err(mixed) = Cli::try_parse_from([
+            "projectatlas",
+            "health",
+            "--summary-only",
+            "resolve",
+            "finding-id",
+            "category",
+            "src/lib.rs",
+            "--rationale",
+            "fixed",
+        ]) else {
+            return Err(io::Error::other(
+                "report flags must conflict with health resolve at parse time",
+            )
+            .into());
+        };
+        require_condition(
+            mixed.to_string().contains("cannot be used with")
+                && mixed.to_string().contains("resolve"),
+            "health mixed report/resolve parse error did not identify the boundary",
+        )?;
+
+        let health_check = Cli::try_parse_from([
+            "projectatlas",
+            "--format",
+            "json",
+            "health-check",
+            "--coverage",
+            "--parser",
+            "tree-sitter",
+        ])?;
+        require_condition(
+            matches!(
+                health_check.command.as_ref(),
+                Command::HealthCheck { report }
+                    if report.coverage
+                        && report.parser.as_deref() == Some("tree-sitter")
+            ),
+            "health-check compatibility parsing lost report filters",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_lock_uses_the_inherited_open_file_description() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("installer.lock");
+        let parent = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let metadata = parent.metadata()?;
+        require_condition(
+            super::acquire_installer_lock(
+                &parent.try_clone()?,
+                metadata.dev(),
+                metadata.ino() ^ 1,
+                std::time::Duration::ZERO,
+            )
+            .is_err(),
+            "installer lock accepted a descriptor with the wrong captured identity",
+        )?;
+        super::acquire_installer_lock(
+            &parent.try_clone()?,
+            metadata.dev(),
+            metadata.ino(),
+            std::time::Duration::ZERO,
+        )?;
+
+        let contender = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        require_condition(
+            matches!(contender.try_lock(), Err(fs::TryLockError::WouldBlock)),
+            "closing the helper copy released the parent installer's inherited lock",
+        )?;
+        drop(parent);
+        contender.try_lock()?;
+
+        let blocked = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        let blocked_result = super::acquire_installer_lock(
+            &blocked,
+            metadata.dev(),
+            metadata.ino(),
+            std::time::Duration::ZERO,
+        );
+        require_condition(
+            blocked_result.is_err_and(|source| source.kind() == io::ErrorKind::TimedOut),
+            "installer lock did not preserve its bounded contention timeout",
+        )?;
+
+        let directory = fs::File::open(temp.path())?;
+        let directory_metadata = directory.metadata()?;
+        require_condition(
+            super::acquire_installer_lock(
+                &directory,
+                directory_metadata.dev(),
+                directory_metadata.ino(),
+                std::time::Duration::ZERO,
+            )
+            .is_err(),
+            "installer lock accepted a directory",
+        )?;
+
+        let detached_path = temp.path().join("detached-installer.lock");
+        let detached = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&detached_path)?;
+        fs::remove_file(&detached_path)?;
+        let detached_metadata = detached.metadata()?;
+        require_condition(
+            detached_metadata.nlink() == 0,
+            "installer lock pathless-descriptor fixture remained linked",
+        )?;
+        super::acquire_installer_lock(
+            &detached,
+            detached_metadata.dev(),
+            detached_metadata.ino(),
+            std::time::Duration::ZERO,
         )?;
         Ok(())
     }
@@ -5522,10 +7175,12 @@ mod tests {
         assert!(dashboard.contains("ProjectAtlas"));
         assert!(dashboard.contains("Token Impact"));
         assert!(dashboard.contains("session-a"));
-        assert!(dashboard.contains("T O T A L   T O K E N S   A V O I D E D"));
+        assert!(dashboard.contains("A V E R A G E   T O K E N S   A V O I D E D"));
+        assert!(dashboard.contains("Total Tokens Avoided"));
         assert!(dashboard.contains("Without ProjectAtlas"));
         assert!(dashboard.contains("With ProjectAtlas"));
-        assert!(dashboard.contains("Saved by ProjectAtlas"));
+        assert!(dashboard.contains("Average avoided"));
+        assert!(dashboard.contains("Maximum avoided"));
         assert!(dashboard.contains("N A V I G A T I O N   W O R K   A V O I D E D"));
         assert!(
             dashboard
@@ -5563,10 +7218,14 @@ mod tests {
     }
 
     #[test]
-    fn token_atlas_loader_filters_containment_before_paging() -> Result<(), Box<dyn Error>> {
-        const FAMILY_PAGE_ROWS: usize = 128;
-        const ADJACENCY_PAGE_ROWS: u32 = 512;
-
+    fn token_atlas_loader_ranks_resolved_hubs_before_bounded_rendering()
+    -> Result<(), Box<dyn Error>> {
+        const UNRESOLVED_PREFIX_ROWS: usize = 129;
+        const BRANCHES: usize = 15;
+        const LEAVES_PER_BRANCH: usize = 3;
+        const DENSE_HUBS: usize = 4;
+        const DENSE_LEAVES_PER_HUB: usize = 200;
+        const ADVERSARY_LEAVES: usize = 128;
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("token-atlas-loader");
         fs::create_dir_all(root.join("src"))?;
@@ -5606,45 +7265,144 @@ mod tests {
             Ok(graph_entity)
         };
         let source = add_file_entity("src/source.rs".to_string())?;
-        let mut imports = Vec::with_capacity(FAMILY_PAGE_ROWS + 1);
-        for index in 0..=FAMILY_PAGE_ROWS {
+        let mut resolved_calls = Vec::new();
+        let mut dense_hubs = Vec::new();
+        for hub_index in 0..DENSE_HUBS {
+            let hub = add_file_entity(format!("src/dense-{hub_index}-hub.rs"))?;
+            for leaf in 0..DENSE_LEAVES_PER_HUB {
+                let leaf = add_file_entity(format!("src/dense-{hub_index}-leaf-{leaf:03}.rs"))?;
+                resolved_calls.push(LogicalRelation::new(
+                    &hub,
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&leaf)?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+            }
+            dense_hubs.push(hub);
+        }
+        resolved_calls.push(LogicalRelation::new(
+            &source,
+            GraphRelationKind::Legacy(RelationKind::Calls),
+            RelationResolution::resolved(&dense_hubs[0])?,
+            ConfidenceClass::Exact,
+            Completeness::Complete,
+            generation,
+        )?);
+        let mut branch_roots = Vec::with_capacity(BRANCHES);
+        for branch in 0..BRANCHES {
+            let branch_root = add_file_entity(format!("src/branch-{branch:02}-root.rs"))?;
+            resolved_calls.push(LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&branch_root)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+            branch_roots.push(branch_root.clone());
+            let mut leaves = Vec::new();
+            for leaf in 0..LEAVES_PER_BRANCH {
+                let entity = add_file_entity(format!("src/branch-{branch:02}-leaf-{leaf}.rs"))?;
+                resolved_calls.push(LogicalRelation::new(
+                    &branch_root,
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&entity)?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+                leaves.push(entity);
+            }
+            for (left, right) in [(0, 1), (1, 2), (2, 0), (1, 0), (2, 1), (0, 2)] {
+                resolved_calls.push(LogicalRelation::new(
+                    &leaves[left],
+                    GraphRelationKind::Legacy(RelationKind::Calls),
+                    RelationResolution::resolved(&leaves[right])?,
+                    ConfidenceClass::Exact,
+                    Completeness::Complete,
+                    generation,
+                )?);
+            }
+        }
+        branch_roots.sort_by_key(|branch| branch.key().digest().to_string());
+        let adversary_branch = &branch_roots[0];
+        let later_branch = &branch_roots[1];
+        let later_branch_edge = resolved_calls
+            .iter()
+            .filter(|relation| relation.source() == later_branch.key())
+            .min_by_key(|relation| relation.key().digest().to_string())
+            .cloned()
+            .ok_or("later branch edge fixture is missing")?;
+        for leaf in 0..ADVERSARY_LEAVES {
+            let entity = add_file_entity(format!("src/adversary-leaf-{leaf:03}.rs"))?;
+            resolved_calls.push(LogicalRelation::new(
+                adversary_branch,
+                GraphRelationKind::Legacy(RelationKind::Calls),
+                RelationResolution::resolved(&entity)?,
+                ConfidenceClass::Exact,
+                Completeness::Complete,
+                generation,
+            )?);
+        }
+        let mut resolved_import = None;
+        for index in 0..1_000 {
             let target = add_file_entity(format!("src/import-target-{index:03}.rs"))?;
-            imports.push(LogicalRelation::new(
+            let relation = LogicalRelation::new(
                 &source,
                 GraphRelationKind::Legacy(RelationKind::Imports),
                 RelationResolution::resolved(&target)?,
                 ConfidenceClass::Exact,
                 Completeness::Complete,
                 generation,
-            )?);
+            )?;
+            if relation.key().digest().starts_with('f') {
+                resolved_import = Some(relation);
+                break;
+            }
         }
-        imports.sort_by(|left, right| left.key().digest().cmp(right.key().digest()));
-        let hidden_import = imports
-            .last()
-            .cloned()
-            .ok_or("token atlas import fixture is empty")?;
-        let call_target = add_file_entity("src/call-target.rs".to_string())?;
-        let calls = LogicalRelation::new(
+        let resolved_import = resolved_import.ok_or(
+            "could not construct a deterministic resolved relation after the prefix boundary",
+        )?;
+        let mut unresolved_imports = Vec::with_capacity(UNRESOLVED_PREFIX_ROWS);
+        for index in 0..1_000 {
+            let relation = LogicalRelation::new(
+                &source,
+                GraphRelationKind::Legacy(RelationKind::Imports),
+                RelationResolution::Unresolved {
+                    reference: GraphIdentityText::new(format!("missing-import-{index:04}"))?,
+                },
+                ConfidenceClass::Low,
+                Completeness::Partial,
+                generation,
+            )?;
+            if relation.key().digest() < resolved_import.key().digest() {
+                unresolved_imports.push(relation);
+                if unresolved_imports.len() == UNRESOLVED_PREFIX_ROWS {
+                    break;
+                }
+            }
+        }
+        if unresolved_imports.len() != UNRESOLVED_PREFIX_ROWS {
+            return Err(io::Error::other(
+                "could not construct the deterministic unresolved relation-key prefix",
+            )
+            .into());
+        }
+        let contained = add_file_entity("src/contained.rs".to_string())?;
+        let containment = LogicalRelation::new(
             &source,
-            GraphRelationKind::Legacy(RelationKind::Calls),
-            RelationResolution::resolved(&call_target)?,
+            GraphRelationKind::Legacy(RelationKind::Contains),
+            RelationResolution::resolved(&contained)?,
             ConfidenceClass::Exact,
             Completeness::Complete,
             generation,
         )?;
-        let mut graph_relations = imports;
-        graph_relations.push(calls);
-        for index in 0..=ADJACENCY_PAGE_ROWS {
-            let target = add_file_entity(format!("src/contained-{index:03}.rs"))?;
-            graph_relations.push(LogicalRelation::new(
-                &source,
-                GraphRelationKind::Legacy(RelationKind::Contains),
-                RelationResolution::resolved(&target)?,
-                ConfidenceClass::Exact,
-                Completeness::Complete,
-                generation,
-            )?);
-        }
+        let mut graph_relations = unresolved_imports;
+        graph_relations.push(resolved_import.clone());
+        graph_relations.extend(resolved_calls);
+        graph_relations.push(containment);
         let mut publication = store.begin_index_publication("token-atlas-loader")?;
         publication.begin_scan_replacement()?;
         publication.upsert_scan_node_batch(&nodes)?;
@@ -5652,43 +7410,94 @@ mod tests {
         publication.replace_repository_graph(project, &entities, &graph_relations, &[], &[])?;
         publication.complete()?;
 
-        let raw = store.repository_graph_adjacency_page(
-            &[source.key().clone()],
-            RepositoryGraphDirection::Outbound,
-            None,
-            ADJACENCY_PAGE_ROWS,
-            None,
+        let raw = store.repository_graph_relations(
+            RepositoryGraphRelationQuery::Family {
+                relation: GraphRelationKind::Legacy(RelationKind::Imports),
+            },
+            128,
         )?;
         if !raw.truncated {
-            return Err(io::Error::other("raw adjacency fixture was not truncated").into());
-        }
-        if !raw.rows.iter().any(|row| {
-            row.detail.relation.kind() == GraphRelationKind::Legacy(RelationKind::Contains)
-        }) {
-            return Err(io::Error::other("raw adjacency omitted containment fixture").into());
+            return Err(io::Error::other("raw relation-family fixture was not truncated").into());
         }
         if raw
             .rows
             .iter()
-            .any(|row| row.detail.relation.key() == hidden_import.key())
+            .any(|relation| relation.resolution().resolved_target().is_some())
         {
-            return Err(
-                io::Error::other("raw adjacency unexpectedly reached hidden import").into(),
-            );
+            return Err(io::Error::other(
+                "raw relation-key prefix unexpectedly reached a resolved relation",
+            )
+            .into());
         }
-        let (relations, _) = load_token_atlas_relations(&store)
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let (relations, truncated) = load_token_atlas_relations(&store, &control)
             .ok_or("token atlas relation loader unexpectedly failed")?;
-        if !relations
-            .iter()
-            .any(|relation| relation.key() == hidden_import.key())
-        {
-            return Err(io::Error::other("token atlas omitted paged network relation").into());
+        if !truncated {
+            return Err(io::Error::other("token atlas omitted bounded-source state").into());
+        }
+        if !relations.iter().all(|relation| {
+            relation.resolution().resolved_target().is_some()
+                && token_atlas_network_relation(relation.kind())
+        }) {
+            return Err(io::Error::other(
+                "token atlas retained unresolved or containment relations",
+            )
+            .into());
+        }
+        for hub in &dense_hubs {
+            if !relations
+                .iter()
+                .any(|relation| relation.source() == hub.key())
+            {
+                return Err(io::Error::other(
+                    "token atlas adjacency budget omitted a ranked dense hub",
+                )
+                .into());
+            }
         }
         if !relations
             .iter()
-            .all(|relation| token_atlas_network_relation(relation.kind()))
+            .any(|relation| relation.key() == later_branch_edge.key())
         {
-            return Err(io::Error::other("token atlas retained containment").into());
+            return Err(io::Error::other(
+                "token atlas adjacency budget omitted a later second-round branch",
+            )
+            .into());
+        }
+        if !relations
+            .iter()
+            .any(|relation| relation.key() == resolved_import.key())
+        {
+            return Err(io::Error::other(
+                "token atlas did not recover the resolved relation behind the unresolved prefix",
+            )
+            .into());
+        }
+        let atlas = load_token_atlas_preview(&store);
+        let dashboard = render_token_dashboard_with_atlas_at_width(
+            &TokenOverview::from_estimated_totals(4, 16_000, 4_000),
+            Some("resolved-loader"),
+            &atlas,
+            200,
+        );
+        if !dashboard.contains("48 nodes •") {
+            let status = dashboard
+                .lines()
+                .find(|line| line.contains(" nodes • "))
+                .unwrap_or("atlas status line missing");
+            return Err(io::Error::other(format!(
+                "resolved full-family atlas did not fill the bounded 200x50 node preview: {status}"
+            ))
+            .into());
+        }
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let cancelled = IndexWorkControl::new(cancellation, None);
+        if load_token_atlas_relations(&store, &cancelled).is_some() {
+            return Err(io::Error::other(
+                "token atlas loader ignored its shared cancellation boundary",
+            )
+            .into());
         }
         Ok(())
     }
@@ -5790,6 +7599,7 @@ mod tests {
             documentation: None,
             line_start: 1,
             line_end: 1,
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: None,
@@ -5897,7 +7707,7 @@ mod tests {
         let scan_text = scan
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("scan result did not contain text"))?;
         if !scan_text.contains("scan:") {
@@ -5916,7 +7726,7 @@ mod tests {
         let symbols_text = symbols
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("symbols result did not contain text"))?;
         if !symbols_text.contains("symbols[") {
@@ -5937,7 +7747,7 @@ mod tests {
         let summary_text = summary
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("summary result did not contain text"))?;
         if !summary_text.contains("file_summary:") {
@@ -5971,7 +7781,7 @@ mod tests {
         let slice_text = slice
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("slice result did not contain text"))?;
         if !slice_text.contains("indexed ProjectAtlas project")
@@ -5990,7 +7800,7 @@ mod tests {
         let token_text = token_report
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("token report did not contain text"))?;
         if !token_text.contains("token_savings:") {
@@ -6018,7 +7828,7 @@ mod tests {
         let parity_text = parity_report
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("parity report did not contain text"))?;
         if !parity_text.contains("parity:")
@@ -6038,7 +7848,7 @@ mod tests {
         let health_text = health
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("health result did not contain text"))?;
         if !health_text.contains("health:")
@@ -6055,6 +7865,32 @@ mod tests {
             );
         }
 
+        let mut coverage_health_args = Map::new();
+        coverage_health_args.insert("coverage".to_string(), json!(true));
+        coverage_health_args.insert("path_prefix".to_string(), json!("src"));
+        coverage_health_args.insert("limit".to_string(), json!(1));
+        let coverage_health = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("atlas_health").with_arguments(coverage_health_args),
+            )
+            .await?;
+        let coverage_health_text = coverage_health
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .ok_or_else(|| io::Error::other("coverage health result did not contain text"))?;
+        if !coverage_health_text.contains("coverage:")
+            || !coverage_health_text.contains("limit: 1")
+            || !coverage_health_text.contains("path: src/detail.rs")
+        {
+            return Err(format!(
+                "atlas_health coverage result lost structured filtered output: {coverage_health_text}"
+            )
+            .into());
+        }
+
         let mut summary_health_args = Map::new();
         summary_health_args.insert("category".to_string(), json!("missing-purpose"));
         summary_health_args.insert("path_prefix".to_string(), json!(".\\src\\"));
@@ -6069,7 +7905,7 @@ mod tests {
         let summary_health_text = summary_health
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("summary health result did not contain text"))?;
         if !summary_health_text.contains("returned: 0")
@@ -6096,7 +7932,7 @@ mod tests {
         let purpose_queue_text = purpose_queue
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| std::io::Error::other("purpose queue result did not contain text"))?;
         if !purpose_queue_text.contains("purpose_curation:")
@@ -6134,7 +7970,7 @@ mod tests {
         let asset_purpose_queue_text = asset_purpose_queue
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| {
                 std::io::Error::other("asset purpose queue result did not contain text")
@@ -6162,7 +7998,7 @@ mod tests {
         let broad_purpose_queue_text = broad_purpose_queue
             .content
             .first()
-            .and_then(|content| content.raw.as_text())
+            .and_then(|content| content.as_text())
             .map(|text| text.text.as_str())
             .ok_or_else(|| {
                 std::io::Error::other("broad purpose queue result did not contain text")
@@ -6231,7 +8067,7 @@ mod tests {
                 result
                     .content
                     .first()
-                    .and_then(|content| content.raw.as_text())
+                    .and_then(|content| content.as_text())
                     .map(|text| text.text.clone())
                     .ok_or_else(|| {
                         std::io::Error::other(format!("{} result did not contain text", $tool))
@@ -7020,7 +8856,7 @@ mod tests {
                 result
                     .content
                     .first()
-                    .and_then(|content| content.raw.as_text())
+                    .and_then(|content| content.as_text())
                     .map(|text| text.text.clone())
                     .ok_or_else(|| {
                         std::io::Error::other(format!("{} result did not contain text", $tool))

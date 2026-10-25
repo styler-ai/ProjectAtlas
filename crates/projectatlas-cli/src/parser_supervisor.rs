@@ -26,9 +26,9 @@ use crate::parser_linux_authority::{
 use projectatlas_core::IndexCancellation;
 use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_LINUX_MEMORY_PROBE_BYTES, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
-    OPTIONAL_PARSER_PACK_WINDOWS_MINIMUM_MEMORY_PROBE_BYTES, OptionalParserPackArtifactManifest,
-    OptionalParserPackManifest, OptionalParserPackManifestError, PackPlatform,
-    ParserPackMemoryProbe, ParserPackPayloadRole,
+    OPTIONAL_PARSER_PACK_WINDOWS_MINIMUM_MEMORY_PROBE_BYTES, OptionalParserCapability,
+    OptionalParserPackArtifactManifest, OptionalParserPackManifest,
+    OptionalParserPackManifestError, PackPlatform, ParserPackMemoryProbe, ParserPackPayloadRole,
 };
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64"),
@@ -72,7 +72,7 @@ const SUPERVISOR_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Absolute deadline shared by both fixtures for one artifact grammar admission.
 const ARTIFACT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Aggregate ceiling for one complete lifecycle/release artifact admission.
-const ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT: Duration = Duration::from_mins(20);
 /// Maximum interval without meaningful worker progress during artifact admission.
 const ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Test-only launch allowance for hostile fixtures that do not stall admission.
@@ -1489,6 +1489,10 @@ struct LinuxResidentLaunchAuthority {
 #[derive(Debug)]
 struct VerifiedParserPackLaunch {
     /// Canonical artifact root.
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64")
+    ))]
     pack_root: PathBuf,
     /// Accepted target bound by the artifact manifest.
     platform: PackPlatform,
@@ -1761,6 +1765,10 @@ impl VerifiedParserPackLaunch {
             })?;
 
         Ok(Self {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "windows", target_arch = "x86_64")
+            ))]
             pack_root,
             platform,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -1951,11 +1959,7 @@ fn read_verified_linux_payload(
 
 /// Return the accepted target for the current host or refuse before reading source.
 fn host_pack_platform() -> Option<PackPlatform> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Some(PackPlatform::LinuxX86_64),
-        ("windows", "x86_64") => Some(PackPlatform::WindowsX86_64),
-        _ => None,
-    }
+    OptionalParserCapability::current().pack_platform()
 }
 
 /// Canonicalize one required artifact directory.
@@ -5313,6 +5317,10 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         let platform = host_pack_platform()
             .ok_or_else(|| io::Error::other("host has no optional-parser containment target"))?;
         Ok(VerifiedParserPackLaunch {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "windows", target_arch = "x86_64")
+            ))]
             pack_root: pack_root.clone(),
             platform,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -5349,7 +5357,13 @@ pub(crate) fn run_adversarial_process_suite(peer: &Path) -> io::Result<()> {
         let modified = fs::metadata(&payload_path)?.modified()?;
 
         let mut launch = test_launch(peer)?;
-        launch.pack_root = temp.path().to_path_buf();
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64")
+        ))]
+        {
+            launch.pack_root = temp.path().to_path_buf();
+        }
         launch.artifact_manifest =
             FileObservation::capture(temp.path().join(ARTIFACT_MANIFEST_FILE_NAME))
                 .map_err(|error| io::Error::other(error.to_string()))?;
@@ -5846,7 +5860,7 @@ mod tests {
         assert_eq!(ARTIFACT_ADMISSION_TIMEOUT, Duration::from_secs(15));
         assert_eq!(
             ARTIFACT_ADMISSION_AGGREGATE_TIMEOUT,
-            Duration::from_secs(20 * 60)
+            Duration::from_mins(20)
         );
         assert_eq!(
             ARTIFACT_ADMISSION_NO_PROGRESS_TIMEOUT,
@@ -5927,6 +5941,10 @@ mod tests {
     fn metadata_only_launch() -> VerifiedParserPackLaunch {
         let pack_root = PathBuf::from("metadata-only-pack");
         VerifiedParserPackLaunch {
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "windows", target_arch = "x86_64")
+            ))]
             pack_root: pack_root.clone(),
             platform: PackPlatform::LinuxX86_64,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -5951,7 +5969,7 @@ mod tests {
     fn metadata_only_supervisor() -> OptionalParserSupervisor {
         let launch = metadata_only_launch();
         OptionalParserSupervisor {
-            pack_root: launch.pack_root.clone(),
+            pack_root: PathBuf::from("metadata-only-pack"),
             launch,
             memory_limits: ParserMemoryLimits::PRODUCTION,
             resident: None,
@@ -6984,7 +7002,13 @@ mod tests {
         let modified = fs::metadata(&policy_path)?.modified()?;
 
         let mut launch = metadata_only_launch();
-        launch.pack_root = temp.path().to_path_buf();
+        #[cfg(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64")
+        ))]
+        {
+            launch.pack_root = temp.path().to_path_buf();
+        }
         launch.artifact_manifest = FileObservation::capture(artifact_path)?;
         launch.payloads = vec![PayloadObservation {
             file: FileObservation::capture(policy_path.clone())?,

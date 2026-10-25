@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from release_version import parse_release_version
+
 
 TARGETS = (
     "x86_64-unknown-linux-gnu",
@@ -48,10 +50,7 @@ def stage_release_assets(
     cargo_lock: Path,
 ) -> list[Path]:
     """Validate a clean handoff and stage versioned release assets."""
-    require(
-        re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release_version) is not None,
-        "release version must match vMAJOR.MINOR.PATCH",
-    )
+    version = parse_release_version(release_version, source="release").package_version
     require(re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "invalid run revision")
     expected_files = {PROOF_NAME}
     for target in TARGETS:
@@ -66,7 +65,6 @@ def stage_release_assets(
     require(actual_files == expected_files, "clean handoff file inventory differs")
 
     proof = load_object(source / PROOF_NAME)
-    version = release_version.removeprefix("v")
     require(proof.get("schema_version") == 2, "unsupported aggregate proof schema")
     require(proof.get("pack_id") == PACK_ID, "aggregate proof pack differs")
     require(proof.get("projectatlas_version") == version, "aggregate proof version differs")
@@ -181,6 +179,8 @@ def self_test() -> None:
         cargo_lock = root / "Cargo.lock"
         cargo_lock.write_bytes(b"locked\n")
         revision = "a" * 40
+        package_version = "6.7.8-rc2"
+        release_tag = f"v{package_version}"
         common = {
             "accepted_manifest_sha256": "b" * 64,
             "capability_set_digest": "c" * 64,
@@ -198,8 +198,8 @@ def self_test() -> None:
                     "platform": target,
                     "candidate": {
                         "projectatlas_revision": revision,
-                        "cargo_package_version": "0.4.0",
-                        "intended_release_version": "0.4.0",
+                        "cargo_package_version": package_version,
+                        "intended_release_version": package_version,
                         "cargo_lock_sha256": digest(cargo_lock),
                         "source_state": "clean",
                     },
@@ -248,21 +248,49 @@ def self_test() -> None:
                 {
                     "schema_version": 2,
                     "pack_id": PACK_ID,
-                    "projectatlas_version": "0.4.0",
+                    "projectatlas_version": package_version,
                     **common,
                     "platforms": platforms,
                 }
             ),
             encoding="utf-8",
         )
-        staged = stage_release_assets(source, output, "v0.4.0", revision, cargo_lock)
+        staged = stage_release_assets(source, output, release_tag, revision, cargo_lock)
         require(len(staged) == 3 and all(path.is_file() for path in staged), "self-test staging failed")
+        require(
+            all(release_tag in path.name for path in staged),
+            "self-test staging truncated the RC tag",
+        )
+        try:
+            stage_release_assets(source, root / "mismatch-output", "v6.7.8", revision, cargo_lock)
+        except ValueError:
+            pass
+        else:
+            raise RuntimeError("mismatched release identity passed validation")
+        stable_version = "6.7.8"
+        for fixture in source.glob("*.json"):
+            fixture.write_text(
+                fixture.read_text(encoding="utf-8").replace(
+                    package_version, stable_version
+                ),
+                encoding="utf-8",
+            )
+        stable_tag = f"v{stable_version}"
+        stable_staged = stage_release_assets(
+            source, root / "stable-output", stable_tag, revision, cargo_lock
+        )
+        require(
+            len(stable_staged) == 3
+            and all(stable_tag in path.name and "-rc" not in path.name for path in stable_staged),
+            "stable release-asset compatibility failed",
+        )
         (source / f"projectatlas-{PACK_ID}-{TARGETS[0]}.tar.zst").write_bytes(b"tampered")
         try:
-            stage_release_assets(source, root / "tampered-output", "v0.4.0", revision, cargo_lock)
+            stage_release_assets(source, root / "tampered-output", stable_tag, revision, cargo_lock)
         except ValueError:
-            return
-        raise RuntimeError("tampered archive passed validation")
+            pass
+        else:
+            raise RuntimeError("tampered archive passed validation")
 
 
 def main() -> None:

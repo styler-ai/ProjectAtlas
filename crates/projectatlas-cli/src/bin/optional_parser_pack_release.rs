@@ -22,11 +22,11 @@ use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_WINDOWS_BROKER_MANAGED_MODULES,
     OPTIONAL_PARSER_PACK_WINDOWS_BROKER_NATIVE_ENTRY_POINT,
     OPTIONAL_PARSER_PACK_WINDOWS_BROKER_PE_LOADER_LIBRARIES,
-    OPTIONAL_PARSER_PACK_WINDOWS_BROKER_RUNTIME_FAMILY, OptionalParserPackArtifactManifest,
-    OptionalParserPackManifest, OptionalParserPackPlatformProof, OptionalParserPackProofAggregate,
-    PackPlatform, PackRelativePath, ParserPackFreshRunner, ParserPackGrammarProbe,
-    ParserPackNetworkDenial, ParserPackNetworkIsolation, ParserPackPayloadRole,
-    ParserPackVerifiedControl, Sha256Digest,
+    OPTIONAL_PARSER_PACK_WINDOWS_BROKER_RUNTIME_FAMILY, OptionalParserCapability,
+    OptionalParserPackArtifactManifest, OptionalParserPackManifest,
+    OptionalParserPackPlatformProof, OptionalParserPackProofAggregate, PackPlatform,
+    PackRelativePath, ParserPackFreshRunner, ParserPackGrammarProbe, ParserPackNetworkDenial,
+    ParserPackNetworkIsolation, ParserPackPayloadRole, ParserPackVerifiedControl, Sha256Digest,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -537,6 +537,7 @@ fn create_archive(staged_directory: &Path, archive: &Path) -> ToolResult<()> {
 
 /// Verify one completed archive and seal its fresh-runner platform proof.
 fn verify_archive(archive: &Path, runner_context: &Path, proof: &Path) -> ToolResult<()> {
+    let platform = current_platform()?;
     require_new_output(proof, "platform proof")?;
     let (archive_sha256, archive_bytes) =
         sha256_file(archive, OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES)?;
@@ -565,7 +566,7 @@ fn verify_archive(archive: &Path, runner_context: &Path, proof: &Path) -> ToolRe
     let artifact: OptionalParserPackArtifactManifest = serde_json::from_slice(&artifact_bytes)?;
     artifact.validate(&logical)?;
     require_archive_name(archive, artifact.platform)?;
-    if artifact.platform != current_platform()? {
+    if artifact.platform != platform {
         return Err(invalid(format!(
             "archive target {} does not match this fresh runner",
             artifact.platform.as_str()
@@ -584,7 +585,6 @@ fn verify_archive(archive: &Path, runner_context: &Path, proof: &Path) -> ToolRe
         MAX_RUNNER_CONTEXT_BYTES,
     )?)?;
     let runner = ParserPackFreshRunner::from(runner_wire);
-    let platform = artifact.platform;
     // Reject a dirty or incompletely isolated runner before executing packaged code.
     runner.validate(platform)?;
     let supervisor = OptionalParserSupervisor::open(&extracted.pack_root)?;
@@ -1486,13 +1486,13 @@ fn invalid(message: impl Into<String>) -> Box<dyn Error> {
 
 /// Identify the contained optional-pack target or fail closed before verification.
 fn current_platform() -> ToolResult<PackPlatform> {
-    match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64") => Ok(PackPlatform::LinuxX86_64),
-        ("windows", "x86_64") => Ok(PackPlatform::WindowsX86_64),
-        _ => Err(invalid(
-            "unsupported_containment: this host has no accepted optional parser-pack runtime adapter",
-        )),
-    }
+    OptionalParserCapability::current()
+        .pack_platform()
+        .ok_or_else(|| {
+            invalid(
+                "unsupported_containment: this host has no accepted optional parser-pack runtime adapter",
+            )
+        })
 }
 
 /// Restore canonical executable permissions after manual extraction.

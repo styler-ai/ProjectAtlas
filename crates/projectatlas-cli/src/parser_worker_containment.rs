@@ -31,7 +31,7 @@ use thiserror::Error;
 
 use projectatlas_core::optional_parser_protocol::PARSER_WORKER_PROCESS_MEMORY_BYTES;
 
-use super::is_runtime_library_basename;
+use super::worker_impl::is_runtime_library_basename;
 
 /// Maximum cumulative CPU time before the supervisor must replace the worker.
 const CPU_SECONDS: rlim_t = 300;

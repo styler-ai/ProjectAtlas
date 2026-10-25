@@ -1,13 +1,20 @@
 //! Purpose: Persist `ProjectAtlas` 3 indexes in `SQLite`.
 
+mod content_classification;
 mod derived_snapshot;
 mod diagnostics;
+mod hydration;
 mod project_identity;
 mod repository_graph;
 mod schema;
 mod sqlite_profile;
 mod telemetry;
+mod worktree_registry;
 
+pub use content_classification::{
+    FileContentClassification, FileContentClassificationPage,
+    MAX_FILE_CONTENT_CLASSIFICATION_PAGE_ROWS, MAX_FILE_CONTENT_CLASSIFICATION_PATHS,
+};
 pub use derived_snapshot::{
     DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedGraphSnapshotMetadata,
     DerivedSnapshotContent, MAX_DERIVED_SNAPSHOT_JSON_BYTES,
@@ -19,20 +26,29 @@ pub use diagnostics::{
     DatabaseSettingsReport, SqliteCompileOptionsIdentity, SqliteRuntimeReport,
     database_settings_report,
 };
+pub use hydration::{
+    PreparedWorktreeHydrationCandidate, WorktreeHydrationActivation, WorktreeHydrationCandidate,
+};
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
     MAX_REPOSITORY_GRAPH_FRONTIER, RepositoryAffectedSourceFootprint, RepositoryCoverageQuery,
     RepositoryCoverageRow, RepositoryGraphAdjacencyContinuation, RepositoryGraphAdjacencyPage,
-    RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow, RepositoryGraphDirection,
-    RepositoryGraphPage, RepositoryGraphReadBatch, RepositoryGraphReadBudget,
-    RepositoryGraphReadPage, RepositoryGraphReadPages, RepositoryGraphReadWork,
-    RepositoryGraphRelationQuery, RepositoryGraphRelationRow, RepositoryGraphStagingGuard,
-    RepositoryNavigationConnections, RepositoryNavigationNode, RepositoryResolutionCandidate,
+    RepositoryGraphAdjacencyReadPage, RepositoryGraphAdjacencyRow,
+    RepositoryGraphClassifiedRelationRow, RepositoryGraphDirection, RepositoryGraphPage,
+    RepositoryGraphReadBatch, RepositoryGraphReadBudget, RepositoryGraphReadPage,
+    RepositoryGraphReadPages, RepositoryGraphReadWork, RepositoryGraphRelationQuery,
+    RepositoryGraphRelationRow, RepositoryGraphStagingGuard, RepositoryNavigationConnections,
+    RepositoryNavigationNode, RepositoryResolutionCandidate,
 };
 pub use sqlite_profile::validate_database_location;
 pub use telemetry::{
     PlannerStatisticsPolicy, PlannerStatisticsState, SpillCleanupState, TelemetryCheckpointState,
-    TelemetryRetentionPolicy, TelemetryRetentionState,
+    TelemetryRetentionPolicy, TelemetryRetentionState, WorktreeUsageSnapshot,
+    WorktreeUsageSyncState,
+};
+pub use worktree_registry::{
+    ActiveWorktreeRegistrationGuard, MAIN_WORKTREE_ALIAS, MAX_WORKTREE_ALIAS_BYTES, WorktreeAlias,
+    WorktreeRegistration, WorktreeRegistrationState,
 };
 
 use blake3::Hasher;
@@ -47,19 +63,21 @@ use projectatlas_core::health::{
     RECOMMENDATION_SUGGESTED_PURPOSE_REVIEW_QUEUE, STRUCTURAL_HEALTH_CATEGORIES, Severity,
     TEMP_FOLDER_BUCKETS, finding_id,
 };
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolGraph, SymbolKind,
-    SymbolRelation,
+    SymbolRelation, SymbolSourceSelector,
 };
 use projectatlas_core::telemetry::{
     TelemetryContractError, TokenOverview, TokenTrendReport, TokenTrendWindow, UsageEvent,
     UsageInstanceId, UsageInstanceOwner,
 };
 use projectatlas_core::{
-    AGENT_REVIEWED_SOURCE_VALUES, HIGH_IMPACT_FILE_NAMES, HIGH_IMPACT_PATH_PREFIXES,
-    HIGH_IMPACT_PATH_SEGMENTS, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
-    IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind, Overview, Purpose, PurposeSource,
-    PurposeStatus, normalize_native_path_display, normalize_repo_path_prefix,
+    AGENT_REVIEWED_SOURCE_VALUES, CanonicalProjectRoot, CoreError, HIGH_IMPACT_FILE_NAMES,
+    HIGH_IMPACT_PATH_PREFIXES, HIGH_IMPACT_PATH_SEGMENTS, IndexGeneration, IndexWorkControl,
+    IndexWorkFailure, IndexWorkStage, IndexedNode, LEGACY_HUMAN_PURPOSE_SOURCE, Node, NodeKind,
+    Overview, Purpose, PurposeSource, PurposeStatus, normalize_native_path_display,
+    normalize_repo_path_prefix,
 };
 use rusqlite::types::Value;
 use rusqlite::{
@@ -75,13 +93,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
+#[cfg(all(test, windows))]
+use schema::PREVIOUS_SCHEMA_VERSION;
 use schema::{
     FILE_TEXT_FTS_PROJECTION_REVISION_KEY, FILE_TEXT_FTS_SOURCE_REVISION_KEY,
     INDEX_PUBLICATION_FINGERPRINT_KEY, INDEX_PUBLICATION_GENERATION_KEY,
     INDEX_PUBLICATION_STATE_KEY, PROJECT_ROOT_KEY, SchemaState,
 };
 #[cfg(test)]
-use schema::{PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
+use schema::{SCHEMA_VERSION, SCHEMA_VERSION_KEY, sqlite_sidecar_path};
 use sqlite_profile::{
     DatabaseLocation, JournalModePolicy, SQLITE_BUSY_TIMEOUT, open_writable_connection,
 };
@@ -94,20 +114,28 @@ const SQLITE_PUBLICATION_ACQUIRE_TIMEOUT: Duration = Duration::ZERO;
 const SQLITE_TELEMETRY_BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 /// Maximum paths admitted to one purpose-curation hydration statement.
 pub const MAX_PURPOSE_CURATION_BATCH_ROWS: usize = 200;
+/// `SQLite` schema version supported by this runtime.
+pub const CURRENT_SCHEMA_VERSION: i64 = schema::SCHEMA_VERSION;
 /// Maximum FTS candidates decoded for one exact-verification request.
 pub const MAX_FILE_TEXT_FTS_CANDIDATES: usize = 4_096;
 /// Path-indexed metadata cursor for one exact path-or-descendant fallback scope.
 const FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL: &str = "
-    SELECT path, content_hash, byte_count, line_count
-    FROM file_texts
-    WHERE path = ?1 OR (path >= ?2 AND path < ?3)
-    ORDER BY path
+    SELECT text.path, text.content_hash, text.byte_count, text.line_count,
+           classification.classification
+    FROM file_texts AS text
+    LEFT JOIN file_content_classifications AS classification
+      ON classification.path = text.path
+    WHERE text.path = ?1 OR (text.path >= ?2 AND text.path < ?3)
+    ORDER BY text.path
 ";
 /// Metadata cursor used when a fallback glob has no safe fixed prefix.
 const FILE_TEXT_FALLBACK_ALL_METADATA_SQL: &str = "
-    SELECT path, content_hash, byte_count, line_count
-    FROM file_texts
-    ORDER BY path
+    SELECT text.path, text.content_hash, text.byte_count, text.line_count,
+           classification.classification
+    FROM file_texts AS text
+    LEFT JOIN file_content_classifications AS classification
+      ON classification.path = text.path
+    ORDER BY text.path
 ";
 /// Exact authoritative content hydration after service-owned admission.
 const FILE_TEXT_FALLBACK_CONTENT_SQL: &str = "SELECT content FROM file_texts WHERE path = ?1";
@@ -190,6 +218,126 @@ pub enum DbError {
     /// A telemetry identity violates its typed domain contract.
     #[error("telemetry contract error: {0}")]
     TelemetryContract(#[from] TelemetryContractError),
+    /// A requested worktree alias violates the public registry contract.
+    #[error("invalid worktree alias {alias:?}: {reason}")]
+    InvalidWorktreeAlias {
+        /// Rejected caller value.
+        alias: String,
+        /// Stable validation reason.
+        reason: &'static str,
+    },
+    /// No active worktree registration has the requested alias.
+    #[error("active worktree registration {alias:?} was not found")]
+    WorktreeRegistrationNotFound {
+        /// Requested normalized alias.
+        alias: String,
+    },
+    /// A registration identity is already owned by another active worktree.
+    #[error("worktree registration {field} conflicts with active value {value:?}")]
+    WorktreeRegistrationConflict {
+        /// Conflicting identity field.
+        field: &'static str,
+        /// Bounded caller-visible value.
+        value: String,
+    },
+    /// A legacy active registration would violate native identity uniqueness.
+    #[error(
+        "worktree registration migration found duplicate active native {field} identities in registrations {first_registration_id} and {second_registration_id}; repair one legacy row and retry"
+    )]
+    WorktreeRegistrationMigrationConflict {
+        /// Native identity column whose uniqueness would be violated.
+        field: &'static str,
+        /// Lowest stable registration ID in the collision.
+        first_registration_id: i64,
+        /// Highest stable registration ID in the collision.
+        second_registration_id: i64,
+    },
+    /// A legacy path projection cannot establish its original native identity.
+    #[error(
+        "worktree registration migration cannot establish native {field} identity for registration {registration_id}; repair the legacy row and retry"
+    )]
+    WorktreeRegistrationMigrationIdentityUnavailable {
+        /// Legacy path field whose native identity cannot be recovered safely.
+        field: &'static str,
+        /// Stable registration ID that needs repair.
+        registration_id: i64,
+    },
+    /// The bounded worktree-registration catalog is full.
+    #[error("worktree registration capacity {limit} is exhausted")]
+    WorktreeRegistrationCapacity {
+        /// Maximum active and retired registrations retained by one control atlas.
+        limit: usize,
+    },
+    /// A registration path is not an absolute caller-validated structural identity.
+    #[error("invalid worktree registration {field} path {path:?}")]
+    InvalidWorktreeRegistrationPath {
+        /// Path responsibility being validated.
+        field: &'static str,
+        /// Rejected normalized path.
+        path: String,
+    },
+    /// A persisted worktree registration row violates its typed contract.
+    #[error("invalid worktree registration row: {reason}")]
+    WorktreeRegistrationRow {
+        /// Stable validation failure.
+        reason: &'static str,
+    },
+    /// A worktree aggregate snapshot belongs to a different initialized atlas.
+    #[error("worktree telemetry project identity does not match registration {registration_id}")]
+    WorktreeTelemetryProjectMismatch {
+        /// Stable control-database registration identity.
+        registration_id: i64,
+    },
+    /// A bounded worktree telemetry snapshot resource ceiling was exceeded.
+    #[error("worktree telemetry snapshot {resource} exceeded limit {limit}: observed {observed}")]
+    WorktreeTelemetrySnapshotLimit {
+        /// Resource whose fixed bound was exceeded.
+        resource: &'static str,
+        /// Maximum admitted value.
+        limit: usize,
+        /// Observed rejected value.
+        observed: usize,
+    },
+    /// One telemetry runtime instance was reused across incompatible origins.
+    #[error("telemetry runtime instance has a conflicting worktree origin")]
+    WorktreeTelemetryOriginConflict,
+    /// A worktree hydration request violates its target-local safety contract.
+    #[error("invalid worktree hydration request: {reason}")]
+    WorktreeHydrationInvalid {
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// A hydration destination already contains a database and cannot be replaced.
+    #[error("worktree hydration destination already exists: {path:?}")]
+    WorktreeHydrationDestinationExists {
+        /// Existing destination preserved without mutation.
+        path: PathBuf,
+    },
+    /// Worktree hydration could not create, clean, or activate its private candidate.
+    #[error("worktree hydration I/O failed for {path:?}: {source}")]
+    WorktreeHydrationIo {
+        /// Candidate or destination path involved in the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Online backup could not make progress within its fixed busy retry budget.
+    #[error("worktree hydration backup remained busy after {attempts} attempts")]
+    WorktreeHydrationBackupBusy {
+        /// Consecutive busy or locked backup steps.
+        attempts: usize,
+    },
+    /// The candidate has not completed a post-hydration source reconciliation.
+    #[error(
+        "worktree hydration candidate is not reconciled: baseline generation {baseline}, found {found}"
+    )]
+    WorktreeHydrationNotReconciled {
+        /// Generation published by baseline rebinding.
+        baseline: IndexGeneration,
+        /// Current complete generation, or zero when unavailable.
+        found: IndexGeneration,
+    },
     /// Persisted graph project identity differs from the selected identity.
     #[error(
         "repository graph project identity {found} does not match selected identity {expected}"
@@ -318,6 +466,28 @@ pub enum DbError {
         expected: String,
         /// Durable root recorded in `SQLite`.
         found: String,
+        /// Lossless native identities when the admission proof had both roots.
+        identities: Option<Box<ProjectRootMismatchIdentities>>,
+    },
+    /// A native project-root identity or its lossless codec is invalid.
+    #[error("project-root identity error: {0}")]
+    ProjectRootIdentity(#[from] CoreError),
+    /// A current bound database has no lossless native project-root identity.
+    #[error("bound project database is missing canonical project-root identity")]
+    ProjectRootIdentityMissing,
+    /// Explicit legacy adoption requires the intact released schema-19 state.
+    #[error(
+        "legacy root adoption requires an intact schema-19 database at the selected root's .projectatlas/projectatlas.db, without native root identity"
+    )]
+    LegacyRootAdoptionUnavailable,
+    /// Adoption committed, but its database location could not be verified afterward.
+    #[error(
+        "legacy root adoption committed, but the selected database location changed or could not be verified; stop recovery and preserve both database locations and their WAL/SHM sidecars: {source}"
+    )]
+    LegacyRootAdoptionCommittedLocationChanged {
+        /// Post-commit location or opened-file identity failure; no rollback is claimed.
+        #[source]
+        source: Box<DbError>,
     },
     /// A root transition destination is not an absolute existing directory.
     #[error("invalid project root transition destination {root:?}: {source}")]
@@ -475,6 +645,40 @@ pub enum DbError {
         /// Repository-relative path.
         path: String,
     },
+    /// One classification write/read batch exceeded its fixed path ceiling.
+    #[error("file classification batch requested {requested} paths; maximum is {maximum}")]
+    FileContentClassificationBatchTooLarge {
+        /// Unique paths requested.
+        requested: usize,
+        /// Storage-owned hard maximum.
+        maximum: usize,
+    },
+    /// One classification batch repeated an exact path.
+    #[error("file classification batch repeats path {path:?}")]
+    FileContentClassificationDuplicatePath {
+        /// Repeated repository-relative path.
+        path: String,
+    },
+    /// A current admitted file has no classification in the active transaction.
+    #[error("current file {path:?} has no content classification")]
+    FileContentClassificationMissing {
+        /// Current repository-relative file path.
+        path: String,
+    },
+    /// A classification row outlived current file ownership.
+    #[error("content classification for {path:?} does not belong to a current file")]
+    FileContentClassificationNotCurrent {
+        /// Stale or non-file repository-relative path.
+        path: String,
+    },
+    /// One classification/path page requested an invalid row limit.
+    #[error("file classification page requested {requested} rows; maximum is {maximum}")]
+    FileContentClassificationLimit {
+        /// Requested page rows.
+        requested: u32,
+        /// Storage-owned hard maximum.
+        maximum: u32,
+    },
     /// A purpose-curation task label is blank, unsafe, or too large.
     #[error("invalid purpose-curation task label: {reason}")]
     PurposeCurationTaskInvalid {
@@ -569,6 +773,30 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// Return a schema version with a complete migration route owned by this runtime.
+    #[must_use]
+    pub fn supported_schema_migration(&self) -> Option<(i64, i64, u32)> {
+        match self {
+            Self::SchemaVersion { found, expected } => schema::migration_steps_remaining(*found)
+                .filter(|steps| *steps > 0)
+                .map(|steps| (*found, *expected, steps)),
+            _ => None,
+        }
+    }
+
+    /// Return a schema version rejected by this runtime's migration inventory.
+    #[must_use]
+    pub fn unsupported_schema_version(&self) -> Option<(i64, i64)> {
+        match self {
+            Self::SchemaVersion { found, expected }
+                if schema::migration_steps_remaining(*found).is_none() =>
+            {
+                Some((*found, *expected))
+            }
+            _ => None,
+        }
+    }
+
     /// Return whether a derived-index write could not proceed without implying
     /// corruption, schema drift, or an identity-contract failure.
     #[must_use]
@@ -583,6 +811,15 @@ impl DbError {
     }
 }
 
+/// Lossless native identities involved in a project-root mismatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectRootMismatchIdentities {
+    /// Canonical root selected by the caller.
+    pub expected: CanonicalProjectRoot,
+    /// Canonical root recorded by the opened index.
+    pub found: CanonicalProjectRoot,
+}
+
 /// Convenient result alias for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 
@@ -594,6 +831,15 @@ pub const MAX_SYMBOL_BATCH_ROWS: u32 = 4_096;
 pub const MAX_SYMBOL_BATCH_DECODED_BYTES: u64 = 4 * 1_024 * 1_024;
 /// Paths bound per statement, below supported `SQLite` variable ceilings.
 const SYMBOL_BATCH_BIND_PATHS: usize = 48;
+
+/// One persisted symbol with the classification of its owning file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassifiedSymbol {
+    /// Persisted symbol detail.
+    pub symbol: CodeSymbol,
+    /// Registry-owned content role for the symbol's file.
+    pub classification: ContentClassification,
+}
 
 /// Typed database envelope for one exact-path symbol batch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -765,10 +1011,41 @@ pub struct AtlasStore {
     read_only: bool,
     /// Project root validated for this store, when the database records one.
     validated_project_root: Option<String>,
+    /// Native root identity captured with the validated root binding.
+    validated_project_root_identity: Option<CanonicalProjectRoot>,
     /// Project identity captured with the validated root binding.
     validated_project_instance_id: Option<ProjectInstanceId>,
     /// Bounded per-label instances used by direct library callers for this handle lifetime.
     library_usage_instances: RefCell<HashMap<String, Option<UsageInstanceId>>>,
+}
+
+/// Caller-owned purpose mutation transaction with an explicit commit boundary.
+///
+/// Purpose adapters keep this guard alive while they revalidate saved-source
+/// admission. Dropping it before [`Self::commit`] rolls the mutation back.
+pub struct PurposeMutationTransaction<'connection> {
+    /// Immediate transaction rolled back on drop until the caller accepts the mutation.
+    transaction: rusqlite::Transaction<'connection>,
+}
+
+impl PurposeMutationTransaction<'_> {
+    /// Commit the admitted purpose mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot commit the transaction.
+    pub fn commit(self) -> DbResult<()> {
+        self.transaction.commit().map_err(Into::into)
+    }
+
+    /// Roll back a rejected purpose mutation and report any storage failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot roll the transaction back.
+    pub fn rollback(self) -> DbResult<()> {
+        self.transaction.rollback().map_err(Into::into)
+    }
 }
 
 /// Root and project identity captured when one store binding was validated.
@@ -776,8 +1053,15 @@ pub struct AtlasStore {
 pub struct CapturedProjectBinding {
     /// Stable project identity captured at open or explicit root transition.
     pub project_instance_id: ProjectInstanceId,
-    /// Normalized local source root captured with the project identity.
-    pub project_root: String,
+    /// Lossless UTF-8 display of the local source root, when one exists.
+    ///
+    /// `None` is the typed unavailable state for native roots that cannot be
+    /// represented as UTF-8. Identity-critical callers must use the native
+    /// [`AtlasStore::project_root_identity`] value instead.
+    pub project_root: Option<String>,
+    /// Lossless native root identity captured with the project identity.
+    #[serde(skip)]
+    pub project_root_identity: CanonicalProjectRoot,
 }
 
 /// Lightweight persisted import fact used by alias resolution.
@@ -921,6 +1205,9 @@ impl IndexPublicationGuard<'_> {
     /// Returns an error if stale projections cannot be removed.
     pub fn finish_scan_replacement(&mut self) -> DbResult<()> {
         delete_absent_scan_projections(&self.store.connection)?;
+        content_classification::validate_complete_file_content_classifications(
+            &self.store.connection,
+        )?;
         self.scan_replacement_pending = false;
         Ok(())
     }
@@ -936,6 +1223,10 @@ impl IndexPublicationGuard<'_> {
         if self.scan_replacement_pending {
             return Err(DbError::ScanReplacementIncomplete);
         }
+        content_classification::validate_complete_file_content_classifications(
+            &self.store.connection,
+        )?;
+        repository_graph::validate_complete_document_unresolved_reasons(&self.store.connection)?;
         let next_generation = self
             .previous_generation
             .checked_next()
@@ -1046,6 +1337,8 @@ pub struct FileTextMetadata {
     pub byte_count: usize,
     /// Persisted line count.
     pub line_count: usize,
+    /// Closed content role available before source decoding.
+    pub classification: ContentClassification,
 }
 
 /// Service decision made before one fallback row decodes source content.
@@ -1258,6 +1551,60 @@ const PURPOSE_HEALTH_SPECS: [PurposeHealthSpec; 3] = [
     },
 ];
 
+/// Run one standalone write only while the captured schema and project binding still match.
+#[cfg(test)]
+fn with_validated_write_transaction<T>(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    expected_identity: Option<ProjectInstanceId>,
+    operation: impl FnOnce(&Connection) -> DbResult<T>,
+) -> DbResult<T> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let result = schema::validate_active_binding(&transaction, expected_root, expected_identity)
+        .and_then(|()| operation(&transaction));
+    match result {
+        Ok(value) => {
+            transaction.commit()?;
+            Ok(value)
+        }
+        Err(operation) => match transaction.rollback() {
+            Ok(()) => Err(operation),
+            Err(rollback) => Err(DbError::TransactionRollback {
+                operation: Box::new(operation),
+                rollback,
+            }),
+        },
+    }
+}
+
+/// Run one standalone write while the captured native root and project binding still match.
+fn with_validated_native_write_transaction<T>(
+    connection: &Connection,
+    expected_root: Option<&CanonicalProjectRoot>,
+    expected_identity: Option<ProjectInstanceId>,
+    operation: impl FnOnce(&Connection) -> DbResult<T>,
+) -> DbResult<T> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let result =
+        schema::validate_active_native_binding(&transaction, expected_root, expected_identity)
+            .and_then(|()| operation(&transaction));
+    match result {
+        Ok(value) => {
+            transaction.commit()?;
+            Ok(value)
+        }
+        Err(operation) => match transaction.rollback() {
+            Ok(()) => Err(operation),
+            Err(rollback) => Err(DbError::TransactionRollback {
+                operation: Box::new(operation),
+                rollback,
+            }),
+        },
+    }
+}
+
 impl AtlasStore {
     /// Reject mutations while this connection owns an ordinary read snapshot.
     fn require_mutation_scope(&self) -> DbResult<()> {
@@ -1272,13 +1619,13 @@ impl AtlasStore {
     fn validated_savepoint(&mut self) -> DbResult<rusqlite::Savepoint<'_>> {
         self.require_mutation_scope()?;
         let validate_binding = self.connection.is_autocommit();
-        let expected_root = self.validated_project_root.clone();
+        let expected_root_identity = self.validated_project_root_identity.clone();
         let expected_identity = self.validated_project_instance_id;
         let savepoint = self.connection.savepoint()?;
         if validate_binding {
-            schema::validate_active_binding(
+            schema::validate_active_native_binding(
                 &savepoint,
-                expected_root.as_deref(),
+                expected_root_identity.as_ref(),
                 expected_identity,
             )?;
         }
@@ -1294,27 +1641,35 @@ impl AtlasStore {
         if !self.connection.is_autocommit() {
             return operation(&self.connection);
         }
+        with_validated_native_write_transaction(
+            &self.connection,
+            self.validated_project_root_identity.as_ref(),
+            self.validated_project_instance_id,
+            operation,
+        )
+    }
+
+    /// Begin one purpose mutation whose caller owns final source revalidation.
+    ///
+    /// Purpose writes performed through this store join the returned immediate
+    /// transaction. The caller must revalidate its saved-source witness before
+    /// committing; an early return drops the guard and rolls the complete batch
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when mutation is unavailable, the binding changed, or
+    /// `SQLite` cannot start the transaction.
+    pub fn begin_purpose_mutation(&self) -> DbResult<PurposeMutationTransaction<'_>> {
+        self.require_mutation_scope()?;
         let transaction =
             rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
-        let result = schema::validate_active_binding(
+        schema::validate_active_native_binding(
             &transaction,
-            self.validated_project_root.as_deref(),
+            self.validated_project_root_identity.as_ref(),
             self.validated_project_instance_id,
-        )
-        .and_then(|()| operation(&transaction));
-        match result {
-            Ok(value) => {
-                transaction.commit()?;
-                Ok(value)
-            }
-            Err(operation) => match transaction.rollback() {
-                Ok(()) => Err(operation),
-                Err(rollback) => Err(DbError::TransactionRollback {
-                    operation: Box::new(operation),
-                    rollback,
-                }),
-            },
-        }
+        )?;
+        Ok(PurposeMutationTransaction { transaction })
     }
 
     /// Run telemetry against this store's exact captured database binding.
@@ -1340,6 +1695,7 @@ impl AtlasStore {
             }
             return Err(DbError::TelemetryPathUnavailable);
         };
+        let _ = schema::preflight(path, None)?;
         let connection = open_writable_connection(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE,
@@ -1370,8 +1726,13 @@ impl AtlasStore {
     /// Returns an error if read-only compatibility preflight, root validation,
     /// transactional migration, or `SQLite` setup fails.
     pub fn open_for_project(path: &Path, root: &Path) -> DbResult<Self> {
-        let expected_root = normalize_native_path_display(root);
-        Self::open_with_project_root(path, Some(&expected_root))
+        let expected_identity = CanonicalProjectRoot::from_path(root)?;
+        Self::open_with_binding_requirement(
+            path,
+            None,
+            Some(&expected_identity),
+            ProjectIdentityRequirement::Required,
+        )
     }
 
     /// Open with an optional source-owned project identity.
@@ -1379,23 +1740,59 @@ impl AtlasStore {
         Self::open_with_binding_requirement(
             path,
             expected_root,
+            None,
             ProjectIdentityRequirement::Required,
         )
     }
 
     /// Open for an explicit root transition that owns identity repair.
     fn open_for_root_transition(path: &Path) -> DbResult<Self> {
-        Self::open_with_binding_requirement(path, None, ProjectIdentityRequirement::TransitionOwned)
+        Self::open_with_binding_requirement(
+            path,
+            None,
+            None,
+            ProjectIdentityRequirement::TransitionOwned,
+        )
     }
 
     /// Open with the root and identity validation required by the caller.
     fn open_with_binding_requirement(
         path: &Path,
         expected_root: Option<&str>,
+        expected_identity: Option<&CanonicalProjectRoot>,
         identity_requirement: ProjectIdentityRequirement,
     ) -> DbResult<Self> {
-        let (preflight, location) = schema::preflight(path, expected_root)?;
-        let validated_project_root = expected_root.map(str::to_owned).or(preflight.project_root);
+        let (preflight, location) = if let Some(expected_identity) = expected_identity {
+            schema::preflight_for_project(path, expected_identity)?
+        } else {
+            schema::preflight(path, None)?
+        };
+        if expected_identity.is_none()
+            && identity_requirement.is_required()
+            && preflight.state == SchemaState::UpgradeRequired
+            && schema::legacy_root_requires_native_authority(preflight.project_root.as_deref())
+        {
+            // Rootless predecessor migration has no native caller authority
+            // with which to identify a lossy legacy display. Refuse before
+            // opening a writable connection or creating WAL state.
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
+        let validated_project_root = expected_identity
+            .and_then(|identity| identity.display_string().ok())
+            .or_else(|| expected_root.map(str::to_owned))
+            .or_else(|| {
+                expected_identity
+                    .is_none()
+                    .then(|| preflight.project_root.clone())
+                    .flatten()
+            });
+        if preflight.state == SchemaState::Current
+            && expected_identity.is_some()
+            && identity_requirement.is_required()
+            && preflight.project_instance_id.is_none()
+        {
+            return Err(DbError::ProjectInstanceIdentityMissing);
+        }
         let connection = open_writable_connection(
             path,
             writable_open_flags(preflight.state, location.database_exists),
@@ -1403,37 +1800,135 @@ impl AtlasStore {
             SQLITE_BUSY_TIMEOUT,
             writable_journal_policy(preflight.state),
         )?;
-        let validated_project_instance_id = if preflight.state == SchemaState::Current {
-            schema::revalidate_current_binding(
-                &connection,
-                validated_project_root.as_deref(),
-                identity_requirement.is_required(),
-            )?
-        } else {
-            schema::initialize(&connection, expected_root)?;
-            project_identity::load_project_identity(&connection)?
-        };
-        if identity_requirement.is_required()
-            && validated_project_root.is_some()
-            && validated_project_instance_id.is_none()
-        {
-            return Err(DbError::ProjectInstanceIdentityMissing);
+        let transition_transaction = preflight.state == SchemaState::UpgradeRequired
+            && identity_requirement == ProjectIdentityRequirement::TransitionOwned;
+        if transition_transaction {
+            connection.execute_batch("BEGIN IMMEDIATE")?;
         }
-        let database_location = if location.database_exists {
-            location
+        let opened = (|| {
+            if preflight.state == SchemaState::Current
+                && let Some(identity) = expected_identity
+            {
+                project_identity::ensure_project_root_identity(&connection, identity)?;
+            }
+            let validated_project_instance_id = if preflight.state == SchemaState::Current {
+                if let Some(expected_identity) = expected_identity {
+                    schema::revalidate_current_native_binding(
+                        &connection,
+                        expected_identity,
+                        identity_requirement.is_required(),
+                    )?
+                } else if identity_requirement == ProjectIdentityRequirement::TransitionOwned {
+                    // Move/Detach revalidate the recorded native identity and
+                    // transition state in apply_root_transition. Their recorded
+                    // root may intentionally be absent, so do not run the
+                    // existing-root admission proof here.
+                    project_identity::load_project_identity(&connection)?
+                } else if let Some(stored_identity) =
+                    project_identity::load_project_root_identity(&connection)?
+                {
+                    schema::revalidate_current_native_binding(
+                        &connection,
+                        &stored_identity,
+                        identity_requirement.is_required(),
+                    )?
+                } else {
+                    let stored_instance_id = project_identity::load_project_identity(&connection)?;
+                    schema::validate_binding_completeness(
+                        validated_project_root.as_deref(),
+                        stored_instance_id,
+                        identity_requirement.is_required(),
+                    )?;
+                    if stored_instance_id.is_some() {
+                        return Err(DbError::ProjectRootIdentityMissing);
+                    }
+                    None
+                }
+            } else {
+                if let Some(expected_identity) = expected_identity {
+                    let expected_display = expected_identity.display_string().ok();
+                    schema::initialize_with_project_root(
+                        &connection,
+                        expected_display.as_deref(),
+                        Some(expected_identity),
+                    )?;
+                } else {
+                    let initialization_root = expected_root.or(preflight.project_root.as_deref());
+                    if transition_transaction {
+                        schema::initialize_with_project_root_in_transaction(
+                            &connection,
+                            initialization_root,
+                            None,
+                        )?;
+                    } else {
+                        schema::initialize_with_project_root(
+                            &connection,
+                            initialization_root,
+                            None,
+                        )?;
+                    }
+                }
+                project_identity::load_project_identity(&connection)?
+            };
+            let validated_project_root_identity =
+                project_identity::load_project_root_identity(&connection)?;
+            if identity_requirement.is_required()
+                && (validated_project_root.is_some() || validated_project_root_identity.is_some())
+                && validated_project_instance_id.is_none()
+            {
+                return Err(DbError::ProjectInstanceIdentityMissing);
+            }
+            let database_location = if location.database_exists {
+                location
+            } else {
+                sqlite_profile::inspect_database_location(path)?
+            };
+            Ok((
+                database_location,
+                validated_project_root,
+                validated_project_root_identity,
+                validated_project_instance_id,
+            ))
+        })();
+        if transition_transaction {
+            match opened {
+                Ok((
+                    database_location,
+                    validated_project_root,
+                    validated_project_root_identity,
+                    validated_project_instance_id,
+                )) => Ok(Self {
+                    connection,
+                    read_snapshot_active: Cell::new(false),
+                    database_path: Some(path.to_path_buf()),
+                    database_location: Some(database_location),
+                    read_only: false,
+                    validated_project_root,
+                    validated_project_root_identity,
+                    validated_project_instance_id,
+                    library_usage_instances: RefCell::new(HashMap::new()),
+                }),
+                Err(error) => Err(schema::rollback_after_error(&connection, error)),
+            }
         } else {
-            sqlite_profile::inspect_database_location(path)?
-        };
-        Ok(Self {
-            connection,
-            read_snapshot_active: Cell::new(false),
-            database_path: Some(path.to_path_buf()),
-            database_location: Some(database_location),
-            read_only: false,
-            validated_project_root,
-            validated_project_instance_id,
-            library_usage_instances: RefCell::new(HashMap::new()),
-        })
+            let (
+                database_location,
+                validated_project_root,
+                validated_project_root_identity,
+                validated_project_instance_id,
+            ) = opened?;
+            Ok(Self {
+                connection,
+                read_snapshot_active: Cell::new(false),
+                database_path: Some(path.to_path_buf()),
+                database_location: Some(database_location),
+                read_only: false,
+                validated_project_root,
+                validated_project_root_identity,
+                validated_project_instance_id,
+                library_usage_instances: RefCell::new(HashMap::new()),
+            })
+        }
     }
 
     /// Open an existing index without creating, migrating, or backfilling it.
@@ -1453,8 +1948,8 @@ impl AtlasStore {
     /// Returns an error if the database is incompatible, belongs to another
     /// root, or cannot be opened without database mutation.
     pub fn open_read_only_for_project(path: &Path, root: &Path) -> DbResult<Self> {
-        let expected_root = normalize_native_path_display(root);
-        Self::open_read_only_with_project_root(path, Some(&expected_root))
+        let expected_identity = CanonicalProjectRoot::from_path(root)?;
+        Self::open_read_only_with_project_root(path, Some(&expected_identity))
     }
 
     /// Return whether this store is restricted to non-mutating queries.
@@ -1472,15 +1967,33 @@ impl AtlasStore {
     /// Open a current read snapshot with optional project identity validation.
     fn open_read_only_with_project_root(
         path: &Path,
-        expected_root: Option<&str>,
+        expected_identity: Option<&CanonicalProjectRoot>,
     ) -> DbResult<Self> {
-        let (connection, preflight) = schema::open_current_read_only(path, expected_root)?;
+        let (connection, preflight) = schema::open_current_read_only(path, None)?;
         let validated_project_instance_id = project_identity::load_project_identity(&connection)?;
-        schema::validate_binding_completeness(
-            preflight.project_root.as_deref(),
-            validated_project_instance_id,
-            true,
-        )?;
+        let validated_project_root_identity =
+            project_identity::load_project_root_identity(&connection)?;
+        if expected_identity.is_some() && validated_project_root_identity.is_none() {
+            return Err(DbError::ProjectRootIdentityMissing);
+        }
+        if let (Some(expected), Some(found)) =
+            (expected_identity, validated_project_root_identity.as_ref())
+        {
+            project_identity::prove_existing_root_equivalence(expected.as_path(), found.as_path())?;
+        }
+        if validated_project_root_identity.is_none() {
+            schema::validate_binding_completeness(
+                preflight.project_root.as_deref(),
+                validated_project_instance_id,
+                true,
+            )?;
+        } else if validated_project_instance_id.is_none() {
+            return Err(DbError::ProjectInstanceIdentityMissing);
+        }
+        let validated_project_root = match validated_project_root_identity.as_ref() {
+            Some(identity) => identity.display_string().ok(),
+            None => preflight.project_root,
+        };
         let database_location = sqlite_profile::inspect_database_location(path)?;
         Ok(Self {
             connection,
@@ -1488,7 +2001,8 @@ impl AtlasStore {
             database_path: Some(path.to_path_buf()),
             database_location: Some(database_location),
             read_only: true,
-            validated_project_root: preflight.project_root,
+            validated_project_root,
+            validated_project_root_identity,
             validated_project_instance_id,
             library_usage_instances: RefCell::new(HashMap::new()),
         })
@@ -1507,6 +2021,7 @@ impl AtlasStore {
             database_location: None,
             read_only: false,
             validated_project_root: None,
+            validated_project_root_identity: None,
             validated_project_instance_id: None,
             library_usage_instances: RefCell::new(HashMap::new()),
         };
@@ -1561,6 +2076,10 @@ impl AtlasStore {
             let mut mark_nodes = savepoint.prepare_cached(
                 "UPDATE nodes SET exists_now = 0 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             )?;
+            let mut delete_classifications = savepoint.prepare_cached(
+                "DELETE FROM file_content_classifications
+                  WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
+            )?;
             let mut delete_relations = savepoint.prepare_cached(
                 "DELETE FROM symbol_relations WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
             )?;
@@ -1583,6 +2102,7 @@ impl AtlasStore {
                     continue;
                 }
                 let descendant_pattern = sqlite_descendant_pattern(path);
+                delete_classifications.execute(params![path, descendant_pattern])?;
                 mark_nodes.execute(params![path, descendant_pattern])?;
                 delete_relations.execute(params![path, descendant_pattern])?;
                 delete_symbols.execute(params![path, descendant_pattern])?;
@@ -1671,7 +2191,7 @@ impl AtlasStore {
     ///
     /// Returns an error if reading fails or stored counts are invalid.
     pub fn load_file_text(&self, path: &str) -> DbResult<Option<IndexedFileText>> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare_cached(
             "
             SELECT path, content_hash, byte_count, line_count, content
             FROM file_texts
@@ -1875,8 +2395,9 @@ impl AtlasStore {
 
     /// Load indexed text rows for search.
     ///
-    /// When `literal_pattern` is supplied, `SQLite` prefilters candidate files
-    /// with a substring search before the service performs line-level matching.
+    /// For a nonempty case-sensitive `literal_pattern`, `SQLite` prefilters
+    /// candidate files with an exact substring search. Case-insensitive visits
+    /// admit all rows because SQLite's built-in `lower()` is ASCII-only.
     /// Regex and fuzzy searches pass `None` and still use the persisted text
     /// index instead of reopening source files from disk.
     ///
@@ -1898,8 +2419,9 @@ impl AtlasStore {
 
     /// Visit indexed text rows for search without materializing all rows.
     ///
-    /// When `literal_pattern` is supplied, `SQLite` prefilters candidate files
-    /// with a substring search before the service performs line-level matching.
+    /// For a nonempty case-sensitive `literal_pattern`, `SQLite` prefilters
+    /// candidate files with an exact substring search. Case-insensitive visits
+    /// admit all rows because SQLite's built-in `lower()` is ASCII-only.
     /// Returning `false` from `visitor` stops iteration early.
     ///
     /// # Errors
@@ -1915,37 +2437,21 @@ impl AtlasStore {
     where
         F: FnMut(IndexedFileText) -> DbResult<bool>,
     {
-        if let Some(pattern) = literal_pattern.filter(|pattern| !pattern.is_empty()) {
-            if case_sensitive {
-                let mut statement = self.connection.prepare(
-                    "
-                    SELECT path, content_hash, byte_count, line_count, content
-                    FROM file_texts
-                    WHERE instr(content, ?1) > 0
-                    ORDER BY path
-                    ",
-                )?;
-                let mut rows = statement.query([pattern])?;
-                while let Some(row) = rows.next()? {
-                    if !visitor(file_text_from_row(row)?)? {
-                        return Ok(());
-                    }
-                }
-            } else {
-                let pattern = pattern.to_ascii_lowercase();
-                let mut statement = self.connection.prepare(
-                    "
-                    SELECT path, content_hash, byte_count, line_count, content
-                    FROM file_texts
-                    WHERE instr(lower(content), ?1) > 0
-                    ORDER BY path
-                    ",
-                )?;
-                let mut rows = statement.query([pattern])?;
-                while let Some(row) = rows.next()? {
-                    if !visitor(file_text_from_row(row)?)? {
-                        return Ok(());
-                    }
+        if let Some(pattern) =
+            literal_pattern.filter(|pattern| case_sensitive && !pattern.is_empty())
+        {
+            let mut statement = self.connection.prepare(
+                "
+                SELECT path, content_hash, byte_count, line_count, content
+                FROM file_texts
+                WHERE instr(content, ?1) > 0
+                ORDER BY path
+                ",
+            )?;
+            let mut rows = statement.query([pattern])?;
+            while let Some(row) = rows.next()? {
+                if !visitor(file_text_from_row(row)?)? {
+                    return Ok(());
                 }
             }
         } else {
@@ -2000,39 +2506,30 @@ impl AtlasStore {
     ///
     /// Returns an error if persistence fails.
     pub fn set_project_root(&mut self, root: &Path) -> DbResult<()> {
-        let value = normalize_metadata_path(root);
+        let identity = CanonicalProjectRoot::from_path(root)?;
+        let value = identity.display_string().ok();
         let previous_identity = self.validated_project_instance_id;
         let savepoint = self.validated_savepoint()?;
-        if let Some(found) = savepoint
+        let found = savepoint
             .query_row(
                 "SELECT value FROM metadata WHERE key = ?1",
                 [PROJECT_ROOT_KEY],
                 |row| row.get::<_, String>(0),
             )
-            .optional()?
-        {
-            if found == value {
-                let (identity, identity_changed) =
-                    project_identity::ensure_project_identity(&savepoint)?;
-                savepoint.commit()?;
-                self.validated_project_root = Some(value);
-                self.validated_project_instance_id = Some(identity);
-                if identity_changed {
-                    self.library_usage_instances.get_mut().clear();
-                }
-                return Ok(());
-            }
-            return Err(DbError::ProjectRootMismatch {
-                expected: value,
-                found,
-            });
+            .optional()?;
+        let found_identity = project_identity::load_project_root_identity(&savepoint)?;
+        if found.is_none() && found_identity.is_none() {
+            project_identity::set_project_root_identity(&savepoint, &identity)?;
+            project_identity::set_project_root_metadata(&savepoint, &identity)?;
+        } else {
+            project_identity::ensure_project_root_identity_in_transaction(&savepoint, &identity)?;
         }
-        set_metadata(&savepoint, PROJECT_ROOT_KEY, &value)?;
-        let (identity, _) = project_identity::ensure_project_identity(&savepoint)?;
-        let identity_changed = previous_identity != Some(identity);
+        let (project_identity, _) = project_identity::ensure_project_identity(&savepoint)?;
+        let identity_changed = previous_identity != Some(project_identity);
         savepoint.commit()?;
-        self.validated_project_root = Some(value);
-        self.validated_project_instance_id = Some(identity);
+        self.validated_project_root = value;
+        self.validated_project_root_identity = Some(identity);
+        self.validated_project_instance_id = Some(project_identity);
         if identity_changed {
             self.library_usage_instances.get_mut().clear();
         }
@@ -2068,11 +2565,42 @@ impl AtlasStore {
             project_instance_id: self
                 .validated_project_instance_id
                 .ok_or(DbError::ProjectInstanceIdentityMissing)?,
-            project_root: self
-                .validated_project_root
+            project_root: self.validated_project_root.clone(),
+            project_root_identity: self
+                .validated_project_root_identity
                 .clone()
-                .ok_or(DbError::ProjectRootMissing)?,
+                .ok_or(DbError::ProjectRootIdentityMissing)?,
         })
+    }
+
+    /// Load the authoritative native project-root identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity row cannot be read or its versioned
+    /// codec payload is invalid.
+    pub fn project_root_identity(&self) -> DbResult<Option<CanonicalProjectRoot>> {
+        project_identity::load_project_root_identity(&self.connection)
+    }
+
+    /// Return whether a selected canonical root resolves to this store's
+    /// captured native root identity.
+    ///
+    /// The comparison re-canonicalizes both existing roots through the
+    /// admission proof, so case-only spelling changes on case-insensitive
+    /// filesystems are accepted while distinct case-sensitive roots remain
+    /// different. An unavailable or unresolvable persisted root fails closed.
+    #[must_use]
+    pub fn project_root_identity_matches(&self, selected: &CanonicalProjectRoot) -> bool {
+        self.validated_project_root_identity
+            .as_ref()
+            .is_some_and(|persisted| {
+                project_identity::prove_existing_root_equivalence(
+                    selected.as_path(),
+                    persisted.as_path(),
+                )
+                .is_ok()
+            })
     }
 
     /// Revalidate the captured binding against a fresh database snapshot.
@@ -2089,16 +2617,16 @@ impl AtlasStore {
     pub fn revalidate_captured_project_binding(&self) -> DbResult<()> {
         let binding = self.captured_project_binding()?;
         let Some(path) = self.database_path.as_deref() else {
-            return schema::validate_active_binding(
+            return schema::validate_active_native_binding(
                 &self.connection,
-                Some(&binding.project_root),
+                Some(&binding.project_root_identity),
                 Some(binding.project_instance_id),
             );
         };
-        let (connection, _) = schema::open_current_read_only(path, Some(&binding.project_root))?;
-        schema::validate_active_binding(
+        let (connection, _) = schema::open_current_read_only(path, None)?;
+        schema::validate_active_native_binding(
             &connection,
-            Some(&binding.project_root),
+            Some(&binding.project_root_identity),
             Some(binding.project_instance_id),
         )
     }
@@ -2165,6 +2693,23 @@ impl AtlasStore {
         )
     }
 
+    /// Check publication-writer availability without changing durable state.
+    ///
+    /// The probe uses the same fail-fast acquisition policy as a real
+    /// publication and immediately rolls back a successful transaction. It
+    /// lets callers reject a contended writer before doing expensive staging,
+    /// while preserving the complete generation for every connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exclusive writer cannot be acquired or the
+    /// probe transaction cannot be rolled back.
+    pub fn probe_index_publication_writer(&mut self) -> DbResult<()> {
+        begin_immediate_publication(&self.connection)?;
+        self.connection.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
     /// Begin one exclusive symbol/projection refresh without replacing the
     /// established full-index contract.
     ///
@@ -2209,9 +2754,9 @@ impl AtlasStore {
     ) -> DbResult<IndexPublicationGuard<'_>> {
         begin_immediate_publication(&self.connection)?;
         let setup = (|| {
-            schema::validate_active_binding(
+            schema::validate_active_native_binding(
                 &self.connection,
-                self.validated_project_root.as_deref(),
+                self.validated_project_root_identity.as_ref(),
                 self.validated_project_instance_id,
             )?;
             let previous = load_index_publication(&self.connection)?;
@@ -2398,14 +2943,22 @@ impl AtlasStore {
                     documentation,
                     line_start,
                     line_end,
+                    source_byte_start,
+                    source_byte_end,
+                    source_column_start,
+                    source_column_end,
                     parent,
                     parser,
                     detail
                 )
-                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES(
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16
+                )
                 ",
             )?;
             for symbol in &graph.symbols {
+                let selector = symbol_source_selector_values(symbol)?;
                 insert_symbol.execute(params![
                     symbol.path,
                     symbol.language.as_deref(),
@@ -2416,6 +2969,10 @@ impl AtlasStore {
                     symbol.documentation.as_deref(),
                     usize_to_i64(symbol.line_start),
                     usize_to_i64(symbol.line_end),
+                    selector[0],
+                    selector[1],
+                    selector[2],
+                    selector[3],
                     symbol.parent.as_deref(),
                     symbol.parser.to_string(),
                     symbol.detail.as_deref(),
@@ -2589,9 +3146,11 @@ impl AtlasStore {
         match (file, query) {
             (Some(file), Some(query)) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1 AND (name LIKE ?2 OR signature LIKE ?2 OR documentation LIKE ?2)
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?3
                 ",
@@ -2599,9 +3158,11 @@ impl AtlasStore {
             ),
             (Some(file), None) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
                 WHERE path = ?1
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?2
                 ",
@@ -2609,9 +3170,11 @@ impl AtlasStore {
             ),
             (None, Some(query)) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
-                WHERE name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1
+                WHERE (name LIKE ?1 OR signature LIKE ?1 OR documentation LIKE ?1 OR path LIKE ?1)
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?2
                 ",
@@ -2619,14 +3182,41 @@ impl AtlasStore {
             ),
             (None, None) => self.query_symbols(
                 "
-                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+                SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                       source_byte_start, source_byte_end, source_column_start, source_column_end
                 FROM symbols
+                WHERE NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?1
                 ",
                 params![max_rows],
             ),
         }
+    }
+
+    /// Load symbols with their owning file classification and optional content selection.
+    ///
+    /// Omitted selection retains the legacy symbol candidate universe and order. Explicit
+    /// selection is applied by `SQLite` before the row limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a classification is missing or corrupt, or reading fails.
+    pub fn load_classified_symbols(
+        &self,
+        file: Option<&str>,
+        query: Option<&str>,
+        selection: ContentSelection,
+        limit: usize,
+    ) -> DbResult<Vec<ClassifiedSymbol>> {
+        let (sql, bindings) = classified_symbols_sql(file, query, selection, limit);
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(bindings.iter()))?;
+        let mut symbols = Vec::new();
+        while let Some(row) = rows.next()? {
+            symbols.push(classified_symbol_from_row(row)?);
+        }
+        Ok(symbols)
     }
 
     /// Load one bounded deterministic symbol set for exact repository paths.
@@ -2701,6 +3291,10 @@ impl AtlasStore {
                     detail,
                     exported,
                     documentation,
+                    source_byte_start,
+                    source_byte_end,
+                    source_column_start,
+                    source_column_end,
                     length(CAST(path AS BLOB))
                         + COALESCE(length(CAST(language AS BLOB)), 0)
                         + length(CAST(name AS BLOB))
@@ -2710,6 +3304,7 @@ impl AtlasStore {
                         + COALESCE(length(CAST(documentation AS BLOB)), 0)
                 FROM symbols
                 WHERE path IN ({placeholders})
+                  AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
                 ORDER BY path, line_start, name
                 LIMIT ?{limit_parameter}
                 "
@@ -2796,7 +3391,8 @@ impl AtlasStore {
         let placeholders = numbered_placeholders(2, kinds.len());
         let sql = format!(
             "
-            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                   source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols INDEXED BY idx_symbols_path
             WHERE path = ?1 AND kind IN ({placeholders})
             ORDER BY path, line_start, name
@@ -2871,9 +3467,11 @@ impl AtlasStore {
         let placeholders = numbered_placeholders(1, names.len());
         let sql = format!(
             "
-            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                   source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE name IN ({placeholders})
+              AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
             ORDER BY path, line_start, name
             "
         );
@@ -2945,9 +3543,11 @@ impl AtlasStore {
     ) -> DbResult<Vec<CodeSymbol>> {
         self.query_symbols(
             "
-            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation
+            SELECT path, language, name, kind, signature, line_start, line_end, parent, parser, detail, exported, documentation,
+                   source_byte_start, source_byte_end, source_column_start, source_column_end
             FROM symbols
             WHERE path = ?1 AND name = ?2
+              AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')
             ORDER BY line_start, line_end, kind, parent
             ",
             params![file, name],
@@ -2994,7 +3594,7 @@ impl AtlasStore {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<u64>>(5)?,
+                    option_u64_from_sql(row, 5)?,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
@@ -3051,7 +3651,7 @@ impl AtlasStore {
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, Option<String>>(4)?,
-                            row.get::<_, Option<u64>>(5)?,
+                            option_u64_from_sql(row, 5)?,
                             row.get::<_, Option<i64>>(6)?,
                             row.get::<_, Option<String>>(7)?,
                             row.get::<_, Option<String>>(8)?,
@@ -3522,7 +4122,7 @@ impl AtlasStore {
     pub fn symbol_count(&self) -> DbResult<usize> {
         let count = self
             .connection
-            .query_row("SELECT COUNT(*) FROM symbols", [], |row| {
+            .query_row("SELECT COUNT(*) FROM symbols WHERE NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')", [], |row| {
                 row.get::<_, i64>(0)
             })?;
         Ok(i64_to_usize(count))
@@ -3549,7 +4149,7 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn symbol_count_for_path(&self, path: &str) -> DbResult<usize> {
         let count = self.connection.query_row(
-            "SELECT COUNT(*) FROM symbols WHERE path = ?1",
+            "SELECT COUNT(*) FROM symbols WHERE path = ?1 AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')",
             [path],
             |row| row.get::<_, i64>(0),
         )?;
@@ -3571,7 +4171,7 @@ impl AtlasStore {
             }
             let placeholders = vec!["?"; chunk.len()].join(",");
             let sql = format!(
-                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) GROUP BY path"
+                "SELECT path, COUNT(*) FROM symbols WHERE path IN ({placeholders}) AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage') GROUP BY path"
             );
             let mut statement = self.connection.prepare(&sql)?;
             let rows = statement.query_map(params_from_iter(chunk.iter()), |row| {
@@ -3708,7 +4308,9 @@ impl AtlasStore {
 
             let symbol_sql = format!(
                 "SELECT path, language, name, kind, signature, line_start, line_end,
-                        parent, parser, detail, exported, documentation
+                        parent, parser, detail, exported, documentation,
+                        source_byte_start, source_byte_end,
+                        source_column_start, source_column_end
                    FROM symbols
                   WHERE path IN ({placeholders})
                   ORDER BY path, line_start, line_end, name, kind"
@@ -3799,7 +4401,7 @@ impl AtlasStore {
     /// Returns an error if reading fails.
     pub fn max_symbol_end_line_for_path(&self, path: &str) -> DbResult<usize> {
         let line = self.connection.query_row(
-            "SELECT COALESCE(MAX(line_end), 0) FROM symbols WHERE path = ?1",
+            "SELECT COALESCE(MAX(line_end), 0) FROM symbols WHERE path = ?1 AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')",
             [path],
             |row| row.get::<_, i64>(0),
         )?;
@@ -4096,7 +4698,7 @@ impl AtlasStore {
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<u64>>(5)?,
+                option_u64_from_sql(row, 5)?,
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
@@ -4317,7 +4919,7 @@ impl AtlasStore {
         let mut statement = self.connection.prepare(&sql)?;
         let mut rows = statement.query(params_from_iter(values))?;
         while let Some(row) = rows.next()? {
-            if !visitor(row.get::<_, String>(0)?, row.get::<_, Option<u64>>(1)?)? {
+            if !visitor(row.get::<_, String>(0)?, option_u64_from_sql(row, 1)?)? {
                 return Ok(());
             }
         }
@@ -5541,6 +6143,9 @@ impl AtlasStore {
     /// Returns an error if persistence fails.
     pub fn record_usage(&self, event: &UsageEvent) -> DbResult<()> {
         telemetry::validate_event(event, TelemetryRetentionPolicy::default())?;
+        self.validated_project_root_identity
+            .as_ref()
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         let instance_id = self.library_usage_instance(&event.session_id, false)?;
         match self.record_usage_for_instance(
             instance_id,
@@ -5611,44 +6216,74 @@ impl AtlasStore {
         event: &UsageEvent,
         seal_after_record: bool,
     ) -> DbResult<()> {
+        self.record_usage_for_instance_origin(instance_id, owner, None, event, seal_after_record)
+    }
+
+    /// Record one centrally routed event for a captured worktree registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected control binding changes, the
+    /// registration or runtime origin conflicts, a retention bound rejects the
+    /// event, or `SQLite` cannot commit the complete telemetry transaction.
+    pub fn record_usage_for_worktree_instance(
+        &self,
+        instance_id: UsageInstanceId,
+        owner: UsageInstanceOwner,
+        registration_id: i64,
+        event: &UsageEvent,
+        seal_after_record: bool,
+    ) -> DbResult<()> {
+        self.record_usage_for_instance_origin(
+            instance_id,
+            owner,
+            Some(registration_id),
+            event,
+            seal_after_record,
+        )
+    }
+
+    /// Record one event with an optional captured worktree origin.
+    fn record_usage_for_instance_origin(
+        &self,
+        instance_id: UsageInstanceId,
+        owner: UsageInstanceOwner,
+        registration_id: Option<i64>,
+        event: &UsageEvent,
+        seal_after_record: bool,
+    ) -> DbResult<()> {
         let policy = TelemetryRetentionPolicy::default();
         let project_instance_id = self
             .validated_project_instance_id
             .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let project_root_identity = self
+            .validated_project_root_identity
+            .as_ref()
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         self.with_telemetry_connection(|connection| {
-            let transaction =
-                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            let operation = schema::validate_active_binding(
-                &transaction,
-                self.validated_project_root.as_deref(),
+            with_validated_native_write_transaction(
+                connection,
+                Some(project_root_identity),
                 Some(project_instance_id),
-            )
-            .and_then(|()| {
-                telemetry::record_usage_for_project(
-                    &transaction,
-                    project_instance_id,
-                    instance_id,
-                    owner,
-                    event,
-                    policy,
-                    seal_after_record,
-                )
-            });
-            match operation {
-                Ok(()) => transaction.commit().map_err(DbError::from),
-                Err(operation) => match transaction.rollback() {
-                    Ok(()) => Err(operation),
-                    Err(rollback) => Err(DbError::TransactionRollback {
-                        operation: Box::new(operation),
-                        rollback,
-                    }),
+                |transaction| {
+                    telemetry::record_usage_for_project(
+                        transaction,
+                        project_instance_id,
+                        instance_id,
+                        owner,
+                        registration_id,
+                        event,
+                        policy,
+                        seal_after_record,
+                    )
                 },
-            }?;
+            )?;
             // The event is already committed. Passive maintenance remains
             // observable through retention state and must never make callers
             // retry a successfully persisted event.
-            drop(telemetry::maintain_after_commit_for_project(
+            drop(telemetry::maintain_after_commit_for_native_project(
                 connection,
+                Some(project_root_identity),
                 project_instance_id,
                 policy,
             ));
@@ -5663,25 +6298,17 @@ impl AtlasStore {
     /// Returns an error when the selected binding changed, the instance is
     /// already inactive, or `SQLite` cannot commit the state transition.
     pub fn seal_usage_instance(&self, instance_id: UsageInstanceId) -> DbResult<()> {
+        let project_root_identity = self
+            .validated_project_root_identity
+            .as_ref()
+            .ok_or(DbError::ProjectRootIdentityMissing)?;
         self.with_telemetry_connection(|connection| {
-            let transaction =
-                rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-            let operation = schema::validate_active_binding(
-                &transaction,
-                self.validated_project_root.as_deref(),
+            with_validated_native_write_transaction(
+                connection,
+                Some(project_root_identity),
                 self.validated_project_instance_id,
+                |transaction| telemetry::seal_usage_instance(transaction, instance_id),
             )
-            .and_then(|()| telemetry::seal_usage_instance(&transaction, instance_id));
-            match operation {
-                Ok(()) => transaction.commit().map_err(Into::into),
-                Err(operation) => match transaction.rollback() {
-                    Ok(()) => Err(operation),
-                    Err(rollback) => Err(DbError::TransactionRollback {
-                        operation: Box::new(operation),
-                        rollback,
-                    }),
-                },
-            }
         })
     }
 
@@ -5712,6 +6339,30 @@ impl AtlasStore {
         telemetry::token_overview(&self.connection, session_id)
     }
 
+    /// Build the control atlas's combined native-main and synchronized-worktree overview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected binding or aggregate state is invalid,
+    /// arithmetic overflows, or `SQLite` cannot complete the bounded read.
+    pub fn repository_token_overview(&self) -> DbResult<TokenOverview> {
+        telemetry::repository_token_overview(&self.connection)
+    }
+
+    /// Build exact retained routed plus synchronized totals for one active alias.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the alias is absent, aggregate state is invalid,
+    /// arithmetic overflows, or `SQLite` cannot complete the bounded read.
+    pub fn registered_worktree_token_overview(
+        &self,
+        alias: &WorktreeAlias,
+    ) -> DbResult<TokenOverview> {
+        let registration = self.worktree_registration(alias)?;
+        telemetry::worktree_token_overview(&self.connection, registration.registration_id)
+    }
+
     /// Build token trend aggregates grouped by day, week, month, or year.
     ///
     /// # Errors
@@ -5723,6 +6374,31 @@ impl AtlasStore {
         window: TokenTrendWindow,
     ) -> DbResult<TokenTrendReport> {
         telemetry::token_trends(&self.connection, session_id, window)
+    }
+
+    /// Build combined native-main and synchronized-worktree token trends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported window, invalid aggregate state,
+    /// arithmetic overflow, or a bounded `SQLite` read failure.
+    pub fn repository_token_trends(&self, window: TokenTrendWindow) -> DbResult<TokenTrendReport> {
+        telemetry::repository_token_trends(&self.connection, window)
+    }
+
+    /// Build exact retained routed plus synchronized trends for one active alias.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the alias is absent, the window or aggregate state
+    /// is invalid, arithmetic overflows, or `SQLite` cannot complete the read.
+    pub fn registered_worktree_token_trends(
+        &self,
+        alias: &WorktreeAlias,
+        window: TokenTrendWindow,
+    ) -> DbResult<TokenTrendReport> {
+        let registration = self.worktree_registration(alias)?;
+        telemetry::worktree_token_trends(&self.connection, registration.registration_id, window)
     }
 
     /// Mark a deterministic health finding as agent-resolved.
@@ -5843,6 +6519,69 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
     schema::read_project_root(path)
 }
 
+/// Read an untrusted predecessor root candidate without creating, migrating,
+/// or repairing a database.
+///
+/// This is recovery evidence for selecting a filesystem candidate only. It is
+/// never an authoritative project identity and callers must canonicalize the
+/// candidate through the live filesystem before opening a project database.
+/// Current databases intentionally return no candidate because their typed
+/// native identity is the only authority. A predecessor candidate is returned
+/// only when the schema-owned policy can establish that its legacy projection
+/// is usable; otherwise the typed native-identity error is returned.
+///
+/// # Errors
+///
+/// Returns an error when the database cannot be inspected read-only or its
+/// predecessor schema is incompatible or malformed.
+pub fn read_legacy_project_root_candidate_read_only(path: &Path) -> DbResult<Option<String>> {
+    let (preflight, _) = schema::inspect_compatibility(path, None)?;
+    if preflight.state != SchemaState::UpgradeRequired {
+        return Ok(None);
+    }
+    if schema::legacy_root_requires_native_authority(preflight.project_root.as_deref()) {
+        return Err(DbError::ProjectRootIdentityMissing);
+    }
+    Ok(preflight.project_root)
+}
+
+/// Validate one existing project binding without creating, migrating, or repairing it.
+///
+/// A fresh or absent database is admitted for a later initializer. Existing current
+/// databases use their native identity, while supported predecessors use the same
+/// read-only native-equivalence proof as the storage writer. No SQLite write
+/// connection or WAL state is opened by this check.
+///
+/// # Errors
+///
+/// Returns an error when the database is malformed, incompatible, missing an
+/// unambiguous predecessor binding, or belongs to another project root.
+pub fn preflight_project_binding_read_only(path: &Path, root: &Path) -> DbResult<()> {
+    let expected_identity = CanonicalProjectRoot::from_path(root)?;
+    schema::preflight_for_project(path, &expected_identity).map(|_| ())
+}
+
+/// Read the authoritative native project-root identity without mutation.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened read-only or the identity
+/// row contains an invalid versioned codec payload.
+pub fn read_project_root_identity_read_only(path: &Path) -> DbResult<Option<CanonicalProjectRoot>> {
+    let location = sqlite_profile::inspect_database_location(path)?;
+    if !location.database_exists {
+        return Ok(None);
+    }
+    let (preflight, _) = schema::inspect_compatibility(path, None)?;
+    if preflight.state != schema::SchemaState::Current {
+        return Ok(None);
+    }
+    let connection = schema::open_current_read_only(path, None)?.0;
+    let identity = project_identity::load_project_root_identity(&connection)?;
+    connection.execute_batch("ROLLBACK")?;
+    Ok(identity)
+}
+
 /// Verify the current project database schema, identity, and full integrity read-only.
 ///
 /// # Errors
@@ -5850,7 +6589,8 @@ pub fn read_project_root_read_only(path: &Path) -> DbResult<Option<String>> {
 /// Returns an error when the database is missing, incompatible, corrupt, or belongs to another
 /// project root.
 pub fn verify_project_database(path: &Path, project_root: &Path) -> DbResult<()> {
-    schema::verify_current_integrity(path, Some(&normalize_native_path_display(project_root)))
+    let identity = CanonicalProjectRoot::from_path(project_root)?;
+    schema::verify_current_integrity_for_project(path, &identity)
 }
 
 /// Normalize a filesystem path stored in `SQLite` metadata.
@@ -6034,8 +6774,14 @@ fn record_released_schema_eight_usage_event(
             event.command,
             event.path,
             event.query,
-            event.estimated_tokens_without_projectatlas,
-            event.estimated_tokens_with_projectatlas,
+            option_usize_to_i64(
+                "estimated_tokens_without_projectatlas",
+                event.estimated_tokens_without_projectatlas,
+            )?,
+            option_usize_to_i64(
+                "estimated_tokens_with_projectatlas",
+                event.estimated_tokens_with_projectatlas,
+            )?,
             event.estimated_tokens_saved,
             event.token_savings_bucket,
             event.provider,
@@ -6109,6 +6855,7 @@ fn mark_all_scan_nodes_absent(connection: &Connection) -> DbResult<()> {
 
 /// Delete derived rows whose owning scan node remained absent.
 fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
+    content_classification::delete_absent_file_content_classifications(connection)?;
     let fts_revision = begin_file_text_fts_update(connection)?;
     connection.execute(
         "DELETE FROM symbol_relations WHERE path IN (SELECT path FROM nodes WHERE exists_now = 0)",
@@ -6138,6 +6885,7 @@ fn delete_absent_scan_projections(connection: &Connection) -> DbResult<()> {
 
 /// Upsert scanned nodes through transaction-owned prepared statements.
 fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
+    content_classification::delete_non_file_content_classifications(connection, nodes)?;
     let mut select_existing = connection.prepare_cached(
         "
         SELECT content_hash
@@ -6162,6 +6910,12 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             last_indexed_at = CURRENT_TIMESTAMP
         ",
     )?;
+    let mut ensure_file_classification = connection.prepare_cached(
+        "INSERT INTO file_content_classifications(path, classification)
+         SELECT ?1, 'opaque'
+          WHERE ?2 = 'file'
+         ON CONFLICT(path) DO NOTHING",
+    )?;
     let mut select_node_id = connection.prepare_cached("SELECT id FROM nodes WHERE path = ?1")?;
     let mut ensure_purpose = connection.prepare_cached(
         "
@@ -6180,6 +6934,15 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
         ",
     )?;
     for node in nodes {
+        let size_bytes = node
+            .size_bytes
+            .map(|value| {
+                i64::try_from(value).map_err(|_source| DbError::GraphCountOverflow {
+                    field: "nodes.size_bytes",
+                    value,
+                })
+            })
+            .transpose()?;
         let existing = select_existing
             .query_row([&node.path], |row| row.get::<_, Option<String>>(0))
             .optional()?;
@@ -6195,10 +6958,11 @@ fn upsert_nodes(connection: &Connection, nodes: &[Node]) -> DbResult<()> {
             node.parent_path,
             node.extension,
             node.language,
-            node.size_bytes,
+            size_bytes,
             node.mtime_ns,
             node.content_hash
         ])?;
+        ensure_file_classification.execute(params![node.path, node.kind.to_string()])?;
         let node_id = select_node_id.query_row([&node.path], |row| row.get::<_, i64>(0))?;
         ensure_purpose.execute([node_id])?;
         upsert_summary.execute(params![
@@ -6357,7 +7121,7 @@ impl<'connection> SqliteReadProgressGuard<'connection> {
                     );
                     interrupted
                 }),
-            );
+            )?;
             true
         } else {
             false
@@ -6369,7 +7133,7 @@ impl<'connection> SqliteReadProgressGuard<'connection> {
 impl Drop for SqliteReadProgressGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.connection.progress_handler(0, None::<fn() -> bool>);
+            drop(self.connection.progress_handler(0, None::<fn() -> bool>));
         }
     }
 }
@@ -6461,11 +7225,21 @@ fn collect_file_text_fts_candidates(
 
 /// Decode persisted file metadata before the potentially large source column.
 fn file_text_metadata_from_row(row: &rusqlite::Row<'_>) -> DbResult<FileTextMetadata> {
+    let path = row.get::<_, String>(0)?;
+    let classification = row
+        .get::<_, Option<String>>(4)?
+        .ok_or_else(|| DbError::FileContentClassificationMissing { path: path.clone() })?;
     Ok(FileTextMetadata {
-        path: row.get(0)?,
+        path,
         content_hash: row.get(1)?,
         byte_count: count_to_usize("file_texts.byte_count", row.get::<_, i64>(2)?)?,
         line_count: count_to_usize("file_texts.line_count", row.get::<_, i64>(3)?)?,
+        classification: ContentClassification::from_db(&classification).ok_or(
+            DbError::InvalidEnum {
+                field: "file_content_classifications.classification",
+                value: classification,
+            },
+        )?,
     })
 }
 
@@ -6535,7 +7309,7 @@ fn indexed_node_parts_from_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         row.get::<_, Option<String>>(2)?,
         row.get::<_, Option<String>>(3)?,
         row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<u64>>(5)?,
+        option_u64_from_sql(row, 5)?,
         row.get::<_, Option<i64>>(6)?,
         row.get::<_, Option<String>>(7)?,
         row.get::<_, Option<String>>(8)?,
@@ -7041,16 +7815,226 @@ fn i64_to_usize(value: i64) -> usize {
     usize::try_from(value.max(0)).unwrap_or(usize::MAX)
 }
 
+/// Decode an optional nonnegative `SQLite` integer into the public unsigned size type.
+fn option_u64_from_sql(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
+    row.get::<_, Option<i64>>(index)?
+        .map(|value| {
+            u64::try_from(value).map_err(|source| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Integer,
+                    Box::new(source),
+                )
+            })
+        })
+        .transpose()
+}
+
+/// Convert an optional token count into the exact `SQLite` integer range.
+#[cfg(test)]
+fn option_usize_to_i64(field: &'static str, value: Option<usize>) -> DbResult<Option<i64>> {
+    value
+        .map(|value| {
+            i64::try_from(value).map_err(|_source| DbError::TelemetryIntegerOverflow { field })
+        })
+        .transpose()
+}
+
+/// Build the classified symbol query from static clauses and bound caller values.
+fn classified_symbols_sql(
+    file: Option<&str>,
+    query: Option<&str>,
+    selection: ContentSelection,
+    limit: usize,
+) -> (String, Vec<Value>) {
+    // Internal document coverage metadata is retained for graph rebuilds, not symbol navigation.
+    let mut predicates = vec!["NOT (symbol.language IN ('docx', 'pdf') AND symbol.kind = 'unknown' AND symbol.name = 'document-text-coverage')".to_owned()];
+    let mut bindings = Vec::new();
+    if let Some(file) = file {
+        bindings.push(Value::Text(file.to_string()));
+        predicates.push(format!("symbol.path = ?{}", bindings.len()));
+    }
+    if let Some(query) = query {
+        bindings.push(Value::Text(like_query(query)));
+        let placeholder = bindings.len();
+        let path_predicate = if file.is_some() {
+            String::new()
+        } else {
+            format!(" OR symbol.path LIKE ?{placeholder}")
+        };
+        predicates.push(format!(
+            "(symbol.name LIKE ?{placeholder} OR symbol.signature LIKE ?{placeholder} \
+             OR symbol.documentation LIKE ?{placeholder}{path_predicate})"
+        ));
+    }
+    match selection {
+        ContentSelection::UnspecifiedLegacy => {}
+        ContentSelection::Source => {
+            bindings.push(Value::Text(
+                ContentClassification::Source.as_str().to_string(),
+            ));
+            predicates.push(format!(
+                "(classification.classification = ?{} OR classification.path IS NULL)",
+                bindings.len()
+            ));
+        }
+        ContentSelection::Documentation => {
+            bindings.push(Value::Text(
+                ContentClassification::Documentation.as_str().to_string(),
+            ));
+            predicates.push(format!(
+                "(classification.classification = ?{} OR classification.path IS NULL)",
+                bindings.len()
+            ));
+        }
+        ContentSelection::Both => {
+            bindings.push(Value::Text(
+                ContentClassification::Source.as_str().to_string(),
+            ));
+            let source = bindings.len();
+            bindings.push(Value::Text(
+                ContentClassification::Documentation.as_str().to_string(),
+            ));
+            let documentation = bindings.len();
+            predicates.push(format!(
+                "(classification.classification IN (?{source}, ?{documentation}) \
+                 OR classification.path IS NULL)"
+            ));
+        }
+    }
+    bindings.push(Value::Integer(usize_to_i64(limit.max(1))));
+    let limit = bindings.len();
+    let where_clause = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", predicates.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT symbol.path, symbol.language, symbol.name, symbol.kind,
+                symbol.signature, symbol.line_start, symbol.line_end, symbol.parent,
+                symbol.parser, symbol.detail, symbol.exported, symbol.documentation,
+                symbol.source_byte_start, symbol.source_byte_end,
+                symbol.source_column_start, symbol.source_column_end,
+                classification.classification
+           FROM symbols AS symbol INDEXED BY idx_symbols_path
+           LEFT JOIN file_content_classifications AS classification
+             ON classification.path = symbol.path
+           {where_clause}
+          ORDER BY symbol.path, symbol.line_start, symbol.name
+          LIMIT ?{limit}"
+    );
+    (sql, bindings)
+}
+
+/// Validate and narrow one parser-supplied source selector for `SQLite` storage.
+fn symbol_source_selector_values(symbol: &CodeSymbol) -> DbResult<[Option<i64>; 4]> {
+    let Some(selector) = symbol.source_selector else {
+        return Ok([None; 4]);
+    };
+    if symbol.line_start == 0
+        || symbol.line_end < symbol.line_start
+        || selector.byte_end < selector.byte_start
+        || (symbol.line_start == symbol.line_end && selector.column_end < selector.column_start)
+    {
+        return Err(DbError::SymbolGraphRowShape {
+            path: symbol.path.clone(),
+            reason: "symbol source selector range is invalid",
+        });
+    }
+    let narrow = |value| match i64::try_from(value) {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => Err(DbError::SymbolGraphRowShape {
+            path: symbol.path.clone(),
+            reason: "symbol source selector exceeds the SQLite integer range",
+        }),
+    };
+    Ok([
+        narrow(selector.byte_start)?,
+        narrow(selector.byte_end)?,
+        narrow(selector.column_start)?,
+        narrow(selector.column_end)?,
+    ])
+}
+
+/// Decode one all-or-none persisted source selector without coercing corrupt ranges.
+fn symbol_source_selector_from_row(
+    row: &rusqlite::Row<'_>,
+    line_start: usize,
+    line_end: usize,
+) -> rusqlite::Result<Option<SymbolSourceSelector>> {
+    let raw = [
+        row.get::<_, Option<i64>>(12)?,
+        row.get::<_, Option<i64>>(13)?,
+        row.get::<_, Option<i64>>(14)?,
+        row.get::<_, Option<i64>>(15)?,
+    ];
+    let [
+        Some(byte_start),
+        Some(byte_end),
+        Some(column_start),
+        Some(column_end),
+    ] = raw
+    else {
+        if raw.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        return Err(invalid_symbol_source_selector(
+            "symbol source selector columns are only partially populated",
+        ));
+    };
+    if byte_start < 0
+        || byte_end < byte_start
+        || column_start < 0
+        || column_end < 0
+        || line_start == 0
+        || line_end < line_start
+        || (line_start == line_end && column_end < column_start)
+    {
+        return Err(invalid_symbol_source_selector(
+            "symbol source selector range is invalid",
+        ));
+    }
+    Ok(Some(SymbolSourceSelector {
+        byte_start: symbol_source_selector_usize(byte_start)?,
+        byte_end: symbol_source_selector_usize(byte_end)?,
+        column_start: symbol_source_selector_usize(column_start)?,
+        column_end: symbol_source_selector_usize(column_end)?,
+    }))
+}
+
+/// Convert one validated nonnegative selector integer without losing overflow detail.
+fn symbol_source_selector_usize(value: i64) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|source| {
+        rusqlite::Error::FromSqlConversionFailure(
+            12,
+            rusqlite::types::Type::Integer,
+            Box::new(source),
+        )
+    })
+}
+
+/// Construct one fail-closed `SQLite` conversion error for a malformed selector row.
+fn invalid_symbol_source_selector(message: &'static str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        12,
+        rusqlite::types::Type::Integer,
+        Box::new(std::io::Error::other(message)),
+    )
+}
+
 /// Decode one persisted symbol row through the shared column contract.
 fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol> {
+    let line_start = i64_to_usize(row.get::<_, i64>(5)?);
+    let line_end = i64_to_usize(row.get::<_, i64>(6)?);
     Ok(CodeSymbol {
         path: row.get(0)?,
         language: row.get(1)?,
         name: row.get(2)?,
         kind: SymbolKind::from_db(row.get_ref(3)?.as_str()?),
         signature: row.get(4)?,
-        line_start: i64_to_usize(row.get::<_, i64>(5)?),
-        line_end: i64_to_usize(row.get::<_, i64>(6)?),
+        line_start,
+        line_end,
+        source_selector: symbol_source_selector_from_row(row, line_start, line_end)?,
         parent: row.get(7)?,
         parser: ParserKind::from_db(row.get_ref(8)?.as_str()?),
         detail: row.get(9)?,
@@ -7059,9 +8043,23 @@ fn code_symbol_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol>
     })
 }
 
+/// Decode one joined symbol/classification row through both owning contracts.
+fn classified_symbol_from_row(row: &rusqlite::Row<'_>) -> DbResult<ClassifiedSymbol> {
+    let symbol = code_symbol_from_row(row)?;
+    let classification = row.get::<_, Option<String>>(16)?.ok_or_else(|| {
+        DbError::FileContentClassificationMissing {
+            path: symbol.path.clone(),
+        }
+    })?;
+    Ok(ClassifiedSymbol {
+        symbol,
+        classification: content_classification::parse_classification(classification)?,
+    })
+}
+
 /// Read the exact owned-string byte floor before hydrating one symbol row.
 fn code_symbol_preflight_bytes(row: &rusqlite::Row<'_>) -> DbResult<u64> {
-    let string_bytes = row.get::<_, i64>(12)?;
+    let string_bytes = row.get::<_, i64>(16)?;
     let string_bytes = u64::try_from(string_bytes).map_err(|source| DbError::InvalidCount {
         field: "symbol persisted field bytes",
         value: string_bytes,
@@ -7634,6 +8632,65 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn unsupported_schema_versions_follow_the_migration_inventory() -> Result<(), Box<dyn Error>> {
+        for found in schema::PREVIOUS_SCHEMA_VERSION..=schema::SCHEMA_VERSION {
+            let error = DbError::SchemaVersion {
+                found,
+                expected: schema::SCHEMA_VERSION,
+            };
+            let expected_migration = if found < schema::SCHEMA_VERSION {
+                Some((
+                    found,
+                    schema::SCHEMA_VERSION,
+                    u32::try_from(schema::SCHEMA_VERSION - found)?,
+                ))
+            } else {
+                None
+            };
+            require_eq(
+                &error.supported_schema_migration(),
+                &expected_migration,
+                "admitted schema migration",
+            )?;
+            require_eq(
+                &error.unsupported_schema_version(),
+                &None,
+                "admitted schema version",
+            )?;
+        }
+        for found in [
+            schema::PREVIOUS_SCHEMA_VERSION - 1,
+            schema::SCHEMA_VERSION + 1,
+        ] {
+            let error = DbError::SchemaVersion {
+                found,
+                expected: schema::SCHEMA_VERSION,
+            };
+            require_eq(
+                &error.unsupported_schema_version(),
+                &Some((found, schema::SCHEMA_VERSION)),
+                "unsupported schema version",
+            )?;
+            require_eq(
+                &error.supported_schema_migration(),
+                &None,
+                "unsupported schema migration",
+            )?;
+        }
+        require_eq(
+            &DbError::SchemaVersionMissing.unsupported_schema_version(),
+            &None,
+            "unrelated database error",
+        )?;
+        require_eq(
+            &DbError::SchemaVersionMissing.supported_schema_migration(),
+            &None,
+            "unrelated migration error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn stores_nodes_and_overview() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         let node = Node {
@@ -7673,6 +8730,35 @@ mod tests {
             &store.load_node_by_path("src/missing.rs")?.is_none(),
             &true,
             "missing targeted path lookup",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn load_nodes_rejects_negative_size_bytes_without_partial_page() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[
+            test_file_node("src/a.rs", "hash-a"),
+            test_file_node("src/b.rs", "hash-b"),
+        ])?;
+        store.connection.execute(
+            "UPDATE nodes SET size_bytes = -1 WHERE path = 'src/b.rs'",
+            [],
+        )?;
+
+        let Err(error) = store.load_nodes() else {
+            return Err(io::Error::other("negative node size returned a partial page").into());
+        };
+        require(
+            matches!(
+                error,
+                DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Integer,
+                    _
+                ))
+            ),
+            "negative node size returned the wrong conversion error",
         )?;
         Ok(())
     }
@@ -7733,6 +8819,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn released_schema_layouts_upgrade_without_losing_local_state() -> Result<(), Box<dyn Error>> {
         let layouts: [(&str, fn(&Path, &Path) -> Result<(), Box<dyn Error>>); 2] = [
@@ -7764,6 +8851,7 @@ mod tests {
     }
 
     /// Verify one released schema layout through migration, reopen, and publication.
+    #[cfg(windows)]
     fn assert_released_schema_upgrade_preserves_local_state(
         label: &str,
         write_fixture: fn(&Path, &Path) -> Result<(), Box<dyn Error>>,
@@ -7772,6 +8860,7 @@ mod tests {
         let db_path = temp.path().join("projectatlas.db");
         let root = temp.path().join("repository");
         write_fixture(&db_path, &root)?;
+        fs::create_dir_all(&root)?;
         let database_before_read = fs::read(&db_path)?;
 
         let Err(read_error) = AtlasStore::open_read_only(&db_path) else {
@@ -7905,6 +8994,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().join("projectatlas.db");
         let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
         let future_schema = SCHEMA_VERSION + 1;
         write_schema_compatibility_fixture(&db_path, &root, future_schema, "future")?;
         let database_before = fs::read(&db_path)?;
@@ -8083,6 +9173,31 @@ mod tests {
             write_test_projection(&mut publication, "new")?;
             require_test_projection(&old_reader, 1, "old")?;
 
+            let probe_started = std::time::Instant::now();
+            let Err(probe_contention) = writer_b.probe_index_publication_writer() else {
+                return Err(io::Error::other(
+                    "writer availability probe entered an active publication transaction",
+                )
+                .into());
+            };
+            require_eq(
+                &matches!(
+                    probe_contention,
+                    DbError::Sqlite(ref error)
+                        if matches!(
+                            error.sqlite_error_code(),
+                            Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                        )
+                ),
+                &true,
+                "same-database writer availability probe",
+            )?;
+            require_eq(
+                &(probe_started.elapsed() < Duration::from_secs(2)),
+                &true,
+                "fail-fast same-database writer availability probe",
+            )?;
+
             let started = std::time::Instant::now();
             let Err(contention) = writer_b.begin_index_publication("contract") else {
                 return Err(io::Error::other(
@@ -8110,9 +9225,9 @@ mod tests {
             let restored_busy_timeout =
                 writer_b
                     .connection
-                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?;
             require_eq(
-                &u128::from(restored_busy_timeout),
+                &u128::try_from(restored_busy_timeout)?,
                 &SQLITE_BUSY_TIMEOUT.as_millis(),
                 "ordinary busy timeout after failed publication acquisition",
             )?;
@@ -8143,9 +9258,9 @@ mod tests {
         let restored_busy_timeout =
             writer_a
                 .connection
-                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, u64>(0))?;
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))?;
         require_eq(
-            &u128::from(restored_busy_timeout),
+            &u128::try_from(restored_busy_timeout)?,
             &SQLITE_BUSY_TIMEOUT.as_millis(),
             "ordinary busy timeout after successful publication acquisition",
         )?;
@@ -8914,22 +10029,56 @@ mod tests {
     }
 
     #[test]
-    fn stores_project_root_in_metadata() -> Result<(), Box<dyn Error>> {
+    fn set_project_root_requires_existing_root_and_preserves_binding() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
         let mut store = AtlasStore::in_memory()?;
-        store.set_project_root(Path::new("C:/workspace/example"))?;
+        let missing = temp.path().join("missing-root");
+        let Err(missing_error) = store.set_project_root(&missing) else {
+            return Err(io::Error::other("missing project root was accepted").into());
+        };
+        require(
+            matches!(missing_error, DbError::ProjectRootIdentity(_)),
+            "missing project root returned the wrong error",
+        )?;
         require_eq(
             &store.project_root()?,
-            &Some("C:/workspace/example".to_string()),
+            &None,
+            "missing-root rejection changed metadata",
+        )?;
+        require_eq(
+            &store.project_root_identity()?,
+            &None,
+            "missing-root rejection changed native identity",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &None,
+            "missing-root rejection changed project identity",
+        )?;
+
+        let root = temp.path().join("workspace").join("example");
+        fs::create_dir_all(&root)?;
+        store.set_project_root(&root)?;
+        require_eq(
+            &store.project_root()?,
+            &Some(normalize_native_path_display(&root)),
             "project root metadata",
         )?;
-        store.set_project_root(Path::new(r"\\?\C:\workspace\example"))?;
+
+        #[cfg(windows)]
+        let extended = PathBuf::from(format!(r"\\?\{}", root.display()));
+        #[cfg(windows)]
+        store.set_project_root(&extended)?;
+        #[cfg(windows)]
         require_eq(
             &store.project_root()?,
-            &Some("C:/workspace/example".to_string()),
+            &Some(normalize_native_path_display(&root)),
             "windows extended project root metadata",
         )?;
-        let Err(rebind_error) = store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))
-        else {
+        let other = temp.path().join("other");
+        fs::create_dir(&other)?;
+        let Err(rebind_error) = store.set_project_root(&other) else {
             return Err(io::Error::other("project identity was rebound implicitly").into());
         };
         require_eq(
@@ -8937,14 +10086,79 @@ mod tests {
             &true,
             "project identity rebind rejection",
         )?;
+        Ok(())
+    }
 
-        let mut unc_store = AtlasStore::in_memory()?;
-        unc_store.set_project_root(Path::new(r"\\?\UNC\server\share\repo"))?;
-        require_eq(
-            &unc_store.project_root()?,
-            &Some("//server/share/repo".to_string()),
-            "windows unc project root metadata",
+    #[test]
+    fn ordinary_root_admission_rejects_missing_and_regular_paths_without_mutation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root");
+        let missing = temp.path().join("missing-root");
+        let regular = temp.path().join("regular-root");
+        fs::create_dir(&root)?;
+        fs::write(&regular, b"not a directory")?;
+        let database = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+
+        for (label, candidate) in [
+            ("missing", missing.as_path()),
+            ("regular", regular.as_path()),
+        ] {
+            let before = fs::read(&database)?;
+            if AtlasStore::open_for_project(&database, candidate).is_ok() {
+                return Err(
+                    io::Error::other(format!("ordinary {label} root admission succeeded")).into(),
+                );
+            }
+            if fs::read(&database)? != before {
+                return Err(io::Error::other(format!(
+                    "ordinary {label} root admission mutated the database"
+                ))
+                .into());
+            }
+            if verify_project_database(&database, candidate).is_ok() {
+                return Err(
+                    io::Error::other(format!("verify admitted ordinary {label} root")).into(),
+                );
+            }
+            if fs::read(&database)? != before {
+                return Err(io::Error::other(format!(
+                    "verify of ordinary {label} root mutated the database"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_project_root_identity_is_refused_without_mutation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("root");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        drop(AtlasStore::open_for_project(&database, &root)?);
+        let connection = Connection::open(&database)?;
+        connection.execute(
+            "UPDATE project_root_identity SET root = ?1 WHERE singleton = 1",
+            [vec![1_u8, 1_u8, b'x']],
         )?;
+        drop(connection);
+        let before = fs::read(&database)?;
+
+        if AtlasStore::open(&database).is_ok()
+            || AtlasStore::open_for_project(&database, &root).is_ok()
+            || verify_project_database(&database, &root).is_ok()
+        {
+            return Err(io::Error::other("malformed project-root identity was admitted").into());
+        }
+        if fs::read(&database)? != before {
+            return Err(io::Error::other(
+                "malformed project-root identity refusal mutated the database",
+            )
+            .into());
+        }
         Ok(())
     }
 
@@ -8979,6 +10193,11 @@ mod tests {
             "read-only project root",
         )?;
         require_eq(
+            &read_legacy_project_root_candidate_read_only(&db_path)?,
+            &None,
+            "current schema has no legacy recovery candidate",
+        )?;
+        require_eq(
             &fs::read(&db_path)?,
             &database_before,
             "read-only project-root database bytes",
@@ -9008,6 +10227,121 @@ mod tests {
             &read_project_root_read_only(&db_path)?,
             &Some(normalize_native_path_display(&root)),
             "WAL-aware read-only project root",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn validated_write_transaction_revalidates_before_operation_and_rolls_back()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let db_path = temp.path().join("projectatlas.db");
+        let store = AtlasStore::open_for_project(&db_path, &root)?;
+        let expected_identity = store
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let sentinel_key = "validated_write_transaction_test";
+
+        with_validated_write_transaction(
+            &store.connection,
+            store.validated_project_root.as_deref(),
+            Some(expected_identity),
+            |connection| set_metadata(connection, sentinel_key, "committed"),
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"committed".to_string(),
+            "validated write positive control",
+        )?;
+
+        let Err(operation_error) = with_validated_write_transaction(
+            &store.connection,
+            store.validated_project_root.as_deref(),
+            Some(expected_identity),
+            |connection| -> DbResult<()> {
+                set_metadata(connection, sentinel_key, "rolled-back")?;
+                Err(DbError::TelemetryIdentityUnavailable)
+            },
+        ) else {
+            return Err(io::Error::other("failing validated write unexpectedly committed").into());
+        };
+        require_eq(
+            &matches!(operation_error, DbError::TelemetryIdentityUnavailable),
+            &true,
+            "validated write operation error",
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"committed".to_string(),
+            "validated write rollback",
+        )?;
+
+        with_validated_native_write_transaction(
+            &store.connection,
+            store.validated_project_root_identity.as_ref(),
+            Some(expected_identity),
+            |connection| set_metadata(connection, sentinel_key, "native-committed"),
+        )?;
+        require_eq(
+            &store.connection.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"native-committed".to_string(),
+            "native validated write positive control",
+        )?;
+
+        let future_schema = schema::SCHEMA_VERSION + 1;
+        let newer_owner = Connection::open(&db_path)?;
+        newer_owner.execute(
+            "UPDATE metadata SET value = ?2 WHERE key = ?1",
+            params![schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+        )?;
+        let operation_invoked = Cell::new(false);
+        let Err(binding_error) = with_validated_native_write_transaction(
+            &store.connection,
+            store.validated_project_root_identity.as_ref(),
+            Some(expected_identity),
+            |connection| {
+                operation_invoked.set(true);
+                set_metadata(connection, sentinel_key, "wrong-schema")
+            },
+        ) else {
+            return Err(io::Error::other("newer schema accepted a validated write").into());
+        };
+        require_eq(
+            &matches!(
+                binding_error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == schema::SCHEMA_VERSION
+            ),
+            &true,
+            "validated write schema recheck",
+        )?;
+        require_eq(
+            &operation_invoked.get(),
+            &false,
+            "validated write closure invocation",
+        )?;
+        require_eq(
+            &newer_owner.query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [sentinel_key],
+                |row| row.get::<_, String>(0),
+            )?,
+            &"native-committed".to_string(),
+            "newer-schema sentinel value",
         )?;
         Ok(())
     }
@@ -9046,6 +10380,174 @@ mod tests {
             &current.token_overview(Some("identity-race"))?.calls,
             &0,
             "telemetry refused after identity replacement",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_recovery_requires_native_identity_before_telemetry_write()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir_all(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let event = usage_from_estimates(
+            "rooted-telemetry",
+            "summary",
+            Some("src/lib.rs".to_string()),
+            None,
+            100,
+            20,
+        );
+        let rooted_instance = UsageInstanceId::from_bytes([7; 16])?;
+        let native_root_row;
+        {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            native_root_row = store.connection.query_row(
+                "SELECT codec_version, root
+                   FROM project_root_identity
+                  WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?;
+            store.record_usage(&event)?;
+            store.record_usage_for_instance(
+                rooted_instance,
+                UsageInstanceOwner::LibraryHandle,
+                &event,
+                false,
+            )?;
+            store.seal_usage_instance(rooted_instance)?;
+            require_eq(
+                &store.token_overview(Some("rooted-telemetry"))?.calls,
+                &2,
+                "rooted telemetry positive write",
+            )?;
+            store
+                .connection
+                .execute("DELETE FROM project_root_identity", [])?;
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+
+        let file_snapshot = || -> Result<BTreeMap<std::ffi::OsString, Vec<u8>>, io::Error> {
+            let mut files = BTreeMap::new();
+            for entry in fs::read_dir(temp.path())? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    files.insert(entry.file_name(), fs::read(entry.path())?);
+                }
+            }
+            Ok(files)
+        };
+        let reader = AtlasStore::open_read_only(&database)?;
+        require_eq(
+            &reader.project_root_identity()?,
+            &None,
+            "rootless recovery has no native identity",
+        )?;
+        require_eq(
+            &reader.validated_project_instance_id.is_some(),
+            &true,
+            "rootless recovery retains project identity",
+        )?;
+        require_eq(
+            &reader.project_root()?,
+            &Some(normalize_native_path_display(&root)),
+            "rootless recovery retains legacy display root",
+        )?;
+        let overview_before = reader.token_overview(Some("rooted-telemetry"))?;
+        let files_before = file_snapshot()?;
+
+        let missing_root_event = usage_from_estimates(
+            "rootless-telemetry",
+            "summary",
+            Some("src/main.rs".to_string()),
+            None,
+            80,
+            20,
+        );
+        let Err(error) = reader.record_usage(&missing_root_event) else {
+            return Err(io::Error::other("rootless recovery recorded direct telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless direct telemetry refusal",
+        )?;
+
+        let Err(error) = reader.record_usage_for_instance(
+            UsageInstanceId::from_bytes([8; 16])?,
+            UsageInstanceOwner::LibraryHandle,
+            &missing_root_event,
+            false,
+        ) else {
+            return Err(io::Error::other("rootless recovery recorded instance telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless instance telemetry refusal",
+        )?;
+
+        let Err(error) = reader.record_usage_for_worktree_instance(
+            UsageInstanceId::from_bytes([9; 16])?,
+            UsageInstanceOwner::McpProcess,
+            1,
+            &missing_root_event,
+            false,
+        ) else {
+            return Err(io::Error::other("rootless recovery recorded worktree telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless worktree telemetry refusal",
+        )?;
+
+        let Err(error) = reader.seal_usage_instance(UsageInstanceId::from_bytes([10; 16])?) else {
+            return Err(io::Error::other("rootless recovery sealed telemetry").into());
+        };
+        require_eq(
+            &matches!(error, DbError::ProjectRootIdentityMissing),
+            &true,
+            "rootless seal telemetry refusal",
+        )?;
+
+        require_eq(
+            &reader.token_overview(Some("rooted-telemetry"))?,
+            &overview_before,
+            "rootless telemetry rows remain unchanged",
+        )?;
+        require_eq(
+            &file_snapshot()?,
+            &files_before,
+            "rootless telemetry files remain unchanged",
+        )?;
+        drop(reader);
+
+        let repair = Connection::open(&database)?;
+        schema::configure_writable(&repair)?;
+        repair.execute(
+            "INSERT INTO project_root_identity(singleton, codec_version, root)
+             VALUES(1, ?1, ?2)",
+            params![native_root_row.0, native_root_row.1],
+        )?;
+        drop(repair);
+        let repaired = AtlasStore::open_for_project(&database, &root)?;
+        repaired.record_usage(&usage_from_estimates(
+            "repaired-telemetry",
+            "summary",
+            None,
+            None,
+            60,
+            20,
+        ))?;
+        require_eq(
+            &repaired.token_overview(Some("repaired-telemetry"))?.calls,
+            &1,
+            "repaired telemetry retry",
         )?;
         Ok(())
     }
@@ -9269,6 +10771,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("gradle-kotlin-dsl-task".to_string()),
@@ -10467,10 +11970,61 @@ mod tests {
         )?;
         let texts = store.load_file_texts_for_search(Some("needle"), true)?;
         require_eq(&texts.len(), &1, "indexed text row count")?;
+        require_eq(
+            &store.load_file_text("src/main.rs")?,
+            &texts.first().cloned(),
+            "initial persisted-text read",
+        )?;
 
         store.replace_file_texts_for_paths(&["src/main.rs".to_string()], &[])?;
         let missing = store.load_file_text("src/main.rs")?;
         require_eq(&missing.is_none(), &true, "cleared stale indexed text")?;
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_text_candidates_preserve_unicode_folding_and_early_stop()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let paths = ["src/a.rs".to_string(), "src/b.rs".to_string()];
+        store.replace_scan(&[
+            test_file_node(&paths[0], "hash-a"),
+            test_file_node(&paths[1], "hash-b"),
+        ])?;
+        let content = "für \u{212a}elvin ſource\n";
+        let texts = paths
+            .iter()
+            .map(|path| IndexedFileText {
+                path: path.clone(),
+                content_hash: None,
+                byte_count: content.len(),
+                line_count: 1,
+                content: content.to_string(),
+            })
+            .collect::<Vec<_>>();
+        store.replace_file_texts_for_paths(&paths, &texts)?;
+        for pattern in ["FÜR", "kelvin", "source"] {
+            let mut visited = Vec::new();
+            store.visit_file_texts_for_search(Some(pattern), false, |text| {
+                visited.push(text.path);
+                Ok(false)
+            })?;
+            require_eq(
+                &visited,
+                &vec![paths[0].clone()],
+                "Unicode candidate early stop",
+            )?;
+            require_eq(
+                &store.load_file_texts_for_search(Some(pattern), true)?.len(),
+                &0,
+                "case-sensitive candidate filter",
+            )?;
+        }
+        require_eq(
+            &store.load_file_texts_for_search(Some("für"), true)?.len(),
+            &2,
+            "exact substring candidates",
+        )?;
         Ok(())
     }
 
@@ -10829,6 +12383,11 @@ mod tests {
             std::slice::from_ref(&replacement),
         )?;
         require_eq(
+            &store.load_file_text(&replacement.path)?,
+            &Some(replacement.clone()),
+            "replacement read after repeated hydration",
+        )?;
+        require_eq(
             &store
                 .query_file_text_fts_candidates(
                     &FileTextFtsQuery {
@@ -10942,6 +12501,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
     fn file_text_fts_migration_backfills_existing_text_and_survives_reopen()
     -> Result<(), Box<dyn Error>> {
@@ -10961,7 +12521,22 @@ mod tests {
                 content: "migration needle\n".to_string(),
             }],
         )?;
-        store.connection.execute_batch("DROP TABLE file_text_fts")?;
+        store.connection.execute_batch(
+            "DROP TABLE file_content_classifications;
+             DROP INDEX idx_nodes_path_kind;
+             DROP TABLE usage_instance_worktree_origins;
+             DROP TABLE worktree_usage_aggregates;
+             DROP TABLE worktree_registrations;
+             DROP TABLE usage_aggregate_revisions;
+             DROP TABLE project_root_identity;
+             DROP TABLE IF EXISTS graph_identity_rejections;",
+        )?;
+        crate::schema::recreate_disposable_graph_projection(&store.connection, false)?;
+        crate::schema::recreate_pre_selector_symbol_storage_for_test(&store.connection)?;
+        store.connection.execute_batch(
+            "DROP INDEX idx_symbol_import_alias_lookup;
+             DROP TABLE file_text_fts;",
+        )?;
         store.connection.execute(
             "DELETE FROM metadata WHERE key IN (?1, ?2)",
             params![
@@ -11164,10 +12739,12 @@ mod tests {
                 content: "needle good\n".to_string(),
             }],
         )?;
-        store.connection.execute(
-            "INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
-             VALUES('src/bad.rs', 'hash-bad', 1, 1, x'80')",
-            [],
+        store.connection.execute_batch(
+            "INSERT INTO nodes(path, kind, exists_now) VALUES('src/bad.rs', 'file', 1);
+             INSERT INTO file_content_classifications(path, classification)
+                VALUES('src/bad.rs', 'source');
+             INSERT INTO file_texts(path, content_hash, byte_count, line_count, content)
+                VALUES('src/bad.rs', 'hash-bad', 1, 1, x'80');",
         )?;
 
         let mut admitted = Vec::new();
@@ -11176,7 +12753,7 @@ mod tests {
             Some("src"),
             None,
             |metadata| {
-                admitted.push(metadata.path.clone());
+                admitted.push((metadata.path.clone(), metadata.classification));
                 Ok(if metadata.path == "src/bad.rs" {
                     FileTextAdmission::Skip
                 } else {
@@ -11190,7 +12767,10 @@ mod tests {
         )?;
         require_eq(
             &admitted,
-            &vec!["src/bad.rs".to_string(), "src/good.rs".to_string()],
+            &vec![
+                ("src/bad.rs".to_string(), ContentClassification::Source),
+                ("src/good.rs".to_string(), ContentClassification::Opaque),
+            ],
             "fallback metadata admission rows",
         )?;
         require_eq(
@@ -11209,10 +12789,13 @@ mod tests {
         require(
             scoped_plan_details
                 .iter()
-                .any(|detail| detail.contains("SEARCH file_texts USING INDEX"))
-                && scoped_plan_details
-                    .iter()
-                    .all(|detail| !detail.contains("SCAN file_texts")),
+                .any(|detail| detail.contains("sqlite_autoindex_file_texts_1"))
+                && scoped_plan_details.iter().any(|detail| {
+                    detail.contains("sqlite_autoindex_file_content_classifications_1")
+                })
+                && scoped_plan_details.iter().all(|detail| {
+                    !detail.contains("SCAN text") && !detail.contains("SCAN classification")
+                }),
             "path-scoped fallback did not use bounded binary index ranges",
         )?;
         let mut scoped_opcodes = store
@@ -11220,14 +12803,31 @@ mod tests {
             .prepare(&format!("EXPLAIN {FILE_TEXT_FALLBACK_SCOPED_METADATA_SQL}"))?;
         let scoped_opcode_rows = scoped_opcodes
             .query_map(params!["src", "src/", "src0"], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let file_text_table_cursors = scoped_opcode_rows
+            .iter()
+            .filter(|(opcode, _, _, shape)| opcode == "DeferredSeek" && shape.is_some())
+            .map(|(_, _, table_cursor, _)| *table_cursor)
+            .collect::<Vec<_>>();
         require(
-            scoped_opcode_rows
-                .iter()
-                .all(|(opcode, column)| opcode != "Column" || *column != 4),
-            "fallback metadata cursor read source content before admission",
+            !file_text_table_cursors.is_empty()
+                && scoped_opcode_rows
+                    .iter()
+                    .all(|(opcode, cursor, column, _)| {
+                        opcode != "Column"
+                            || !file_text_table_cursors.contains(cursor)
+                            || *column != 4
+                    }),
+            &format!(
+                "fallback metadata cursor read source content before admission: {scoped_opcode_rows:?}"
+            ),
         )?;
         require(
             store
@@ -11321,6 +12921,23 @@ mod tests {
                 }))
             ),
             "FTS deadline was not typed",
+        )?;
+        store.connection.execute(
+            "DELETE FROM file_content_classifications WHERE path = 'src/good.rs'",
+            [],
+        )?;
+        let missing_classification = store.visit_file_texts_for_fallback(
+            Some("src/good.rs"),
+            None,
+            |_| Ok(FileTextAdmission::Read),
+            |_| Ok(true),
+        );
+        require(
+            matches!(
+                missing_classification,
+                Err(DbError::FileContentClassificationMissing { .. })
+            ),
+            "fallback omitted a text row whose predecode classification was missing",
         )?;
         Ok(())
     }
@@ -11561,6 +13178,36 @@ mod tests {
             "explicit accepted-purpose correction",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn explicit_purpose_rollback_reports_storage_failure() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("project");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node("source.rs", "hash")])?;
+        let before_revision = store.authored_purpose_revision()?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose("source.rs", "Rejected purpose", PurposeSource::Agent)?;
+        store.connection.execute_batch("ROLLBACK")?;
+
+        require(
+            matches!(transaction.rollback(), Err(DbError::Sqlite(_))),
+            "explicit purpose rollback suppressed its SQLite failure",
+        )?;
+        require_eq(
+            &store.authored_purpose_revision()?,
+            &before_revision,
+            "manually rolled-back purpose revision",
+        )?;
+        require(
+            store
+                .load_node_by_path("source.rs")?
+                .is_none_or(|node| node.purpose.purpose.as_deref() != Some("Rejected purpose")),
+            "manual rollback retained the rejected purpose",
+        )
     }
 
     #[test]
@@ -12034,6 +13681,7 @@ mod tests {
                 documentation: Some("Run the application.".to_string()),
                 line_start: 1,
                 line_end: 3,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("function_item".to_string()),
@@ -12067,6 +13715,388 @@ mod tests {
             &Some("Run the application.".to_string()),
             "documentation metadata",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_source_selectors_round_trip_all_read_paths_and_reopen() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repository");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("projectatlas.db");
+        let path = "docs/guide.md";
+        let expected = SymbolSourceSelector {
+            byte_start: 17,
+            byte_end: 31,
+            column_start: 4,
+            column_end: 2,
+        };
+        let graph = SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![
+                CodeSymbol {
+                    path: path.to_string(),
+                    language: Some("markdown".to_string()),
+                    name: "Overview".to_string(),
+                    kind: SymbolKind::Heading,
+                    signature: "overview#1".to_string(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 2,
+                    line_end: 3,
+                    source_selector: Some(expected),
+                    parent: None,
+                    parser: ParserKind::Structural,
+                    detail: Some("level=2".to_string()),
+                },
+                CodeSymbol {
+                    path: path.to_string(),
+                    language: Some("markdown".to_string()),
+                    name: "Compatibility".to_string(),
+                    kind: SymbolKind::Heading,
+                    signature: "compatibility#1".to_string(),
+                    exported: false,
+                    documentation: None,
+                    line_start: 6,
+                    line_end: 6,
+                    source_selector: None,
+                    parent: None,
+                    parser: ParserKind::Structural,
+                    detail: Some("level=2".to_string()),
+                },
+            ],
+            relations: Vec::new(),
+        };
+
+        let mut store = AtlasStore::open_for_project(&database, &root)?;
+        store.replace_scan(&[test_file_node(path, "guide-hash")])?;
+        store.replace_symbol_graph(&graph)?;
+        let mut publication = store.begin_index_publication("symbol-source-selectors")?;
+        publication.upsert_file_content_classification_batch(&[FileContentClassification {
+            path: path.to_string(),
+            classification: ContentClassification::Documentation,
+        }])?;
+        publication.complete()?;
+        verify_symbol_source_selector_read_paths(&store, path, expected)?;
+        drop(store);
+
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        verify_symbol_source_selector_read_paths(&reopened, path, expected)?;
+        drop(reopened);
+
+        let read_only = AtlasStore::open_read_only_for_project(&database, &root)?;
+        verify_symbol_source_selector_read_paths(&read_only, path, expected)?;
+        read_only.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_source_selector_constraints_and_corrupt_reads_fail_closed()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let path = "docs/guide.md";
+        store.replace_symbol_graph(&SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![CodeSymbol {
+                path: path.to_string(),
+                language: Some("markdown".to_string()),
+                name: "Overview".to_string(),
+                kind: SymbolKind::Heading,
+                signature: "overview#1".to_string(),
+                exported: false,
+                documentation: None,
+                line_start: 2,
+                line_end: 2,
+                source_selector: None,
+                parent: None,
+                parser: ParserKind::Structural,
+                detail: None,
+            }],
+            relations: Vec::new(),
+        })?;
+
+        for invalid_update in [
+            "UPDATE symbols SET source_byte_start = 0 WHERE path = 'docs/guide.md'",
+            "UPDATE symbols SET source_byte_start = -1, source_byte_end = 4,
+                                source_column_start = 0, source_column_end = 4
+              WHERE path = 'docs/guide.md'",
+            "UPDATE symbols SET source_byte_start = 5, source_byte_end = 4,
+                                source_column_start = 0, source_column_end = 4
+              WHERE path = 'docs/guide.md'",
+            "UPDATE symbols SET source_byte_start = 0, source_byte_end = 4,
+                                source_column_start = 5, source_column_end = 4
+              WHERE path = 'docs/guide.md'",
+        ] {
+            require(
+                store.connection.execute(invalid_update, []).is_err(),
+                "invalid source selector bypassed its table constraint",
+            )?;
+        }
+        store.connection.execute(
+            "UPDATE symbols
+                SET source_byte_start = 0, source_byte_end = 4,
+                    source_column_start = 0, source_column_end = 4
+              WHERE path = ?1",
+            [path],
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols(Some(path), None, 10)?,
+            Some(SymbolSourceSelector {
+                byte_start: 0,
+                byte_end: 4,
+                column_start: 0,
+                column_end: 4,
+            }),
+            "valid constrained selector",
+        )?;
+
+        store.connection.execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE symbols
+                SET source_byte_start = 0, source_byte_end = NULL,
+                    source_column_start = 0, source_column_end = 4
+              WHERE path = 'docs/guide.md';
+             PRAGMA ignore_check_constraints = OFF;",
+        )?;
+        let corrupt = store.load_symbols(Some(path), None, 10);
+        require(
+            matches!(corrupt, Err(DbError::Sqlite(_))),
+            "partially populated source selector did not fail closed",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_source_selector_write_failure_rolls_back_graph() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let path = "docs/guide.md";
+        let previous = SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![batch_test_symbol(path, "previous", 1, 0)],
+            relations: Vec::new(),
+        };
+        store.replace_symbol_graph(&previous)?;
+
+        let mut valid = batch_test_symbol(path, "valid", 2, 0);
+        valid.source_selector = Some(SymbolSourceSelector {
+            byte_start: 4,
+            byte_end: 9,
+            column_start: 0,
+            column_end: 5,
+        });
+        let mut invalid = batch_test_symbol(path, "invalid", 3, 0);
+        invalid.source_selector = Some(SymbolSourceSelector {
+            byte_start: 12,
+            byte_end: 11,
+            column_start: 0,
+            column_end: 5,
+        });
+        let replacement = SymbolGraph {
+            path: path.to_string(),
+            language: Some("markdown".to_string()),
+            parser: ParserKind::Structural,
+            symbols: vec![valid, invalid],
+            relations: Vec::new(),
+        };
+        let Err(error) = store.replace_symbol_graph(&replacement) else {
+            return Err(io::Error::other("invalid selector replacement committed").into());
+        };
+        require(
+            matches!(error, DbError::SymbolGraphRowShape { .. }),
+            "invalid selector replacement returned the wrong error",
+        )?;
+        require_eq(
+            &store.load_symbol_graphs_for_paths(&[path.to_string()])?,
+            &vec![previous],
+            "selector failure transaction rollback",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn classified_symbol_list_filters_before_limit_and_preserves_legacy_order()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let classified_paths = [
+            (
+                "config/first.toml",
+                ContentClassification::ConfigurationData,
+            ),
+            ("docs/guide.md", ContentClassification::Documentation),
+            ("other/notes.txt", ContentClassification::OtherText),
+            ("src/lib.rs", ContentClassification::Source),
+            ("src/second.rs", ContentClassification::Source),
+        ];
+        let nodes = classified_paths
+            .iter()
+            .enumerate()
+            .map(|(index, (path, _))| test_file_node(path, &format!("hash-{index}")))
+            .collect::<Vec<_>>();
+        store.replace_scan(&nodes)?;
+        for (index, (path, _)) in classified_paths.iter().enumerate() {
+            store.replace_symbol_graph(&SymbolGraph {
+                path: (*path).to_string(),
+                language: Some("rust".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: vec![batch_test_symbol(path, &format!("needle_{index}"), 1, 0)],
+                relations: Vec::new(),
+            })?;
+        }
+        let classifications = classified_paths
+            .iter()
+            .map(|(path, classification)| FileContentClassification {
+                path: (*path).to_string(),
+                classification: *classification,
+            })
+            .collect::<Vec<_>>();
+        let mut publication = store.begin_index_publication("classified-symbol-list")?;
+        publication.upsert_file_content_classification_batch(&classifications)?;
+        publication.complete()?;
+
+        for (file, query, limit) in [
+            (None, None, 3),
+            (None, Some("needle"), 3),
+            (Some("src/second.rs"), None, 10),
+            (Some("src/second.rs"), Some("needle_4"), 10),
+            (Some("src/second.rs"), Some("second"), 10),
+            (None, None, 0),
+        ] {
+            let legacy = store.load_symbols(file, query, limit)?;
+            let classified = store.load_classified_symbols(
+                file,
+                query,
+                ContentSelection::UnspecifiedLegacy,
+                limit,
+            )?;
+            require_eq(
+                &classified
+                    .into_iter()
+                    .map(|row| row.symbol)
+                    .collect::<Vec<_>>(),
+                &legacy,
+                "omitted classified symbol candidates and order",
+            )?;
+        }
+        let omitted = store.load_classified_symbols(
+            None,
+            Some("needle"),
+            ContentSelection::UnspecifiedLegacy,
+            3,
+        )?;
+        require_eq(
+            &omitted
+                .iter()
+                .map(|row| row.classification)
+                .collect::<Vec<_>>(),
+            &vec![
+                ContentClassification::ConfigurationData,
+                ContentClassification::Documentation,
+                ContentClassification::OtherText,
+            ],
+            "additive legacy classifications",
+        )?;
+
+        let source =
+            store.load_classified_symbols(None, Some("needle"), ContentSelection::Source, 1)?;
+        require_eq(
+            &source.first().map(|row| row.symbol.path.as_str()),
+            &Some("src/lib.rs"),
+            "source selection before limit",
+        )?;
+        let documentation = store.load_classified_symbols(
+            None,
+            Some("needle"),
+            ContentSelection::Documentation,
+            1,
+        )?;
+        require_eq(
+            &documentation.first().map(|row| row.symbol.path.as_str()),
+            &Some("docs/guide.md"),
+            "documentation selection before limit",
+        )?;
+        let both =
+            store.load_classified_symbols(None, Some("needle"), ContentSelection::Both, 2)?;
+        require_eq(
+            &both
+                .iter()
+                .map(|row| row.symbol.path.as_str())
+                .collect::<Vec<_>>(),
+            &vec!["docs/guide.md", "src/lib.rs"],
+            "combined selection order",
+        )?;
+        let file_query = store.load_classified_symbols(
+            Some("src/second.rs"),
+            Some("needle_4"),
+            ContentSelection::Source,
+            10,
+        )?;
+        require_eq(&file_query.len(), &1, "file/query classified symbol filter")?;
+        Ok(())
+    }
+
+    #[test]
+    fn classified_symbol_list_rejects_missing_owner_and_uses_existing_indexes()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/lib.rs", "hash")])?;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "src/lib.rs".to_string(),
+            language: Some("rust".to_string()),
+            parser: ParserKind::TreeSitter,
+            symbols: vec![batch_test_symbol("src/lib.rs", "needle", 1, 0)],
+            relations: Vec::new(),
+        })?;
+
+        for selection in [
+            ContentSelection::UnspecifiedLegacy,
+            ContentSelection::Source,
+            ContentSelection::Both,
+        ] {
+            let (sql, bindings) = classified_symbols_sql(None, Some("needle"), selection, 1);
+            let mut statement = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let plan = statement
+                .query_map(params_from_iter(bindings.iter()), |row| {
+                    row.get::<_, String>(3)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            require(
+                plan.contains("idx_symbols_path")
+                    && plan.contains("sqlite_autoindex_file_content_classifications_1")
+                    && !plan.contains("SCAN classification"),
+                &format!("classified symbol query missed existing indexes: {plan}"),
+            )?;
+        }
+
+        store.connection.execute(
+            "DELETE FROM file_content_classifications WHERE path = 'src/lib.rs'",
+            [],
+        )?;
+        for selection in [
+            ContentSelection::UnspecifiedLegacy,
+            ContentSelection::Source,
+            ContentSelection::Both,
+        ] {
+            let Err(error) = store.load_classified_symbols(Some("src/lib.rs"), None, selection, 10)
+            else {
+                return Err(
+                    io::Error::other("symbol without a file classification was accepted").into(),
+                );
+            };
+            require(
+                matches!(error, DbError::FileContentClassificationMissing { .. }),
+                "missing symbol classification returned the wrong error",
+            )?;
+        }
         Ok(())
     }
 
@@ -12137,7 +14167,9 @@ mod tests {
         for sql in [
             "EXPLAIN QUERY PLAN
              SELECT path, language, name, kind, signature, line_start, line_end,
-                    parent, parser, detail, exported, documentation
+                    parent, parser, detail, exported, documentation,
+                    source_byte_start, source_byte_end,
+                    source_column_start, source_column_end
              FROM symbols INDEXED BY idx_symbols_path
              WHERE path = 'src/lib.rs' AND kind IN ('function')
              ORDER BY path, line_start, name
@@ -12179,6 +14211,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::Fallback,
                 detail: None,
@@ -12310,6 +14343,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 2,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("function_item".to_string()),
@@ -12385,6 +14419,89 @@ mod tests {
         if !matches!(error, DbError::SymbolGraphRowShape { .. }) {
             return Err(io::Error::other(format!(
                 "metadata count corruption returned the wrong error: {error}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_symbol_batch_omits_document_coverage_before_limits() -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("docs/partial.docx", "hash-docx")])?;
+        let mut symbol = batch_test_symbol("docs/partial.docx", "document-symbol-1", 2, 0);
+        symbol.language = Some("docx".to_owned());
+        symbol.kind = SymbolKind::Value;
+        symbol.parser = ParserKind::Structural;
+        let mut coverage = batch_test_symbol("docs/partial.docx", "document-text-coverage", 1, 0);
+        coverage.language = Some("docx".to_owned());
+        coverage.kind = SymbolKind::Unknown;
+        coverage.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "docs/partial.docx".to_owned(),
+            language: Some("docx".to_owned()),
+            parser: ParserKind::Structural,
+            symbols: vec![coverage, symbol],
+            relations: Vec::new(),
+        })?;
+        let result = store.load_symbols_for_paths_bounded(
+            &["docs/partial.docx".to_owned()],
+            SymbolBatchReadBudget::new(1, 1, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+            None,
+        )?;
+        require_eq(&result.rows.len(), &1, "only the real document symbol")?;
+        require_eq(
+            &result.rows[0].name.as_str(),
+            &"document-symbol-1",
+            "visible row",
+        )?;
+        require_eq(
+            &result.reached_limit,
+            &None,
+            "coverage does not consume row budget",
+        )?;
+        let exact_bytes = store.load_symbols_for_paths_bounded(
+            &["docs/partial.docx".to_owned()],
+            SymbolBatchReadBudget::new(1, 1, result.work.decoded_bytes)?,
+            None,
+        )?;
+        require_eq(&exact_bytes.rows.len(), &1, "exact real-symbol byte budget")?;
+        require_eq(
+            &exact_bytes.reached_limit,
+            &None,
+            "coverage does not consume byte budget",
+        )?;
+        require_eq(
+            &store.max_symbol_end_line_for_path("docs/partial.docx")?,
+            &3,
+            "coverage marker does not affect the maximum real line",
+        )?;
+        let mut coverage_only =
+            batch_test_symbol("docs/partial.docx", "document-text-coverage", 1, 0);
+        coverage_only.language = Some("docx".to_owned());
+        coverage_only.kind = SymbolKind::Unknown;
+        coverage_only.parser = ParserKind::Structural;
+        store.replace_symbol_graph(&SymbolGraph {
+            path: "docs/partial.docx".to_owned(),
+            language: Some("docx".to_owned()),
+            parser: ParserKind::Structural,
+            symbols: vec![coverage_only],
+            relations: Vec::new(),
+        })?;
+        require_eq(
+            &store.max_symbol_end_line_for_path("docs/partial.docx")?,
+            &0,
+            "coverage-only documents have no inferred rendered lines",
+        )?;
+        let plan = store
+            .connection
+            .prepare("EXPLAIN QUERY PLAN SELECT path FROM symbols WHERE path IN ('docs/partial.docx') AND NOT (language IN ('docx', 'pdf') AND kind = 'unknown' AND name = 'document-text-coverage')")?
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        if !plan.contains("idx_symbols_path") {
+            return Err(io::Error::other(format!(
+                "bounded document symbols missed the path index: {plan}"
             ))
             .into());
         }
@@ -12608,6 +14725,10 @@ mod tests {
                  detail,
                  exported,
                  documentation,
+                 source_byte_start,
+                 source_byte_end,
+                 source_column_start,
+                 source_column_end,
                  length(CAST(path AS BLOB))
                      + COALESCE(length(CAST(language AS BLOB)), 0)
                      + length(CAST(name AS BLOB))
@@ -12888,6 +15009,7 @@ mod tests {
     }
 
     /// Write evolved released schema-8 source, authored, telemetry, and publication state.
+    #[cfg(windows)]
     fn write_evolved_released_schema_eight_compatibility_fixture(
         db_path: &Path,
         root: &Path,
@@ -12987,6 +15109,23 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::open(db_path)?;
         store.set_project_root(root)?;
+        populate_schema_compatibility_fixture(&mut store, label)?;
+        set_metadata(
+            &store.connection,
+            SCHEMA_VERSION_KEY,
+            &schema_version.to_string(),
+        )?;
+        store
+            .connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
+    /// Populate representative source, authored, telemetry, and publication state.
+    pub(crate) fn populate_schema_compatibility_fixture(
+        store: &mut AtlasStore,
+        label: &str,
+    ) -> Result<(), Box<dyn Error>> {
         {
             let mut publication = store.begin_index_publication("untrusted-contract")?;
             write_test_projection(&mut publication, label)?;
@@ -13018,14 +15157,6 @@ mod tests {
             20,
         ))?;
         set_metadata(&store.connection, "custom_setting", "preserved")?;
-        set_metadata(
-            &store.connection,
-            SCHEMA_VERSION_KEY,
-            &schema_version.to_string(),
-        )?;
-        store
-            .connection
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
 
@@ -13060,10 +15191,103 @@ mod tests {
             documentation: Some("d".repeat(documentation_bytes)),
             line_start,
             line_end: line_start.saturating_add(1),
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: Some("function_item".to_string()),
         }
+    }
+
+    /// Assert the exact selector on the heading row and the legacy row remains absent.
+    fn require_symbol_source_selectors(
+        symbols: &[CodeSymbol],
+        expected: Option<SymbolSourceSelector>,
+        context: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let heading = symbols
+            .iter()
+            .find(|symbol| symbol.name == "Overview")
+            .ok_or_else(|| io::Error::other(format!("{context} omitted the heading symbol")))?;
+        require_eq(&heading.source_selector, &expected, context)?;
+        if let Some(compatibility) = symbols.iter().find(|symbol| symbol.name == "Compatibility") {
+            require_eq(
+                &compatibility.source_selector,
+                &None,
+                &format!("{context} changed the selector-free symbol"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Exercise every DB-owned symbol row decoder against one persisted selector.
+    fn verify_symbol_source_selector_read_paths(
+        store: &AtlasStore,
+        path: &str,
+        expected: SymbolSourceSelector,
+    ) -> Result<(), Box<dyn Error>> {
+        require_symbol_source_selectors(
+            &store.load_symbols(Some(path), None, 10)?,
+            Some(expected),
+            "symbol list",
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols_by_kinds(path, &[SymbolKind::Heading], 10)?,
+            Some(expected),
+            "kind-filtered symbols",
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols_by_names(&["Overview".to_string()])?,
+            Some(expected),
+            "name-filtered symbols",
+        )?;
+        let named = store
+            .load_symbol_by_name(path, "Overview")?
+            .ok_or_else(|| io::Error::other("exact-name symbol lookup omitted the heading"))?;
+        require_eq(
+            &named.source_selector,
+            &Some(expected),
+            "single exact-name symbol",
+        )?;
+        require_symbol_source_selectors(
+            &store.load_symbols_by_exact_file_and_name(path, "Overview")?,
+            Some(expected),
+            "exact-file-and-name symbols",
+        )?;
+        require_symbol_source_selectors(
+            &store
+                .load_symbols_for_paths_bounded(
+                    &[path.to_string()],
+                    SymbolBatchReadBudget::new(1, 10, MAX_SYMBOL_BATCH_DECODED_BYTES)?,
+                    None,
+                )?
+                .rows,
+            Some(expected),
+            "bounded exact-path symbols",
+        )?;
+        let classified =
+            store.load_classified_symbols(Some(path), None, ContentSelection::Documentation, 10)?;
+        require(
+            classified
+                .iter()
+                .all(|row| row.classification == ContentClassification::Documentation),
+            "classified symbol read changed the owning file classification",
+        )?;
+        require_symbol_source_selectors(
+            &classified
+                .into_iter()
+                .map(|row| row.symbol)
+                .collect::<Vec<_>>(),
+            Some(expected),
+            "classified symbols",
+        )?;
+        let graphs = store.load_symbol_graphs_for_paths(&[path.to_string()])?;
+        require_eq(&graphs.len(), &1, "reconstructed graph count")?;
+        require_symbol_source_selectors(
+            &graphs[0].symbols,
+            Some(expected),
+            "reconstructed symbol graph",
+        )?;
+        Ok(())
     }
 
     /// Copy one selected queue candidate into the public conditional-write contract.
@@ -13110,6 +15334,7 @@ mod tests {
                 documentation: None,
                 line_start: 1,
                 line_end: 1,
+                source_selector: None,
                 parent: None,
                 parser: ParserKind::TreeSitter,
                 detail: Some("function_item".to_string()),
@@ -13217,9 +15442,9 @@ mod tests {
     /// Assert the bounded contention wait shared by ordinary connections.
     fn require_busy_timeout(connection: &Connection) -> Result<(), Box<dyn Error>> {
         let busy_timeout =
-            connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))?;
+            connection.pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))?;
         require_eq(
-            &u128::from(busy_timeout),
+            &u128::try_from(busy_timeout)?,
             &SQLITE_BUSY_TIMEOUT.as_millis(),
             "bounded connection busy timeout",
         )

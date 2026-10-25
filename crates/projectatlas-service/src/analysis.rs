@@ -7,8 +7,17 @@ mod analysis_test_observer {
     use std::cell::RefCell;
 
     /// Named production phase reached by one synchronous analysis request.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     pub(super) enum AnalysisPhaseEvent {
+        /// Exact byte ledger passed to the architecture community projection.
+        CompositionBudget {
+            /// Remaining bytes handed to architecture findings.
+            symbol_byte_budget: u64,
+            /// Existing architecture findings' append charge.
+            existing_finding_append_bytes: u64,
+            /// Remaining bytes handed to community findings.
+            community_budget: u64,
+        },
         /// Induced relationship closure is about to traverse its first bounded frontier.
         Traversal,
         /// Admitted symbol hydration is about to enter bounded storage work.
@@ -17,6 +26,35 @@ mod analysis_test_observer {
         Composition,
         /// Optional dead-code candidate discovery has entered complete-scope work.
         DeadCodeDiscovery,
+        /// One bounded candidate-classification batch is about to run.
+        ClassificationHydration,
+        /// One bounded candidate relation traversal is about to run.
+        CandidateTraversal,
+        /// One candidate relation report has returned its typed truncation state.
+        CandidateReport {
+            /// Whether the candidate report has a resumable continuation.
+            has_continuation: bool,
+            /// Whether the candidate report reached the edge limit.
+            has_edges_limit: bool,
+        },
+        /// Terminal adjacency was probed before its generation was rechecked.
+        TerminalProbe,
+        /// Occurrence evidence was probed before its generation was rechecked.
+        OccurrenceProbe,
+        /// The occurrence evidence query was about to validate its generation.
+        OccurrenceProbeBeforeRead,
+        /// Terminal candidate coverage was loaded before its generation was rechecked.
+        TerminalCandidateCoverageProbe {
+            /// Aggregate relation work retained after the coverage batch.
+            intermediate_bytes: u64,
+        },
+        /// The repository-wide candidate entity page is about to run.
+        CandidateEntityHydration {
+            /// Intermediate bytes left after relation traversal.
+            remaining_intermediate_bytes: u64,
+        },
+        /// The repository-wide candidate page has been reduced to exact candidates.
+        CandidateEnumeration,
         /// Adapter-specific output fitting has begun under the retained request control.
         OutputRendering,
     }
@@ -63,43 +101,72 @@ mod analysis_test_observer {
     }
 }
 
+#[cfg(test)]
+use super::relations::classification_path;
 use super::relations::{
-    ExternalRelationIdentity, external_relation_identities, load_detailed_relations,
+    ExternalRelationIdentity, external_relation_identities, hydrate_single_detailed_node,
+    load_detailed_relations, resolve_relation_anchor_for_analysis,
 };
 use super::{
-    DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery, DetailedRelationReport,
-    DetailedRelationWork, RelationAnchor, RelationDirection, RelationNextCall, RelationPurpose,
-    RelationResolutionFilter, RelationTotalState, ServiceError, ServiceResult,
-    selected_project_binding,
+    CoverageTrustState, DetailedRelationBudget, DetailedRelationNode, DetailedRelationQuery,
+    DetailedRelationReport, DetailedRelationRow, DetailedRelationWork, RelationAnchor,
+    RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
+    RelationTotalState, ServiceError, ServiceResult, coverage_trust, selected_project_binding,
 };
 use impact::{LoadedVcs, digest_vcs_paths, impact_findings, load_vcs_paths};
 use projectatlas_core::graph::{
-    Completeness, ConfidenceClass, CoverageState, EntitySelector, ExtendedRelationKind,
-    GraphEntity, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
-    ProjectInstanceId, RelationResolution,
+    Completeness, ConfidenceClass, CoverageRecord, EntitySelector, ExtendedRelationKind,
+    GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind,
+    ProjectInstanceId, RelationResolution, RepositoryNodePath,
 };
+#[cfg(test)]
+use projectatlas_core::language::ContentClassification;
+use projectatlas_core::language::ContentSelection;
 use projectatlas_core::symbols::{CodeSymbol, RelationKind};
-use projectatlas_core::{IndexCancellation, IndexWorkControl, IndexWorkStage};
+use projectatlas_core::{
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkStage,
+};
+#[cfg(test)]
+use projectatlas_db::MAX_FILE_CONTENT_CLASSIFICATION_PATHS;
 use projectatlas_db::{
     AtlasStore, DbError, MAX_REPOSITORY_GRAPH_FRONTIER, MAX_SYMBOL_BATCH_DECODED_BYTES,
     MAX_SYMBOL_BATCH_PATHS, MAX_SYMBOL_BATCH_ROWS, RepositoryGraphAdjacencyContinuation,
-    RepositoryGraphDirection, RepositoryGraphReadBudget, SymbolBatchReadBudget,
-    SymbolBatchReadLimit,
+    RepositoryGraphDirection, RepositoryGraphReadBudget, RepositoryGraphReadWork,
+    SymbolBatchReadBudget, SymbolBatchReadLimit,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Current closed relation-analysis cursor schema.
 const ANALYSIS_CURSOR_VERSION: u16 = 1;
+/// Domain separator for the native project-root continuation binding.
+const ANALYSIS_ROOT_DOMAIN: &str = "projectatlas:analysis-root:v1";
 /// Maximum decoded cursor bytes accepted from an adapter.
 const ANALYSIS_CURSOR_MAX_BYTES: usize = 256 * 1024;
 /// Maximum nodes retained by one analysis projection.
 const MAX_ANALYSIS_NODES: u32 = 512;
 /// Maximum edges retained by one analysis projection.
 const MAX_ANALYSIS_EDGES: u32 = 2_048;
+/// Version of the deterministic architecture-community projection.
+const COMMUNITY_ALGORITHM_VERSION: u16 = 1;
+/// Version of the stable community ordering and identifier contract.
+const COMMUNITY_ORDERING_VERSION: u16 = 1;
+/// Maximum asynchronous label-propagation rounds per request.
+const COMMUNITY_MAX_ITERATIONS: u32 = 24;
+/// Self-vote keeps isolated and weakly connected nodes deterministic.
+const COMMUNITY_SELF_WEIGHT: u32 = 1;
+/// Conservative duplicate serialized-byte charge for community working state.
+const COMMUNITY_WORKING_SET_MULTIPLIER: u64 = 8;
+/// Conservative per-node/edge container overhead for community working state.
+const COMMUNITY_WORKING_SET_ENTRY_BYTES: u64 = 256;
+/// Conservative fixed map, vector, and propagation-state overhead.
+const COMMUNITY_WORKING_SET_FIXED_BYTES: u64 = 32 * 1024;
+/// Fixed JSON array framing already retained by the analysis composition.
+const JSON_ARRAY_FRAMING_BYTES: u64 = 2;
+/// Fixed JSON array separator inserted before an appended finding.
+const JSON_ARRAY_SEPARATOR_BYTES: u64 = 1;
 
 /// Closed analysis projection selected on the existing relation route.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -111,6 +178,49 @@ pub enum RelationAnalysisMode {
     Impact,
     /// One node-simple static relationship path to an exact target label.
     Trace,
+    /// Bounded reachability from an explicit, non-persistent entrypoint profile.
+    Entrypoint,
+}
+
+/// Request-owned entrypoint reachability profile.
+///
+/// Profiles are deliberately not discovered or persisted. The surrounding
+/// relation budget supplies the input, traversal, and output ceilings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EntrypointProfile {
+    /// Stable human-readable profile name.
+    pub name: String,
+    /// Exact file or fully disambiguated symbol anchors.
+    pub anchors: Vec<RelationAnchor>,
+    /// Closed relation families admitted by this profile.
+    pub relations: Vec<GraphRelationKind>,
+}
+
+/// Typed profile-level reachability disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntrypointProfileCoverage {
+    /// Every admitted entity and relation was inspected under the profile bounds.
+    Complete,
+    /// A declared relation, entity, or resource boundary prevented a safe negative.
+    Partial,
+}
+
+/// Non-persistent profile metadata returned with entrypoint findings.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EntrypointProfileResult {
+    /// Request-owned stable profile name.
+    pub name: String,
+    /// Exact anchors used for traversal.
+    pub anchors: Vec<RelationAnchor>,
+    /// Exact relation families used for traversal.
+    pub relations: Vec<GraphRelationKind>,
+    /// Coverage disposition for the complete local entity scope.
+    pub coverage: EntrypointProfileCoverage,
+    /// Number of reachable local entities retained in the result.
+    pub reachable: u32,
+    /// Number of evidence-backed unreachable candidates retained in the result.
+    pub unreachable_candidates: u32,
 }
 
 /// Version-control scope used by the impact projection.
@@ -147,6 +257,8 @@ pub struct RelationAnalysisQuery {
     pub include_cycles: bool,
     /// Include conservative non-exported dead-code candidates.
     pub include_dead_code: bool,
+    /// Explicit non-persistent profile for entrypoint reachability mode.
+    pub entrypoint_profile: Option<EntrypointProfile>,
 }
 
 /// Confidence disposition of one analysis finding.
@@ -189,6 +301,8 @@ pub enum AnalysisFindingKind {
     StaticTrace,
     /// Ambiguous or unresolved static relation that prevents a closed conclusion.
     ResolutionGap,
+    /// Reachability disposition for an explicit entrypoint profile.
+    EntrypointReachability,
 }
 
 /// One deterministic bounded analysis finding.
@@ -206,6 +320,95 @@ pub struct AnalysisFinding {
     pub metric: Option<u64>,
     /// Exact relation evidence when this finding is caused by a resolution gap.
     pub evidence: Option<AnalysisRelationEvidence>,
+    /// Deterministic community metadata when this is a community finding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community: Option<CommunityAnalysis>,
+}
+
+/// Convergence state of one bounded label-propagation run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunityConvergence {
+    /// Every node retained its selected label during a complete round.
+    Converged,
+    /// The fixed iteration ceiling was reached before convergence.
+    IterationLimit,
+    /// The input coverage or resource envelope did not permit a partition.
+    Inconclusive,
+}
+
+/// Coverage state attached to one community projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunityCoverage {
+    /// All admitted nodes and resolved local edges were inspected.
+    Complete,
+    /// A traversal or relation boundary prevented a complete partition.
+    Partial,
+}
+
+/// One fixed relation-family weight in the v1 community contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CommunityRelationWeight {
+    /// Relation family receiving this vote weight.
+    pub relation: GraphRelationKind,
+    /// Positive vote weight used by label propagation.
+    pub weight: u32,
+}
+
+/// Versioned limits and input selectors used by one community run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CommunityParameters {
+    /// Label-propagation algorithm version.
+    pub algorithm_version: u16,
+    /// Stable node, label, and identifier ordering version.
+    pub ordering_version: u16,
+    /// Maximum label-propagation rounds.
+    pub max_iterations: u32,
+    /// Maximum nodes admitted to one projection.
+    pub node_limit: u32,
+    /// Maximum edges admitted to one projection.
+    pub edge_limit: u32,
+    /// Maximum encoded output bytes inherited from the bounded analysis route.
+    pub output_bytes: u32,
+    /// Optional detailed relation-family filter.
+    pub relation: Option<GraphRelationKind>,
+}
+
+/// One resolved relation retained as community evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CommunityEdgeEvidence {
+    /// Canonical source entity identity.
+    pub source: String,
+    /// Canonical target entity identity.
+    pub target: String,
+    /// Resolved local relation family.
+    pub relation: GraphRelationKind,
+    /// Vote weight applied to this edge.
+    pub weight: u32,
+}
+
+/// Complete non-persistent metadata for one deterministic community.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CommunityAnalysis {
+    /// Stable ID derived from the versioned parameters and sorted members.
+    pub id: String,
+    /// Exact members with their existing source, purpose, and coverage evidence.
+    pub members: Vec<AnalysisNode>,
+    /// Resolved local edges induced by these members.
+    pub evidence: Vec<CommunityEdgeEvidence>,
+    /// Fixed relation weights admitted by this run.
+    pub weights: Vec<CommunityRelationWeight>,
+    /// Versioned algorithm and resource parameters.
+    pub parameters: CommunityParameters,
+    /// Number of completed propagation rounds.
+    pub iteration: u32,
+    /// Typed convergence disposition.
+    pub convergence: CommunityConvergence,
+    /// Typed graph coverage disposition.
+    pub coverage: CommunityCoverage,
+    /// Whether a fixed node, edge, or output bound prevented a complete result.
+    pub truncated: bool,
 }
 
 /// One reusable analysis node retaining its authoritative navigation evidence.
@@ -239,6 +442,9 @@ pub struct RelationAnalysisNextCall {
     pub resolution: RelationResolutionFilter,
     /// Minimum confidence that retains the exact relation trust class.
     pub minimum_confidence: ConfidenceClass,
+    /// Explicit classified-content restriction retained across the next call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_selection: Option<ContentSelection>,
 }
 
 /// Typed VCS availability retained in impact responses.
@@ -286,7 +492,8 @@ pub struct RelationAnalysisWork {
     pub symbol_hydration_truncated: bool,
     /// Exact serialized-equivalent analysis-owned bytes retained at return.
     pub retained_composition_bytes: u64,
-    /// Peak aggregate relation, closure, VCS, symbol, topology, and finding bytes.
+    /// Peak aggregate relation, closure, VCS, symbol, topology,
+    /// community-working-set, and finding bytes.
     pub peak_intermediate_bytes: u64,
     /// Whether composition limits omitted supported analysis projections.
     pub composition_truncated: bool,
@@ -317,6 +524,9 @@ pub struct RelationAnalysisReport {
     pub reached_limits: Vec<GraphLimitKind>,
     /// Typed VCS evidence for impact mode.
     pub vcs: VcsImpact,
+    /// Request-owned entrypoint profile metadata, when that mode is selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint_profile: Option<EntrypointProfileResult>,
     /// Exact bounded work retained by this analysis.
     pub work: RelationAnalysisWork,
     /// Deterministically ordered structural findings.
@@ -378,6 +588,9 @@ impl RelationAnalysisDraft {
         E: From<ServiceError>,
         O: AsRef<[u8]>,
     {
+        if self.report.mode == RelationAnalysisMode::Entrypoint {
+            return self.fit_entrypoint_output(encode);
+        }
         check_control(Some(&self.control)).map_err(E::from)?;
         #[cfg(test)]
         analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OutputRendering);
@@ -500,6 +713,60 @@ impl RelationAnalysisDraft {
             E::from(ServiceError::InvalidInput(message.to_string()))
         })
     }
+
+    /// Fit an entrypoint report atomically; partial finding prefixes are not replayable.
+    fn fit_entrypoint_output<F, E, O>(self, mut encode: F) -> Result<(RelationAnalysisReport, O), E>
+    where
+        F: FnMut(&RelationAnalysisReport, &IndexWorkControl) -> Result<O, E>,
+        E: From<ServiceError>,
+        O: AsRef<[u8]>,
+    {
+        check_control(Some(&self.control)).map_err(E::from)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OutputRendering);
+        let mut candidate = self.report;
+        let mut encoded = encode(&candidate, &self.control)?;
+        for _ in 0..8 {
+            check_control(Some(&self.control)).map_err(E::from)?;
+            let rendered = u64::try_from(encoded.as_ref().len()).map_err(|source| {
+                E::from(ServiceError::InvalidInput(format!(
+                    "entrypoint rendered byte count overflowed: {source}"
+                )))
+            })?;
+            let candidate_report_bytes =
+                serialized_bytes_controlled(&candidate, Some(&self.control)).map_err(E::from)?;
+            let fitting_peak = candidate_report_bytes
+                .checked_add(rendered)
+                .ok_or_else(|| {
+                    E::from(ServiceError::InvalidInput(
+                        "entrypoint output fitting byte count overflowed".to_string(),
+                    ))
+                })?;
+            let peak = candidate.work.peak_intermediate_bytes.max(fitting_peak);
+            if candidate.work.rendered_output_bytes == rendered
+                && candidate.work.peak_intermediate_bytes == peak
+            {
+                if encoded.as_ref().len() > self.output_bytes as usize {
+                    return Err(E::from(ServiceError::InvalidInput(
+                        "entrypoint profile output exceeds its declared byte budget".to_string(),
+                    )));
+                }
+                if peak > self.budget.intermediate_bytes() {
+                    return Err(E::from(ServiceError::InvalidInput(
+                        "entrypoint profile output exceeds its aggregate intermediate-byte budget"
+                            .to_string(),
+                    )));
+                }
+                return Ok((candidate, encoded));
+            }
+            candidate.work.rendered_output_bytes = rendered;
+            candidate.work.peak_intermediate_bytes = peak;
+            encoded = encode(&candidate, &self.control)?;
+        }
+        Err(E::from(ServiceError::InvalidInput(
+            "entrypoint output accounting did not stabilize".to_string(),
+        )))
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -532,6 +799,8 @@ struct SupplementalWork {
     retained_composition_bytes: u64,
     /// Whether composition fitting omitted supported evidence.
     composition_truncated: bool,
+    /// Conservative transient bytes charged while constructing community state.
+    community_working_set_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -549,6 +818,9 @@ struct AnalysisCursorBinding {
     minimum_confidence: ConfidenceClass,
     /// Resolution-class filter.
     resolution: RelationResolutionFilter,
+    /// Classified-content restriction that changes admitted topology.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_selection: Option<ContentSelection>,
     /// Closed feature selections that affect results.
     options: AnalysisCursorOptions,
     /// Exact traversal resource envelope.
@@ -563,6 +835,8 @@ struct AnalysisCursorBinding {
     trace_target: Option<RelationAnchor>,
     /// Optional VCS selector.
     vcs: Option<GitImpactSelection>,
+    /// Explicit entrypoint profile, when selected.
+    entrypoint_profile: Option<EntrypointProfile>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -638,6 +912,9 @@ pub fn load_relation_analysis(
     query: &RelationAnalysisQuery,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<RelationAnalysisDraft> {
+    if query.mode == RelationAnalysisMode::Entrypoint {
+        return load_entrypoint_profile_draft(store, query, control);
+    }
     load_relation_analysis_with_closure_deadline(store, query, control, None, false)
 }
 
@@ -647,6 +924,11 @@ pub(super) fn load_relation_analysis_for_federation(
     query: &RelationAnalysisQuery,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<RelationAnalysisDraft> {
+    if query.mode == RelationAnalysisMode::Entrypoint {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profiles require one project root".to_string(),
+        ));
+    }
     load_relation_analysis_with_closure_deadline(store, query, control, None, true)
 }
 
@@ -675,7 +957,7 @@ fn load_relation_analysis_with_closure_deadline(
     let control = Some(&analysis_control);
     check_control(control)?;
     let selected_binding = selected_project_binding(store)?;
-    let cursor_binding = analysis_cursor_binding(query, &selected_binding.project_root);
+    let cursor_binding = analysis_cursor_binding(query, &selected_binding.project_root_identity)?;
     let decoded_cursor = query
         .relations
         .cursor
@@ -727,13 +1009,16 @@ fn load_relation_analysis_with_closure_deadline(
         control,
     )?;
     check_control(control)?;
-    let evidence_complete = relation_evidence_complete(&relations, &nodes, &edges, query, &closure);
+    let evidence_complete =
+        relation_evidence_complete(&relations, &nodes, &edges, query, &closure, false);
+    let community_evidence_complete =
+        relation_evidence_complete(&relations, &nodes, &edges, query, &closure, true);
     let dead_code_scope_complete = dead_code_scope_complete(&relations, query);
     check_control(control)?;
     let vcs_load = if query.mode == RelationAnalysisMode::Impact {
         let selection = query.vcs.clone().unwrap_or(GitImpactSelection::WorkingTree);
         load_vcs_paths(
-            Path::new(&selected_binding.project_root),
+            selected_binding.project_root_identity.as_path(),
             selection,
             query.relations.budget.intermediate_bytes().saturating_sub(
                 relations
@@ -804,9 +1089,11 @@ fn load_relation_analysis_with_closure_deadline(
             nodes: vec![analysis_node(&relations.anchor)],
             metric: None,
             evidence: None,
+            community: None,
         }]
     };
     let initial_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+    let initial_finding_count = findings.len();
     let symbol_byte_budget = projection_allowance
         .saturating_sub(topology_bytes)
         .saturating_sub(initial_finding_bytes);
@@ -817,8 +1104,10 @@ fn load_relation_analysis_with_closure_deadline(
                 &nodes,
                 &edges,
                 evidence_complete,
+                community_evidence_complete,
                 query,
                 symbol_byte_budget,
+                initial_finding_count,
                 &mut supplemental_work,
                 control,
             )?,
@@ -838,12 +1127,17 @@ fn load_relation_analysis_with_closure_deadline(
             RelationAnalysisMode::Trace => {
                 trace_findings(&relations, query.trace_target.as_ref(), evidence_complete)?
             }
+            RelationAnalysisMode::Entrypoint => Vec::new(),
         });
     }
     let generated_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
     })?;
     let mut finding_bytes = serialized_bytes_controlled(&findings, control)?;
+    let generated_composition_bytes = vcs_load
+        .retained_bytes
+        .saturating_add(topology_bytes)
+        .saturating_add(finding_bytes);
     supplemental_work.retained_composition_bytes = vcs_load
         .retained_bytes
         .saturating_add(topology_bytes)
@@ -884,13 +1178,26 @@ fn load_relation_analysis_with_closure_deadline(
         .saturating_add(initial_finding_bytes)
         .saturating_add(external_relation_identity_bytes)
         .saturating_add(supplemental_work.hydrated_symbol_peak_bytes);
+    let generation_peak = relations
+        .work
+        .intermediate_bytes
+        .saturating_add(closure.decoded_bytes)
+        .saturating_add(external_relation_identity_bytes)
+        .saturating_add(generated_composition_bytes)
+        .saturating_add(supplemental_work.community_working_set_bytes);
     let final_peak = relations
         .work
         .intermediate_bytes
         .saturating_add(closure.decoded_bytes)
         .saturating_add(supplemental_work.retained_composition_bytes)
         .saturating_add(external_relation_identity_bytes);
-    let peak_intermediate_bytes = hydration_peak.max(final_peak);
+    let peak_intermediate_bytes = hydration_peak.max(generation_peak).max(final_peak);
+    let community_projection_truncated = findings.iter().any(|finding| {
+        finding
+            .community
+            .as_ref()
+            .is_some_and(|community| community.truncated)
+    });
     let full_finding_count = u32::try_from(findings.len()).map_err(|_overflow| {
         ServiceError::InvalidInput("analysis finding count overflowed".to_string())
     })?;
@@ -932,7 +1239,8 @@ fn load_relation_analysis_with_closure_deadline(
     let analysis_truncated = (!evidence_complete && relations.truncated)
         || !closure.complete
         || supplemental_work.symbol_hydration_truncated
-        || supplemental_work.composition_truncated;
+        || supplemental_work.composition_truncated
+        || community_projection_truncated;
     let returned = u32::try_from(findings.len()).unwrap_or(u32::MAX);
     let total = if analysis_truncated {
         RelationTotalState::AtLeast(u64::from(generated_finding_count))
@@ -968,6 +1276,7 @@ fn load_relation_analysis_with_closure_deadline(
         truncated: analysis_truncated,
         reached_limits,
         vcs,
+        entrypoint_profile: None,
         work,
         findings,
     };
@@ -989,6 +1298,47 @@ fn load_relation_analysis_with_closure_deadline(
 
 /// Validate closed mode, selector, option, and budget combinations.
 fn validate_analysis_query(query: &RelationAnalysisQuery) -> ServiceResult<()> {
+    if query.mode == RelationAnalysisMode::Entrypoint {
+        let profile = query.entrypoint_profile.as_ref().ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "entrypoint analysis requires an explicit profile".to_string(),
+            )
+        })?;
+        validate_entrypoint_profile(profile)?;
+        if query.relations.direction != RelationDirection::Outbound
+            || query.relations.resolution != RelationResolutionFilter::Any
+        {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profiles require outbound traversal with any resolution".to_string(),
+            ));
+        }
+        if query.relations.cursor.is_some() {
+            return Err(ServiceError::RelationCursorInvalid {
+                reason: "entrypoint profiles do not support relation cursors; restart the profile",
+            });
+        }
+        if query.relations.relation.is_some() {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profiles carry relation families in the profile itself".to_string(),
+            ));
+        }
+        if query.trace_target.is_some()
+            || query.vcs.is_some()
+            || query.include_communities
+            || query.include_cycles
+            || query.include_dead_code
+        {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profiles do not accept unrelated analysis controls".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if query.entrypoint_profile.is_some() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile is valid only for entrypoint analysis".to_string(),
+        ));
+    }
     if query.mode == RelationAnalysisMode::Trace {
         let Some(target) = query.trace_target.as_ref() else {
             return Err(ServiceError::InvalidInput(
@@ -1037,6 +1387,1938 @@ fn validate_analysis_query(query: &RelationAnalysisQuery) -> ServiceResult<()> {
     Ok(())
 }
 
+/// Validate the request-owned profile before any graph read occurs.
+fn validate_entrypoint_profile(profile: &EntrypointProfile) -> ServiceResult<()> {
+    let name = profile.name.trim();
+    if name.is_empty() || name.len() > 128 || name != profile.name {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile name must be nonempty, trimmed, and at most 128 bytes".to_string(),
+        ));
+    }
+    if profile.anchors.is_empty() || profile.anchors.len() > 32 {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile requires 1 to 32 anchors".to_string(),
+        ));
+    }
+    let mut anchors = BTreeSet::new();
+    for anchor in &profile.anchors {
+        let encoded = serde_json::to_string(anchor)?;
+        if !anchors.insert(encoded) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profile anchors must be unique".to_string(),
+            ));
+        }
+        if matches!(
+            anchor,
+            RelationAnchor::Symbol {
+                symbol_kind: None,
+                ..
+            }
+        ) || matches!(
+            anchor,
+            RelationAnchor::Symbol {
+                signature: None,
+                ..
+            }
+        ) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint symbol anchors require exact kind and signature".to_string(),
+            ));
+        }
+        if let RelationAnchor::Symbol {
+            name,
+            parent,
+            signature,
+            ..
+        } = anchor
+            && (name.trim().is_empty()
+                || name != name.trim()
+                || signature
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                || parent
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty()))
+        {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint symbol anchors require nonempty exact identity fields".to_string(),
+            ));
+        }
+    }
+    if profile.relations.is_empty() || profile.relations.len() > GraphRelationKind::ALL.len() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile requires 1 to 12 relation families".to_string(),
+        ));
+    }
+    let mut relations = BTreeSet::new();
+    for relation in &profile.relations {
+        if !GraphRelationKind::ALL.contains(relation) || !relations.insert(relation.as_str()) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profile relation families must be unique supported values".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Build a bounded, non-persistent entrypoint profile over the existing graph.
+fn load_entrypoint_profile_draft(
+    store: &AtlasStore,
+    query: &RelationAnalysisQuery,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<RelationAnalysisDraft> {
+    validate_analysis_query(query)?;
+    let profile = query
+        .entrypoint_profile
+        .as_ref()
+        .ok_or_else(|| ServiceError::InvalidInput("entrypoint profile is missing".to_string()))?;
+    let started = Instant::now();
+    let budget = bounded_analysis_budget(query.relations.budget)?;
+    validate_entrypoint_profile_budget(profile, budget)?;
+    let deadline = started
+        .checked_add(Duration::from_millis(budget.deadline_ms()))
+        .unwrap_or(started);
+    let analysis_control = control.map_or_else(
+        || IndexWorkControl::with_deadline(IndexCancellation::new(), deadline),
+        |caller| {
+            caller.with_timeout_ceiling(deadline.saturating_duration_since(caller.started_at()))
+        },
+    );
+    let control = Some(&analysis_control);
+    check_control(control)?;
+    let selected_binding = selected_project_binding(store)?;
+    let generation = store.repository_graph_generation()?.ok_or_else(|| {
+        ServiceError::InvalidInput(
+            "repository graph has no complete generation for entrypoint analysis".to_string(),
+        )
+    })?;
+    let mut reachable = BTreeMap::<String, DetailedRelationNode>::new();
+    let mut edges = Vec::new();
+    let mut relation_work = DetailedRelationWork::default();
+    let mut canonical_anchors = Vec::with_capacity(profile.anchors.len());
+    let mut canonical_anchor_keys = BTreeSet::new();
+    let mut resolved_anchor_keys = BTreeMap::<String, String>::new();
+    let mut resolved_anchor_entities = BTreeMap::<String, GraphEntity>::new();
+    let mut first_resolved_anchor = None;
+    let mut complete = true;
+    let mut reached_limits = Vec::new();
+    'anchors: for anchor in &profile.anchors {
+        let anchor_budget = match entrypoint_anchor_budget(budget, &relation_work)? {
+            Ok(anchor_budget) => anchor_budget,
+            Err(limit) => {
+                complete = false;
+                push_limit(&mut reached_limits, limit);
+                break 'anchors;
+            }
+        };
+        let (entity, anchor_work) = match resolve_relation_anchor_for_analysis(
+            store,
+            selected_binding.project_instance_id,
+            generation,
+            anchor,
+            anchor_budget,
+            control,
+        ) {
+            Ok(result) => result,
+            Err(ServiceError::Db(DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                    reason: "graph read decoded bytes exceed the batch budget",
+                },
+            ))) => {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                break 'anchors;
+            }
+            Err(error) => return Err(error),
+        };
+        add_relation_work(&mut relation_work, &anchor_work)?;
+        first_resolved_anchor.get_or_insert_with(|| entity.clone());
+        let entity_key = entity.key().canonical_identity().to_string();
+        if !canonical_anchor_keys.insert(entity_key.clone()) {
+            return Err(ServiceError::InvalidInput(
+                "entrypoint profile anchors must resolve to unique entities".to_string(),
+            ));
+        }
+        let canonical_anchor = relation_anchor_for_entity(&entity).ok_or_else(|| {
+            ServiceError::InvalidInput(
+                "entrypoint profile anchor is not addressable by an exact anchor".to_string(),
+            )
+        })?;
+        let anchor_identity = serde_json::to_string(&canonical_anchor)
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        resolved_anchor_keys.insert(anchor_identity.clone(), entity_key);
+        resolved_anchor_entities.insert(anchor_identity, entity);
+        canonical_anchors.push(canonical_anchor);
+    }
+    let mut first_anchor = None;
+    let mut authored_purpose_revision = 0;
+    let mut purpose_revision_initialized = false;
+    let entity_selected = |node: &DetailedRelationNode| {
+        !matches!(node.entity.selector(), EntitySelector::External { .. })
+            && (query.relations.content_selection == ContentSelection::UnspecifiedLegacy
+                || node.classification.is_some_and(|classification| {
+                    query.relations.content_selection.includes(classification)
+                }))
+    };
+
+    let mut frontier = if complete {
+        canonical_anchors
+    } else {
+        Vec::new()
+    };
+    let mut scheduled_anchors = frontier
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let mut visited = BTreeSet::new();
+    let mut depth = 0_u32;
+    'profile: while !frontier.is_empty() && depth < budget.depth() {
+        let mut next_frontier = Vec::new();
+        for anchor in frontier.drain(..) {
+            for relation in &profile.relations {
+                check_control(control)?;
+                let anchor_identity = serde_json::to_string(&anchor)
+                    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+                let anchor_is_retained = resolved_anchor_keys
+                    .get(&anchor_identity)
+                    .is_some_and(|key| reachable.contains_key(key));
+                let retained_keys =
+                    anchor_is_retained.then(|| reachable.keys().cloned().collect::<BTreeSet<_>>());
+                let collect_occurrences = query.relations.include_occurrences
+                    && relation_work.retained_occurrences < budget.occurrences_total();
+                let step_budget = match entrypoint_step_budget(
+                    budget,
+                    &relation_work,
+                    reachable.len(),
+                    0,
+                    anchor_is_retained,
+                    false,
+                    collect_occurrences,
+                    None,
+                )? {
+                    Ok(step_budget) => step_budget,
+                    Err(limit) => {
+                        if limit == GraphLimitKind::Edges
+                            && let Some(anchor_key) = resolved_anchor_keys.get(&anchor_identity)
+                            && let Some(entity) = resolved_anchor_entities
+                                .get(&anchor_identity)
+                                .or_else(|| reachable.get(anchor_key).map(|node| &node.entity))
+                            && entrypoint_terminal_adjacency_is_empty(
+                                store,
+                                generation,
+                                entity.key(),
+                                *relation,
+                                query.relations.minimum_confidence,
+                                query.relations.content_selection,
+                                control,
+                            )?
+                        {
+                            if reachable.contains_key(anchor_key) {
+                                continue;
+                            }
+                            if purpose_revision_initialized
+                                && store.authored_purpose_revision()? != authored_purpose_revision
+                            {
+                                return Err(ServiceError::RelationCursorStale {
+                                    field: "entrypoint authored purpose revision",
+                                });
+                            }
+                            let anchor_node = match load_entrypoint_terminal_candidate_coverage(
+                                store,
+                                entity,
+                                generation,
+                                budget,
+                                &mut relation_work,
+                                query.relations.content_selection,
+                                control,
+                            )? {
+                                Ok(node) => node,
+                                Err(limit) => {
+                                    complete = false;
+                                    push_limit(&mut reached_limits, limit);
+                                    break 'profile;
+                                }
+                            };
+                            if !entity_selected(&anchor_node) {
+                                return Err(ServiceError::InvalidInput(
+                                    "entrypoint anchor is outside the selected content".to_string(),
+                                ));
+                            }
+                            if purpose_revision_initialized
+                                && store.authored_purpose_revision()? != authored_purpose_revision
+                            {
+                                return Err(ServiceError::RelationCursorStale {
+                                    field: "entrypoint authored purpose revision",
+                                });
+                            }
+                            if !trusted_node_coverage(&anchor_node, &profile.relations) {
+                                complete = false;
+                                break 'profile;
+                            }
+                            if reachable.len() >= budget.nodes() as usize {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                            }
+                            if visited.len() >= budget.visited() as usize {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Visited);
+                            }
+                            if !complete {
+                                break 'profile;
+                            }
+                            let entity_key = entity.key().canonical_identity().to_string();
+                            visited.insert(entity_key);
+                            insert_node(&mut reachable, &anchor_node);
+                            first_anchor.get_or_insert(anchor_node);
+                            continue;
+                        }
+                        complete = false;
+                        push_limit(&mut reached_limits, limit);
+                        break 'profile;
+                    }
+                };
+                let mut relation_query = query.relations.clone();
+                relation_query.anchor = anchor.clone();
+                relation_query.relation = Some(*relation);
+                relation_query.direction = RelationDirection::Outbound;
+                relation_query.resolution = RelationResolutionFilter::Any;
+                relation_query.cursor = None;
+                relation_query.budget = step_budget;
+                relation_query.include_occurrences = collect_occurrences;
+                #[cfg(test)]
+                analysis_test_observer::notify(
+                    analysis_test_observer::AnalysisPhaseEvent::Traversal,
+                );
+                let report = match load_detailed_relations(store, &relation_query, control) {
+                    Ok(report) => report,
+                    Err(ServiceError::Db(DbError::GraphContract(
+                        projectatlas_core::graph::GraphContractError::InvalidLimits {
+                            reason: "graph read decoded bytes exceed the batch budget",
+                        },
+                    ))) => {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                        break 'profile;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if report.generation != generation {
+                    return Err(ServiceError::RelationCursorStale {
+                        field: "entrypoint graph generation",
+                    });
+                }
+                first_anchor.get_or_insert_with(|| report.anchor.clone());
+                resolved_anchor_keys.insert(
+                    anchor_identity,
+                    report.anchor.entity.key().canonical_identity().to_string(),
+                );
+                if purpose_revision_initialized
+                    && report.authored_purpose_revision != authored_purpose_revision
+                {
+                    return Err(ServiceError::RelationCursorStale {
+                        field: "entrypoint authored purpose revision",
+                    });
+                }
+                authored_purpose_revision = report.authored_purpose_revision;
+                purpose_revision_initialized = true;
+                add_relation_work(&mut relation_work, &report.work)?;
+                if report.pruned_incomplete_paths > 0 {
+                    complete = false;
+                }
+                if report.pruned_evidence_truncated {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                }
+                let filtered_edge_limit_is_terminal = entrypoint_filtered_edge_limit_is_terminal(
+                    store,
+                    generation,
+                    &report,
+                    *relation,
+                    query.relations.minimum_confidence,
+                    query.relations.content_selection,
+                    control,
+                )?;
+                if query.relations.include_occurrences
+                    && (!collect_occurrences || !report.pruned_relations.is_empty())
+                {
+                    match entrypoint_occurrence_evidence_is_incomplete(
+                        store,
+                        &report,
+                        generation,
+                        budget,
+                        &mut relation_work,
+                        control,
+                        !collect_occurrences,
+                    )? {
+                        Ok(true) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                        }
+                        Err(limit) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, limit);
+                        }
+                        Ok(false) => {}
+                    }
+                }
+                for limit in &report.reached_limits {
+                    if !filtered_edge_limit_is_terminal
+                        || (*limit != GraphLimitKind::Edges && *limit != GraphLimitKind::Rows)
+                    {
+                        push_limit(&mut reached_limits, *limit);
+                    }
+                }
+                if relation_work.inspected_edges > budget.edges() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                    break 'profile;
+                }
+                if relation_work.intermediate_bytes > budget.intermediate_bytes() {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    break 'profile;
+                }
+                complete &= trusted_node_coverage(&report.anchor, &profile.relations);
+                let anchor_key = report.anchor.entity.key().canonical_identity().to_string();
+                visited.insert(anchor_key);
+                insert_node(&mut reachable, &report.anchor);
+                for row in &report.rows {
+                    check_control(control)?;
+                    let resolved = matches!(
+                        row.relation.resolution(),
+                        RelationResolution::Resolved { .. } | RelationResolution::External { .. }
+                    ) && row.relation.completeness() == Completeness::Complete;
+                    complete &= resolved && trusted_relation_row(row, &profile.relations);
+                    insert_node(&mut reachable, &row.source);
+                    if let Some(target) = &row.target
+                        && entity_selected(target)
+                    {
+                        insert_node(&mut reachable, target);
+                        if resolved {
+                            let target_key = target.entity.key().canonical_identity().to_string();
+                            if visited.insert(target_key.clone()) {
+                                match relation_anchor_for_entity(&target.entity) {
+                                    Some(target_anchor) => {
+                                        if let Ok(anchor_key) =
+                                            serde_json::to_string(&target_anchor)
+                                        {
+                                            let is_new =
+                                                scheduled_anchors.insert(anchor_key.clone());
+                                            resolved_anchor_keys
+                                                .entry(anchor_key)
+                                                .or_insert_with(|| target_key.clone());
+                                            if is_new {
+                                                next_frontier.push(target_anchor);
+                                            }
+                                        }
+                                    }
+                                    None if !matches!(
+                                        target.entity.selector(),
+                                        EntitySelector::External { .. }
+                                    ) =>
+                                    {
+                                        complete = false;
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
+                    for node in &row.path {
+                        if entity_selected(node) {
+                            insert_node(&mut reachable, node);
+                        }
+                    }
+                    if let Some(edge) =
+                        local_edge(&row.relation, &row.source.entity, row.target.as_ref())
+                    {
+                        let edge_bytes = u64::try_from(edge.source.len())
+                            .unwrap_or(u64::MAX)
+                            .checked_add(u64::try_from(edge.target.len()).unwrap_or(u64::MAX))
+                            .and_then(|bytes| {
+                                bytes.checked_add(std::mem::size_of::<LocalEdge>() as u64)
+                            })
+                            .ok_or_else(entrypoint_work_overflow)?;
+                        let retained_edge_bytes = relation_work
+                            .intermediate_bytes
+                            .checked_add(edge_bytes)
+                            .ok_or_else(entrypoint_work_overflow)?;
+                        if retained_edge_bytes > budget.intermediate_bytes() {
+                            complete = false;
+                            push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                            break 'profile;
+                        }
+                        relation_work.intermediate_bytes = retained_edge_bytes;
+                        edges.push(edge);
+                    }
+                }
+                if reachable.len() > budget.nodes() as usize {
+                    if let Some(retained_keys) = retained_keys {
+                        reachable.retain(|key, _| retained_keys.contains(key));
+                    }
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                    break 'profile;
+                }
+                if report.continuation.is_some() {
+                    if !filtered_edge_limit_is_terminal {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Rows);
+                    }
+                } else {
+                    complete &= filtered_edge_limit_is_terminal
+                        || (!report.truncated
+                            && report.reached_limits.is_empty()
+                            && matches!(report.total, RelationTotalState::Exact(_)));
+                }
+            }
+        }
+        frontier = next_frontier;
+        depth = depth.saturating_add(1);
+    }
+    if !frontier.is_empty() {
+        complete = false;
+        push_limit(&mut reached_limits, GraphLimitKind::Depth);
+    }
+    edges.sort_by(|left, right| {
+        (&left.source, &left.target, left.kind.as_str()).cmp(&(
+            &right.source,
+            &right.target,
+            right.kind.as_str(),
+        ))
+    });
+    edges.dedup_by(|left, right| {
+        left.source == right.source && left.target == right.target && left.kind == right.kind
+    });
+    if first_anchor.is_none()
+        && first_resolved_anchor.is_none()
+        && reached_limits.contains(&GraphLimitKind::IntermediateBytes)
+    {
+        return Err(ServiceError::ResourceLimit {
+            limit: GraphLimitKind::IntermediateBytes,
+        });
+    }
+    let anchor = first_anchor
+        .or_else(|| {
+            first_resolved_anchor.map(|entity| {
+                entrypoint_unavailable_node(&entity, query.relations.content_selection)
+            })
+        })
+        .ok_or_else(|| {
+            ServiceError::InvalidInput("entrypoint profile resolved no anchors".to_string())
+        })?;
+    let entity_limit = budget.nodes();
+    let reachable_keys = reachable.keys().cloned().collect::<BTreeSet<_>>();
+    let mut protected_reachable_keys = reachable_keys.clone();
+    for node in reachable.values() {
+        if let EntitySelector::Symbol { symbol } = node.entity.selector() {
+            let file_selector = EntitySelector::File {
+                path: symbol.file.clone(),
+            };
+            protected_reachable_keys.insert(
+                GraphEntityKey::new(node.entity.key().project(), &file_selector)
+                    .canonical_identity()
+                    .to_string(),
+            );
+        }
+    }
+    let mut protected_enclosure_entities = Vec::new();
+    if complete {
+        let owner_paths = reachable
+            .values()
+            .filter_map(|node| match node.entity.selector() {
+                EntitySelector::Symbol { symbol } => Some(symbol.file.as_str().to_string()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for path in owner_paths {
+            check_control(control)?;
+            let path = RepositoryNodePath::new(std::path::Path::new(&path))
+                .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+            let remaining_intermediate = budget
+                .intermediate_bytes()
+                .saturating_sub(relation_work.intermediate_bytes);
+            if remaining_intermediate == 0 {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                break;
+            }
+            let read_budget = RepositoryGraphReadBudget::new(
+                1,
+                RepositoryGraphReadBudget::MAX_RETURNED_ROWS,
+                remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+                RepositoryGraphReadBudget::MAX_HYDRATED_ENTITIES,
+                RepositoryGraphReadBudget::MAX_HYDRATED_PATHS,
+            )
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+            let owner_page = match store.repository_graph_entities_by_path_bounded(
+                generation_project(&anchor.entity),
+                generation,
+                &path,
+                RepositoryGraphReadBudget::MAX_RETURNED_ROWS,
+                read_budget,
+                control,
+            ) {
+                Ok(owner_page) => owner_page,
+                Err(DbError::GraphContract(
+                    projectatlas_core::graph::GraphContractError::InvalidLimits {
+                        reason: "graph read decoded bytes exceed the batch budget",
+                    },
+                )) => {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            add_repository_read_work(&mut relation_work, &owner_page.work)?;
+            if owner_page.page.truncated {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                break;
+            }
+            protected_enclosure_entities.extend(owner_page.page.rows);
+        }
+    }
+    protect_reachable_symbol_enclosures(
+        &reachable,
+        &protected_enclosure_entities,
+        &mut protected_reachable_keys,
+    );
+    let mut retained_candidate_keys = reachable_keys;
+    let mut unreachable = BTreeMap::new();
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(relation_work.intermediate_bytes);
+    if remaining_intermediate == 0 {
+        complete = false;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+    }
+    if complete {
+        let protected_entity_overhead = match u32::try_from(protected_reachable_keys.len()) {
+            Ok(overhead) => overhead,
+            Err(_overflow) => {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                0
+            }
+        };
+        let candidate_page_limit = match entity_limit.checked_add(protected_entity_overhead) {
+            Some(limit) if limit <= GraphLimits::MAX_ROWS => limit,
+            _ => {
+                complete = false;
+                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                0
+            }
+        };
+        let all_entities = if candidate_page_limit == 0 {
+            None
+        } else {
+            #[cfg(test)]
+            analysis_test_observer::notify(
+                analysis_test_observer::AnalysisPhaseEvent::CandidateEntityHydration {
+                    remaining_intermediate_bytes: remaining_intermediate,
+                },
+            );
+            let read_budget = RepositoryGraphReadBudget::new(
+                1,
+                candidate_page_limit,
+                remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+                candidate_page_limit.saturating_add(1).saturating_mul(2),
+                candidate_page_limit.saturating_add(1).saturating_mul(2),
+            )
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+            match store.repository_graph_entrypoint_candidates_page_bounded(
+                generation_project(&anchor.entity),
+                generation,
+                candidate_page_limit,
+                query.relations.content_selection,
+                read_budget,
+                control,
+            ) {
+                Ok(all_entities) => {
+                    add_repository_read_work(&mut relation_work, &all_entities.work)?;
+                    Some(all_entities.page)
+                }
+                Err(DbError::GraphContract(
+                    projectatlas_core::graph::GraphContractError::InvalidLimits {
+                        reason: "graph read decoded bytes exceed the batch budget",
+                    },
+                )) => {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    None
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        if let Some(all_entities) = all_entities.as_ref() {
+            protect_reachable_symbol_enclosures(
+                &reachable,
+                &all_entities.rows,
+                &mut protected_reachable_keys,
+            );
+        }
+        let candidate_entities = all_entities
+            .as_ref()
+            .map(|all_entities| {
+                if all_entities.truncated {
+                    complete = false;
+                    push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                }
+                all_entities
+                    .rows
+                    .iter()
+                    .filter(|entity| {
+                        matches!(
+                            entity.selector(),
+                            EntitySelector::File { .. } | EntitySelector::Symbol { .. }
+                        ) && !protected_reachable_keys.contains(entity.key().canonical_identity())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::CandidateEnumeration,
+        );
+        if complete {
+            let current_generation = store.repository_graph_generation()?.ok_or_else(|| {
+                ServiceError::InvalidInput(
+                    "repository graph has no complete generation for entrypoint analysis"
+                        .to_string(),
+                )
+            })?;
+            if current_generation != generation {
+                return Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation",
+                });
+            }
+            for entity in candidate_entities {
+                check_control(control)?;
+                if !complete {
+                    break;
+                }
+                let candidate_key = entity.key().canonical_identity().to_string();
+                let candidate_anchor = relation_anchor_for_entity(entity).ok_or_else(|| {
+                    ServiceError::InvalidInput(
+                        "entrypoint candidate is not addressable by an exact anchor".to_string(),
+                    )
+                })?;
+                let mut candidate_report_anchor = None;
+                let mut candidate_unretained_keys = BTreeSet::new();
+                for relation in &profile.relations {
+                    let accounted_candidates = retained_candidate_keys
+                        .len()
+                        .saturating_sub(reachable.len());
+                    let anchor_is_retained = retained_candidate_keys.contains(&candidate_key);
+                    let collect_occurrences = query.relations.include_occurrences
+                        && relation_work.retained_occurrences < budget.occurrences_total();
+                    let step_budget = match entrypoint_step_budget(
+                        budget,
+                        &relation_work,
+                        reachable.len(),
+                        accounted_candidates,
+                        anchor_is_retained,
+                        true,
+                        collect_occurrences,
+                        None,
+                    )? {
+                        Ok(step_budget) => step_budget,
+                        Err(GraphLimitKind::Edges)
+                            if entrypoint_terminal_adjacency_is_empty(
+                                store,
+                                generation,
+                                entity.key(),
+                                *relation,
+                                query.relations.minimum_confidence,
+                                query.relations.content_selection,
+                                control,
+                            )? =>
+                        {
+                            match entrypoint_step_budget(
+                                budget,
+                                &relation_work,
+                                reachable.len(),
+                                accounted_candidates,
+                                anchor_is_retained,
+                                true,
+                                collect_occurrences,
+                                Some(1),
+                            )? {
+                                Ok(_) => {}
+                                Err(limit) => {
+                                    complete = false;
+                                    push_limit(&mut reached_limits, limit);
+                                    break;
+                                }
+                            }
+                            let candidate_node = if let Some(node) = candidate_report_anchor.clone()
+                            {
+                                node
+                            } else {
+                                let node = match load_entrypoint_terminal_candidate_coverage(
+                                    store,
+                                    entity,
+                                    generation,
+                                    budget,
+                                    &mut relation_work,
+                                    query.relations.content_selection,
+                                    control,
+                                )? {
+                                    Ok(node) => node,
+                                    Err(limit) => {
+                                        complete = false;
+                                        push_limit(&mut reached_limits, limit);
+                                        break;
+                                    }
+                                };
+                                candidate_report_anchor = Some(node.clone());
+                                node
+                            };
+                            if !trusted_node_coverage(&candidate_node, &profile.relations) {
+                                complete = false;
+                                break;
+                            }
+                            if !anchor_is_retained {
+                                candidate_unretained_keys.insert(candidate_key.clone());
+                            }
+                            let remaining_candidate_capacity =
+                                u32::try_from(retained_candidate_keys.len()).unwrap_or(u32::MAX);
+                            let remaining_nodes = usize::try_from(
+                                budget.nodes().saturating_sub(remaining_candidate_capacity),
+                            )
+                            .unwrap_or(usize::MAX);
+                            let remaining_visited = usize::try_from(
+                                budget
+                                    .visited()
+                                    .saturating_sub(remaining_candidate_capacity),
+                            )
+                            .unwrap_or(usize::MAX);
+                            if candidate_unretained_keys.len() > remaining_nodes {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                            }
+                            if candidate_unretained_keys.len() > remaining_visited {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Visited);
+                            }
+                            if !complete {
+                                break;
+                            }
+                            candidate_report_anchor.get_or_insert(candidate_node);
+                            continue;
+                        }
+                        Err(limit) => {
+                            complete = false;
+                            push_limit(&mut reached_limits, limit);
+                            break;
+                        }
+                    };
+                    let mut candidate_query = query.relations.clone();
+                    candidate_query.anchor = candidate_anchor.clone();
+                    candidate_query.relation = Some(*relation);
+                    candidate_query.direction = RelationDirection::Outbound;
+                    candidate_query.resolution = RelationResolutionFilter::Any;
+                    candidate_query.cursor = None;
+                    candidate_query.budget = step_budget;
+                    candidate_query.include_occurrences = collect_occurrences;
+                    #[cfg(test)]
+                    analysis_test_observer::notify(
+                        analysis_test_observer::AnalysisPhaseEvent::CandidateTraversal,
+                    );
+                    let candidate_report =
+                        match load_detailed_relations(store, &candidate_query, control) {
+                            Ok(report) => report,
+                            Err(ServiceError::Db(DbError::GraphContract(
+                                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                                    reason: "graph read decoded bytes exceed the batch budget",
+                                },
+                            ))) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                                break;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                    #[cfg(test)]
+                    analysis_test_observer::notify(
+                        analysis_test_observer::AnalysisPhaseEvent::CandidateReport {
+                            has_continuation: candidate_report.continuation.is_some(),
+                            has_edges_limit: candidate_report
+                                .reached_limits
+                                .contains(&GraphLimitKind::Edges),
+                        },
+                    );
+                    if candidate_report.generation != generation {
+                        return Err(ServiceError::RelationCursorStale {
+                            field: "entrypoint graph generation",
+                        });
+                    }
+                    if candidate_report.authored_purpose_revision != authored_purpose_revision {
+                        return Err(ServiceError::RelationCursorStale {
+                            field: "entrypoint authored purpose revision",
+                        });
+                    }
+                    add_relation_work(&mut relation_work, &candidate_report.work)?;
+                    if candidate_report.pruned_evidence_truncated {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                    }
+                    let filtered_edge_limit_is_terminal =
+                        entrypoint_filtered_edge_limit_is_terminal(
+                            store,
+                            generation,
+                            &candidate_report,
+                            *relation,
+                            query.relations.minimum_confidence,
+                            query.relations.content_selection,
+                            control,
+                        )?;
+                    if query.relations.include_occurrences
+                        && (!collect_occurrences || !candidate_report.pruned_relations.is_empty())
+                    {
+                        match entrypoint_occurrence_evidence_is_incomplete(
+                            store,
+                            &candidate_report,
+                            generation,
+                            budget,
+                            &mut relation_work,
+                            control,
+                            !collect_occurrences,
+                        )? {
+                            Ok(true) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, GraphLimitKind::Occurrences);
+                            }
+                            Err(limit) => {
+                                complete = false;
+                                push_limit(&mut reached_limits, limit);
+                            }
+                            Ok(false) => {}
+                        }
+                    }
+                    if relation_work.inspected_edges > budget.edges() {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Edges);
+                        break;
+                    }
+                    if relation_work.intermediate_bytes > budget.intermediate_bytes() {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+                        break;
+                    }
+                    candidate_unretained_keys.extend(candidate_report_unretained_local_keys(
+                        &candidate_report,
+                        &retained_candidate_keys,
+                        query.relations.content_selection,
+                    ));
+                    let remaining_candidate_capacity =
+                        u32::try_from(retained_candidate_keys.len()).unwrap_or(u32::MAX);
+                    let remaining_nodes = usize::try_from(
+                        budget.nodes().saturating_sub(remaining_candidate_capacity),
+                    )
+                    .unwrap_or(usize::MAX);
+                    let remaining_visited = usize::try_from(
+                        budget
+                            .visited()
+                            .saturating_sub(remaining_candidate_capacity),
+                    )
+                    .unwrap_or(usize::MAX);
+                    if candidate_unretained_keys.len() > remaining_nodes {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Nodes);
+                    }
+                    if candidate_unretained_keys.len() > remaining_visited {
+                        complete = false;
+                        push_limit(&mut reached_limits, GraphLimitKind::Visited);
+                    }
+                    if !complete {
+                        break;
+                    }
+                    for limit in &candidate_report.reached_limits {
+                        if !filtered_edge_limit_is_terminal
+                            || (*limit != GraphLimitKind::Edges && *limit != GraphLimitKind::Rows)
+                        {
+                            push_limit(&mut reached_limits, *limit);
+                        }
+                    }
+                    if candidate_report.continuation.is_some() && !filtered_edge_limit_is_terminal {
+                        push_limit(&mut reached_limits, GraphLimitKind::Rows);
+                    }
+                    if !entrypoint_report_complete(
+                        &candidate_report,
+                        &profile.relations,
+                        filtered_edge_limit_is_terminal,
+                    ) {
+                        complete = false;
+                        break;
+                    }
+                    candidate_report_anchor.get_or_insert(candidate_report.anchor);
+                }
+                if complete && let Some(candidate_report_anchor) = candidate_report_anchor {
+                    unreachable.insert(candidate_key.clone(), candidate_report_anchor);
+                    for key in candidate_unretained_keys {
+                        retained_candidate_keys.insert(key);
+                    }
+                }
+            }
+        }
+    }
+    if complete {
+        validate_entrypoint_generation(generation, store.repository_graph_generation())?;
+        if purpose_revision_initialized
+            && store.authored_purpose_revision()? != authored_purpose_revision
+        {
+            return Err(ServiceError::RelationCursorStale {
+                field: "entrypoint authored purpose revision",
+            });
+        }
+    }
+    let coverage = if complete {
+        EntrypointProfileCoverage::Complete
+    } else {
+        EntrypointProfileCoverage::Partial
+    };
+    let mut findings = Vec::new();
+    if complete {
+        findings.push(AnalysisFinding {
+            kind: AnalysisFindingKind::EntrypointReachability,
+            status: AnalysisStatus::Confirmed,
+            summary: "explicit entrypoints reach these local entities through complete admitted relations"
+                .to_string(),
+            nodes: Vec::new(),
+            metric: Some(reachable.len() as u64),
+            evidence: None,
+            community: None,
+        });
+        if !unreachable.is_empty() {
+            findings.push(AnalysisFinding {
+                kind: AnalysisFindingKind::EntrypointReachability,
+                status: AnalysisStatus::Candidate,
+                summary: "local entities are unreachable from the explicit entrypoints; review exact source evidence before any deletion decision"
+                    .to_string(),
+                nodes: Vec::new(),
+                metric: Some(unreachable.len() as u64),
+                evidence: None,
+                community: None,
+            });
+        }
+    } else {
+        findings.push(AnalysisFinding {
+            kind: AnalysisFindingKind::EntrypointReachability,
+            status: AnalysisStatus::Inconclusive,
+            summary: "entrypoint reachability is inconclusive because relation coverage or a declared bound is partial"
+                .to_string(),
+            nodes: Vec::new(),
+            metric: None,
+            evidence: None,
+            community: None,
+        });
+    }
+    let mut profile_result = EntrypointProfileResult {
+        name: profile.name.clone(),
+        anchors: profile.anchors.clone(),
+        relations: profile.relations.clone(),
+        coverage,
+        reachable: u32::try_from(reachable.len()).unwrap_or(u32::MAX),
+        unreachable_candidates: if complete {
+            u32::try_from(unreachable.len()).unwrap_or(u32::MAX)
+        } else {
+            0
+        },
+    };
+    let mut work = RelationAnalysisWork {
+        relations: relation_work,
+        analyzed_nodes: u32::try_from(reachable.len().saturating_add(unreachable.len()))
+            .unwrap_or(u32::MAX),
+        analyzed_edges: u32::try_from(edges.len()).unwrap_or(u32::MAX),
+        ..RelationAnalysisWork::default()
+    };
+    let metadata_composition_bytes =
+        serialized_bytes_controlled(&(&findings, &profile_result), control)?;
+    let mut node_composition_bytes = serialized_analysis_nodes_bytes(reachable.values(), control)?;
+    if complete && !unreachable.is_empty() {
+        node_composition_bytes = node_composition_bytes
+            .checked_add(serialized_analysis_nodes_bytes(
+                unreachable.values(),
+                control,
+            )?)
+            .ok_or_else(entrypoint_work_overflow)?;
+    }
+    let composition_fits = work
+        .relations
+        .intermediate_bytes
+        .checked_add(metadata_composition_bytes)
+        .and_then(|bytes| bytes.checked_add(node_composition_bytes))
+        .is_some_and(|bytes| bytes <= budget.intermediate_bytes());
+    if composition_fits {
+        if complete {
+            findings[0].nodes = reachable.values().map(analysis_node).collect();
+            if !unreachable.is_empty() {
+                findings[1].nodes = unreachable.values().map(analysis_node).collect();
+            }
+            profile_result.unreachable_candidates =
+                u32::try_from(unreachable.len()).unwrap_or(u32::MAX);
+        } else {
+            findings[0].nodes = reachable.values().map(analysis_node).collect();
+        }
+    } else {
+        complete = false;
+        work.composition_truncated = true;
+        push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
+        profile_result.coverage = EntrypointProfileCoverage::Partial;
+        profile_result.reachable = 0;
+        profile_result.unreachable_candidates = 0;
+        findings.truncate(1);
+        findings[0].status = AnalysisStatus::Inconclusive;
+        findings[0].summary =
+            "entrypoint evidence was omitted because the declared composition bound was partial"
+                .to_string();
+        findings[0].nodes.clear();
+        findings[0].metric = None;
+    }
+    work.retained_composition_bytes =
+        serialized_bytes_controlled(&(&findings, &profile_result), control)?;
+    work.peak_intermediate_bytes = work
+        .relations
+        .intermediate_bytes
+        .checked_add(work.retained_composition_bytes)
+        .ok_or_else(entrypoint_work_overflow)?;
+    if work.peak_intermediate_bytes > budget.intermediate_bytes() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile construction exceeds its aggregate intermediate-byte budget"
+                .to_string(),
+        ));
+    }
+    if !complete {
+        profile_result.coverage = EntrypointProfileCoverage::Partial;
+        for finding in &mut findings {
+            finding.status = AnalysisStatus::Inconclusive;
+        }
+    }
+    let report = RelationAnalysisReport {
+        mode: RelationAnalysisMode::Entrypoint,
+        anchor,
+        generation,
+        authored_purpose_revision,
+        continuation: None,
+        returned: u32::try_from(findings.len()).unwrap_or(u32::MAX),
+        total: if complete {
+            RelationTotalState::Exact(findings.len() as u64)
+        } else {
+            RelationTotalState::AtLeast(findings.len() as u64)
+        },
+        truncated: !complete,
+        reached_limits,
+        vcs: VcsImpact::NotRequested,
+        entrypoint_profile: Some(profile_result),
+        work,
+        findings,
+    };
+    let cursor_snapshot = AnalysisCursorSnapshot {
+        project: generation_project(&report.anchor.entity),
+        generation,
+        authored_purpose_revision,
+    };
+    let cursor_binding = analysis_cursor_binding(query, &selected_binding.project_root_identity)?;
+    Ok(RelationAnalysisDraft {
+        report,
+        output_bytes: budget.output_bytes(),
+        budget,
+        cursor_binding,
+        cursor_snapshot,
+        replay_relation_cursor: None,
+        finding_offset: 0,
+        vcs_digest: None,
+        external_relation_identities: BTreeSet::new(),
+        control: analysis_control,
+    })
+}
+
+/// Reject a profile whose required initial anchors cannot fit its shared state.
+fn validate_entrypoint_profile_budget(
+    profile: &EntrypointProfile,
+    budget: DetailedRelationBudget,
+) -> ServiceResult<()> {
+    let anchor_count = u32::try_from(profile.anchors.len()).unwrap_or(u32::MAX);
+    if anchor_count > budget.nodes() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile anchor count exceeds the node budget".to_string(),
+        ));
+    }
+    if anchor_count > budget.visited() {
+        return Err(ServiceError::InvalidInput(
+            "entrypoint profile anchor count exceeds the visited budget".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Add one detailed traversal work ledger without widening its types.
+fn add_relation_work(
+    total: &mut DetailedRelationWork,
+    next: &DetailedRelationWork,
+) -> ServiceResult<()> {
+    total.returned_rows = total
+        .returned_rows
+        .checked_add(next.returned_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.inspected_edges = total
+        .inspected_edges
+        .checked_add(next.inspected_edges)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.active_nodes = total.active_nodes.max(next.active_nodes);
+    total.visited_nodes = total.visited_nodes.max(next.visited_nodes);
+    total.retained_occurrences = total
+        .retained_occurrences
+        .checked_add(next.retained_occurrences)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_requested_rows = total
+        .database_requested_rows
+        .checked_add(next.database_requested_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_returned_rows = total
+        .database_returned_rows
+        .checked_add(next.database_returned_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_decoded_bytes = total
+        .database_decoded_bytes
+        .checked_add(next.database_decoded_bytes)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_entities = total
+        .hydrated_entities
+        .checked_add(next.hydrated_entities)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_purpose_paths = total
+        .hydrated_purpose_paths
+        .checked_add(next.hydrated_purpose_paths)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_classification_paths = total
+        .hydrated_classification_paths
+        .checked_add(next.hydrated_classification_paths)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.retained_composition_bytes = total
+        .retained_composition_bytes
+        .saturating_add(next.retained_composition_bytes);
+    total.intermediate_bytes = total
+        .intermediate_bytes
+        .saturating_add(next.intermediate_bytes);
+    total.rendered_output_bytes = total
+        .rendered_output_bytes
+        .saturating_add(next.rendered_output_bytes);
+    Ok(())
+}
+
+/// Add one bounded repository-graph read to the profile work ledger.
+fn add_repository_read_work(
+    total: &mut DetailedRelationWork,
+    next: &RepositoryGraphReadWork,
+) -> ServiceResult<()> {
+    total.database_requested_rows = total
+        .database_requested_rows
+        .checked_add(next.requested_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_returned_rows = total
+        .database_returned_rows
+        .checked_add(next.returned_rows)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.database_decoded_bytes = total
+        .database_decoded_bytes
+        .checked_add(next.decoded_bytes)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_entities = total
+        .hydrated_entities
+        .checked_add(next.hydrated_entities)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.hydrated_purpose_paths = total
+        .hydrated_purpose_paths
+        .checked_add(next.hydrated_paths)
+        .ok_or_else(entrypoint_work_overflow)?;
+    total.intermediate_bytes = total.intermediate_bytes.saturating_add(next.decoded_bytes);
+    Ok(())
+}
+
+/// Load candidate classifications in bounded, cancellable batches.
+#[cfg(test)]
+fn load_entrypoint_candidate_classifications<'entity>(
+    store: &AtlasStore,
+    entities: impl IntoIterator<Item = &'entity GraphEntity>,
+    budget: DetailedRelationBudget,
+    relation_work: &mut DetailedRelationWork,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Option<BTreeMap<String, projectatlas_core::language::ContentClassification>>> {
+    let mut path_set = BTreeSet::new();
+    for entity in entities {
+        check_control(control)?;
+        let Some(path) = classification_path(entity) else {
+            continue;
+        };
+        if path_set.contains(&path) {
+            continue;
+        }
+        let path_bytes = classification_path_bytes(&path)?;
+        if relation_work
+            .intermediate_bytes
+            .checked_add(path_bytes)
+            .is_none_or(|bytes| bytes > budget.intermediate_bytes())
+        {
+            return Ok(None);
+        }
+        path_set.insert(path);
+        relation_work.intermediate_bytes = relation_work
+            .intermediate_bytes
+            .checked_add(path_bytes)
+            .ok_or_else(entrypoint_work_overflow)?;
+    }
+    let paths = path_set.into_iter().collect::<Vec<_>>();
+    let mut classifications = BTreeMap::new();
+    for chunk in paths.chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS) {
+        check_control(control)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::ClassificationHydration,
+        );
+        let row_upper_bound = classification_rows_upper_bound(chunk, control)?;
+        if relation_work
+            .intermediate_bytes
+            .checked_add(row_upper_bound)
+            .is_none_or(|bytes| bytes > budget.intermediate_bytes())
+        {
+            return Ok(None);
+        }
+        let rows = store.file_content_classifications_for_paths(chunk)?;
+        check_control(control)?;
+        let decoded_bytes = classification_rows_bytes(&rows, control)?;
+        let retained_bytes = classification_rows_bytes(&rows, control)?;
+        let requested_rows =
+            u32::try_from(chunk.len()).map_err(|_overflow| entrypoint_work_overflow())?;
+        let returned_rows =
+            u32::try_from(rows.len()).map_err(|_overflow| entrypoint_work_overflow())?;
+        relation_work.database_requested_rows = relation_work
+            .database_requested_rows
+            .checked_add(requested_rows)
+            .ok_or_else(entrypoint_work_overflow)?;
+        relation_work.database_returned_rows = relation_work
+            .database_returned_rows
+            .checked_add(returned_rows)
+            .ok_or_else(entrypoint_work_overflow)?;
+        relation_work.database_decoded_bytes = relation_work
+            .database_decoded_bytes
+            .checked_add(decoded_bytes)
+            .ok_or_else(entrypoint_work_overflow)?;
+        relation_work.hydrated_classification_paths = relation_work
+            .hydrated_classification_paths
+            .checked_add(returned_rows)
+            .ok_or_else(entrypoint_work_overflow)?;
+        let retained_intermediate = relation_work
+            .intermediate_bytes
+            .checked_add(decoded_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_bytes))
+            .ok_or_else(entrypoint_work_overflow)?;
+        if retained_intermediate > budget.intermediate_bytes() {
+            return Ok(None);
+        }
+        relation_work.intermediate_bytes = retained_intermediate;
+        classifications.extend(rows.into_iter().map(|row| (row.path, row.classification)));
+        check_control(control)?;
+    }
+    Ok(Some(classifications))
+}
+
+/// Count one bounded path retained while classification batches run.
+#[cfg(test)]
+fn classification_path_bytes(path: &str) -> ServiceResult<u64> {
+    u64::try_from(path.len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(8))
+        .ok_or_else(entrypoint_work_overflow)
+}
+
+/// Bound one classification batch before materializing its database rows.
+#[cfg(test)]
+fn classification_rows_upper_bound(
+    paths: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let maximum_classification_bytes = ContentClassification::ALL
+        .iter()
+        .map(|classification| classification.as_str().len())
+        .max()
+        .map_or(0, |bytes| u64::try_from(bytes).unwrap_or(u64::MAX));
+    paths.iter().try_fold(0_u64, |bytes, path| {
+        check_control(control)?;
+        let row_bytes = u64::try_from(path.len())
+            .ok()
+            .and_then(|path_bytes| path_bytes.checked_add(maximum_classification_bytes))
+            .and_then(|row_bytes| row_bytes.checked_add(8))
+            .and_then(|row_bytes| row_bytes.checked_mul(2))
+            .ok_or_else(entrypoint_work_overflow)?;
+        bytes
+            .checked_add(row_bytes)
+            .ok_or_else(entrypoint_work_overflow)
+    })
+}
+
+/// Count conservative decoded and retained bytes for one classification batch.
+#[cfg(test)]
+fn classification_rows_bytes(
+    rows: &[projectatlas_db::FileContentClassification],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    rows.iter().try_fold(0_u64, |bytes, row| {
+        check_control(control)?;
+        let row_bytes = u64::try_from(row.path.len())
+            .ok()
+            .and_then(|path| {
+                u64::try_from(row.classification.as_str().len())
+                    .ok()
+                    .and_then(|classification| path.checked_add(classification))
+            })
+            .and_then(|bytes| bytes.checked_add(8))
+            .ok_or_else(entrypoint_work_overflow)?;
+        bytes
+            .checked_add(row_bytes)
+            .ok_or_else(entrypoint_work_overflow)
+    })
+}
+
+/// Derive one initial-anchor budget from the remaining profile-wide capacity.
+fn entrypoint_anchor_budget(
+    budget: DetailedRelationBudget,
+    work: &DetailedRelationWork,
+) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(work.intermediate_bytes);
+    if remaining_intermediate < 64 * 1_024 {
+        return Ok(Err(GraphLimitKind::IntermediateBytes));
+    }
+    Ok(Ok(budget.with_aggregate_limits(
+        None,
+        None,
+        None,
+        None,
+        Some(remaining_intermediate),
+        None,
+    )?))
+}
+
+/// Check whether occurrence hydration omitted evidence after the profile total was exhausted.
+fn entrypoint_occurrence_evidence_is_incomplete(
+    store: &AtlasStore,
+    report: &DetailedRelationReport,
+    generation: projectatlas_core::IndexGeneration,
+    budget: DetailedRelationBudget,
+    relation_work: &mut DetailedRelationWork,
+    control: Option<&IndexWorkControl>,
+    include_report_rows: bool,
+) -> ServiceResult<Result<bool, GraphLimitKind>> {
+    let mut admitted_relations = if include_report_rows {
+        report
+            .rows
+            .iter()
+            .map(|row| row.relation.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    admitted_relations.extend(report.pruned_relations.iter().cloned());
+    if admitted_relations.is_empty() {
+        return Ok(Ok(false));
+    }
+    for chunk in admitted_relations.chunks(MAX_REPOSITORY_GRAPH_FRONTIER) {
+        check_control(control)?;
+        let remaining_intermediate = budget
+            .intermediate_bytes()
+            .saturating_sub(relation_work.intermediate_bytes);
+        if remaining_intermediate < 64 * 1_024 {
+            return Ok(Err(GraphLimitKind::IntermediateBytes));
+        }
+        let relations = chunk.to_vec();
+        let batch_rows = u32::try_from(relations.len()).map_err(|_overflow| {
+            ServiceError::InvalidInput("occurrence evidence batch size overflowed".to_string())
+        })?;
+        let read_budget = RepositoryGraphReadBudget::new(
+            batch_rows,
+            batch_rows,
+            remaining_intermediate.min(RepositoryGraphReadBudget::MAX_DECODED_BYTES),
+            1,
+            batch_rows.saturating_mul(2).max(1),
+        )
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::OccurrenceProbeBeforeRead,
+        );
+        let batch = match store.repository_graph_occurrence_pages_bounded(
+            &relations,
+            1,
+            read_budget,
+            control,
+        ) {
+            Ok(batch) => batch,
+            Err(DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::InvalidLimits {
+                    reason: "graph read decoded bytes exceed the batch budget",
+                },
+            )) => return Ok(Err(GraphLimitKind::IntermediateBytes)),
+            Err(
+                DbError::GraphContract(
+                    projectatlas_core::graph::GraphContractError::GenerationMismatch { .. },
+                )
+                | DbError::GraphRowShape {
+                    table: "project_identity",
+                    reason: "typed graph generation does not match complete publication",
+                },
+            ) => {
+                return Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation",
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        add_repository_read_work(relation_work, &batch.work)?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::OccurrenceProbe);
+        let current_generation = match store.repository_graph_generation() {
+            Ok(generation) => generation.ok_or_else(|| {
+                ServiceError::InvalidInput(
+                    "repository graph has no complete generation for entrypoint analysis"
+                        .to_string(),
+                )
+            })?,
+            Err(DbError::GraphRowShape {
+                table: "project_identity",
+                reason: "typed graph generation does not match complete publication",
+            }) => {
+                return Err(ServiceError::RelationCursorStale {
+                    field: "entrypoint graph generation",
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if current_generation != generation {
+            return Err(ServiceError::RelationCursorStale {
+                field: "entrypoint graph generation",
+            });
+        }
+        if batch
+            .pages
+            .iter()
+            .any(|page| page.truncated || !page.rows.is_empty())
+        {
+            return Ok(Ok(true));
+        }
+    }
+    Ok(Ok(false))
+}
+
+/// Retain one resolved entity when no relation page was needed for it.
+fn entrypoint_unavailable_node(
+    entity: &GraphEntity,
+    content_selection: ContentSelection,
+) -> DetailedRelationNode {
+    let path = entity_path(entity).map(str::to_string);
+    DetailedRelationNode {
+        entity: entity.clone(),
+        classification: None,
+        content_selection: content_selection
+            .explicit_value()
+            .map(|_| content_selection),
+        purpose: RelationPurpose::Unavailable { path },
+        coverage: Vec::new(),
+    }
+}
+
+/// Protect every indexed symbol that encloses a reachable symbol.
+fn protect_reachable_symbol_enclosures(
+    reachable: &BTreeMap<String, DetailedRelationNode>,
+    entities: &[GraphEntity],
+    protected_keys: &mut BTreeSet<String>,
+) {
+    let mut pending = reachable
+        .values()
+        .filter_map(|node| match node.entity.selector() {
+            EntitySelector::Symbol { symbol } => symbol.parent.as_ref().map(|parent| {
+                (
+                    symbol.file.as_str().to_string(),
+                    parent.as_str().to_string(),
+                )
+            }),
+            _ => None,
+        })
+        .collect::<VecDeque<_>>();
+    while let Some((file, parent)) = pending.pop_front() {
+        for entity in entities {
+            let EntitySelector::Symbol { symbol } = entity.selector() else {
+                continue;
+            };
+            let qualified_name_matches = symbol.name.as_str() == parent
+                || symbol.parent.as_ref().is_some_and(|candidate_parent| {
+                    format!("{candidate_parent}::{name}", name = symbol.name.as_str()) == parent
+                        || format!("{candidate_parent}.{name}", name = symbol.name.as_str())
+                            == parent
+                });
+            if symbol.file.as_str() != file || !qualified_name_matches {
+                continue;
+            }
+            let key = entity.key().canonical_identity().to_string();
+            if protected_keys.insert(key)
+                && let Some(next_parent) = symbol.parent.as_ref()
+            {
+                pending.push_back((file.clone(), next_parent.as_str().to_string()));
+            }
+        }
+    }
+}
+
+/// Derive one one-step detailed budget from the remaining profile-wide capacity.
+fn entrypoint_step_budget(
+    budget: DetailedRelationBudget,
+    work: &DetailedRelationWork,
+    retained_nodes: usize,
+    validated_candidates: usize,
+    anchor_is_retained: bool,
+    candidate_anchor_overhead: bool,
+    include_occurrences: bool,
+    remaining_edges_override: Option<u32>,
+) -> ServiceResult<Result<DetailedRelationBudget, GraphLimitKind>> {
+    let accounted_nodes = retained_nodes.saturating_add(validated_candidates);
+    let accounted_nodes = u32::try_from(accounted_nodes).unwrap_or(u32::MAX);
+    let validated_candidates = u32::try_from(validated_candidates).unwrap_or(u32::MAX);
+    let remaining_edges = remaining_edges_override
+        .unwrap_or_else(|| budget.edges().saturating_sub(work.inspected_edges));
+    let remaining_nodes = budget.nodes().saturating_sub(accounted_nodes);
+    let remaining_visited = budget.visited().saturating_sub(accounted_nodes);
+    let step_nodes = if candidate_anchor_overhead {
+        budget.nodes()
+    } else if anchor_is_retained {
+        budget.nodes().saturating_sub(validated_candidates)
+    } else {
+        remaining_nodes
+    };
+    let step_visited = if candidate_anchor_overhead {
+        budget.visited()
+    } else if anchor_is_retained {
+        budget.visited().saturating_sub(validated_candidates)
+    } else {
+        remaining_visited
+    };
+    let remaining_occurrences = if include_occurrences {
+        budget
+            .occurrences_total()
+            .saturating_sub(work.retained_occurrences)
+    } else {
+        budget.occurrences_total()
+    };
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(work.intermediate_bytes);
+    let rows = budget.page_rows().min(remaining_edges);
+    if remaining_edges == 0 {
+        return Ok(Err(GraphLimitKind::Edges));
+    }
+    if remaining_nodes == 0 && !anchor_is_retained {
+        return Ok(Err(GraphLimitKind::Nodes));
+    }
+    if remaining_visited == 0 && !anchor_is_retained {
+        return Ok(Err(GraphLimitKind::Visited));
+    }
+    if remaining_intermediate < 64 * 1_024 {
+        return Ok(Err(GraphLimitKind::IntermediateBytes));
+    }
+    if rows == 0 {
+        return Ok(Err(GraphLimitKind::Rows));
+    }
+    let limits = GraphLimits::new(
+        rows,
+        budget.occurrences_per_relation(),
+        1,
+        budget.output_bytes(),
+    )
+    .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let step = DetailedRelationBudget::from_graph_limits(limits).with_aggregate_limits(
+        Some(remaining_edges),
+        Some(step_nodes),
+        Some(step_visited),
+        Some(remaining_occurrences),
+        Some(remaining_intermediate),
+        Some(budget.deadline_ms()),
+    )?;
+    Ok(Ok(step))
+}
+
+/// Return the typed error for aggregate entrypoint work overflow.
+fn entrypoint_work_overflow() -> ServiceError {
+    ServiceError::InvalidInput("entrypoint relation work overflowed".to_string())
+}
+
+/// Reconcile a raw edge limit when no admitted row remains after the page.
+fn entrypoint_filtered_edge_limit_is_terminal(
+    store: &AtlasStore,
+    generation: projectatlas_core::IndexGeneration,
+    report: &DetailedRelationReport,
+    relation: GraphRelationKind,
+    minimum_confidence: ConfidenceClass,
+    content_selection: ContentSelection,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<bool> {
+    if !report.reached_limits.contains(&GraphLimitKind::Edges)
+        || report.reached_limits.iter().any(|limit| {
+            *limit != GraphLimitKind::Edges
+                && (report.rows.is_empty() || *limit != GraphLimitKind::Rows)
+        })
+        || report.pruned_incomplete_paths > 0
+        || report.pruned_evidence_truncated
+    {
+        return Ok(false);
+    }
+    if let Some(continuation) = report.adjacency_continuation.as_ref() {
+        let has_rows = store.repository_graph_adjacency_continuation_has_filtered_rows(
+            continuation,
+            minimum_confidence,
+            content_selection,
+            control,
+        )?;
+        validate_entrypoint_generation(generation, store.repository_graph_generation())?;
+        #[cfg(test)]
+        analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::TerminalProbe);
+        return Ok(!has_rows);
+    }
+    if !report.rows.is_empty() {
+        return Ok(false);
+    }
+    entrypoint_terminal_adjacency_is_empty(
+        store,
+        generation,
+        report.anchor.entity.key(),
+        relation,
+        minimum_confidence,
+        content_selection,
+        control,
+    )
+}
+
+/// Return the project identity for an already generation-bound graph entity.
+fn generation_project(entity: &GraphEntity) -> ProjectInstanceId {
+    entity.key().project()
+}
+
+/// Probe one terminal adjacency and reject a publication change immediately afterward.
+fn entrypoint_terminal_adjacency_is_empty(
+    store: &AtlasStore,
+    generation: projectatlas_core::IndexGeneration,
+    key: &GraphEntityKey,
+    relation: GraphRelationKind,
+    minimum_confidence: ConfidenceClass,
+    content_selection: ContentSelection,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<bool> {
+    let empty = store.repository_graph_adjacency_is_empty_filtered(
+        key,
+        RepositoryGraphDirection::Outbound,
+        relation,
+        minimum_confidence,
+        content_selection,
+        control,
+    )?;
+    #[cfg(test)]
+    analysis_test_observer::notify(analysis_test_observer::AnalysisPhaseEvent::TerminalProbe);
+    validate_entrypoint_generation(generation, store.repository_graph_generation())?;
+    Ok(empty)
+}
+
+/// Load trusted coverage for a candidate whose admitted terminal adjacency is empty.
+fn load_entrypoint_terminal_candidate_coverage(
+    store: &AtlasStore,
+    entity: &GraphEntity,
+    generation: projectatlas_core::IndexGeneration,
+    budget: DetailedRelationBudget,
+    relation_work: &mut DetailedRelationWork,
+    content_selection: ContentSelection,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Result<DetailedRelationNode, GraphLimitKind>> {
+    check_control(control)?;
+    let remaining_intermediate = budget
+        .intermediate_bytes()
+        .saturating_sub(relation_work.intermediate_bytes);
+    if remaining_intermediate < 64 * 1_024 {
+        return Ok(Err(GraphLimitKind::IntermediateBytes));
+    }
+    let candidate_budget =
+        budget.with_aggregate_limits(None, None, None, None, Some(remaining_intermediate), None)?;
+    let (node, metadata_work) = match hydrate_single_detailed_node(
+        store,
+        entity,
+        generation,
+        content_selection,
+        candidate_budget,
+        control,
+    ) {
+        Ok(value) => value,
+        Err(ServiceError::Db(DbError::GraphContract(
+            projectatlas_core::graph::GraphContractError::InvalidLimits {
+                reason: "graph read decoded bytes exceed the batch budget",
+            },
+        ))) => return Ok(Err(GraphLimitKind::IntermediateBytes)),
+        Err(ServiceError::InvalidInput(reason))
+            if reason == "detailed relation intermediate-byte budget is exhausted"
+                || reason == "terminal node metadata exceeded the intermediate-byte budget" =>
+        {
+            return Ok(Err(GraphLimitKind::IntermediateBytes));
+        }
+        Err(ServiceError::Db(
+            DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::GenerationMismatch { .. },
+            )
+            | DbError::GraphRowShape {
+                table: "project_identity",
+                reason: "typed graph generation does not match complete publication",
+            },
+        )) => {
+            return Err(ServiceError::RelationCursorStale {
+                field: "entrypoint graph generation",
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    add_relation_work(relation_work, &metadata_work)?;
+    #[cfg(test)]
+    analysis_test_observer::notify(
+        analysis_test_observer::AnalysisPhaseEvent::TerminalCandidateCoverageProbe {
+            intermediate_bytes: relation_work.intermediate_bytes,
+        },
+    );
+    validate_entrypoint_generation(generation, store.repository_graph_generation())?;
+    check_control(control)?;
+    Ok(Ok(node))
+}
+
+/// Return whether a detailed node carries trusted coverage for admitted relations.
+fn trusted_node_coverage(
+    node: &DetailedRelationNode,
+    admitted_relations: &[GraphRelationKind],
+) -> bool {
+    let applies = |coverage: &CoverageRecord| {
+        coverage
+            .relation()
+            .is_none_or(|relation| admitted_relations.contains(&relation))
+    };
+    let applicable = node
+        .coverage
+        .iter()
+        .filter(|coverage| applies(coverage))
+        .collect::<Vec<_>>();
+    !applicable.is_empty()
+        && applicable
+            .iter()
+            .all(|coverage| coverage_trust(coverage.state()) == CoverageTrustState::Trusted)
+        && (applicable
+            .iter()
+            .any(|coverage| coverage.relation().is_none())
+            || admitted_relations.iter().all(|relation| {
+                applicable
+                    .iter()
+                    .any(|coverage| coverage.relation() == Some(*relation))
+            }))
+}
+
+/// Return whether every local endpoint in one relation row has trusted coverage.
+fn trusted_relation_row(
+    row: &DetailedRelationRow,
+    admitted_relations: &[GraphRelationKind],
+) -> bool {
+    trusted_node_coverage(&row.source, admitted_relations)
+        && row.target.as_ref().is_none_or(|target| {
+            matches!(target.entity.selector(), EntitySelector::External { .. })
+                || trusted_node_coverage(target, admitted_relations)
+        })
+        && row
+            .path
+            .iter()
+            .all(|node| trusted_node_coverage(node, admitted_relations))
+}
+
+/// Return whether one terminal candidate traversal supports a safe negative.
+fn entrypoint_report_complete(
+    report: &DetailedRelationReport,
+    admitted_relations: &[GraphRelationKind],
+    filtered_edge_limit_is_terminal: bool,
+) -> bool {
+    (filtered_edge_limit_is_terminal
+        || (matches!(
+            report.total,
+            RelationTotalState::Exact(total) if total == u64::from(report.returned)
+        ) && !report.truncated
+            && report.continuation.is_none()
+            && report.reached_limits.is_empty()))
+        && report.pruned_incomplete_paths == 0
+        && !report.pruned_evidence_truncated
+        && trusted_node_coverage(&report.anchor, admitted_relations)
+        && report.rows.iter().all(|row| {
+            matches!(
+                row.relation.resolution(),
+                RelationResolution::Resolved { .. } | RelationResolution::External { .. }
+            ) && row.relation.completeness() == Completeness::Complete
+                && trusted_relation_row(row, admitted_relations)
+        })
+}
+
+/// Return local identities exposed by candidate traversal that were not retained already.
+fn candidate_report_unretained_local_keys(
+    report: &DetailedRelationReport,
+    retained_keys: &BTreeSet<String>,
+    content_selection: ContentSelection,
+) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    let mut retain = |node: &DetailedRelationNode| {
+        if !matches!(node.entity.selector(), EntitySelector::External { .. })
+            && (content_selection == ContentSelection::UnspecifiedLegacy
+                || node
+                    .classification
+                    .is_some_and(|classification| content_selection.includes(classification)))
+            && !retained_keys.contains(node.entity.key().canonical_identity())
+        {
+            keys.insert(node.entity.key().canonical_identity().to_string());
+        }
+    };
+    retain(&report.anchor);
+    for row in &report.rows {
+        retain(&row.source);
+        if let Some(target) = row.target.as_ref() {
+            retain(target);
+        }
+        row.path.iter().for_each(&mut retain);
+    }
+    keys
+}
+
+/// Require one unchanged complete generation at a freshness boundary.
+fn validate_entrypoint_generation(
+    expected: IndexGeneration,
+    current: Result<Option<IndexGeneration>, DbError>,
+) -> ServiceResult<()> {
+    match current {
+        Ok(Some(current)) if current == expected => Ok(()),
+        Ok(Some(_) | None)
+        | Err(
+            DbError::GraphPublicationUnavailable
+            | DbError::GraphRowShape {
+                table: "project_identity",
+                reason: "typed graph generation does not match complete publication",
+            }
+            | DbError::GraphContract(
+                projectatlas_core::graph::GraphContractError::GenerationMismatch { .. },
+            ),
+        ) => Err(ServiceError::RelationCursorStale {
+            field: "entrypoint graph generation",
+        }),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Clamp the existing traversal budget to analysis product ceilings.
 fn bounded_analysis_budget(
     budget: DetailedRelationBudget,
@@ -1061,18 +3343,20 @@ fn bounded_analysis_budget(
 /// Normalize every result-defining request field for cursor identity.
 fn analysis_cursor_binding(
     query: &RelationAnalysisQuery,
-    project_root: &str,
-) -> AnalysisCursorBinding {
-    AnalysisCursorBinding {
-        root_digest: *blake3::hash(
-            format!("projectatlas:analysis-root:v1\0{project_root}").as_bytes(),
-        )
-        .as_bytes(),
+    project_root: &CanonicalProjectRoot,
+) -> ServiceResult<AnalysisCursorBinding> {
+    Ok(AnalysisCursorBinding {
+        root_digest: super::canonical_root_digest(ANALYSIS_ROOT_DOMAIN, project_root)?,
         anchor: query.relations.anchor.clone(),
         direction: query.relations.direction,
         relation: query.relations.relation,
         minimum_confidence: query.relations.minimum_confidence,
         resolution: query.relations.resolution,
+        content_selection: query
+            .relations
+            .content_selection
+            .explicit_value()
+            .map(|_| query.relations.content_selection),
         options: AnalysisCursorOptions {
             relation_occurrences: query.relations.include_occurrences.into(),
             communities: query.include_communities.into(),
@@ -1086,7 +3370,8 @@ fn analysis_cursor_binding(
         trace_target: query.trace_target.clone(),
         vcs: (query.mode == RelationAnalysisMode::Impact)
             .then(|| query.vcs.clone().unwrap_or(GitImpactSelection::WorkingTree)),
-    }
+        entrypoint_profile: query.entrypoint_profile.clone(),
+    })
 }
 
 /// Decode and validate one analysis continuation against its request.
@@ -1196,8 +3481,9 @@ fn resolution_gap_finding(
         metric: None,
         evidence: Some(AnalysisRelationEvidence {
             relation: relation.clone(),
-            next_call: relation_gap_next_call(relation, &source.entity),
+            next_call: relation_gap_next_call(relation, source),
         }),
+        community: None,
     }
 }
 
@@ -1212,9 +3498,9 @@ fn resolution_gap_identity(finding: &AnalysisFinding) -> &str {
 /// Build an exact existing relation request for one source-side gap.
 fn relation_gap_next_call(
     relation: &projectatlas_core::graph::LogicalRelation,
-    source: &GraphEntity,
+    source: &DetailedRelationNode,
 ) -> Option<RelationAnalysisNextCall> {
-    let anchor = relation_anchor_for_entity(source)?;
+    let anchor = relation_anchor_for_entity(&source.entity)?;
     let resolution = match relation.resolution() {
         RelationResolution::Ambiguous { .. } => RelationResolutionFilter::Ambiguous,
         RelationResolution::Unresolved { .. } => RelationResolutionFilter::Unresolved,
@@ -1227,6 +3513,7 @@ fn relation_gap_next_call(
         relation: relation.kind(),
         resolution,
         minimum_confidence: relation.confidence(),
+        content_selection: source.content_selection,
     })
 }
 
@@ -1293,6 +3580,16 @@ fn local_edge(
     })
 }
 
+/// Completeness state for admitted community relations during closure.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CommunityClosureScope {
+    /// Every admitted community relation stayed within the induced nodes.
+    #[default]
+    Closed,
+    /// At least one admitted community relation escaped the induced nodes.
+    Open,
+}
+
 /// Work and evidence retained while closing edges among admitted nodes.
 #[derive(Default)]
 struct ClosureWork {
@@ -1302,6 +3599,8 @@ struct ClosureWork {
     deadline_reached: bool,
     /// Whether the induced node scope was closed in the requested direction.
     induced_scope_closed: bool,
+    /// Scope status for admitted community relations.
+    community_scope: CommunityClosureScope,
     /// Database adjacency rows inspected by closure.
     inspected_edges: u32,
     /// Database-decoded bytes retained during closure.
@@ -1323,6 +3622,11 @@ fn close_induced_edges(
     let mut work = ClosureWork {
         complete: true,
         induced_scope_closed: query.relations.direction == RelationDirection::Outbound,
+        community_scope: if query.relations.direction == RelationDirection::Outbound {
+            CommunityClosureScope::Closed
+        } else {
+            CommunityClosureScope::Open
+        },
         ..ClosureWork::default()
     };
     let mut keys = Vec::with_capacity(nodes.len());
@@ -1379,10 +3683,11 @@ fn close_induced_edges(
                 endpoints,
             )
             .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-            let read = store.repository_graph_adjacency_page_filtered_bounded(
+            let read = store.repository_graph_adjacency_page_filtered_bounded_with_documents(
                 chunk,
                 RepositoryGraphDirection::Outbound,
                 query.relations.relation,
+                super::relations::include_document_relations(&query.relations),
                 continuation.as_ref(),
                 page_limit,
                 budget,
@@ -1402,12 +3707,17 @@ fn close_induced_edges(
                 if !analysis_relation_matches(&row.detail.relation, &query.relations) {
                     continue;
                 }
+                let community_relation =
+                    community_relation_weight(row.detail.relation.kind()).is_some();
                 let source_key = row.detail.source.key().canonical_identity().to_string();
                 if matches!(
                     row.detail.relation.resolution(),
                     RelationResolution::Ambiguous { .. } | RelationResolution::Unresolved { .. }
                 ) {
                     work.induced_scope_closed = false;
+                    if community_relation {
+                        work.community_scope = CommunityClosureScope::Open;
+                    }
                     if let Some(source) = nodes.get(&source_key) {
                         work.resolution_gaps
                             .push(resolution_gap_finding(&row.detail.relation, source));
@@ -1416,6 +3726,9 @@ fn close_induced_edges(
                 }
                 let Some(target) = row.detail.target else {
                     work.induced_scope_closed = false;
+                    if community_relation {
+                        work.community_scope = CommunityClosureScope::Open;
+                    }
                     continue;
                 };
                 let target_key = target.key().canonical_identity().to_string();
@@ -1428,6 +3741,9 @@ fn close_induced_edges(
                     });
                 } else {
                     work.induced_scope_closed = false;
+                    if community_relation {
+                        work.community_scope = CommunityClosureScope::Open;
+                    }
                 }
             }
             if read.page.truncated {
@@ -1469,12 +3785,20 @@ fn relation_evidence_complete(
     edges: &[LocalEdge],
     query: &RelationAnalysisQuery,
     closure: &ClosureWork,
+    community_only: bool,
 ) -> bool {
     closure.complete
-        && closure.induced_scope_closed
+        && if community_only {
+            closure.community_scope == CommunityClosureScope::Closed
+        } else {
+            closure.induced_scope_closed
+        }
         && report.reached_limits.is_empty()
         && query.relations.direction == RelationDirection::Outbound
-        && edges.iter().all(|edge| edge.complete)
+        && edges
+            .iter()
+            .filter(|edge| !community_only || community_relation_weight(edge.kind).is_some())
+            .all(|edge| edge.complete)
         && nodes.values().all(|node| match node.entity.selector() {
             EntitySelector::Project => true,
             EntitySelector::Folder { .. }
@@ -1482,10 +3806,9 @@ fn relation_evidence_complete(
             | EntitySelector::Package { .. }
             | EntitySelector::Symbol { .. } => {
                 !node.coverage.is_empty()
-                    && node
-                        .coverage
-                        .iter()
-                        .all(|coverage| coverage.state() == CoverageState::Complete)
+                    && node.coverage.iter().all(|coverage| {
+                        coverage_trust(coverage.state()) == CoverageTrustState::Trusted
+                    })
             }
             EntitySelector::External { .. } => false,
         })
@@ -1522,7 +3845,7 @@ fn dead_code_scope_complete(
             .anchor
             .coverage
             .iter()
-            .all(|coverage| coverage.state() == CoverageState::Complete)
+            .all(|coverage| coverage_trust(coverage.state()) == CoverageTrustState::Trusted)
         && report.rows.iter().all(|row| {
             matches!(
                 row.relation.resolution(),
@@ -1536,33 +3859,7 @@ fn analysis_relation_matches(
     relation: &projectatlas_core::graph::LogicalRelation,
     query: &DetailedRelationQuery,
 ) -> bool {
-    query.relation.is_none_or(|kind| relation.kind() == kind)
-        && confidence_rank(relation.confidence()) >= confidence_rank(query.minimum_confidence)
-        && match query.resolution {
-            RelationResolutionFilter::Any => true,
-            RelationResolutionFilter::Resolved => {
-                matches!(relation.resolution(), RelationResolution::Resolved { .. })
-            }
-            RelationResolutionFilter::Ambiguous => {
-                matches!(relation.resolution(), RelationResolution::Ambiguous { .. })
-            }
-            RelationResolutionFilter::Unresolved => {
-                matches!(relation.resolution(), RelationResolution::Unresolved { .. })
-            }
-            RelationResolutionFilter::External => {
-                matches!(relation.resolution(), RelationResolution::External { .. })
-            }
-        }
-}
-
-/// Rank the closed confidence classes for inclusive threshold comparison.
-const fn confidence_rank(value: ConfidenceClass) -> u8 {
-    match value {
-        ConfidenceClass::Exact => 4,
-        ConfidenceClass::High => 3,
-        ConfidenceClass::Medium => 2,
-        ConfidenceClass::Low => 1,
-    }
+    super::relations::relation_matches(relation, query)
 }
 
 /// Compute bounded architecture findings over admitted topology and symbols.
@@ -1571,8 +3868,10 @@ fn architecture_findings(
     nodes: &BTreeMap<String, DetailedRelationNode>,
     edges: &[LocalEdge],
     complete: bool,
+    community_complete: bool,
     query: &RelationAnalysisQuery,
     symbol_byte_budget: u64,
+    preceding_finding_count: usize,
     supplemental_work: &mut SupplementalWork,
     control: Option<&IndexWorkControl>,
 ) -> ServiceResult<Vec<AnalysisFinding>> {
@@ -1594,6 +3893,7 @@ fn architecture_findings(
             nodes: analysis_nodes_for(nodes, &nodes.keys().cloned().collect::<Vec<_>>()),
             metric: Some(nodes.len() as u64),
             evidence: None,
+            community: None,
         });
     }
     let components = weak_components(nodes, edges, false);
@@ -1606,21 +3906,82 @@ fn architecture_findings(
             nodes: analysis_nodes_for(nodes, component),
             metric: Some(component.len() as u64),
             evidence: None,
+            community: None,
         });
         findings.push(purpose_finding(nodes, component, complete));
     }
     if query.include_communities {
-        for community in weak_components(nodes, edges, true) {
-            findings.push(AnalysisFinding {
-                kind: AnalysisFindingKind::Community,
-                status: AnalysisStatus::Candidate,
-                summary: "relationship-derived community with containment edges excluded"
-                    .to_string(),
-                nodes: analysis_nodes_for(nodes, &community),
-                metric: Some(community.len() as u64),
-                evidence: None,
-            });
+        let mut existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+        let mut existing_finding_append_bytes = serialized_findings_append_bytes(
+            existing_finding_bytes,
+            findings.len(),
+            preceding_finding_count,
+        );
+        if existing_finding_append_bytes > symbol_byte_budget {
+            supplemental_work.composition_truncated = true;
+            push_limit(
+                &mut supplemental_work.reached_limits,
+                GraphLimitKind::IntermediateBytes,
+            );
+            while existing_finding_append_bytes > symbol_byte_budget && findings.len() > 1 {
+                check_control(control)?;
+                findings.pop();
+                existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+                existing_finding_append_bytes = serialized_findings_append_bytes(
+                    existing_finding_bytes,
+                    findings.len(),
+                    preceding_finding_count,
+                );
+            }
+            if existing_finding_append_bytes > symbol_byte_budget {
+                findings.clear();
+                existing_finding_bytes = serialized_bytes_controlled(&findings, control)?;
+                existing_finding_append_bytes = serialized_findings_append_bytes(
+                    existing_finding_bytes,
+                    findings.len(),
+                    preceding_finding_count,
+                );
+            }
         }
+        let community_budget = symbol_byte_budget.saturating_sub(existing_finding_append_bytes);
+        #[cfg(test)]
+        analysis_test_observer::notify(
+            analysis_test_observer::AnalysisPhaseEvent::CompositionBudget {
+                symbol_byte_budget,
+                existing_finding_append_bytes,
+                community_budget,
+            },
+        );
+        let existing_community_finding_count =
+            preceding_finding_count.saturating_add(findings.len());
+        let (community_findings, community_working_set_bytes, community_limits) =
+            community_findings_with_budget(
+                nodes,
+                edges,
+                community_complete,
+                query,
+                community_budget,
+                existing_community_finding_count,
+                control,
+            )?;
+        supplemental_work.community_working_set_bytes = supplemental_work
+            .community_working_set_bytes
+            .max(community_working_set_bytes);
+        let community_truncated = !community_limits.is_empty();
+        for limit in community_limits {
+            push_limit(&mut supplemental_work.reached_limits, limit);
+        }
+        if community_truncated
+            || community_findings.iter().any(|finding| {
+                finding
+                    .community
+                    .as_ref()
+                    .is_some_and(|community| community.truncated)
+            })
+        {
+            supplemental_work.composition_truncated = true;
+        }
+        findings.extend(community_findings);
     }
     if query.include_cycles {
         let dependency_edges = edges
@@ -1654,6 +4015,7 @@ fn architecture_findings(
                 nodes: Vec::new(),
                 metric: Some(0),
                 evidence: None,
+                community: None,
             });
         } else {
             for cycle in cycles {
@@ -1665,6 +4027,7 @@ fn architecture_findings(
                     nodes: analysis_nodes_for(nodes, &cycle),
                     metric: Some(cycle.len() as u64),
                     evidence: None,
+                    community: None,
                 });
             }
         }
@@ -1734,6 +4097,7 @@ fn purpose_finding(
         nodes: analysis_nodes_for(nodes, component),
         metric: Some(purposes.len() as u64),
         evidence: None,
+        community: None,
     }
 }
 
@@ -1804,6 +4168,7 @@ fn structural_findings(
             nodes: analysis_nodes_for(nodes, std::slice::from_ref(key)),
             metric: Some(*span),
             evidence: None,
+            community: None,
         });
     }
     if let Some((_span, degree, key)) = candidates
@@ -1821,6 +4186,7 @@ fn structural_findings(
             nodes: analysis_nodes_for(nodes, std::slice::from_ref(key)),
             metric: Some(*degree),
             evidence: None,
+            community: None,
         });
     }
     Ok(findings)
@@ -2075,6 +4441,38 @@ fn serialized_bytes_controlled<T: Serialize + ?Sized>(
     Ok(counter.bytes)
 }
 
+/// Charge one finding as an append to an already retained JSON findings array.
+///
+/// The enclosing array's `[]` framing is charged by the composition owner. An
+/// append therefore adds only the finding bytes and, after the first finding,
+/// the fixed comma separator.
+const fn serialized_finding_append_bytes(
+    finding_bytes: u64,
+    preceding_finding_count: usize,
+) -> u64 {
+    finding_bytes.saturating_add(if preceding_finding_count == 0 {
+        0
+    } else {
+        JSON_ARRAY_SEPARATOR_BYTES
+    })
+}
+
+/// Charge a serialized findings vector appended to an existing JSON array.
+const fn serialized_findings_append_bytes(
+    findings_bytes: u64,
+    finding_count: usize,
+    preceding_finding_count: usize,
+) -> u64 {
+    if finding_count == 0 {
+        return 0;
+    }
+    findings_bytes.saturating_sub(if preceding_finding_count == 0 {
+        JSON_ARRAY_FRAMING_BYTES
+    } else {
+        JSON_ARRAY_SEPARATOR_BYTES
+    })
+}
+
 /// Find one node-simple static relation path to an exact target.
 fn trace_findings(
     report: &DetailedRelationReport,
@@ -2109,6 +4507,7 @@ fn trace_findings(
             nodes: vec![analysis_node(&report.anchor)],
             metric: Some(0),
             evidence: None,
+            community: None,
         }]);
     }
     if let Some(row) = target_key.and_then(|target_key| {
@@ -2125,6 +4524,7 @@ fn trace_findings(
             nodes: row.path.iter().map(analysis_node).collect(),
             metric: Some(u64::from(row.depth)),
             evidence: None,
+            community: None,
         }]);
     }
     Ok(vec![AnalysisFinding {
@@ -2143,7 +4543,707 @@ fn trace_findings(
         nodes: Vec::new(),
         metric: None,
         evidence: None,
+        community: None,
     }])
+}
+
+/// Return the fixed relation-family weights admitted by community v1.
+fn community_relation_weights() -> Vec<CommunityRelationWeight> {
+    GraphRelationKind::ALL
+        .into_iter()
+        .filter_map(|relation| {
+            community_relation_weight(relation)
+                .map(|weight| CommunityRelationWeight { relation, weight })
+        })
+        .collect()
+}
+
+/// Return the fixed vote weight for an admitted relation family.
+fn community_relation_weight(kind: GraphRelationKind) -> Option<u32> {
+    match kind {
+        GraphRelationKind::Legacy(RelationKind::Calls) => Some(8),
+        GraphRelationKind::Legacy(RelationKind::Imports) => Some(5),
+        GraphRelationKind::Legacy(RelationKind::DependsOn) => Some(3),
+        GraphRelationKind::Extended(
+            ExtendedRelationKind::Tests | ExtendedRelationKind::RoutesTo,
+        ) => Some(4),
+        GraphRelationKind::Extended(
+            ExtendedRelationKind::References
+            | ExtendedRelationKind::Configures
+            | ExtendedRelationKind::Reads
+            | ExtendedRelationKind::Writes,
+        ) => Some(2),
+        GraphRelationKind::Extended(
+            ExtendedRelationKind::Documents | ExtendedRelationKind::Deploys,
+        ) => Some(1),
+        GraphRelationKind::Legacy(RelationKind::Contains) => None,
+    }
+}
+
+/// Return the weight for one complete relation admitted by the community projection.
+fn admitted_community_edge_weight(edge: &LocalEdge) -> Option<u32> {
+    if !edge.complete {
+        return None;
+    }
+    community_relation_weight(edge.kind)
+}
+
+/// Compute deterministic bounded weighted label-propagation communities.
+#[cfg(test)]
+fn community_findings(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    edges: &[LocalEdge],
+    complete: bool,
+    query: &RelationAnalysisQuery,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<Vec<AnalysisFinding>> {
+    Ok(community_findings_with_budget(
+        nodes,
+        edges,
+        complete,
+        query,
+        query.relations.budget.intermediate_bytes(),
+        0,
+        control,
+    )?
+    .0)
+}
+
+/// Compute communities with an explicit remaining intermediate-byte allowance.
+fn community_findings_with_budget(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    edges: &[LocalEdge],
+    complete: bool,
+    query: &RelationAnalysisQuery,
+    intermediate_bytes: u64,
+    preceding_finding_count: usize,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(Vec<AnalysisFinding>, u64, Vec<GraphLimitKind>)> {
+    check_control(control)?;
+    let weights = community_relation_weights();
+    let parameters = CommunityParameters {
+        algorithm_version: COMMUNITY_ALGORITHM_VERSION,
+        ordering_version: COMMUNITY_ORDERING_VERSION,
+        max_iterations: COMMUNITY_MAX_ITERATIONS,
+        node_limit: query.relations.budget.nodes().min(MAX_ANALYSIS_NODES),
+        edge_limit: query.relations.budget.edges().min(MAX_ANALYSIS_EDGES),
+        output_bytes: query.relations.budget.output_bytes(),
+        relation: query.relations.relation,
+    };
+    let complete = complete
+        && edges
+            .iter()
+            .filter(|edge| community_relation_weight(edge.kind).is_some())
+            .all(|edge| edge.complete);
+    let marker_coverage = if complete {
+        CommunityCoverage::Complete
+    } else {
+        CommunityCoverage::Partial
+    };
+    let truncation_marker = community_truncation_finding(&weights, parameters, 0, marker_coverage);
+    let truncation_marker_bytes = serialized_bytes_controlled(&truncation_marker, control)?;
+    let truncation_marker_append_bytes =
+        serialized_finding_append_bytes(truncation_marker_bytes, preceding_finding_count);
+    let working_set_bytes = community_working_set_upper_bound(nodes, edges, control)?;
+    if working_set_bytes.saturating_add(truncation_marker_append_bytes) > intermediate_bytes {
+        let findings = if truncation_marker_append_bytes <= intermediate_bytes {
+            vec![truncation_marker]
+        } else {
+            Vec::new()
+        };
+        return Ok((findings, 0, vec![GraphLimitKind::IntermediateBytes]));
+    }
+    let construction_bytes = intermediate_bytes.saturating_sub(working_set_bytes);
+    let (keys, admitted_edges, resource_limits) =
+        admitted_community_scope(nodes, edges, parameters);
+    let resource_truncated = !resource_limits.is_empty();
+    if !complete || resource_truncated {
+        let mut evidence = admitted_edges;
+        if resource_truncated {
+            evidence.truncate(parameters.edge_limit as usize);
+        }
+        let metadata_fits = serialized_finding_append_bytes(
+            community_finding_upper_bound(nodes, &keys, &evidence, &weights, parameters, control)?,
+            preceding_finding_count,
+        ) <= construction_bytes;
+        let metadata_keys = if metadata_fits { keys.as_slice() } else { &[] };
+        let metadata_evidence = if metadata_fits {
+            evidence.as_slice()
+        } else {
+            &[]
+        };
+        let metadata_truncated = resource_truncated || !metadata_fits;
+        let mut truncation_limits = resource_limits;
+        if !metadata_fits {
+            push_limit(&mut truncation_limits, GraphLimitKind::IntermediateBytes);
+        }
+        let metadata = community_metadata(
+            metadata_keys,
+            metadata_evidence,
+            weights,
+            parameters,
+            0,
+            CommunityConvergence::Inconclusive,
+            if complete {
+                CommunityCoverage::Complete
+            } else {
+                CommunityCoverage::Partial
+            },
+            metadata_truncated,
+            nodes,
+        );
+        return Ok((
+            vec![AnalysisFinding {
+                kind: AnalysisFindingKind::Community,
+                status: AnalysisStatus::Inconclusive,
+                summary: if resource_truncated {
+                    "community projection crossed its fixed node or edge resource ceiling"
+                } else {
+                    "community projection is inconclusive because relation coverage is partial"
+                }
+                .to_string(),
+                nodes: analysis_nodes_for(nodes, metadata_keys),
+                metric: Some(metadata_keys.len() as u64),
+                evidence: None,
+                community: Some(metadata),
+            }],
+            working_set_bytes,
+            truncation_limits,
+        ));
+    }
+
+    let (labels, iteration, convergence) =
+        propagate_community_labels(&keys, &admitted_edges, parameters.max_iterations, control)?;
+    if convergence != CommunityConvergence::Converged {
+        let metadata_fits = community_finding_upper_bound(
+            nodes,
+            &keys,
+            &admitted_edges,
+            &weights,
+            parameters,
+            control,
+        )?;
+        let metadata_fits = serialized_finding_append_bytes(metadata_fits, preceding_finding_count)
+            <= construction_bytes;
+        let metadata_keys = if metadata_fits { keys.as_slice() } else { &[] };
+        let metadata_evidence = if metadata_fits {
+            admitted_edges.as_slice()
+        } else {
+            &[]
+        };
+        let metadata_truncated = !metadata_fits;
+        let mut truncation_limits = Vec::new();
+        if !metadata_fits {
+            truncation_limits.push(GraphLimitKind::IntermediateBytes);
+        }
+        let metadata = community_metadata(
+            metadata_keys,
+            metadata_evidence,
+            weights,
+            parameters,
+            iteration,
+            convergence,
+            CommunityCoverage::Complete,
+            metadata_truncated,
+            nodes,
+        );
+        return Ok((
+            vec![AnalysisFinding {
+                kind: AnalysisFindingKind::Community,
+                status: AnalysisStatus::Inconclusive,
+                summary: "community label propagation reached its fixed iteration ceiling"
+                    .to_string(),
+                nodes: analysis_nodes_for(nodes, metadata_keys),
+                metric: Some(metadata_keys.len() as u64),
+                evidence: None,
+                community: Some(metadata),
+            }],
+            working_set_bytes,
+            truncation_limits,
+        ));
+    }
+
+    let (findings, truncation_limits) = community_candidate_findings(
+        nodes,
+        &keys,
+        &admitted_edges,
+        &labels,
+        &weights,
+        parameters,
+        iteration,
+        convergence,
+        control,
+        preceding_finding_count,
+        construction_bytes,
+    )?;
+    Ok((findings, working_set_bytes, truncation_limits))
+}
+
+/// Admit the stable node and edge prefix under the community resource ceiling.
+fn admitted_community_scope(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    edges: &[LocalEdge],
+    parameters: CommunityParameters,
+) -> (Vec<String>, Vec<CommunityEdgeEvidence>, Vec<GraphLimitKind>) {
+    let all_keys = nodes.keys().cloned().collect::<Vec<_>>();
+    let keys = all_keys
+        .iter()
+        .take(parameters.node_limit as usize)
+        .cloned()
+        .collect::<Vec<_>>();
+    let admitted_nodes = keys.iter().collect::<BTreeSet<_>>();
+    let mut admitted_edges = Vec::new();
+    let mut edge_count = 0_usize;
+    for edge in edges {
+        let Some(weight) = admitted_community_edge_weight(edge) else {
+            continue;
+        };
+        if !admitted_nodes.contains(&edge.source) || !admitted_nodes.contains(&edge.target) {
+            continue;
+        }
+        edge_count = edge_count.saturating_add(1);
+        if edge_count <= parameters.edge_limit as usize {
+            admitted_edges.push(CommunityEdgeEvidence {
+                source: edge.source.clone(),
+                target: edge.target.clone(),
+                relation: edge.kind,
+                weight,
+            });
+        }
+    }
+    admitted_edges.sort_by(|left, right| {
+        (&left.source, &left.target, left.relation.as_str()).cmp(&(
+            &right.source,
+            &right.target,
+            right.relation.as_str(),
+        ))
+    });
+    admitted_edges.dedup_by(|left, right| {
+        left.source == right.source
+            && left.target == right.target
+            && left.relation == right.relation
+    });
+    let mut reached_limits = Vec::new();
+    if all_keys.len() > parameters.node_limit as usize {
+        reached_limits.push(GraphLimitKind::Nodes);
+    }
+    if edge_count > parameters.edge_limit as usize {
+        reached_limits.push(GraphLimitKind::Edges);
+    }
+    (keys, admitted_edges, reached_limits)
+}
+
+/// Propagate labels in stable node order with a fixed sequential work budget.
+fn propagate_community_labels(
+    keys: &[String],
+    edges: &[CommunityEdgeEvidence],
+    max_iterations: u32,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<(BTreeMap<String, String>, u32, CommunityConvergence)> {
+    check_control(control)?;
+    let mut adjacency = keys
+        .iter()
+        .map(|key| (key.clone(), Vec::<(String, u32)>::new()))
+        .collect::<BTreeMap<_, _>>();
+    for edge in edges {
+        check_control(control)?;
+        adjacency
+            .entry(edge.source.clone())
+            .or_default()
+            .push((edge.target.clone(), edge.weight));
+        adjacency
+            .entry(edge.target.clone())
+            .or_default()
+            .push((edge.source.clone(), edge.weight));
+    }
+    for neighbors in adjacency.values_mut() {
+        neighbors.sort();
+    }
+
+    // ponytail: one bounded sequential pass is deterministic and sufficient at
+    // the 512-node ceiling; replace only after a representative profile proves
+    // that parallel label updates repay their extra synchronization.
+    let mut labels = keys
+        .iter()
+        .map(|key| (key.clone(), key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut converged = keys.is_empty();
+    let mut iteration = 0;
+    while !converged && iteration < max_iterations {
+        check_control(control)?;
+        iteration += 1;
+        let mut changed = false;
+        for key in keys {
+            check_control(control)?;
+            let mut scores = BTreeMap::<String, u32>::new();
+            scores.insert(key.clone(), COMMUNITY_SELF_WEIGHT);
+            if let Some(neighbors) = adjacency.get(key) {
+                for (neighbor, weight) in neighbors {
+                    check_control(control)?;
+                    if let Some(label) = labels.get(neighbor) {
+                        let score = scores.entry(label.clone()).or_default();
+                        *score = score.saturating_add(*weight);
+                    }
+                }
+            }
+            let selected = select_community_label(key, scores);
+            if labels.get(key) != Some(&selected) {
+                labels.insert(key.clone(), selected);
+                changed = true;
+            }
+        }
+        converged = !changed;
+    }
+
+    Ok((
+        labels,
+        iteration,
+        if converged {
+            CommunityConvergence::Converged
+        } else {
+            CommunityConvergence::IterationLimit
+        },
+    ))
+}
+
+/// Select the highest-scoring label, breaking equal scores by stable key order.
+fn select_community_label(key: &str, scores: BTreeMap<String, u32>) -> String {
+    let mut selected = key.to_string();
+    let mut selected_score = 0;
+    for (label, score) in scores {
+        if score > selected_score || (score == selected_score && label < selected) {
+            selected = label;
+            selected_score = score;
+        }
+    }
+    selected
+}
+
+/// Convert stable labels into candidate findings with induced evidence.
+fn community_candidate_findings(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    keys: &[String],
+    admitted_edges: &[CommunityEdgeEvidence],
+    labels: &BTreeMap<String, String>,
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+    iteration: u32,
+    convergence: CommunityConvergence,
+    control: Option<&IndexWorkControl>,
+    preceding_finding_count: usize,
+    intermediate_bytes: u64,
+) -> ServiceResult<(Vec<AnalysisFinding>, Vec<GraphLimitKind>)> {
+    let mut groups = BTreeMap::<String, Vec<String>>::new();
+    for key in keys {
+        check_control(control)?;
+        let label = labels.get(key).cloned().unwrap_or_else(|| key.clone());
+        groups.entry(label).or_default().push(key.clone());
+    }
+    let mut findings = Vec::new();
+    let mut retained_append_bytes = 0_u64;
+    let mut truncated = false;
+    for members in groups.values() {
+        check_control(control)?;
+        let candidate_bound = community_candidate_upper_bound(
+            nodes,
+            members,
+            admitted_edges,
+            weights,
+            parameters,
+            control,
+        )?;
+        let candidate_append_bytes = serialized_finding_append_bytes(
+            candidate_bound,
+            preceding_finding_count.saturating_add(findings.len()),
+        );
+        if retained_append_bytes.saturating_add(candidate_append_bytes) > intermediate_bytes {
+            truncated = true;
+            break;
+        }
+        let evidence = admitted_edges
+            .iter()
+            .filter(|edge| {
+                members.binary_search(&edge.source).is_ok()
+                    && members.binary_search(&edge.target).is_ok()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let metadata = community_metadata(
+            members,
+            &evidence,
+            weights.to_vec(),
+            parameters,
+            iteration,
+            convergence,
+            CommunityCoverage::Complete,
+            false,
+            nodes,
+        );
+        let finding = AnalysisFinding {
+            kind: AnalysisFindingKind::Community,
+            status: AnalysisStatus::Candidate,
+            summary: if members.len() == 1 {
+                "singleton community from the complete admitted relation scope"
+            } else {
+                "deterministic weighted relationship community candidate"
+            }
+            .to_string(),
+            nodes: analysis_nodes_for(nodes, members),
+            metric: Some(members.len() as u64),
+            evidence: None,
+            community: Some(metadata),
+        };
+        let finding_bytes = serialized_bytes_controlled(&finding, control)?;
+        let finding_append_bytes = serialized_finding_append_bytes(
+            finding_bytes,
+            preceding_finding_count.saturating_add(findings.len()),
+        );
+        if retained_append_bytes.saturating_add(finding_append_bytes) > intermediate_bytes {
+            truncated = true;
+            break;
+        }
+        retained_append_bytes = retained_append_bytes.saturating_add(finding_append_bytes);
+        findings.push(finding);
+    }
+    if truncated {
+        check_control(control)?;
+        let marker = community_truncation_finding(
+            weights,
+            parameters,
+            iteration,
+            CommunityCoverage::Complete,
+        );
+        let marker_bytes = serialized_bytes_controlled(&marker, control)?;
+        let marker_append_bytes = serialized_finding_append_bytes(
+            marker_bytes,
+            preceding_finding_count.saturating_add(findings.len()),
+        );
+        if retained_append_bytes.saturating_add(marker_append_bytes) > intermediate_bytes {
+            findings.clear();
+        } else {
+            findings.push(marker);
+        }
+    }
+    Ok((
+        findings,
+        truncated
+            .then_some(vec![GraphLimitKind::IntermediateBytes])
+            .unwrap_or_default(),
+    ))
+}
+
+/// Charge every graph-sized community temporary before allocating it.
+///
+/// The edge charge mirrors the complete, weighted relation admission used by
+/// `admitted_community_scope`; excluded relation families never own community
+/// clones and therefore do not consume this working-set budget.
+fn community_working_set_upper_bound(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    edges: &[LocalEdge],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut endpoint_bytes = 0_u64;
+    for key in nodes.keys() {
+        check_control(control)?;
+        endpoint_bytes = endpoint_bytes
+            .saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX))
+            .saturating_add(std::mem::size_of::<String>() as u64);
+    }
+    let mut admitted_edge_count = 0_u64;
+    for edge in edges {
+        check_control(control)?;
+        if admitted_community_edge_weight(edge).is_none() {
+            continue;
+        }
+        admitted_edge_count = admitted_edge_count.saturating_add(1);
+        endpoint_bytes = endpoint_bytes
+            .saturating_add(u64::try_from(edge.source.len()).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(edge.target.len()).unwrap_or(u64::MAX))
+            .saturating_add(std::mem::size_of::<String>() as u64 * 2)
+            .saturating_add(std::mem::size_of::<CommunityEdgeEvidence>() as u64);
+    }
+    let entry_count = u64::try_from(nodes.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(admitted_edge_count);
+    Ok(endpoint_bytes
+        .saturating_mul(COMMUNITY_WORKING_SET_MULTIPLIER)
+        .saturating_add(entry_count.saturating_mul(COMMUNITY_WORKING_SET_ENTRY_BYTES))
+        .saturating_add(COMMUNITY_WORKING_SET_FIXED_BYTES))
+}
+
+/// Build the typed marker returned when community construction cannot fit.
+fn community_truncation_finding(
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+    iteration: u32,
+    coverage: CommunityCoverage,
+) -> AnalysisFinding {
+    AnalysisFinding {
+        kind: AnalysisFindingKind::Community,
+        status: AnalysisStatus::Inconclusive,
+        summary: "community projection crossed the intermediate-byte budget before all communities were constructed"
+            .to_string(),
+        nodes: Vec::new(),
+        metric: None,
+        evidence: None,
+        community: Some(CommunityAnalysis {
+            id: community_id(&[], weights, parameters),
+            members: Vec::new(),
+            evidence: Vec::new(),
+            weights: weights.to_vec(),
+            parameters,
+            iteration,
+            convergence: CommunityConvergence::Inconclusive,
+            coverage,
+            truncated: true,
+        }),
+    }
+}
+
+/// Conservatively charge one candidate before allocating its owned vectors.
+fn community_finding_upper_bound(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    members: &[String],
+    evidence: &[CommunityEdgeEvidence],
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let member_bytes = community_member_bytes(nodes, members, control)?;
+    let evidence_bytes = serialized_bytes_controlled(evidence, control)?;
+    let weights_bytes = serialized_bytes_controlled(weights, control)?;
+    let parameter_bytes = serialized_bytes_controlled(&parameters, control)?;
+    Ok(member_bytes
+        .saturating_mul(2)
+        .saturating_add(evidence_bytes)
+        .saturating_add(weights_bytes)
+        .saturating_add(parameter_bytes)
+        .saturating_add((members.len() as u64).saturating_mul(2))
+        .saturating_add(2_048))
+}
+
+/// Conservatively charge admitted evidence without allocating a group copy.
+fn community_candidate_upper_bound(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    members: &[String],
+    admitted_edges: &[CommunityEdgeEvidence],
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let member_bytes = community_member_bytes(nodes, members, control)?;
+    let mut evidence_bytes = 0_u64;
+    for edge in admitted_edges {
+        check_control(control)?;
+        if members.binary_search(&edge.source).is_ok()
+            && members.binary_search(&edge.target).is_ok()
+        {
+            evidence_bytes = evidence_bytes
+                .saturating_add(serialized_bytes_controlled(edge, control)?)
+                .saturating_add(1);
+        }
+    }
+    let weights_bytes = serialized_bytes_controlled(weights, control)?;
+    let parameter_bytes = serialized_bytes_controlled(&parameters, control)?;
+    Ok(member_bytes
+        .saturating_mul(2)
+        .saturating_add(evidence_bytes)
+        .saturating_add(weights_bytes)
+        .saturating_add(parameter_bytes)
+        .saturating_add((members.len() as u64).saturating_mul(2))
+        .saturating_add(2_048))
+}
+
+/// Measure projected members one at a time before retaining a finding.
+fn community_member_bytes(
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+    members: &[String],
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut bytes = 0_u64;
+    for key in members {
+        check_control(control)?;
+        if let Some(node) = nodes.get(key) {
+            bytes =
+                bytes.saturating_add(serialized_bytes_controlled(&analysis_node(node), control)?);
+        }
+    }
+    Ok(bytes)
+}
+
+/// Build stable metadata for one community or typed inconclusive result.
+fn community_metadata(
+    members: &[String],
+    evidence: &[CommunityEdgeEvidence],
+    weights: Vec<CommunityRelationWeight>,
+    parameters: CommunityParameters,
+    iteration: u32,
+    convergence: CommunityConvergence,
+    coverage: CommunityCoverage,
+    truncated: bool,
+    nodes: &BTreeMap<String, DetailedRelationNode>,
+) -> CommunityAnalysis {
+    let mut members = members.to_vec();
+    members.sort();
+    let id = community_id(&members, &weights, parameters);
+    let mut evidence = evidence.to_vec();
+    evidence.sort_by(|left, right| {
+        (&left.source, &left.target, left.relation.as_str()).cmp(&(
+            &right.source,
+            &right.target,
+            right.relation.as_str(),
+        ))
+    });
+    CommunityAnalysis {
+        id,
+        members: analysis_nodes_for(nodes, &members),
+        evidence,
+        weights,
+        parameters,
+        iteration,
+        convergence,
+        coverage,
+        truncated,
+    }
+}
+
+/// Hash one stable community identifier from its complete versioned inputs.
+fn community_id(
+    members: &[String],
+    weights: &[CommunityRelationWeight],
+    parameters: CommunityParameters,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"projectatlas:architecture-community");
+    hasher.update(&[0]);
+    hasher.update(&parameters.algorithm_version.to_le_bytes());
+    hasher.update(&parameters.ordering_version.to_le_bytes());
+    hasher.update(&parameters.max_iterations.to_le_bytes());
+    hasher.update(&parameters.node_limit.to_le_bytes());
+    hasher.update(&parameters.edge_limit.to_le_bytes());
+    hasher.update(&parameters.output_bytes.to_le_bytes());
+    hasher.update(&COMMUNITY_SELF_WEIGHT.to_le_bytes());
+    hasher.update(
+        parameters
+            .relation
+            .map_or("none", GraphRelationKind::as_str)
+            .as_bytes(),
+    );
+    hasher.update(&[0]);
+    for entry in weights {
+        hasher.update(entry.relation.as_str().as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&entry.weight.to_le_bytes());
+    }
+    for member in members {
+        hasher.update(member.as_bytes());
+        hasher.update(&[0]);
+    }
+    format!(
+        "community-v{}-{}",
+        parameters.algorithm_version,
+        hasher.finalize().to_hex()
+    )
 }
 
 /// Compute deterministic weak components with optional containment exclusion.
@@ -2313,21 +5413,33 @@ fn analysis_nodes_for(
         .collect()
 }
 
+/// Measure node payload added to an already serialized empty node array.
+fn serialized_analysis_nodes_bytes<'node>(
+    nodes: impl IntoIterator<Item = &'node DetailedRelationNode>,
+    control: Option<&IndexWorkControl>,
+) -> ServiceResult<u64> {
+    let mut bytes = 0_u64;
+    for (index, node) in nodes.into_iter().enumerate() {
+        if index > 0 {
+            bytes = bytes
+                .checked_add(JSON_ARRAY_SEPARATOR_BYTES)
+                .ok_or_else(entrypoint_work_overflow)?;
+        }
+        bytes = bytes
+            .checked_add(serialized_bytes_controlled(&analysis_node(node), control)?)
+            .ok_or_else(entrypoint_work_overflow)?;
+    }
+    Ok(bytes)
+}
+
 /// Preserve one detailed node and its exact reusable next call.
 fn analysis_node(node: &DetailedRelationNode) -> AnalysisNode {
-    let next_call = match node.entity.selector() {
-        EntitySelector::Folder { path } => Some(RelationNextCall::Files {
-            folder: path.clone(),
-        }),
-        EntitySelector::File { path } => Some(RelationNextCall::Summary { file: path.clone() }),
-        EntitySelector::Package { package } => Some(RelationNextCall::Summary {
-            file: package.manifest.clone(),
-        }),
-        EntitySelector::Symbol { symbol } => Some(RelationNextCall::SymbolSlice {
-            symbol: symbol.clone(),
-        }),
-        EntitySelector::Project | EntitySelector::External { .. } => None,
-    };
+    let next_call = super::relations::next_call_for_entity(
+        &node.entity,
+        node.content_selection
+            .unwrap_or(ContentSelection::UnspecifiedLegacy),
+        node.classification,
+    );
     AnalysisNode {
         node: node.clone(),
         next_call,

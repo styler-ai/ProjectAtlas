@@ -2,7 +2,7 @@
 
 # Workflow and Troubleshooting
 
-ProjectAtlas is designed to run locally with a project-local SQLite atlas and optional TOON exports.
+ProjectAtlas is designed to run locally with a project-local SQLite atlas and on-demand map responses.
 
 ## Recommended workflow
 
@@ -13,7 +13,7 @@ ProjectAtlas is designed to run locally with a project-local SQLite atlas and op
 5. Copy returned selectors into `atlas_slice`; use the manual CLI summary/outline/slice funnel only as a fallback.
 6. Run `projectatlas config --print` when effective scan, purpose, or exclusion policy is unclear.
 7. Run `projectatlas lint --report-untracked --purpose-level low`.
-8. Run `projectatlas map --force` only when a compatibility TOON snapshot is explicitly needed.
+8. Run `projectatlas map` only when the current AtlasMap response is explicitly needed.
 9. Open a PR that references the GitHub issue (CI requires `#NNN` in title or body).
 10. Install git hooks by copying or linking files from `.githooks/` into `.git/hooks/`.
 
@@ -27,9 +27,17 @@ Exact line slices validate the file through the atlas database, then read the cu
 use the stored symbol ranges, then read current disk content, so keep the watcher running during active edits if
 symbol-level slices matter.
 
-## One-command local verification
+## Local and complete verification
 
-Run the full local check suite with Cargo:
+The pre-push hook validates the exact clean candidate first, then uses
+`.github/scripts/affected-ci-proof.py` to run only the repository, Rust package
+or test target, dependency, and local ProjectAtlas checks that can detect a
+defect in that change. Unknown paths and changes to shared proof authorities
+select the complete local fallback. Installed Mermaid dependencies are reused;
+`npm audit` runs only when its package manifests change or during explicit
+drift proof.
+
+Run the complete local suite only for an explicit drift or release boundary:
 
 ```bash
 cargo fmt --all --check
@@ -40,6 +48,8 @@ cargo test --doc --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 cargo deny --locked --all-features check -D warnings
+npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
@@ -70,7 +80,7 @@ For a bounded manual update or Dependabot review:
 4. Check the repository Rust toolchain and the dependency's MSRV, default and added features, license, advisories, registry or Git source, duplicate paths, upstream changelog, and breaking changes.
 5. Run the focused repository-policy E2E test, the dependency inventory and deny commands above, and the ordinary locked workspace gates.
 
-Weekly Cargo and GitHub Actions Dependabot updates target `dev`; only Cargo minor and patch updates are grouped, majors remain separate, and no repository automation merges them. Configuration merged only into `dev` is validated but does not become hosted-active until the later normal verified integration into the default branch. GitHub may originate a security-update pull request against the default branch; leave it unmerged until the same dependency change has been routed through and proven on `dev`.
+Weekly Cargo and GitHub Actions Dependabot updates target `main`; only Cargo minor and patch updates are grouped, majors remain separate, and no repository automation merges them. Dependency pull requests follow the same review and locked workspace gates as other changes. Obsolete automated pull requests against the retired `dev` release line are explicitly closed or superseded rather than merged into a release milestone as cleanup.
 
 ## Lean implementation and IssueOps
 
@@ -79,20 +89,27 @@ ProjectAtlas uses the implementation loop that produced v0.3.26:
 1. Implement a meaningful compiling behavior slice.
 2. Add or update the smallest focused unit, integration, E2E, smoke, or validation test appropriate to the risk. One coherent test may cover several related tasks.
 3. Run the ordinary locked Rust/workspace gates.
-4. Commit and integrate significant working slices into `dev`.
+4. Commit and integrate significant working slices into `main` through reviewed pull requests.
 5. Use normal CI and review, then synchronize the local OpenSpec checklist with its mapped GitHub issue.
 
 Task completion does not require unique test identifiers, task-level verification plans or ledgers, commit receipts, rendered evidence comments, hosted links per checkbox, or post-merge issue sealing. When useful, keep one compact shared behavior-coverage row in the issue with clickable owning test definitions and the passed test command. One test may cover several tasks, and several tests may jointly cover one coherent task. GitHub Actions already records normal hosted outcomes.
 
-Open mapped issues keep the concise v0.3.26 #305 planning shape: `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, and one authoritative OpenSpec task section. `Architecture Diagrams` contains at least one durable HTTPS link to a versioned `dev/docs/*.md` view in this repository; reuse an existing architecture document when the change does not need a new one, and do not substitute `N/A`, a commit/SHA permalink, an external repository, or a duplicate PDF. The pre-mortem lists likely failures and visible mitigation checkboxes. Each mitigation ends with its owning task IDs, for example `(OpenSpec tasks: 2.1, 4.3)`, and is checked exactly when all referenced tasks are checked. This reuses the implementation checklist; it does not create mitigation-specific tests, receipts, or evidence artifacts.
+Open mapped issues keep the concise v0.3.26 #305 planning shape: `Why`, `What Changes`, `Capabilities`, `Architecture Diagrams`, `Release Scope`, `Non-Goals`, `Pre-Mortem`, exactly one `Implementation Tasks` section, and exactly one canonical `Acceptance and Review Tasks` section. Generic issue forms collect the substantive packet but deliberately omit both authoritative task sections; add them only after a real OpenSpec mapping supplies task authority. `Implementation Tasks` mirrors the mapped local `openspec/changes/<id>/tasks.md` owner slice exactly; it does not need to end with the historical architecture-review row, while any existing row remains preserved. Implementation tasks are live progress: check each row immediately after its behavior and required task-level proof pass, and reopen it immediately when review finds the implementation partial, resetting all acceptance/review rows. The acceptance section has exactly five ordered outcome-oriented review tasks and remains unchecked until implementation is complete, then advances only as a checked prefix. `Architecture Diagrams` either contains a durable HTTPS link to a versioned `docs/*.md#user-content-heading` view on `main` in this repository or records exactly `N/A: <reason>` as a conscious no-architecture-change decision. The `user-content-` prefix targets GitHub's rendered heading ID directly instead of relying on client-side fragment rewriting. Every linked heading's own section must contain a closed fenced `mermaid` block that passes the repository-locked Mermaid syntax parser; a heading, prose, empty or declaration-only fence, or invalid Mermaid does not satisfy the gate. The acceptance specification/architecture task compares the completed implementation with those diagrams and updates either side until they agree, or reconfirms the reasoned `N/A`. The pre-mortem lists likely failures and visible mitigation checkboxes. Each mitigation ends with its owning task IDs, for example `(Implementation tasks: 2.1, 4.3)`, and is checked exactly when all referenced tasks are checked. Already closed mapped issues remain untouched and inert without retroactive acceptance or body validation; reopening an old issue requires the current two-list contract. This reuses the implementation checklist; it does not create mitigation-specific tests, receipts, or evidence artifacts.
+
+Assign an open issue to a canonical `vMAJOR.MINOR.PATCH-00` release milestone only when it has exactly `status:ready`, exactly one accepted `complexity:*` label, a local OpenSpec mapping, exactly one non-empty copy of every required proposal and design section, complete delta-spec/task artifacts, explicit dependency and cross-issue impact, no unresolved open questions, checked contract tasks, synchronized implementation and acceptance sections, and architecture evidence. The issue-event IssueOps workflow enforces this implementation-ready boundary. `--milestone` remains the strict all-issues-closed closeout gate. The release workflow uses `--publication-version <canonical-tag>` instead: it derives the stable milestone and permits only the declared release owner to remain open while every child is closed. The existing `release_graphs` declaration must be valid and exactly match native milestone membership. A closed release owner is admitted only for an existing non-draft release with matching tag/classification and a remote tag commit equal to the candidate. Historical milestones without a release graph retain all-closed behavior. Both modes retain native closed-history handling and the active two-list contract for open mapped work; publication admission never completes the owner's remaining release tasks. The publish job repeats the complete admission check immediately before both release creation and asset upload, so readiness changes during packaging fail before mutation.
 
 Ordinary pull requests require exact local/GitHub checklist synchronization but do not require the whole release milestone to be complete. Full milestone checklist completion is a release-only gate. SHA-pinned Actions, locked Cargo commands, least privilege, parser/package/signature/digest validation, release checksums, and other executable integrity controls remain independent of task bookkeeping.
+
+Pull-request IssueOps resolves exactly one owning issue from the existing PR reference syntax. It compares that open issue's candidate implementation-task slice with mutable live state, while requiring every unrelated open mapped task slice to remain identical to the accepted PR base and excluding closed unrelated history; missing or ambiguous ownership and unreadable base authority fail closed. Pushes to `main` and milestone/release validation retain the complete active live-state comparison plus the applicable publication or closeout state gate, while ordinary issue events retain their affected-issue `--planned-issue` scope.
+
+Local candidate-branch IssueOps consumes Git's four-field pre-push ref-update records. Exactly one update targeting `refs/heads/main` selects global validation regardless of the checkout branch; exactly one non-main `refs/heads/*` target may select candidate mode when its non-zero local object ID equals the validated checked-out `HEAD`. Zero or multiple updates, including mixed main/candidate pushes, plus deletions, malformed, or unsupported records fail closed before owner or base extraction. A candidate worktree must also have no tracked, staged, or non-ignored untracked changes and no tracked index entries marked `assume-unchanged` or `skip-worktree` as early mutation guards. Candidate content authority is the submitted Git tree: the checker validates object IDs against the repository's SHA-1 or SHA-256 object format and reads the issue map, mapped task files, and linked regular Markdown architecture documents directly from their exact tree blobs. The candidate route then validates every post-base commit subject, including issue-owned merge commits, requiring exactly one well-formed same-owner `(#NNN)` reference with no unmatched `(#` fragment before resolving exactly one mapped open owner and running the same owner/live and unrelated/base comparison with `--candidate-issue`. Empty, blank, unreferenced, malformed, unmatched, multiple, or different references, closed or unmapped ownership, missing or unreadable accepted-base authority, dirty candidate state, hidden tracked index state, or a linked document absent from the candidate tree fail closed. The hook keeps the planner self-test, IssueOps, and every selected quality gate mandatory; it does not run unrelated builds or tests.
 
 Commit identity is provenance, not a general test invalidation key. After a commit-only or metadata-only change, rerun cheap OpenSpec, IssueOps, review, topology, and release-policy checks, then reuse passed expensive proof whose behavior-relevant source, dependency, lockfile, toolchain, workflow, packaging, configuration, platform, and immutable artifact identities are unchanged. Unknown changes fail closed and every affected test or construction reruns.
 
 ## Issue hygiene
 
 - Every issue should carry a `type:*` label plus a `priority:*` and `status:*` label.
+- Every open issue, including unmapped backlog work, carries exactly one of `complexity:low`, `complexity:medium`, `complexity:high`, or `complexity:very-high`. IssueOps validates only vocabulary and cardinality; it does not infer complexity or select a reviewer/model.
 - Use `status:backlog` for unscheduled work.
 - Any issue referenced by a PR must be assigned to the target release milestone (CI enforces this).
 - Keep public issues/PRs/release notes free of private or internal-only details (release notes are generated from PR text).
@@ -106,27 +123,132 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 
 ## Documentation site
 
-- `04-Docs` builds Rust API docs plus the generated Language & Ecosystem Support page from the same catalog identity as `docs/language-support.md`, then deploys `target/doc` to GitHub Pages.
+- `04-Docs` builds the public landing page with agent-integration, worktree-continuity, and architecture entry points, Rust API docs, plus the generated Language & Ecosystem Support page from the same catalog identity as `docs/language-support.md`, then deploys `target/doc` to GitHub Pages.
 - GitHub Pages should be configured for GitHub Actions deployment.
 
 ## Branching
 
-- `dev` for active development.
-- `main` for stable releases only.
-- Merge `dev` -> `main` via pull request after CI is green.
-- Ensure `dev` includes the latest `main` changes before releasing.
+- Open change branches and pull requests against `main`; `main` is the active integration and release authority.
+- Retain `dev` only while durable historical links or an explicit migration require it; dependency and release automation do not target it.
 - Update the Cargo workspace version in `Cargo.toml`.
-- Pushes to `main` create a GitHub release when the Cargo version is release-eligible.
-- The auto-release workflow generates GitHub release notes from merged PRs.
-- Release archives are published with a `SHA256SUMS` asset. Verify manually with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS` from a directory containing the downloaded archives.
-- If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same version. The publish job recovers when the existing tag points at the current commit, creates the missing release when needed, and uploads release assets with replacement enabled for repair runs.
+- Pushes to `main` automatically dispatch a release for an exact stable `MAJOR.MINOR.PATCH` or candidate `MAJOR.MINOR.PATCH-rcN` workspace version when the tag is absent and the clean optional-parser handoff is input-compatible with the exact pushed commit. Merge-commit, squash, and rebase histories use that same commit-bound rule. Canonical Cargo development versions `MAJOR.MINOR.PATCH-dev.N` do not dispatch; malformed versions fail closed.
+- Publish at least `-rc1` before promoting a release series to its final stable version. The release gate refuses a final version unless the highest published non-draft RC for the same base version is an ancestor of the final head, and refuses a late RC after that stable tag exists. RCs are non-draft GitHub prereleases created with Latest disabled, so GitHub Latest stays on the preceding stable release. The final stable release is a normal release and becomes Latest.
+- Keep exact hosted tag/release/Latest verification in the release operation after all mapped milestone implementation issues are closed. Implementation checklists prove generic policy and prepublication packages; they must not require the hosted release whose prepublication milestone gate they block.
+- Release notes for every RC and the final stable promotion use the preceding stable tag as their baseline. Later candidates and the final notes therefore remain cumulative across the entire release series without duplicating an RC as the history baseline.
+- Release archives are published with a `SHA256SUMS` asset. If the clean-main seed producer supplies the optional exact-tag `projectatlas-main-atlas-seed-<tag>-<snapshot-digest>.tar.zst` and matching `.manifest.json`, release staging validates the pair and checksums both without opening or modifying the seed. Verify downloaded assets with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS`.
+
+### GitHub page and documentation site updates
+
+README text, artwork, charts, and documentation-site content can be updated through normal pull requests without a new product release. Keep the workspace and plugin versions unchanged for these page-only updates. GitHub renders the README when the change merges, and `04-docs.yml` republishes the documentation site from `main`. For an already published version, the tag-exists check in `03-auto-release.yml` skips another release dispatch.
+
+Marketplace plugins install from a release tag. Changes to bundled agent skills and references reach installed users through a plugin release.
+
+### First RC run with tag-dependent native proof
+
+The automatic `03-auto-release.yml` dispatch uses `prepublish_only=false`. For a new candidate, its native Codex plugin-convergence proof needs a marketplace tag that does not yet exist. Do not count that dispatch as release acceptance. Bootstrap a tag-only ref before the normal release run. For example:
+
+```bash
+RELEASE_VERSION=v0.5.0
+```
+
+1. Keep the exact reviewed, merged `main` commit fixed, with its child issues accepted. Dispatch a clean parser-pack build:
+
+   ```bash
+   gh workflow run optional-parser-pack.yml --ref main \
+     --field clean_construction=true --field target=all
+   ```
+
+   Record the successful run ID and confirm its `headSha` matches the reviewed `main` SHA. Set `PARSER_PACK_RUN_ID` to that run ID.
+
+2. Run the package diagnostic on `main` with `prepublish_only=true`:
+
+   ```bash
+   gh workflow run release.yml --ref main \
+     --field version="$RELEASE_VERSION" \
+     --field prepublish_only=true \
+     --field parser_pack_run_id="$PARSER_PACK_RUN_ID"
+   ```
+
+   This builds and checks packages but skips native Codex installation, the publication checklist, and the publish job. It is diagnostic only, not native acceptance.
+
+3. Before any ref mutation, require the publication checklist to pass and verify `main` still points at the reviewed SHA:
+
+   ```bash
+   python3 .github/scripts/issue-checklists.py \
+     --repo styler-ai/ProjectAtlas \
+     --publication-version "$RELEASE_VERSION"
+   ```
+
+   Also check that both the tag-ref and release-by-tag API reads return HTTP 404:
+
+   ```bash
+   gh api --include "repos/styler-ai/ProjectAtlas/git/ref/tags/$RELEASE_VERSION"
+   gh api --include "repos/styler-ai/ProjectAtlas/releases/tags/$RELEASE_VERSION"
+   ```
+
+   `gh api` exits nonzero for the expected 404 responses; inspect the HTTP status itself. A 404 confirms absence. If the tag exists, skip step 4 only when it points to the exact reviewed commit. Use release repair only when that exact tag and the release classification match the derived RC policy. Stop if a tag points elsewhere, a release lacks its matching tag, or release metadata is invalid; never move the tag to repair those states. Stop on every other status or error.
+
+4. Create only the lightweight tag ref through the authenticated GitHub API; the repository pre-push hook accepts branch updates, so do not use `git push` to create a tag. Keep the exact SHA check and ref readback in a fail-fast shell:
+
+   ```bash
+   set -euo pipefail
+   MAIN_SHA="$(gh run view "$PARSER_PACK_RUN_ID" --json headSha --jq .headSha)"
+   test "$(gh api repos/styler-ai/ProjectAtlas/commits/main --jq .sha)" = "$MAIN_SHA"
+   gh api repos/styler-ai/ProjectAtlas/git/refs --method POST \
+     -f ref="refs/tags/$RELEASE_VERSION" -f sha="$MAIN_SHA"
+   test "$(gh api "repos/styler-ai/ProjectAtlas/git/ref/tags/$RELEASE_VERSION" --jq .object.type)" = commit
+   test "$(gh api "repos/styler-ai/ProjectAtlas/git/ref/tags/$RELEASE_VERSION" --jq .object.sha)" = "$MAIN_SHA"
+   ```
+
+5. Rerun `release.yml` on `main` with `prepublish_only=false` and the same parser-pack run ID:
+
+   ```bash
+   gh workflow run release.yml --ref main \
+     --field version="$RELEASE_VERSION" \
+     --field prepublish_only=false \
+     --field parser_pack_run_id="$PARSER_PACK_RUN_ID"
+   ```
+
+   This verifies native Codex marketplace convergence on Linux, Windows, macOS Intel, and macOS ARM before publishing. The workflow requires the tag to match the exact `main` head. When that matching tag exists without a release, its existing recovery path creates the candidate prerelease with Latest disabled.
+
+- If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same exact version. Repair is accepted only when the existing non-draft release classification and tag head match the derived stable/RC policy; replaceable assets may then be repaired without moving the tag or changing classification, while validated immutable seed assets are never clobbered. If interruption left exactly one seed-pair member, recovery also requires the complete staged pair and exact byte equality, then uploads only the missing companion. The workflow rechecks release metadata, exact head, and requires the previously captured Latest release to remain unchanged during repair.
 
 ## CI behavior
 
-- GitHub Actions runs Rust source, dependency, unit, E2E, documentation, and packaging checks. ProjectAtlas scan, purpose, parity, and lint maintenance run locally against the developer or agent's current source state, not against the hosted Actions checkout.
+- `01-CI` plans from the exact base-to-head diff, runs selected repository,
+  affected Rust package or test-target, and platform contracts concurrently, and
+  accepts omissions only through the always-run fail-closed `verify` aggregate.
+  Unknown paths and shared workflow, planner, toolchain, lockfile, manifest,
+  schema, or test-support authorities select complete normal-PR proof. A base
+  retarget replans against the new base even when the head is unchanged; a title
+  or body edit runs no source job and cannot cancel or rerun source proof. Its required `verify` job
+  reads the existing source run instead: the latest source run for this PR/head
+  must match the event's captured base and have successful native `plan` and
+  `verify` jobs. Source run names capture PR/base/head at event creation; an old
+  run's mutable PR association is not historical proof. Metadata fetches only
+  the verification helper at the captured accepted base, without checkout, planning, builds,
+  tests, or source aggregation. It rechecks the live PR before passing and waits
+  up to 120 minutes for pending source work. Missing, failed, stale, inaccessible,
+  or incomplete proof fails closed, including discovery beyond 100 head-matching
+  runs. Missing accepted-base verification support fails closed; the submitted
+  head is never a fallback authority. This keeps native protected readiness truthful after metadata edits.
+- The lightweight required `pr-state` workflow owns exactly-one-open-issue
+  reference validation and requires the PR milestone to match that issue's
+  milestone. GitHub native required conversation resolution owns all
+  human and automated review threads. Review activity starts neither workflow
+  and cannot launch or cancel unchanged source proof.
+- Automatic cancellation applies only to an older source-verification run
+  superseded by a newer run for the same pull-request number. Push, merge-group,
+  dispatch, schedule, `pr-state`, IssueOps, release, publish, and deploy use
+  isolated non-cancelling namespaces.
+- Normal CI deliberately has no mutation, coverage, or nextest campaign.
+  Dependency audits run for changed dependency manifests and scheduled/manual
+  drift proof. The release-candidate workflow retains complete installed-product
+  proof on Linux, Windows, macOS Intel, and macOS ARM.
+- ProjectAtlas scan, purpose, parity, and lint maintenance run locally against the developer or agent's current source state, not against the hosted Actions checkout.
 - `projectatlas lint` checks purpose/header health, non-source declarations, and untracked files; it does not require or validate the optional compatibility TOON export.
 - `projectatlas lint --purpose-level low` is the default first-pass agent gate: duplicate and repeated temporary-folder findings fail, while missing/suggested purpose curation for folders plus high-impact files remains advisory. Use `projectatlas purpose queue` for the actionable curation list, `--purpose-level medium` when all source files must be agent-reviewed, and `--purpose-level strict` only when every indexed file and folder must be agent-reviewed.
-- PRs must reference a GitHub issue and have a milestone.
+- PRs must reference exactly one open GitHub issue and use that issue's milestone.
 - Ordinary PRs may reference an issue without closing it; use `Closes #NNN` only when the issue's complete checklist is ready to close.
 - Active OpenSpec task lists must be mapped in `openspec/issue-map.json`, and their authoritative GitHub task sections must exactly mirror local text, order, ownership, and checked state.
 - CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
@@ -138,15 +260,15 @@ Environment toggles:
 
 ## Troubleshooting
 
-### Optional compatibility map export
+### Optional current map response
 
-Only older integrations need a static `.projectatlas/projectatlas.toon` snapshot. Generate it explicitly:
+When you need the complete current AtlasMap, request it directly:
 
 ```bash
-projectatlas map --force
+projectatlas map
 ```
 
-Normal ProjectAtlas 3 agent workflows should read from `.projectatlas/projectatlas.db` through the CLI or MCP tools.
+This emits TOON by default or JSON with global `--format json`; neither writes a TOON file. `map --json` separately writes an adjacent JSON sidecar outside CI, or with `--force` in CI. Existing legacy TOON files remain unchanged and may still provide purpose-import input. Normal agent workflows should read from `.projectatlas/projectatlas.db` through the CLI or MCP tools.
 
 ### Missing or suggested purposes
 

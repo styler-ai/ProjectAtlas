@@ -2910,6 +2910,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$diagnosticClock = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-NamedObjectDiagnosticPhase {
+    param(
+        [ValidateSet('initialization', 'native-compilation', 'native-setup',
+            'descendant-launch', 'descendant-wait', 'descendant-complete', 'result-write')]
+        [string]$Phase
+    )
+    if ($DiagnosticFault -cne 'none') {
+        [Console]::Error.WriteLine(
+            "named-object-phase=$Phase elapsed_ms=$($diagnosticClock.ElapsedMilliseconds)"
+        )
+    }
+}
+Write-NamedObjectDiagnosticPhase -Phase initialization
+
 $probeExitCodes = [ordered]@{
     'identity' = 121
     'ambient-environment' = 122
@@ -3485,8 +3500,18 @@ try {
         throw [System.InvalidOperationException]::new('construction-token-owner-sid-mismatch')
     }
 
+    # Synthetic error composition does not depend on native probe compilation.
+    $probeStage = 'semaphore-acl'
+    if ($DiagnosticFault -ceq 'operation-and-cleanup') {
+        throw [System.InvalidOperationException]::new(
+            'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
+        )
+    }
+
     $probeStage = 'native-semaphore-create'
+    Write-NamedObjectDiagnosticPhase -Phase native-compilation
     Add-Type -TypeDefinition $nativeProbeSource -Language CSharp -ErrorAction Stop
+    Write-NamedObjectDiagnosticPhase -Phase native-setup
     $currentPrivateNamespaceEnabled =
         [ProjectAtlasNamedObjectAccessProbe]::ReadCurrentPrivateNamespaceEnabled(
             $actualIdentity.AccessToken
@@ -3578,12 +3603,6 @@ try {
         )
     }
 
-    $probeStage = 'semaphore-acl'
-    if ($DiagnosticFault -ceq 'operation-and-cleanup') {
-        throw [System.InvalidOperationException]::new(
-            'diagnostic-operation-fault ordinary/token C:/private/forward.txt //server/share/unquoted.txt'
-        )
-    }
     $probeStage = 'semaphore-create'
     $name = $SeededSemaphoreName
     $semaphore = [ProjectAtlasNamedObjectAccessProbe]::OpenOwnedSemaphore($name)
@@ -3597,6 +3616,7 @@ try {
     }
 
     $probeStage = 'descendant-launch'
+    Write-NamedObjectDiagnosticPhase -Phase descendant-launch
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     $start.UseShellExecute = $false
@@ -3625,6 +3645,7 @@ try {
     $childErrorTask = $child.StandardError.ReadToEndAsync()
 
     $probeStage = 'descendant-open'
+    Write-NamedObjectDiagnosticPhase -Phase descendant-wait
     if (-not $child.WaitForExit(15000)) {
         throw [System.TimeoutException]::new('descendant-open-timeout')
     }
@@ -3638,6 +3659,7 @@ try {
         throw [System.InvalidOperationException]::new('descendant-diagnostic-output-limit')
     }
     $childExitCode = [int]$child.ExitCode
+    Write-NamedObjectDiagnosticPhase -Phase descendant-complete
     if ($childExitCode -ne 0) {
         if ($childExitCode -in @(143, 144)) {
             $nativeMatch = [System.Text.RegularExpressions.Regex]::Match(
@@ -3776,6 +3798,7 @@ $record = [ordered]@{
     descendant_exit_code = $childExitCode
 }
 $probeStage = 'result-write'
+Write-NamedObjectDiagnosticPhase -Phase result-write
 try {
     Write-AtomicProbeRecord -Path $ResultPath -Record $record
 }

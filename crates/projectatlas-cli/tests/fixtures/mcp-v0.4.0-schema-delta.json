@@ -1,0 +1,264 @@
+{
+  "base": "v0.3.26",
+  "release": "v0.4.0",
+  "windows_release_sha256": "09423b83011ab14fc2254f7ee29edae4c1fc797df167d345aefa1ef9d8bfbcda",
+  "normalization": [
+    "atlas_purpose_review.inputSchema.properties.items.items",
+    "atlas_root_set.inputSchema.properties.transition",
+    "atlas_search.inputSchema.properties.retrieval_mode"
+  ],
+  "tools": {
+    "atlas_file_summary": {
+      "properties": {
+        "compact": {
+          "description": "Return the additive compact summary projection when true.",
+          "type": ["boolean", "null"]
+        }
+      }
+    },
+    "atlas_health": {
+      "properties": {
+        "coverage": {
+          "description": "Opt in to bounded current coverage discovery instead of structural findings.",
+          "type": ["boolean", "null"]
+        },
+        "parser": {
+          "description": "Optional source parser coverage filter.",
+          "type": ["string", "null"]
+        },
+        "provider": {
+          "description": "Optional derived-fact provider coverage filter.",
+          "type": ["string", "null"]
+        },
+        "relation": {
+          "description": "Optional relationship-family coverage filter.",
+          "type": ["string", "null"]
+        },
+        "coverage_state": {
+          "description": "Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.",
+          "type": ["string", "null"]
+        },
+        "reason": {
+          "description": "Optional exact coverage reason filter.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "atlas_purpose_queue": {
+      "properties": {
+        "coverage": {
+          "description": "Opt in to bounded current coverage discovery instead of structural findings.",
+          "type": ["boolean", "null"]
+        },
+        "parser": {
+          "description": "Optional source parser coverage filter.",
+          "type": ["string", "null"]
+        },
+        "provider": {
+          "description": "Optional derived-fact provider coverage filter.",
+          "type": ["string", "null"]
+        },
+        "relation": {
+          "description": "Optional relationship-family coverage filter.",
+          "type": ["string", "null"]
+        },
+        "coverage_state": {
+          "description": "Optional complete, partial, failed, ignored, oversized, quarantined, or stale filter.",
+          "type": ["string", "null"]
+        },
+        "reason": {
+          "description": "Optional exact coverage reason filter.",
+          "type": ["string", "null"]
+        },
+        "task": {
+          "description": "Host-owned task label for deterministic purpose-curator work identity.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "atlas_purpose_review": {
+      "properties": {
+        "items": {
+          "items": {
+            "properties": {
+              "task": {
+                "description": "Queue task copied from the purpose-curation item.",
+                "type": ["string", "null"]
+              },
+              "work_key": {
+                "description": "Queue work key copied from the purpose-curation item.",
+                "type": ["string", "null"]
+              },
+              "state_token": {
+                "description": "Queue state token copied from the purpose-curation item.",
+                "type": ["string", "null"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "atlas_root_set": {
+      "properties": {
+        "transition": {
+          "description": "Explicit durable transition. Omitted requests retain bind behavior.",
+          "anyOf": [
+            {
+              "description": "Explicit durable root transition selected by CLI or MCP callers.",
+              "oneOf": [
+                {
+                  "description": "Initialize a missing binding or verify an identical existing binding.",
+                  "type": "string",
+                  "const": "bind"
+                },
+                {
+                  "description": "Preserve identity only after the previously recorded root is proven absent.",
+                  "type": "string",
+                  "const": "move"
+                },
+                {
+                  "description": "Rotate identity for an independent copy, clone, or worktree.",
+                  "type": "string",
+                  "const": "detach"
+                }
+              ]
+            },
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "atlas_scan": {
+      "properties": {
+        "background": {
+          "description": "Run indexing in the bounded session task registry and return immediately.",
+          "type": ["boolean", "null"]
+        }
+      }
+    },
+    "atlas_search": {
+      "properties": {
+        "retrieval_mode": {
+          "description": "Retrieval family; lexical is the default and always-available mode.",
+          "anyOf": [
+            {
+              "description": "Retrieval family accepted by CLI and MCP search adapters.",
+              "oneOf": [
+                {
+                  "description": "Correctness-authoritative lexical search.",
+                  "type": "string",
+                  "const": "lexical"
+                },
+                {
+                  "description": "Optional semantic retrieval generation.",
+                  "type": "string",
+                  "const": "semantic"
+                },
+                {
+                  "description": "Lexical-complete search with optional semantic ranking.",
+                  "type": "string",
+                  "const": "hybrid"
+                }
+              ]
+            },
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "atlas_session_brief": {
+      "properties": {
+        "purpose_task": {
+          "description": "Optional host-owned task label for the purpose-curator handoff.",
+          "type": ["string", "null"]
+        },
+        "compact": {
+          "description": "Return the additive compact startup projection when true.",
+          "type": ["boolean", "null"]
+        },
+        "purpose_limit": {
+          "description": "Maximum actionable low-scope purpose rows in the startup handoff.",
+          "type": ["integer", "null"],
+          "format": "uint",
+          "minimum": 0
+        }
+      }
+    },
+    "atlas_slice": {
+      "properties": {
+        "symbol_signature": {
+          "description": "Optional exact signature for disambiguating `symbol`.",
+          "type": ["string", "null"]
+        },
+        "output_bytes": {
+          "description": "Maximum encoded bytes admitted to the slice response.",
+          "type": ["integer", "null"],
+          "format": "uint32",
+          "minimum": 0
+        }
+      }
+    },
+    "atlas_symbol_relations": {
+      "properties": {
+        "view": {"description": "Preserve `legacy`, opt in to `detailed`, or select closed `analysis`.", "type": ["string", "null"]},
+        "compact": {"description": "Return the opt-in compact detailed projection while preserving exact selectors and trust.", "type": ["boolean", "null"]},
+        "cursor": {"description": "Resume one exact generation- and purpose-bound detailed page.", "type": ["string", "null"]},
+        "roots": {"description": "Complete ordered project-root set for one read-only federated call.", "type": ["array", "null"], "items": {"type": "string"}},
+        "symbol": {"description": "Exact symbol name used as the detailed anchor; omit for a file anchor.", "type": ["string", "null"]},
+        "symbol_parent": {"description": "Optional exact parent used to disambiguate the detailed symbol anchor.", "type": ["string", "null"]},
+        "symbol_kind": {"description": "Optional exact kind used to disambiguate the detailed symbol anchor.", "type": ["string", "null"]},
+        "symbol_signature": {"description": "Optional exact signature used to disambiguate the detailed symbol anchor.", "type": ["string", "null"]},
+        "direction": {"description": "Detailed traversal direction: `outbound` or `inbound`.", "type": ["string", "null"]},
+        "relation": {"description": "Optional exact legacy or extended relation family.", "type": ["string", "null"]},
+        "minimum_confidence": {"description": "Detailed confidence floor: `exact`, `high`, `medium`, or `low`.", "type": ["string", "null"]},
+        "resolution": {"description": "Detailed resolution filter.", "type": ["string", "null"]},
+        "depth": {"description": "Maximum detailed traversal depth.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "include_occurrences": {"description": "Retain bounded exact source occurrences in detailed rows.", "type": ["boolean", "null"]},
+        "occurrence_limit": {"description": "Maximum exact occurrences retained per detailed relation.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "edge_limit": {"description": "Maximum adjacency rows inspected by one detailed page.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "node_limit": {"description": "Maximum unique traversal nodes retained across continuation state.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "visited_limit": {"description": "Maximum unique visited-node state retained across continuation state.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "occurrence_total_limit": {"description": "Maximum exact occurrences retained across the complete page.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "intermediate_bytes": {"description": "Maximum decoded, cursor, and service-composition intermediate bytes.", "type": ["integer", "null"], "format": "uint64", "minimum": 0},
+        "deadline_ms": {"description": "Maximum service-owned elapsed milliseconds.", "type": ["integer", "null"], "format": "uint64", "minimum": 0},
+        "output_bytes": {"description": "Maximum encoded bytes admitted to the detailed response.", "type": ["integer", "null"], "format": "uint32", "minimum": 0},
+        "analysis_mode": {"description": "Closed analysis mode: `architecture`, `impact`, or `trace`.", "type": ["string", "null"]},
+        "trace_target": {"description": "Exact target symbol name for trace mode.", "type": ["string", "null"]},
+        "trace_target_file": {"description": "Exact target file for trace mode; alone selects a file target.", "type": ["string", "null"]},
+        "trace_target_parent": {"description": "Exact target parent for symbol trace mode.", "type": ["string", "null"]},
+        "trace_target_kind": {"description": "Exact target kind required by symbol trace mode.", "type": ["string", "null"]},
+        "trace_target_signature": {"description": "Exact target signature required by symbol trace mode.", "type": ["string", "null"]},
+        "vcs": {"description": "Impact VCS scope: `working_tree`, `index`, or `revision_range`.", "type": ["string", "null"]},
+        "vcs_base": {"description": "Older Git revision used by `revision_range`.", "type": ["string", "null"]},
+        "vcs_head": {"description": "Newer Git revision used by `revision_range`.", "type": ["string", "null"]},
+        "include_communities": {"description": "Include communities with containment excluded.", "type": ["boolean", "null"]},
+        "include_cycles": {"description": "Include dependency SCC findings.", "type": ["boolean", "null"]},
+        "include_dead_code": {"description": "Include conservative dead-code candidates.", "type": ["boolean", "null"]}
+      }
+    },
+    "atlas_symbols_build": {
+      "properties": {
+        "background": {
+          "description": "Run indexing in the bounded session task registry and return immediately.",
+          "type": ["boolean", "null"]
+        }
+      }
+    },
+    "atlas_token_report": {
+      "properties": {
+        "benchmark_results": {
+          "description": "Optional repository-relative agent-navigation benchmark result.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "atlas_watch_once": {
+      "properties": {
+        "background": {
+          "description": "Run indexing in the bounded session task registry and return immediately.",
+          "type": ["boolean", "null"]
+        }
+      }
+    }
+  }
+}

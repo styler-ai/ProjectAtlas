@@ -86,7 +86,7 @@ Reference source:
 
 - Repository: https://github.com/johnhuang316/code-index-mcp
 - Local audit clone:
-  `C:\Users\styler\AppData\Local\Temp\code-index-mcp-src`
+  `<temporary-directory>/code-index-mcp-src`
 - Audited commit: `5e8d5fce10a29a58b71f736824253fb22e239610`
 
 Relevant mechanisms found in Code Index:

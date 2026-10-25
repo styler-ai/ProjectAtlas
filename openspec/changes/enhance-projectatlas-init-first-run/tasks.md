@@ -10,7 +10,7 @@
 
 - [x] 2.1 Inspect current `projectatlas init`, `init_project`, MCP `atlas_init`, scan pipeline, and purpose queue APIs.
 - [x] 2.2 Confirm CLI/MCP report formats and existing output formatting patterns.
-- [x] 2.3 Identify where plugin/skill guidance should describe low-reasoning subagent purpose curation.
+- [x] 2.3 Identify where plugin/skill guidance should describe bounded isolated subagent purpose curation at the lowest reliable reasoning and cost tier the host supports.
 
 ## 3. Init Bootstrap Implementation
 
@@ -18,7 +18,7 @@
 - [x] 3.2 Expand CLI `projectatlas init` options for scan control and first-run behavior.
 - [x] 3.3 Make init create/verify `.projectatlas/`, config, non-source TOON, and DB idempotently.
 - [x] 3.4 Integrate default deep scan/index into init, with `--no-scan` and `--force-rescan` controls.
-- [x] 3.5 Add purpose queue/handoff output with low-reasoning subagent instructions for plugin/agent harnesses.
+- [x] 3.5 Add purpose queue/handoff output with the reliable-tier instructions for plugin/agent harnesses. A fixed reliable subagent tier still delegates at that tier without a selector; reasoning selection is optional, and only absence of bounded isolated subagent execution selects the main-agent fallback.
 - [x] 3.6 Expand MCP `atlas_init` parameters and result to match CLI behavior.
 - [x] 3.7 Preserve wrong-root and nearest-project safety: init mutates only the explicit/current project root.
 - [x] 3.8 Generate and report `.projectatlas/projectatlas.mcp.json`, `.projectatlas/projectatlas.claude.mcp.json`, and `.projectatlas/projectatlas.opencode.json`.
@@ -26,7 +26,7 @@
 ## 4. Plugin/Docs Guidance
 
 - [x] 4.1 Update ProjectAtlas plugin/skill guidance so agents run `projectatlas init` for first-run setup.
-- [x] 4.2 Document that purpose creation/correction is delegated to a low-reasoning subagent after init returns the handoff.
+- [x] 4.2 Document that purpose creation/correction is delegated to a bounded isolated subagent at the lowest reliable reasoning and cost tier the host supports after init returns the handoff.
 - [x] 4.3 Document that subagents apply reviewed purposes through ProjectAtlas purpose APIs and that API-written purposes count as approved.
 - [x] 4.4 Update README/docs/CI examples so first-run setup does not immediately double-run `projectatlas scan` unless an explicit refresh is intended.
 

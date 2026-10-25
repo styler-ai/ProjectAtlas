@@ -1,0 +1,469 @@
+{
+  "schema": "projectatlas.classified-document-refresh.v1",
+  "candidate": {
+    "checkout_head": "7f8ce515312bdddf359287ea1f34454fc369354a",
+    "runtime": "{REPO_ROOT}\\target\\release\\projectatlas.exe",
+    "runtime_sha256": "b4f5773b667b08f13aaa5d1a704bbc29842827149706658445859dc0436827bf",
+    "runtime_info": {
+      "project": "ProjectAtlas",
+      "major_version": 3,
+      "version": "0.4.5-rc1",
+      "executable": "{REPO_ROOT}/target/release/projectatlas.exe",
+      "repository": "https://github.com/styler-ai/ProjectAtlas",
+      "capabilities": [
+        "cli",
+        "mcp",
+        "sqlite",
+        "toon",
+        "symbol-index",
+        "text-search",
+        "watch",
+        "token-telemetry"
+      ],
+      "text_format": "TOON",
+      "output_formats": [
+        "toon",
+        "json"
+      ],
+      "mcp_tools": [
+        "atlas_set_project_path",
+        "atlas_worktree_list",
+        "atlas_worktree_add",
+        "atlas_worktree_remove",
+        "atlas_init",
+        "atlas_map",
+        "atlas_root",
+        "atlas_root_set",
+        "atlas_config",
+        "atlas_ignore_list",
+        "atlas_ignore_init_gitignore",
+        "atlas_ignore_add",
+        "atlas_ignore_remove",
+        "atlas_scan",
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_next",
+        "atlas_outline",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_slice",
+        "atlas_symbols_build",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_health",
+        "atlas_health_resolve",
+        "atlas_lint",
+        "atlas_token_report",
+        "atlas_parity_report",
+        "atlas_settings",
+        "atlas_watch_status",
+        "atlas_watch_once",
+        "atlas_strip_legacy_purpose",
+        "atlas_reset_index",
+        "atlas_mcp_config",
+        "atlas_runtime_info",
+        "atlas_session_brief",
+        "atlas_task_status",
+        "atlas_task_cancel",
+        "atlas_purpose_queue",
+        "atlas_purpose_set",
+        "atlas_purpose_review"
+      ]
+    }
+  },
+  "host": {
+    "system": "Windows",
+    "release": "10",
+    "machine": "AMD64",
+    "logical_cpus": 16
+  },
+  "fixture": {
+    "source_files": 1024,
+    "fanout": 256,
+    "document": "docs/high-fanout.md",
+    "tracked": {
+      "files": 1029
+    }
+  },
+  "full_build": {
+    "pre_storage": {
+      "database_bytes": 0,
+      "wal_bytes": 0,
+      "shm_bytes": 0,
+      "staging_bytes": 0,
+      "stage_directories": 0
+    },
+    "process": {
+      "sampler": "psutil-7.0.0",
+      "interval_seconds": 0.02,
+      "sampled_peak_metrics": [
+        "rss_bytes",
+        "processes",
+        "threads",
+        "storage"
+      ],
+      "peak_rss_bytes": 39841792,
+      "peak_processes": 1,
+      "peak_worker_processes": 0,
+      "peak_threads": 20,
+      "cpu_seconds": 2.125,
+      "observed_pids": [
+        24996
+      ],
+      "peak_storage": {
+        "database_bytes": 18477056,
+        "wal_bytes": 18881992,
+        "shm_bytes": 65536,
+        "staging_bytes": 0,
+        "stage_directories": 0
+      },
+      "read_count": 34984,
+      "write_count": 225191,
+      "exact_total_processes": 1,
+      "exact_terminal_active_processes": 0,
+      "worker_process_bound": 0,
+      "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+      "terminal_io_complete": true,
+      "terminal_io_method": "windows-job-basic-and-io-accounting",
+      "process_io_metric": {
+        "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+        "kind": "exact-terminal-owned-process-tree-accounting",
+        "required_final_platform": "Windows",
+        "final_platform_eligible": true,
+        "ineligible_reason": null,
+        "terminal_counters_complete": true
+      },
+      "arguments": [
+        "--format",
+        "json",
+        "scan",
+        "."
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "wall_seconds": 1.985722,
+      "one_core_cpu_percent": 107.014,
+      "host_cpu_percent": 6.688,
+      "stdout_bytes": 924,
+      "stderr_bytes": 0,
+      "process_read_transfer_bytes": 109943110,
+      "process_write_transfer_bytes": 465307308,
+      "stderr": ""
+    },
+    "report": {
+      "overview": {
+        "files": 1029,
+        "folders": 3,
+        "missing_purposes": 4,
+        "stale_purposes": 0,
+        "approved_purposes": 0,
+        "suggested_purposes": 1028
+      },
+      "purpose_import": {
+        "imported": 0,
+        "skipped_stale": 0,
+        "skipped_existing": 0
+      },
+      "text_index": {
+        "candidates": 1029,
+        "indexed": 1029,
+        "binary_or_non_utf8": 0,
+        "too_large": 0,
+        "skipped": 0,
+        "max_bytes": 2000000,
+        "bytes": 111556
+      },
+      "structural_summaries": {
+        "candidates": 3,
+        "summarized": 1,
+        "cleared": 1,
+        "too_large": 0,
+        "binary_or_non_utf8": 0,
+        "purpose_suggestions": 1
+      },
+      "symbols": {
+        "candidates": 1028,
+        "parsed": 1028,
+        "unchanged": 0,
+        "too_large": 0,
+        "binary_or_non_utf8": 0,
+        "timed_out": 0,
+        "max_workers": 16,
+        "timeout_seconds": null,
+        "symbols": 3076,
+        "relations": 2048,
+        "summaries": 1028,
+        "purpose_suggestions": 1028
+      }
+    },
+    "counts": {
+      "nodes": 1032,
+      "symbols": 3076,
+      "symbol_relations": 2048,
+      "graph_entities": 3085,
+      "graph_relations": 2304,
+      "graph_relation_occurrences": 2304,
+      "graph_resolution_keys": 10262,
+      "graph_relation_dependencies": 2560,
+      "graph_coverage": 1029,
+      "generation": 1,
+      "relation_resolution": {
+        "resolved": 2304
+      }
+    },
+    "post_storage": {
+      "database_bytes": 18477056,
+      "wal_bytes": 0,
+      "shm_bytes": 0,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 18477056
+    },
+    "database_profile": {
+      "page_size": 4096,
+      "page_count": 4624,
+      "page_bytes": 18939904,
+      "freelist_pages": 7,
+      "freelist_ratio": 0.001514,
+      "quick_check": "ok",
+      "sqlite_stat1_present": false,
+      "project_root": "{REPO_ROOT}/target/benchmarks/classified-document-refresh/current"
+    }
+  },
+  "one_document_refresh": {
+    "process": {
+      "sampler": "psutil-7.0.0",
+      "interval_seconds": 0.02,
+      "sampled_peak_metrics": [
+        "rss_bytes",
+        "processes",
+        "threads",
+        "storage"
+      ],
+      "peak_rss_bytes": 22347776,
+      "peak_processes": 1,
+      "peak_worker_processes": 0,
+      "peak_threads": 21,
+      "cpu_seconds": 0.421875,
+      "observed_pids": [
+        30168
+      ],
+      "peak_storage": {
+        "database_bytes": 18939904,
+        "wal_bytes": 17019752,
+        "shm_bytes": 65536,
+        "staging_bytes": 0,
+        "stage_directories": 0
+      },
+      "writer_availability": {
+        "method": "timeout-zero-begin-immediate-sampled-bound",
+        "intrusive": true,
+        "interval_seconds": 0.005,
+        "attempts": 55,
+        "busy_observations": 4,
+        "maximum_probe_gap_seconds": 0.032032,
+        "maximum_busy_upper_bound_seconds": 0.119459
+      },
+      "read_count": 12537,
+      "write_count": 10180,
+      "exact_total_processes": 1,
+      "exact_terminal_active_processes": 0,
+      "worker_process_bound": 0,
+      "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+      "terminal_io_complete": true,
+      "terminal_io_method": "windows-job-basic-and-io-accounting",
+      "process_io_metric": {
+        "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+        "kind": "exact-terminal-owned-process-tree-accounting",
+        "required_final_platform": "Windows",
+        "final_platform_eligible": true,
+        "ineligible_reason": null,
+        "terminal_counters_complete": true
+      },
+      "arguments": [
+        "--format",
+        "json",
+        "watch",
+        ".",
+        "--poll-seconds",
+        "1",
+        "--max-cycles",
+        "2"
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "wall_seconds": 1.286415,
+      "one_core_cpu_percent": 32.795,
+      "host_cpu_percent": 2.05,
+      "stdout_bytes": 690,
+      "stderr_bytes": 0,
+      "process_read_transfer_bytes": 42922858,
+      "process_write_transfer_bytes": 21148928,
+      "stderr": "",
+      "readiness_seconds": 1.763613,
+      "readiness_path": "src/caller_0000.rs",
+      "readiness_generation": 2,
+      "edit_to_complete_seconds": 1.286415
+    },
+    "report": {
+      "mode": "notify",
+      "cycles": 2,
+      "once": false,
+      "text_index": {
+        "candidates": 1,
+        "indexed": 1,
+        "binary_or_non_utf8": 0,
+        "too_large": 0,
+        "skipped": 0,
+        "max_bytes": 2000000,
+        "bytes": 10019
+      },
+      "structural_summaries": {
+        "candidates": 1,
+        "summarized": 1,
+        "cleared": 0,
+        "too_large": 0,
+        "binary_or_non_utf8": 0,
+        "purpose_suggestions": 1
+      },
+      "last_symbols": {
+        "candidates": 1,
+        "parsed": 1,
+        "unchanged": 0,
+        "too_large": 0,
+        "binary_or_non_utf8": 0,
+        "timed_out": 0,
+        "max_workers": 1,
+        "timeout_seconds": null,
+        "symbols": 1,
+        "relations": 0,
+        "summaries": 1,
+        "purpose_suggestions": 1
+      }
+    },
+    "counts": {
+      "nodes": 1032,
+      "symbols": 3076,
+      "symbol_relations": 2048,
+      "graph_entities": 3085,
+      "graph_relations": 2304,
+      "graph_relation_occurrences": 2304,
+      "graph_resolution_keys": 10262,
+      "graph_relation_dependencies": 2560,
+      "graph_coverage": 1029,
+      "generation": 3,
+      "relation_resolution": {
+        "resolved": 2304
+      }
+    },
+    "owned_rows_before": {
+      "nodes": 1,
+      "classifications": 1,
+      "file_texts": 1,
+      "parse_metadata": 1,
+      "symbols": 1,
+      "symbol_relations": 0,
+      "graph_entities": 2,
+      "graph_relations": 256,
+      "graph_occurrences": 256,
+      "graph_coverage": 2,
+      "graph_exports": 3,
+      "graph_dependencies": 512,
+      "total": 1036
+    },
+    "owned_rows_after": {
+      "nodes": 1,
+      "classifications": 1,
+      "file_texts": 1,
+      "parse_metadata": 1,
+      "symbols": 1,
+      "symbol_relations": 0,
+      "graph_entities": 2,
+      "graph_relations": 256,
+      "graph_occurrences": 256,
+      "graph_coverage": 2,
+      "graph_exports": 3,
+      "graph_dependencies": 512,
+      "total": 1036
+    },
+    "final_storage": {
+      "database_bytes": 18939904,
+      "wal_bytes": 0,
+      "shm_bytes": 32768,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 18972672
+    },
+    "output_bytes": 690
+  },
+  "sqlite_publication_probe": {
+    "command": "cargo test --locked -p projectatlas-db repository_graph::tests::high_fanout_document_refresh_has_bounded_sql_and_changed_rows -- --exact --nocapture",
+    "links": 256,
+    "statements": 2081,
+    "changed_rows": 1031
+  },
+  "checks": [
+    {
+      "name": "full build includes the fixture",
+      "actual": 1029,
+      "expected": "> 1024",
+      "passed": true
+    },
+    {
+      "name": "one refresh text candidate",
+      "actual": 1,
+      "expected": 1,
+      "passed": true
+    },
+    {
+      "name": "one refresh parse",
+      "actual": 1,
+      "expected": 1,
+      "passed": true
+    },
+    {
+      "name": "document fanout retained",
+      "actual": 256,
+      "expected": 256,
+      "passed": true
+    },
+    {
+      "name": "refresh generation published",
+      "actual": 3,
+      "expected": 3,
+      "passed": true
+    },
+    {
+      "name": "SQLite probe fanout",
+      "actual": 256,
+      "expected": 256,
+      "passed": true
+    },
+    {
+      "name": "bounded output",
+      "actual": 690,
+      "expected": "<= 65536 bytes",
+      "passed": true
+    },
+    {
+      "name": "writer probe observed publication",
+      "actual": 55,
+      "expected": "> 0",
+      "passed": true
+    },
+    {
+      "name": "final WAL drained",
+      "actual": 0,
+      "expected": 0,
+      "passed": true
+    },
+    {
+      "name": "no staging database remains",
+      "actual": 0,
+      "expected": 0,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

@@ -1,10 +1,12 @@
-# Purpose: Document ProjectAtlas TOON response and optional compatibility export format.
+# Purpose: Document ProjectAtlas TOON and JSON map response formats.
 
 # TOON Output Format
 
-ProjectAtlas can write an optional compatibility TOON snapshot at `.projectatlas/projectatlas.toon` with these sections. ProjectAtlas 3's durable source of truth is `.projectatlas/projectatlas.db`; TOON remains the compact MCP/CLI response and explicit export format.
+`projectatlas map` returns the current map with these sections on stdout in TOON by default, or JSON when global `--format json` is selected. MCP `atlas_map` returns the selected format in its `content` field (`json: true` selects JSON). The response is limited to 4 MiB; an oversized map returns a typed refusal instead of partial content. ProjectAtlas 3's durable source of truth is `.projectatlas/projectatlas.db`.
 
-The map snapshot is a compatibility artifact for older map/import workflows and should not be committed as the primary atlas. Agent-facing CLI/MCP payloads use official TOON-compatible text, and TOON fixtures are decoded with the `toon-format` crate in tests. The compatibility map writer keeps a local row reader/writer only to preserve backward-compatible atlas snapshots and must keep escaping/round-trip coverage when the row schema changes.
+`generated_at` is the time of each render, not a content revision; identical map content can have different timestamps across calls. Compare `file_hash` and `folder_hash` to detect content changes.
+
+Map rendering never creates, overwrites, or deletes `.projectatlas/projectatlas.toon` (or an alternate configured `map_path`). A pre-existing TOON file remains a read-only legacy purpose-import input. Map-local `--json` independently writes an adjacent JSON sidecar outside CI, or with `--force` in CI; global `--format json` does not imply a sidecar. `.projectatlas/projectatlas-nonsource-files.toon` remains a separate authored input. Agent-facing TOON fixtures are decoded with the `toon-format` crate in tests; map rows retain escaping/round-trip coverage.
 
 ```
 version: 1
@@ -19,10 +21,10 @@ exclude_dir_names[]:
   - .git
 exclude_path_prefixes[]:
   - docs/generated
-folders[3]{path,folder_purpose,source}:
+folders[3]{path,summary,source}:
   .,Project root,purpose
-files[4]{path,file_purpose,content_summary,source}:
-  src/main.py,Main entry,Python application entry point,header
+files[4]{path,summary,source}:
+  src/main.py,Python application entry point,header
 folder_summary_duplicates[]:
   - Shared utils :: src/utils | app/utils
 file_summary_duplicates[]:
@@ -32,7 +34,7 @@ folder_tree[]:
   - src/ - Application source
 ```
 
-Sections are stable so agents can scan quickly and tooling can diff.
+The section layout is stable so agents can scan quickly; tooling comparing content should use the hashes rather than `generated_at`.
 
 ## Overview fields
 
@@ -43,7 +45,7 @@ Sections are stable so agents can scan quickly and tooling can diff.
 
 ## Non-source list
 
-The generated atlas can merge `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
+The returned map can merge `.projectatlas/projectatlas-nonsource-files.toon` entries into `files[]`
 for compatibility. New ProjectAtlas 3 workflows should prefer SQLite `folder_purpose` and
 `file_purpose` records, plus deterministic `content_summary` values from `projectatlas summary`
 or `atlas_file_summary`.

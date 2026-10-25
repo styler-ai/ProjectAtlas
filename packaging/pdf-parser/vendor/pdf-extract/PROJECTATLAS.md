@@ -1,0 +1,60 @@
+# Fixed PDF guest dependency
+
+This directory retains the published source and attribution of `pdf-extract`
+0.12.0 by Jeff Muizelaar and contributors. Its published Cargo manifest declares
+the MIT license. The registry archive contains no separate license file.
+
+Upstream: https://github.com/jrmuizel/pdf-extract
+
+Published source commit: `b95bf9f6268772d5088f09b0034e488e64294835`.
+
+ProjectAtlas carries these local changes for its fixed, contained PDF guest:
+
+- Normalize trailing whitespace retained in the published source.
+- Use the same pinned `lopdf` 0.44.0 as the guest's bounded input owner.
+- Decode complete content streams strictly instead of accepting a parsed prefix.
+- Key cached fonts by the resolved dictionary's identity within the immutable
+  document, preserving independent page and Form resource scopes.
+- Refuse incomplete or unmapped character codes instead of silently ending text.
+- Refuse ActualText replacement semantics in direct or resource-named marked-content properties before publishing underlying glyphs.
+- Refuse ReversedChars marked content before publishing unsupported logical text order; validate BMC/BDC operand counts and tag names.
+- Interpret quote text-showing operators with their line movement and spacing semantics.
+- Apply CID range widths to both inclusive endpoints using the declared width.
+- Read CID default widths as PDF numbers, preserving fractional advances and the omitted default.
+- Apply ExtGState font dictionaries and finite sizes through the existing scoped font cache.
+- Resolve indirect ExtGState type names before validating the graphics-state dictionary.
+- Resolve XObject subtype names before dispatching Form, Image, and PostScript resources.
+- Measure plain-text horizontal advances and font heights from their separate transformed vectors, preserving rotated and anisotropically scaled text spacing.
+- Measure logical word and line gaps in the preceding glyph frame using the existing affine inverse; preserve rotated, scaled, reflected, and sheared text and skip inferred separators for degenerate frames.
+- Include configured character and word spacing in the recorded glyph endpoint so adjacent text operations do not fabricate spaces.
+- Save and restore both text matrices with q/Q, following the [ISO-approved text-object errata](https://pdf-issues.pdfa.org/32000-2-2020/clause09.html#941-general), while preserving Form-local execution.
+- Use known font encodings for missing ToUnicode entries, including built-in Base-14 encodings with explicit widths; refuse used characters without a known fallback and unmapped CID characters through the existing typed unsupported path.
+- Read simple-font MissingWidth from its font descriptor; reject malformed descriptors or nonnumeric/nonfinite widths.
+- Transform Type 3 glyph widths through the required finite FontMatrix's horizontal component, including rotated and reflected matrices, before shared text advancement.
+- Resolve indirect CalGray, CalRGB, and Lab parameter dictionaries in shared fill/stroke selection, including Separation alternates.
+- Accept DeviceCMYK, Pattern, and Indexed resources through the existing shared fill/stroke color-space resolver; Indexed lookup tables are visual-only and are not read or rendered.
+- Seed encoding dictionaries from known font-program or standard-font maps before applying Differences; unknown or explicitly undefined glyphs remain unsupported unless ToUnicode provides the character. Type 3 dictionaries do not inherit a metadata-string encoding, and unparsed TrueType cmap data is not guessed as WinAnsi.
+- Reject used undefined font-encoding slots before emitting text, while preserving explicit ToUnicode mappings and the existing WinAnsi bullet mappings.
+- Admit only Identity-H Type 0 font encodings through the shared font cache owner.
+  Vertical and custom stream CMap encodings return typed unsupported input: the
+  pinned CMap byte-width and CID-range mappings cannot provide correct custom
+  encoding semantics. ToUnicode maps remain supported for admitted fonts.
+- Apply inherited integer page rotation in the initial graphics transform; reject non-quarter-turn or non-integer rotation before publication.
+- Preserve the current point after closed subpaths and rectangles; a curve without a current point returns malformed input instead of panicking.
+- Clear completed paths after every painting operator so obsolete segments cannot accumulate or supply a current point to a later curve.
+- Interpret Form XObjects with inherited graphics state and composed caller/Form
+  transforms, skip Image pixels without OCR and print-only PostScript XObjects
+  (including the legacy Form/Subtype2 representation), and refuse unknown XObject subtypes
+  or malformed Form matrices.
+
+The guest uses exact-page execution and bounded output collection. It does not
+use the upstream convenience function that stops after the first page error.
+The original generated glyph-table attribution headers remain intact. They cite:
+
+- https://github.com/michal-h21/htfgen/commits/master/glyphlist-extended.txt
+- https://github.com/kohler/lcdf-typetools/blob/master/texglyphlist.txt
+- https://github.com/apache/pdfbox/blob/trunk/pdfbox/src/main/resources/org/apache/pdfbox/resources/glyphlist/additional.txt
+
+These changes should be removed when an audited upstream release provides the
+same behavior and passes the guest's Form, image, font-scope, malformed-page,
+resource, and cancellation regressions.

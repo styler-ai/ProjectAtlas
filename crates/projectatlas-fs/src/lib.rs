@@ -1,5 +1,7 @@
 //! Purpose: Scan repository files and folders for `ProjectAtlas` 3.
 
+pub mod worktree;
+
 use blake3::Hasher;
 use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
 use projectatlas_core::language::{
@@ -8,7 +10,8 @@ use projectatlas_core::language::{
 };
 use projectatlas_core::{
     CoreError, IndexCancellation, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
-    IndexWorkStage, Node, NodeKind, normalize_repo_path, normalized_extension, normalized_parent,
+    IndexWorkStage, MAX_GIT_WORKTREE_REGISTRATIONS, Node, NodeKind, normalize_repo_path,
+    normalized_extension, normalized_parent,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -40,14 +43,11 @@ const DEFAULT_SCAN_MAX_ENTRIES: u64 = 1_000_000;
 /// Default maximum source bytes hashed by one scan.
 const DEFAULT_SCAN_MAX_SOURCE_BYTES: u64 = 16 * 1_024 * 1_024 * 1_024;
 /// Default deadline for the compatibility repository scan.
-const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_mins(30);
 /// Exact-byte hash read buffer size.
 const HASH_BUFFER_BYTES: usize = 8_192;
 /// Maximum linked-worktree `.git` pointer bytes inspected for policy discovery.
 const GIT_DIRECTORY_POINTER_MAX_BYTES: u64 = 64 * 1_024;
-/// Maximum linked-worktree registrations inspected for one repository.
-const MAX_REGISTERED_WORKTREES: usize = 1_024;
-
 /// Filesystem scanner errors.
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -160,6 +160,25 @@ impl RootScanPolicy {
         })?;
         let options = scan_options_for_root(&root, options, control)?;
         Ok(Self { root, options })
+    }
+
+    /// Return whether one repository-contained path is excluded by the
+    /// effective scanner policy, including rules that match an absent leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be normalized or an ignore
+    /// source cannot be parsed safely.
+    pub fn excludes_path(&self, path: &Path) -> FsResult<bool> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        if should_skip_path(&self.root, &absolute, &self.options) {
+            return Ok(true);
+        }
+        standard_ignore_excludes_path(&self.root, &absolute)
     }
 }
 
@@ -534,7 +553,7 @@ pub fn scan_path_with_policy_controlled(
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
-    if gitignore_excludes_path(root, &absolute)? || should_skip_path(root, &absolute, options) {
+    if policy.excludes_path(&absolute)? {
         control.check(IndexWorkStage::ScanFinalization)?;
         return Ok(None);
     }
@@ -621,41 +640,84 @@ pub fn gitignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
     } else {
         absolute
     };
-    let relative = normalize_repo_path(&root, &absolute)?;
+    Ok(ignore_family_match(&root, &absolute, ".gitignore")?.unwrap_or(false))
+}
+
+/// Apply the same standard ignore-family precedence as `WalkBuilder`.
+fn standard_ignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
+    let relative = normalize_repo_path(root, path)?;
     if relative == "." || relative.split('/').any(|component| component == "..") {
         return Ok(false);
     }
-    let is_dir = absolute.metadata().is_ok_and(|metadata| metadata.is_dir());
-    let target_dir = if is_dir {
-        absolute.as_path()
-    } else {
-        absolute.parent().unwrap_or(root.as_path())
-    };
-    let mut ignored = false;
-    for directory in gitignore_search_dirs(&root, target_dir) {
-        let gitignore_path = directory.join(".gitignore");
-        if !gitignore_path.exists() {
-            continue;
-        }
-        let mut builder = GitignoreBuilder::new(&directory);
-        if let Some(error) = builder.add(&gitignore_path) {
-            return Err(FsError::Io {
-                path: gitignore_path,
-                source: io::Error::other(error.to_string()),
-            });
-        }
-        let matcher = builder.build().map_err(|error| FsError::Io {
-            path: directory.join(".gitignore"),
+    if let Some(ignored) = ignore_family_match(root, path, ".ignore")? {
+        return Ok(ignored);
+    }
+    if let Some(ignored) = ignore_family_match(root, path, ".gitignore")? {
+        return Ok(ignored);
+    }
+    if let Some(common_git_dir) = common_git_directory(root)?
+        && let Some(ignored) = ignore_file_match(root, path, &common_git_dir.join("info/exclude"))?
+    {
+        return Ok(ignored);
+    }
+    let (global, error) = GitignoreBuilder::new(root).build_global();
+    if let Some(error) = error {
+        return Err(FsError::Io {
+            path: git_global_excludes_path().unwrap_or_else(|| root.to_path_buf()),
             source: io::Error::other(error.to_string()),
-        })?;
-        let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
-        if matched.is_ignore() {
-            ignored = true;
-        } else if matched.is_whitelist() {
-            ignored = false;
+        });
+    }
+    Ok(ignore_match(&global, path).unwrap_or(false))
+}
+
+/// Return the deepest matching rule from one nested ignore-file family.
+fn ignore_family_match(root: &Path, path: &Path, file_name: &str) -> FsResult<Option<bool>> {
+    let is_dir = path.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let target_dir = if is_dir {
+        path
+    } else {
+        path.parent().unwrap_or(root)
+    };
+    let mut outcome = None;
+    for directory in gitignore_search_dirs(root, target_dir) {
+        let ignore_path = directory.join(file_name);
+        if let Some(matched) = ignore_file_match(&directory, path, &ignore_path)? {
+            outcome = Some(matched);
         }
     }
-    Ok(ignored)
+    Ok(outcome)
+}
+
+/// Match one ignore-format file while retaining ignore versus whitelist state.
+fn ignore_file_match(root: &Path, path: &Path, source: &Path) -> FsResult<Option<bool>> {
+    if !source.exists() {
+        return Ok(None);
+    }
+    let mut builder = GitignoreBuilder::new(root);
+    if let Some(error) = builder.add(source) {
+        return Err(FsError::Io {
+            path: source.to_path_buf(),
+            source: io::Error::other(error.to_string()),
+        });
+    }
+    let matcher = builder.build().map_err(|error| FsError::Io {
+        path: source.to_path_buf(),
+        source: io::Error::other(error.to_string()),
+    })?;
+    Ok(ignore_match(&matcher, path))
+}
+
+/// Reduce an ignore matcher result to its policy-relevant tri-state.
+fn ignore_match(matcher: &ignore::gitignore::Gitignore, path: &Path) -> Option<bool> {
+    let is_dir = path.metadata().is_ok_and(|metadata| metadata.is_dir());
+    let matched = matcher.matched_path_or_any_parents(path, is_dir);
+    if matched.is_ignore() {
+        Some(true)
+    } else if matched.is_whitelist() {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Resolve the global Git excludes file selected by the same ignore engine as scans.
@@ -711,36 +773,20 @@ pub fn source_selection_policy_paths_controlled(
                 paths.insert(git.join("info").join("exclude"));
             }
             Ok(metadata) if metadata.is_file() => {
-                if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
-                    return Err(FsError::Io {
-                        path: git,
-                        source: io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "linked-worktree .git pointer exceeds the policy-input limit",
-                        ),
-                    });
-                }
-                let text = fs::read_to_string(&git).map_err(|source| FsError::Io {
-                    path: git.clone(),
-                    source,
-                })?;
-                if let Some(directory) = text.strip_prefix("gitdir:").map(str::trim) {
-                    let directory = Path::new(directory);
-                    let directory = if directory.is_absolute() {
-                        directory.to_path_buf()
-                    } else {
-                        ancestor.join(directory)
-                    };
-                    paths.insert(directory.join("info").join("exclude"));
-                    let common_dir_pointer = directory.join("commondir");
-                    paths.insert(common_dir_pointer.clone());
-                    if let Some(common_dir) = read_git_directory_pointer(
-                        &common_dir_pointer,
-                        &directory,
-                        "linked-worktree commondir",
-                    )? {
-                        paths.insert(common_dir.join("info").join("exclude"));
-                    }
+                let directory = worktree::read_prefixed_pointer(&git, "gitdir:")
+                    .map_err(git_pointer_io_error)?;
+                let directory = if directory.is_absolute() {
+                    directory
+                } else {
+                    ancestor.join(&directory)
+                };
+                paths.insert(directory.join("info").join("exclude"));
+                let common_dir_pointer = directory.join("commondir");
+                paths.insert(common_dir_pointer.clone());
+                if let Some(common_dir) =
+                    read_git_directory_pointer(&common_dir_pointer, &directory)?
+                {
+                    paths.insert(common_dir.join("info").join("exclude"));
                 }
             }
             Ok(_metadata) => {}
@@ -792,11 +838,7 @@ pub fn source_selection_policy_paths_controlled(
 }
 
 /// Read one bounded Git directory pointer relative to its containing directory.
-fn read_git_directory_pointer(
-    path: &Path,
-    base: &Path,
-    description: &str,
-) -> FsResult<Option<PathBuf>> {
+fn read_git_directory_pointer(path: &Path, base: &Path) -> FsResult<Option<PathBuf>> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -810,29 +852,24 @@ fn read_git_directory_pointer(
     if !metadata.is_file() {
         return Ok(None);
     }
-    if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
-        return Err(FsError::Io {
-            path: path.to_path_buf(),
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{description} exceeds the policy-input limit"),
-            ),
-        });
-    }
-    let value = fs::read_to_string(path).map_err(|source| FsError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let value = Path::new(value);
+    let value = worktree::read_plain_pointer(path).map_err(git_pointer_io_error)?;
     Ok(Some(if value.is_absolute() {
-        value.to_path_buf()
+        value
     } else {
         base.join(value)
     }))
+}
+
+/// Adapt one structural pointer failure for scanner policy callers.
+fn git_pointer_io_error(issue: worktree::GitStructureIssue) -> FsError {
+    let (path, source) = issue.into_io_error();
+    FsError::Io { path, source }
+}
+
+/// Adapt one structural pointer failure for repository-boundary callers.
+fn git_pointer_boundary_error(issue: worktree::GitStructureIssue) -> FsError {
+    let (path, source) = issue.into_io_error();
+    FsError::RepositoryBoundary { path, source }
 }
 
 /// Add registered in-root sibling worktrees to the existing prefix policy.
@@ -962,11 +999,11 @@ fn linked_worktree_excluded_prefixes(
 fn check_registered_worktree(control: &IndexWorkControl, index: usize) -> FsResult<()> {
     control.check(IndexWorkStage::RepositoryTraversal)?;
     let observed = index.saturating_add(1);
-    if observed > MAX_REGISTERED_WORKTREES {
+    if observed > MAX_GIT_WORKTREE_REGISTRATIONS {
         return Err(IndexWorkFailure::resource_limit(
             IndexWorkStage::RepositoryTraversal,
             IndexWorkResource::Entries,
-            u64::try_from(MAX_REGISTERED_WORKTREES).unwrap_or(u64::MAX),
+            u64::try_from(MAX_GIT_WORKTREE_REGISTRATIONS).unwrap_or(u64::MAX),
             u64::try_from(observed).unwrap_or(u64::MAX),
         )
         .into());
@@ -999,36 +1036,12 @@ fn common_git_directory(root: &Path) -> FsResult<Option<PathBuf>> {
             ),
         });
     }
-    if metadata.len() > GIT_DIRECTORY_POINTER_MAX_BYTES {
-        return Err(FsError::RepositoryBoundary {
-            path: git,
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                "linked-worktree .git pointer exceeds the policy-input limit",
-            ),
-        });
-    }
-    let value = fs::read_to_string(&git).map_err(|source| FsError::RepositoryBoundary {
-        path: git.clone(),
-        source,
-    })?;
-    let git_dir = value
-        .trim()
-        .strip_prefix("gitdir:")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| FsError::RepositoryBoundary {
-            path: git.clone(),
-            source: io::Error::new(
-                io::ErrorKind::InvalidData,
-                "linked-worktree .git pointer is malformed",
-            ),
-        })?;
-    let git_dir = Path::new(git_dir);
+    let git_dir =
+        worktree::read_prefixed_pointer(&git, "gitdir:").map_err(git_pointer_boundary_error)?;
     let git_dir = if git_dir.is_absolute() {
-        git_dir.to_path_buf()
+        git_dir
     } else {
-        root.join(git_dir)
+        root.join(&git_dir)
     };
     let git_dir = git_dir
         .canonicalize()
@@ -1077,7 +1090,7 @@ fn read_repository_boundary_pointer(
             ),
         });
     }
-    match read_git_directory_pointer(path, base, description) {
+    match read_git_directory_pointer(path, base) {
         Ok(Some(value)) => Ok(Some(value)),
         Ok(None) => Err(FsError::RepositoryBoundary {
             path: path.to_path_buf(),
@@ -1319,7 +1332,9 @@ fn admitted_scan_language(
 }
 
 /// Select one configured explicit override before built-in detector rules.
-fn explicit_language_override<'a>(
+/// Exact filenames take precedence over the longest matching extension selector.
+#[must_use]
+pub fn explicit_language_override<'a>(
     path: &str,
     extension: Option<&str>,
     overrides: &'a BTreeMap<String, String>,
@@ -1515,9 +1530,9 @@ mod tests {
         ));
 
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
-        assert!(check_registered_worktree(&control, MAX_REGISTERED_WORKTREES - 1).is_ok());
+        assert!(check_registered_worktree(&control, MAX_GIT_WORKTREE_REGISTRATIONS - 1).is_ok());
         assert!(matches!(
-            check_registered_worktree(&control, MAX_REGISTERED_WORKTREES),
+            check_registered_worktree(&control, MAX_GIT_WORKTREE_REGISTRATIONS),
             Err(FsError::IndexWork(
                 IndexWorkFailure::ResourceLimitExceeded {
                     stage: IndexWorkStage::RepositoryTraversal,
@@ -1525,8 +1540,8 @@ mod tests {
                     limit,
                     observed
                 }
-            )) if limit == MAX_REGISTERED_WORKTREES as u64
-                && observed == MAX_REGISTERED_WORKTREES as u64 + 1
+            )) if limit == MAX_GIT_WORKTREE_REGISTRATIONS as u64
+                && observed == MAX_GIT_WORKTREE_REGISTRATIONS as u64 + 1
         ));
     }
 
@@ -1788,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_hash_loop_observes_cancellation_between_chunks() {
+    fn exact_hash_loop_observes_work_bounds() {
         let exact_budget = ScanBudget::new(
             ScanLimits::new(8, (HASH_BUFFER_BYTES * 2) as u64, 1),
             IndexWorkControl::new(IndexCancellation::new(), None),
@@ -1825,6 +1840,23 @@ mod tests {
         assert!(matches!(
             result,
             Err(FsError::IndexWork(IndexWorkFailure::Cancelled {
+                stage: IndexWorkStage::SourceHash,
+            }))
+        ));
+
+        let expired_budget = ScanBudget::new(
+            ScanLimits::default(),
+            IndexWorkControl::with_deadline(IndexCancellation::new(), Instant::now()),
+        );
+        let expired = hash_reader(
+            Path::new("deadline-source.rs"),
+            io::Cursor::new(vec![7_u8; HASH_BUFFER_BYTES * 2]),
+            &expired_budget,
+            false,
+        );
+        assert!(matches!(
+            expired,
+            Err(FsError::IndexWork(IndexWorkFailure::DeadlineExceeded {
                 stage: IndexWorkStage::SourceHash,
             }))
         ));
@@ -2274,6 +2306,40 @@ mod tests {
         if indexed.is_none() {
             return Err(io::Error::other("single-path refresh skipped indexed source").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn root_scan_policy_classifies_absent_standard_and_atlas_ignores() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".git").join("info"))?;
+        fs::write(repo.join(".gitignore"), "generated/\n")?;
+        fs::write(repo.join(".ignore"), "drafts/\n")?;
+        fs::write(
+            repo.join(".git").join("info").join("exclude"),
+            "private.txt\n",
+        )?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&repo, &ScanOptions::default(), &control)?;
+
+        require(
+            policy.excludes_path(&repo.join("generated").join("missing.md"))?,
+            "absent .gitignore target was not excluded",
+        )?;
+        require(
+            policy.excludes_path(&repo.join("drafts").join("missing.md"))?,
+            "absent .ignore target was not excluded",
+        )?;
+        require(
+            policy.excludes_path(&repo.join("private.txt"))?,
+            "absent Git info/exclude target was not excluded",
+        )?;
+        require(
+            policy.excludes_path(&repo.join(".projectatlas").join("state.db"))?,
+            "Atlas-specific excluded prefix was not retained",
+        )?;
         Ok(())
     }
 

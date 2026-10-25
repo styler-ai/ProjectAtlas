@@ -65,6 +65,18 @@ The stages answer different questions:
 
 Folder purposes should be curated broadly because they drive the highest-value narrowing step. File purposes should remain selective and focus on public APIs, runtime behavior, build/configuration, tests, commands, adapters, migrations, and other high-impact files. ProjectAtlas preserves the 0.3.26 distinction: deterministic or heuristic text is generated/suggested and is not reviewed truth; an agent-approved purpose is durable authored responsibility state. Source, summary, symbol, graph, scan, and watcher changes never invalidate it automatically. A main agent, reviewer, explicitly assigned curator, or user can still correct an accepted purpose through the purpose APIs when it is wrong or the path was genuinely repurposed.
 
+Purpose set and applied review force exact saved-source admission once for the
+whole mutation batch and retain that witness through the existing purpose transaction.
+If source changed after a queue item was issued, the current generation is
+published before the conditional work is evaluated; the old item returns stale.
+If source, policy, observation continuity, or cancellation changes after
+admission, one exact detect-only saved-source witness at the final precommit
+linearization point refuses commit and explicitly rolls the complete batch back.
+Neither path changes a purpose row or authored revision. Requeue against
+the current generation, review the changed source, and apply the new item. This
+prevents stale approval without automatically demoting durable authored intent
+after later edits.
+
 When an accepted purpose is missing, ProjectAtlas reports generated/suggested or missing state and falls back deterministically to path, current content, symbols, and graph context. It must not pretend a suggestion is authoritative. Deleted or excluded paths are absent from navigation while their path-owned accepted purpose remains dormant; a rename does not transfer approval automatically.
 
 ### Initial Task Discovery
@@ -131,6 +143,48 @@ trust fields state how much to rely on it, and the slice provides exact source.
 An external or unresolved target reports purpose as not applicable or
 unavailable instead of inheriting or fabricating local responsibility.
 
+### Classified Documentation Traversal
+
+Classification narrows the same agent-first sieve without replacing its trust
+contract. `source`, `documentation`, and `both` are the only explicit
+selections. `both` means source plus documentation; configuration/data, other
+text, and opaque metadata remain available through the omitted legacy path.
+Filtering occurs before ranking, pagination, anchor selection, and traversal
+expansion.
+
+Documentation is guidance rather than runtime truth. Start a documentation task
+with classified files or search, inspect parser provenance and completeness,
+then request a validated bridge explicitly. The document file is the canonical
+source of every static `documents` relation; headings remain exact slice and
+occurrence evidence rather than alternate graph anchors:
+
+```text
+documentation file
+→ detailed outbound relation=documents, content_selection=documentation
+→ source-classified target and exact next_call
+→ current source summary, symbol, or slice
+```
+
+From a source anchor, the same stored relation is queried inbound and displayed
+as `documented_by`; ProjectAtlas stores no inverse edge. A requested document
+bridge may cross the selected classification to return its endpoint, but that
+endpoint does not expand as an unrelated frontier. Missing, ignored,
+outside-root, case-conflicting, unsupported, and non-static targets remain typed
+unresolved evidence rather than guessed links. A complete document with no
+supported static target returns trusted `no_candidates` coverage. That state is
+different from an unresolved candidate and from incomplete or failed extraction:
+it says the extractor proved there was no supported reference, not that the
+documentation implements nothing. ProjectAtlas never converts long prose,
+similar wording, or topic overlap into a fan-out across source files.
+
+Every returned file endpoint retains classification alongside purpose, parser,
+coverage, resolution, completeness, freshness, and truncation. Exact next calls
+carry the selected project, file or heading selector, selection, generation, and
+bounds. In a shared host or linked-worktree session, pass the addressed
+checkout's `project_path` on every call: each checkout owns an ignored writable
+database, and a verified stable seed is read-only input rather than shared live
+state.
+
 ### Anchored Analysis Views
 
 Architecture, impact, and trace remain closed views of the existing relation
@@ -172,7 +226,7 @@ main task:
 sequenceDiagram
     participant Host as Agent host
     participant Main as Main agent
-    participant Curator as Low-reasoning purpose curator
+    participant Curator as Reliable-tier purpose curator
     participant Atlas as ProjectAtlas purpose APIs
 
     Host->>Main: continue source task immediately
@@ -186,7 +240,7 @@ sequenceDiagram
     Note over Curator,Host: no ordinary conversation or per-path status
 ```
 
-At startup and relevant task/source transitions, a supported agent host launches the packaged purpose-curator lane without blocking the main task. Init, explicit session brief, and purpose queue expose one bounded task/generation/path-scoped handoff; ordinary folder/file/summary responses carry no maintenance status. Deterministic work keys coalesce duplicate host work, and current-row state tokens make stale review writes no-ops. ProjectAtlas itself does not pretend an MCP server can spawn a host agent. If the host cannot enforce isolated subagents or reasoning selection, the main agent may process the same `low`-scope batch; `medium` and `strict` remain explicit.
+At startup and relevant task/source transitions, a host with bounded isolated subagent execution launches the packaged purpose-curator lane at the lowest reliable reasoning and cost tier it supports without blocking the main task. A host with one fixed reliable subagent tier still delegates at that tier; reasoning selection is optional. Init, explicit session brief, and purpose queue expose one bounded task/generation/path-scoped handoff; ordinary folder/file/summary responses carry no maintenance status. Deterministic work keys coalesce duplicate host work, and current-row state tokens make stale review writes no-ops. ProjectAtlas itself does not pretend an MCP server can spawn a host agent. Only when bounded isolated subagent execution is unavailable may the main agent process the same `low`-scope batch; `medium` and `strict` remain explicit.
 
 Successful curation is silent in the main conversation: no per-file progress, approval, or completion messages. Later navigation simply benefits from the improved purposes. If a host requires a terminal result, it should be a minimal machine-facing state. Task-relevant conflicts that would make ranking unsafe and repeated degraded/failure state remain available through compact blockers or explicit health/settings diagnostics.
 
@@ -308,7 +362,7 @@ Every local step carries its relationship, exact file/symbol selector, authorita
 
 ## Freshness Contract
 
-The watcher is a latency optimization, not the freshness authority. A new long-lived MCP runtime activates bounded root and policy observation before its first exact post-start verification, reconciles any buffered events, and binds a process-local verified epoch to the selected project identity and complete SQLite generation. Later unchanged reads reuse that epoch after a constant freshness snapshot check without another whole-tree walk or full node-table decode. Relevant events, observer overflow/gap/disconnection, root or policy uncertainty, cancellation, and changes racing a query invalidate the epoch. A one-shot CLI process performs its own exact first verification because it cannot inherit process-local observation state.
+The watcher is a latency optimization, not the freshness authority. A new long-lived MCP runtime activates bounded root and policy observation before its first exact post-start verification, reconciles any buffered events, and binds a process-local verified epoch to the selected project identity and complete SQLite generation. Later unchanged reads reuse that epoch after a constant freshness snapshot check without another whole-tree walk or full node-table decode. Relevant events, observer overflow/gap/disconnection, root or policy uncertainty, cancellation, and changes racing a query invalidate the epoch. Purpose mutations are stricter: they never treat an empty asynchronous event queue as authority and always perform exact batch admission plus one final exact saved-source witness. A one-shot CLI process performs its own exact first verification because it cannot inherit process-local observation state.
 
 The response must do one of two things:
 

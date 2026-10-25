@@ -14,7 +14,7 @@ required-features = ["cli-core"]
 
 [[bin]]
 name = "projectatlas-parser-worker"
-path = "src/parser_worker.rs"
+path = "src/parser_worker_entry.rs"
 required-features = ["optional-parser-worker"]
 
 [[bin]]
@@ -27,6 +27,11 @@ name = "parser_supervisor_adversarial"
 path = "tests/parser_supervisor_adversarial.rs"
 harness = false
 required-features = ["optional-parser-supervisor"]
+
+[[test]]
+name = "optional_parser_worker_platform"
+path = "tests/optional_parser_worker_platform.rs"
+required-features = ["optional-parser-worker"]
 
 [features]
 default = ["cli"]
@@ -42,7 +47,6 @@ cli-core = [
     "dep:getrandom",
     "dep:jsonc-parser",
     "dep:notify",
-    "dep:pulldown-cmark",
     "dep:projectatlas-db",
     "dep:projectatlas-fs",
     "dep:projectatlas-service",
@@ -52,6 +56,7 @@ cli-core = [
     "dep:regex",
     "dep:rmcp",
     "dep:scraper",
+    "dep:same-file",
     "dep:tempfile",
     "dep:tiktoken",
     "dep:tokio",
@@ -99,12 +104,12 @@ cssparser = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 jsonc-parser = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
-pulldown-cmark = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 scraper = { workspace = true, optional = true }
+same-file = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -130,12 +135,14 @@ tree-sitter-language = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd.workspace = true
+lopdf.workspace = true
 predicates.workspace = true
 rusqlite.workspace = true
 rmcp = { workspace = true, features = ["client"] }
 serde_json.workspace = true
 tar.workspace = true
 tempfile.workspace = true
+zip.workspace = true
 zstd.workspace = true
 
 [lints]

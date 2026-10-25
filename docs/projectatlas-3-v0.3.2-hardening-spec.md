@@ -212,8 +212,7 @@ symbol extractor for that language and cover it with tests.
 - Keep local workspace memory notes out of Git; promote only stable public decisions into docs.
 - Do not require a committed `.projectatlas/projectatlas.toon`; the SQLite DB
   and MCP/CLI query surfaces are the normal ProjectAtlas 3 source of truth.
-- Keep `AGENTS.md` and plugin skill guidance aligned only if the command
-  workflow changes. No workflow change is expected.
+- Keep public command guidance in the packaged plugin skill aligned with the workflow.
 
 ### Verification Gates
 

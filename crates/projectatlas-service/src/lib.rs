@@ -7,9 +7,10 @@ mod import_aliases;
 mod relations;
 
 pub use analysis::{
-    AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, GitImpactSelection,
-    RelationAnalysisDraft, RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport,
-    RelationAnalysisWork, VcsImpact, load_relation_analysis,
+    AnalysisFinding, AnalysisFindingKind, AnalysisNode, AnalysisStatus, EntrypointProfile,
+    EntrypointProfileCoverage, EntrypointProfileResult, GitImpactSelection, RelationAnalysisDraft,
+    RelationAnalysisMode, RelationAnalysisQuery, RelationAnalysisReport, RelationAnalysisWork,
+    VcsImpact, load_relation_analysis,
 };
 pub use federation::{
     FederatedAnalysisDraft, FederatedAnalysisReport, FederatedDetailedRelationDraft,
@@ -26,34 +27,41 @@ pub use relations::{
     parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
 };
 
-use agent_efficiency::load_agent_efficiency_comparison;
+use agent_efficiency::load_agent_efficiency_comparison as load_agent_efficiency_for_binding;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use import_aliases::{ImportAliasMap, load_import_alias_map};
 use projectatlas_core::graph::{
-    CoverageScope, CoverageState, ExtendedRelationKind, GraphLimitKind, GraphLimits,
-    GraphRelationKind,
+    CoverageScope, CoverageState, ExtendedRelationKind, GraphIdentityRejection, GraphLimitKind,
+    GraphLimits, GraphRelationKind,
 };
+use projectatlas_core::language::{ContentClassification, ContentSelection};
 use projectatlas_core::outline::estimate_tokens;
 use projectatlas_core::symbols::{
     CodeSymbol, ParserKind, RelationKind, SourceParseMetadata, SymbolKind, SymbolRelation,
 };
-use projectatlas_core::telemetry::{TokenOverview, TokenTrendReport, TokenTrendWindow};
+use projectatlas_core::telemetry::{
+    AgentEfficiencyComparison, TokenOverview, TokenTrendReport, TokenTrendWindow,
+};
 use projectatlas_core::{
-    IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure, IndexWorkStage,
-    IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind, RankedConnectionKind,
-    RankedConnectionTarget, RankedNode, RankedReasonCode, repo_path_to_native,
-    validated_repo_file_key,
+    CanonicalProjectRoot, IndexCancellation, IndexGeneration, IndexWorkControl, IndexWorkFailure,
+    IndexWorkStage, IndexedNode, NavigationNextCall, NavigationNextCapability, NodeKind,
+    RankedConnectionKind, RankedConnectionTarget, RankedNode, RankedReasonCode,
+    repo_path_to_native, validated_repo_file_key,
 };
 use projectatlas_db::{
     AtlasStore, CapturedProjectBinding, DbError, FileTextAdmission, FileTextFtsQuery,
-    IndexedFileText, MAX_FILE_TEXT_FTS_CANDIDATES, RepositoryCoverageQuery, RepositoryCoverageRow,
-    RepositoryNavigationConnections, RepositoryNavigationNode,
+    IndexedFileText, MAX_FILE_CONTENT_CLASSIFICATION_PATHS, MAX_FILE_TEXT_FTS_CANDIDATES,
+    RepositoryCoverageQuery, RepositoryCoverageRow, RepositoryNavigationConnections,
+    RepositoryNavigationNode,
 };
 use projectatlas_symbols::module_aliases_for_path;
 use regex::RegexBuilder;
+use regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
 use serde::Serialize;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -78,6 +86,10 @@ const NEXT_REPORT_DEFAULT_LIMIT: usize = 3;
 const NEXT_REPORT_MAX_LIMIT: usize = 10;
 /// Maximum rows returned by one agent-facing coverage page.
 pub const COVERAGE_PAGE_MAX_LIMIT: u32 = 200;
+/// Maximum typed identity-rejection details retained by one coverage report.
+const COVERAGE_IDENTITY_REJECTION_LIMIT: u32 = COVERAGE_PAGE_MAX_LIMIT;
+/// Maximum elapsed work for one project-wide coverage discovery query.
+const COVERAGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum rows retained by one selected-file coverage digest.
 const COVERAGE_DIGEST_ROW_LIMIT: u32 = 16;
 /// Status emitted when live source was read successfully.
@@ -132,6 +144,12 @@ pub enum ServiceError {
     /// Database operation failed.
     #[error("{0}")]
     Db(#[from] DbError),
+    /// A bounded service request reached a typed resource limit before a report could be composed.
+    #[error("service request reached the {limit:?} resource limit")]
+    ResourceLimit {
+        /// Resource limit that stopped the request.
+        limit: GraphLimitKind,
+    },
     /// User input or stored metadata was invalid.
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -185,6 +203,23 @@ pub enum ServiceError {
 /// Convenient result alias for service operations.
 pub type ServiceResult<T> = Result<T, ServiceError>;
 
+/// Hash a native canonical root for an opaque service continuation identity.
+pub(crate) fn canonical_root_digest(
+    domain: &str,
+    root: &CanonicalProjectRoot,
+) -> ServiceResult<[u8; 32]> {
+    let canonical_root = CanonicalProjectRoot::from_path(root.as_path())
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let encoded = canonical_root
+        .encode()
+        .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&encoded);
+    Ok(*hasher.finalize().as_bytes())
+}
+
 /// Closed token-report request selected by CLI and MCP adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenReportRequest<'a> {
@@ -199,6 +234,16 @@ pub enum TokenReportRequest<'a> {
     Trends {
         /// Optional caller-visible label filter.
         caller_label: Option<&'a str>,
+        /// Calendar grouping requested by the adapter.
+        window: TokenTrendWindow,
+    },
+    /// Load the control atlas's combined native-main and worktree overview.
+    RepositoryOverview {
+        /// Optional repository-relative controlled benchmark artifact.
+        benchmark_results: Option<&'a Path>,
+    },
+    /// Load combined native-main and worktree trends.
+    RepositoryTrends {
         /// Calendar grouping requested by the adapter.
         window: TokenTrendWindow,
     },
@@ -238,6 +283,44 @@ fn revalidate_selected_project_binding(store: &AtlasStore) -> ServiceResult<()> 
     }
 }
 
+/// Load persisted classifications for exact paths through bounded set queries.
+fn file_content_classifications_by_path(
+    store: &AtlasStore,
+    paths: impl IntoIterator<Item = String>,
+) -> ServiceResult<HashMap<String, ContentClassification>> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    let mut classifications = HashMap::with_capacity(paths.len());
+    for chunk in paths.chunks(MAX_FILE_CONTENT_CLASSIFICATION_PATHS) {
+        classifications.extend(
+            store
+                .file_content_classifications_for_paths(chunk)?
+                .into_iter()
+                .map(|row| (row.path, row.classification)),
+        );
+    }
+    Ok(classifications)
+}
+
+/// Load one exact file classification and enforce an explicit selection.
+fn selected_file_classification(
+    store: &AtlasStore,
+    path: &str,
+    selection: ContentSelection,
+) -> ServiceResult<ContentClassification> {
+    let mut classifications = file_content_classifications_by_path(store, [path.to_string()])?;
+    let classification = classifications.remove(path).ok_or_else(|| {
+        ServiceError::InvalidInput(format!("file {path:?} has no content classification"))
+    })?;
+    if !selection.includes(classification) {
+        return Err(ServiceError::InvalidInput(format!(
+            "file {path:?} is classified as {classification} and is outside the selected content"
+        )));
+    }
+    Ok(classification)
+}
+
 /// Load one token report through the selected-project service boundary.
 ///
 /// # Errors
@@ -255,7 +338,7 @@ pub fn load_token_report(
             benchmark_results,
         } => {
             let mut overview = store.token_overview(caller_label)?;
-            overview.set_agent_efficiency(load_agent_efficiency_comparison(
+            overview.set_agent_efficiency(load_agent_efficiency_for_binding(
                 &selected_project,
                 benchmark_results,
             )?);
@@ -265,9 +348,36 @@ pub fn load_token_report(
             caller_label,
             window,
         } => TokenReport::Trends(store.token_trends(caller_label, window)?),
+        TokenReportRequest::RepositoryOverview { benchmark_results } => {
+            let mut overview = store.repository_token_overview()?;
+            overview.set_agent_efficiency(load_agent_efficiency_for_binding(
+                &selected_project,
+                benchmark_results,
+            )?);
+            TokenReport::Overview(Box::new(overview))
+        }
+        TokenReportRequest::RepositoryTrends { window } => {
+            TokenReport::Trends(store.repository_token_trends(window)?)
+        }
     };
     revalidate_selected_project_binding(store)?;
     Ok(report)
+}
+
+/// Load optional benchmark evidence for one exact selected project.
+///
+/// # Errors
+///
+/// Returns an error when the selected project is unavailable or changes while
+/// the bounded artifact is loaded.
+pub fn load_agent_efficiency_comparison(
+    store: &AtlasStore,
+    benchmark_results: Option<&Path>,
+) -> ServiceResult<AgentEfficiencyComparison> {
+    let selected_project = selected_project_binding(store)?;
+    let comparison = load_agent_efficiency_for_binding(&selected_project, benchmark_results)?;
+    revalidate_selected_project_binding(store)?;
+    Ok(comparison)
 }
 
 /// Closed trust projection for one normalized coverage state.
@@ -309,6 +419,8 @@ pub enum CoverageTotalState {
 pub struct CoverageStateCounts {
     /// Complete coverage rows.
     pub complete: u32,
+    /// Complete extraction scopes containing no supported candidates.
+    pub no_candidates: u32,
     /// Partial coverage rows.
     pub partial: u32,
     /// Failed coverage rows.
@@ -381,6 +493,9 @@ pub struct CoverageDiscoveryRow {
     pub parser: Option<ParserKind>,
     /// Fact provider pass for path-scoped coverage.
     pub provider: Option<ParserKind>,
+    /// Bounded typed identity rejections for this path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub identity_rejections: Vec<GraphIdentityRejection>,
     /// Existing selected-file summary or health surface to call next.
     pub next_call: NavigationNextCall,
 }
@@ -408,6 +523,10 @@ pub struct CoverageDiscoveryReport {
     pub output_bytes: u32,
     /// Absolute encoded-output ceiling.
     pub max_output_bytes: u32,
+    /// Whether additional nested identity-rejection details were omitted.
+    pub identity_rejections_truncated: bool,
+    /// Maximum nested identity-rejection details retained by this report.
+    pub identity_rejections_limit: u32,
     /// Fully validated actionable rows.
     pub rows: Vec<CoverageDiscoveryRow>,
 }
@@ -453,6 +572,7 @@ pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> 
         "deploys" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Deploys)),
         "reads" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Reads)),
         "writes" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Writes)),
+        "documents" => Ok(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
         _ => Err(ServiceError::InvalidInput(format!(
             "invalid coverage relation '{value}'"
         ))),
@@ -463,10 +583,11 @@ pub fn parse_coverage_relation(value: &str) -> ServiceResult<GraphRelationKind> 
 ///
 /// # Errors
 ///
-/// Returns an error when the value is not one of the seven closed states.
+/// Returns an error when the value is not one of the eight closed states.
 pub fn parse_coverage_state(value: &str) -> ServiceResult<CoverageState> {
     match value.trim().to_ascii_lowercase().as_str() {
         "complete" => Ok(CoverageState::Complete),
+        "no-candidates" | "no_candidates" => Ok(CoverageState::NoCandidates),
         "partial" => Ok(CoverageState::Partial),
         "failed" => Ok(CoverageState::Failed),
         "ignored" => Ok(CoverageState::Ignored),
@@ -487,7 +608,22 @@ pub fn parse_coverage_state(value: &str) -> ServiceResult<CoverageState> {
 /// are invalid, or persisted coverage/provenance is inconsistent.
 pub fn load_coverage_discovery(
     store: &AtlasStore,
+    query: RepositoryCoverageQuery,
+) -> ServiceResult<CoverageDiscoveryReport> {
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(COVERAGE_DISCOVERY_TIMEOUT));
+    load_coverage_discovery_controlled(store, query, &control)
+}
+
+/// Load one coverage page under caller cancellation and a fixed elapsed ceiling.
+///
+/// # Errors
+///
+/// Returns the same errors as [`load_coverage_discovery`] plus typed
+/// cancellation or deadline failure.
+pub fn load_coverage_discovery_controlled(
+    store: &AtlasStore,
     mut query: RepositoryCoverageQuery,
+    control: &IndexWorkControl,
 ) -> ServiceResult<CoverageDiscoveryReport> {
     if query.start_index >= GraphLimits::MAX_ROWS {
         return Err(ServiceError::InvalidInput(format!(
@@ -502,11 +638,68 @@ pub fn load_coverage_discovery(
     let project = store
         .project_instance_id()?
         .ok_or(ServiceError::SelectedProjectUnavailable)?;
-    let page = store.repository_coverage_page(project, &query)?;
-    let rows = page
-        .rows
+    let control = control.with_timeout_ceiling(COVERAGE_DISCOVERY_TIMEOUT);
+    let page = store.repository_coverage_page_controlled(project, &query, Some(&control))?;
+    let page_rows = page.rows;
+    let mut selected_paths = HashSet::new();
+    let paths = page_rows
+        .iter()
+        .filter_map(|row| match row.coverage.scope() {
+            CoverageScope::Path { path } => {
+                selected_paths.insert(path.clone()).then_some(path.clone())
+            }
+            CoverageScope::Project => None,
+        })
+        .collect::<Vec<_>>();
+    let identity_rejections_query_limit = COVERAGE_IDENTITY_REJECTION_LIMIT
+        .checked_add(1)
+        .ok_or_else(|| {
+            ServiceError::InvalidInput("coverage rejection limit overflowed".to_string())
+        })?;
+    let rejections = store.repository_graph_identity_rejections(
+        project,
+        &paths,
+        identity_rejections_query_limit,
+        Some(&control),
+    )?;
+    // Relation-free graph coverage owns the publication-time, path-scoped
+    // marker for a distinct identity detail evicted by the global detail
+    // ceiling. The public page may filter that companion row by relation,
+    // reason, parser, provider, or state, so hydrate all selected paths in one
+    // bounded set query. This keeps unrelated paths from tainting a report
+    // without changing the page's filtering or pagination semantics.
+    let companion_coverage = if paths.is_empty() {
+        Vec::new()
+    } else {
+        store
+            .repository_graph_path_coverage(project, &paths, Some(&control))?
+            .rows
+    };
+    let identity_rejections_truncated = rejections.len()
+        > COVERAGE_IDENTITY_REJECTION_LIMIT as usize
+        || page_rows.iter().any(|row| {
+            matches!(row.coverage.scope(), CoverageScope::Path { .. })
+                && row.coverage.relation().is_none()
+                && row.coverage.reached_limit() == Some(GraphLimitKind::Rows)
+        })
+        || companion_coverage.iter().any(|coverage| {
+            matches!(coverage.scope(), CoverageScope::Path { .. })
+                && coverage.relation().is_none()
+                && coverage.reached_limit() == Some(GraphLimitKind::Rows)
+        });
+    let mut rejections_by_path = HashMap::<String, Vec<GraphIdentityRejection>>::new();
+    for rejection in rejections
         .into_iter()
-        .map(coverage_discovery_row)
+        .take(COVERAGE_IDENTITY_REJECTION_LIMIT as usize)
+    {
+        rejections_by_path
+            .entry(rejection.path.as_str().to_owned())
+            .or_default()
+            .push(rejection);
+    }
+    let rows = page_rows
+        .into_iter()
+        .map(|row| coverage_discovery_row(row, &mut rejections_by_path))
         .collect::<Vec<_>>();
     let returned = u32::try_from(rows.len()).map_err(|error| {
         ServiceError::InvalidInput(format!("coverage row count did not fit u32: {error}"))
@@ -533,18 +726,24 @@ pub fn load_coverage_discovery(
         total,
         output_bytes: 0,
         max_output_bytes: GraphLimits::MAX_OUTPUT_BYTES,
+        identity_rejections_truncated,
+        identity_rejections_limit: COVERAGE_IDENTITY_REJECTION_LIMIT,
         rows,
     })
 }
 
 /// Project one validated storage row into the agent-facing coverage contract.
-fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
+fn coverage_discovery_row(
+    row: RepositoryCoverageRow,
+    rejections_by_path: &mut HashMap<String, Vec<GraphIdentityRejection>>,
+) -> CoverageDiscoveryRow {
     let coverage = row.coverage;
     let path = match coverage.scope() {
         CoverageScope::Project => ".".to_string(),
         CoverageScope::Path { path } => path.as_str().to_string(),
     };
     let relation = coverage.relation();
+    let identity_rejections = rejections_by_path.remove(&path).unwrap_or_default();
     CoverageDiscoveryRow {
         next_call: NavigationNextCall {
             capability: if matches!(coverage.scope(), CoverageScope::Path { .. }) {
@@ -571,13 +770,14 @@ fn coverage_discovery_row(row: RepositoryCoverageRow) -> CoverageDiscoveryRow {
         active_generation: coverage.generation(),
         parser: row.parser,
         provider: row.provider,
+        identity_rejections,
     }
 }
 
 /// Return the conservative trust state for one coverage lifecycle state.
 const fn coverage_trust(state: CoverageState) -> CoverageTrustState {
     match state {
-        CoverageState::Complete => CoverageTrustState::Trusted,
+        CoverageState::Complete | CoverageState::NoCandidates => CoverageTrustState::Trusted,
         CoverageState::Partial => CoverageTrustState::Partial,
         CoverageState::Failed
         | CoverageState::Ignored
@@ -681,6 +881,7 @@ fn checked_coverage_sum(current: u64, value: u64, field: &str) -> ServiceResult<
 fn increment_coverage_state(counts: &mut CoverageStateCounts, state: CoverageState) {
     let count = match state {
         CoverageState::Complete => &mut counts.complete,
+        CoverageState::NoCandidates => &mut counts.no_candidates,
         CoverageState::Partial => &mut counts.partial,
         CoverageState::Failed => &mut counts.failed,
         CoverageState::Ignored => &mut counts.ignored,
@@ -698,6 +899,8 @@ pub struct FileSummaryReport {
     pub file_path: String,
     /// Detected language or file family.
     pub language: String,
+    /// Registry-owned role of this admitted file.
+    pub classification: ContentClassification,
     /// Source line count when the file can be read.
     pub line_count: usize,
     /// Whether source-derived fields came from live source or indexed metadata.
@@ -805,6 +1008,8 @@ pub struct FileCallSummary {
 pub struct SearchMatch {
     /// Repository-relative path.
     pub path: String,
+    /// Registry-owned role of the matched file.
+    pub classification: ContentClassification,
     /// One-based line number.
     pub line: usize,
     /// Context before the matching line.
@@ -859,6 +1064,8 @@ pub struct SearchQuery<'query> {
     pub start_index: usize,
     /// Maximum exact matches returned.
     pub limit: usize,
+    /// Optional classified-content restriction; the default preserves legacy candidates.
+    pub content_selection: ContentSelection,
     /// Explicit retrieval family; omitted adapters use lexical.
     pub retrieval_mode: SearchRetrievalMode,
 }
@@ -872,6 +1079,9 @@ pub struct SearchReport {
     pub mode: String,
     /// Retrieval family selected by the caller.
     pub retrieval_mode: String,
+    /// Explicit classified-content restriction, or `None` for legacy behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_selection: Option<ContentSelection>,
     /// Source used for broad repository search.
     pub source: String,
     /// Candidate strategy used while preserving exact lexical semantics.
@@ -910,9 +1120,27 @@ pub struct NextStepReport {
     /// Top matching folders with concise ranking evidence.
     pub folders: Vec<RankedNode>,
     /// Top matching files with concise ranking evidence.
-    pub files: Vec<RankedNode>,
+    pub files: Vec<ClassifiedRankedNode>,
     /// Deterministic follow-up commands for the selected index targets.
     pub suggestions: Vec<String>,
+}
+
+/// One ranked file row with its persisted content role.
+#[derive(Debug, Serialize)]
+pub struct ClassifiedRankedNode {
+    /// Existing compatibility-preserving ranked node payload.
+    #[serde(flatten)]
+    pub ranked: RankedNode,
+    /// Registry-owned role of the ranked file.
+    pub classification: ContentClassification,
+}
+
+impl Deref for ClassifiedRankedNode {
+    type Target = RankedNode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ranked
+    }
 }
 
 /// Exact code slice returned after orientation.
@@ -920,6 +1148,9 @@ pub struct NextStepReport {
 pub struct CodeSlice {
     /// Repository-relative path.
     pub path: String,
+    /// Persisted role of the indexed file, when an index-backed entry point was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<ContentClassification>,
     /// One-based start line.
     pub start_line: usize,
     /// One-based end line.
@@ -1050,25 +1281,43 @@ pub fn build_file_summary(
     file: &Path,
     limit: usize,
 ) -> ServiceResult<FileSummaryReport> {
+    build_file_summary_with_selection(store, file, limit, ContentSelection::UnspecifiedLegacy)
+}
+
+/// Build structured file intelligence after enforcing classified-content selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection or the
+/// ordinary summary read fails.
+pub fn build_file_summary_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    content_selection: ContentSelection,
+) -> ServiceResult<FileSummaryReport> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
     let source_read =
         indexed_native_path(store, &file_key).and_then(|path| read_file_content(&path));
     match source_read {
         Ok(content) => build_file_summary_with_source_state(
             store,
-            file,
+            file_key,
             limit,
             Some(&content),
             SOURCE_STATUS_LIVE.to_string(),
             String::new(),
+            classification,
         ),
         Err(error) => build_file_summary_with_source_state(
             store,
-            file,
+            file_key,
             limit,
             None,
             SOURCE_STATUS_INDEXED.to_string(),
             error.to_string(),
+            classification,
         ),
     }
 }
@@ -1085,26 +1334,51 @@ pub fn build_file_summary_from_source(
     limit: usize,
     source: &str,
 ) -> ServiceResult<FileSummaryReport> {
-    build_file_summary_with_source_state(
+    build_file_summary_from_source_with_selection(
         store,
         file,
+        limit,
+        source,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Build structured file intelligence from verified source after selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection or the
+/// ordinary summary read fails.
+pub fn build_file_summary_from_source_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    limit: usize,
+    source: &str,
+    content_selection: ContentSelection,
+) -> ServiceResult<FileSummaryReport> {
+    let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
+    build_file_summary_with_source_state(
+        store,
+        file_key,
         limit,
         Some(source),
         SOURCE_STATUS_LIVE.to_string(),
         String::new(),
+        classification,
     )
 }
 
 /// Build one summary from optional already-selected live source.
 fn build_file_summary_with_source_state(
     store: &AtlasStore,
-    file: &Path,
+    file_key: String,
     limit: usize,
     file_content: Option<&str>,
     source_status: String,
     source_error: String,
+    classification: ContentClassification,
 ) -> ServiceResult<FileSummaryReport> {
-    let file_key = validated_indexed_file_key(store, file)?;
     let effective_limit = limit.max(1);
     let indexed = store
         .load_node_by_path(&file_key)?
@@ -1220,6 +1494,7 @@ fn build_file_summary_with_source_state(
             .language
             .clone()
             .unwrap_or_else(|| "unknown".to_string()),
+        classification,
         line_count,
         file_purpose: indexed.purpose.purpose.clone().unwrap_or_default(),
         file_purpose_status: indexed.purpose.status.to_string(),
@@ -1398,6 +1673,7 @@ pub fn search_indexed_files(
             context_lines,
             start_index,
             limit,
+            content_selection: ContentSelection::UnspecifiedLegacy,
             retrieval_mode: SearchRetrievalMode::Lexical,
         },
         None,
@@ -1476,19 +1752,38 @@ fn search_indexed_files_with_bounds(
         )
     } else if query.fuzzy {
         LineMatcher::Fuzzy {
-            needle: normalized_search_text(query.pattern, query.case_sensitive),
-            case_sensitive: query.case_sensitive,
+            needle: query
+                .pattern
+                .chars()
+                .map(|character| {
+                    let mut class =
+                        ClassUnicode::new([ClassUnicodeRange::new(character, character)]);
+                    if !query.case_sensitive {
+                        class
+                            .try_case_fold_simple()
+                            .map_err(|source| ServiceError::InvalidInput(source.to_string()))?;
+                    }
+                    Ok(class)
+                })
+                .collect::<ServiceResult<Vec<_>>>()?,
         }
     } else {
         LineMatcher::Literal {
-            needle: normalized_search_text(query.pattern, query.case_sensitive),
-            case_sensitive: query.case_sensitive,
+            needle: query.pattern.to_string(),
+            matcher: RegexBuilder::new(&regex::escape(query.pattern))
+                .case_insensitive(!query.case_sensitive)
+                .build()
+                .map_err(|source| ServiceError::InvalidInput(source.to_string()))?,
         }
     };
     let mut report = SearchReport {
         query: query.pattern.to_string(),
         mode: matcher.mode().to_string(),
         retrieval_mode: query.retrieval_mode.as_str().to_string(),
+        content_selection: query
+            .content_selection
+            .explicit_value()
+            .map(|_| query.content_selection),
         source: "sqlite-file-text".to_string(),
         strategy: "persisted-text-fallback".to_string(),
         start_index: query.start_index,
@@ -1543,10 +1838,29 @@ fn search_indexed_files_with_bounds(
         if !page.overflow {
             page.candidates
                 .sort_by(|left, right| left.path.cmp(&right.path));
+            let classifications = file_content_classifications_by_path(
+                store,
+                page.candidates
+                    .iter()
+                    .map(|candidate| candidate.path.clone()),
+            )?;
             report.strategy = "fts5-bm25-candidates-exact-verified".to_string();
             used_fts = true;
             for candidate in page.candidates {
                 if !path_matches(&candidate.path, path_matcher.as_ref()) {
+                    continue;
+                }
+                let classification =
+                    classifications
+                        .get(&candidate.path)
+                        .copied()
+                        .ok_or_else(|| {
+                            ServiceError::InvalidInput(format!(
+                                "FTS candidate {:?} has no content classification",
+                                candidate.path
+                            ))
+                        })?;
+                if !query.content_selection.includes(classification) {
                     continue;
                 }
                 if let Err(failure) = bounded_control.check(IndexWorkStage::RepositoryTraversal) {
@@ -1584,6 +1898,7 @@ fn search_indexed_files_with_bounds(
                 if let Err(failure) = inspect_search_text(
                     &mut report,
                     &text,
+                    classification,
                     &matcher,
                     query.context_lines,
                     needed,
@@ -1608,11 +1923,15 @@ fn search_indexed_files_with_bounds(
         let mut searched_files = 0usize;
         let mut searched_bytes = 0usize;
         let mut admission_truncation = None;
+        let admitted_classification = Cell::new(None);
         let fallback_result = store.visit_file_texts_for_fallback(
             path_prefix.as_deref(),
             Some(&bounded_control),
             |metadata| {
                 if !path_matches(&metadata.path, path_matcher.as_ref()) {
+                    return Ok(FileTextAdmission::Skip);
+                }
+                if !query.content_selection.includes(metadata.classification) {
                     return Ok(FileTextAdmission::Skip);
                 }
                 if selected_files >= bounds.selected_files {
@@ -1629,14 +1948,21 @@ fn search_indexed_files_with_bounds(
                 }
                 selected_files += 1;
                 selected_bytes = next_bytes;
+                admitted_classification.set(Some(metadata.classification));
                 Ok(FileTextAdmission::Read)
             },
             |text| {
+                let classification = admitted_classification.take().ok_or_else(|| {
+                    DbError::FileContentClassificationMissing {
+                        path: text.path.clone(),
+                    }
+                })?;
                 searched_files += 1;
                 searched_bytes += text.byte_count;
                 inspect_search_text(
                     &mut report,
                     &text,
+                    classification,
                     &matcher,
                     query.context_lines,
                     needed,
@@ -1756,6 +2082,57 @@ fn load_ranked_file_node_candidates(
     Ok(selected)
 }
 
+/// Load the bounded eligible file candidate set before final ranking.
+fn load_ranked_file_node_candidates_with_selection(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    target: usize,
+    include_content: bool,
+    content_selection: ContentSelection,
+) -> ServiceResult<Vec<IndexedNode>> {
+    if content_selection == ContentSelection::UnspecifiedLegacy {
+        return load_ranked_file_node_candidates(
+            store,
+            query,
+            folder,
+            file_pattern,
+            target,
+            include_content,
+        );
+    }
+    let matcher = FilePathMatcher::new(file_pattern)?;
+    let candidate_target = ranked_candidate_target(query, target);
+    let mut selected = load_ranked_file_nodes_matching_selection(
+        store,
+        query,
+        folder,
+        &matcher,
+        candidate_target,
+        content_selection,
+    )?;
+    if include_content && !query.trim().is_empty() && selected.len() < candidate_target {
+        append_content_ranked_file_nodes_selected(
+            store,
+            query,
+            folder,
+            &matcher,
+            candidate_target,
+            content_selection,
+            &mut selected,
+        )?;
+    }
+    append_paired_file_nodes_selected(
+        store,
+        &matcher,
+        candidate_target,
+        content_selection,
+        &mut selected,
+    )?;
+    Ok(selected)
+}
+
 /// Load ranked folders with concise reasons.
 ///
 /// # Errors
@@ -1801,6 +2178,56 @@ pub fn load_ranked_file_nodes_with_reasons(
     Ok(ranked)
 }
 
+/// Load ranked files with persisted classification and pre-ranking selection.
+///
+/// # Errors
+///
+/// Returns an error when indexed metadata, classification, or filters are invalid.
+pub fn load_classified_ranked_file_nodes_with_reasons(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    file_pattern: Option<&str>,
+    limit: usize,
+    include_content: bool,
+    content_selection: ContentSelection,
+) -> ServiceResult<Vec<ClassifiedRankedNode>> {
+    let target = limit.max(1);
+    let selected = load_ranked_file_node_candidates_with_selection(
+        store,
+        query,
+        folder,
+        file_pattern,
+        target,
+        include_content,
+        content_selection,
+    )?;
+    let mut ranked = ranked_nodes_with_reasons(store, query, selected)?;
+    ranked.truncate(target);
+    let classifications = file_content_classifications_by_path(
+        store,
+        ranked.iter().map(|node| node.node.node.path.clone()),
+    )?;
+    ranked
+        .into_iter()
+        .map(|ranked| {
+            let classification = classifications
+                .get(&ranked.node.node.path)
+                .copied()
+                .ok_or_else(|| {
+                    ServiceError::InvalidInput(format!(
+                        "ranked file {:?} has no content classification",
+                        ranked.node.node.path
+                    ))
+                })?;
+            Ok(ClassifiedRankedNode {
+                ranked,
+                classification,
+            })
+        })
+        .collect()
+}
+
 /// Build an indexed-metadata recommendation report for the next inspection step.
 ///
 /// # Errors
@@ -1811,12 +2238,34 @@ pub fn build_next_report(
     query: &str,
     limit: Option<usize>,
 ) -> ServiceResult<NextStepReport> {
+    build_next_report_with_selection(store, query, limit, ContentSelection::UnspecifiedLegacy)
+}
+
+/// Build an indexed recommendation report with classified file selection.
+///
+/// # Errors
+///
+/// Returns an error when indexed folder, file, or classification metadata cannot be loaded.
+pub fn build_next_report_with_selection(
+    store: &AtlasStore,
+    query: &str,
+    limit: Option<usize>,
+    content_selection: ContentSelection,
+) -> ServiceResult<NextStepReport> {
     let target = limit
         .unwrap_or(NEXT_REPORT_DEFAULT_LIMIT)
         .clamp(1, NEXT_REPORT_MAX_LIMIT);
     let folders = load_ranked_folder_nodes_with_reasons(store, query, target)?;
-    let files = load_ranked_file_nodes_with_reasons(store, query, None, None, target, true)?;
-    let suggestions = next_report_suggestions(query, &folders, &files);
+    let files = load_classified_ranked_file_nodes_with_reasons(
+        store,
+        query,
+        None,
+        None,
+        target,
+        true,
+        content_selection,
+    )?;
+    let suggestions = next_report_suggestions(query, &folders, &files, content_selection);
     Ok(NextStepReport {
         query: query.to_string(),
         folders,
@@ -2216,6 +2665,50 @@ fn append_paired_file_nodes(
     Ok(())
 }
 
+/// Append classification-eligible source/test counterparts in one exact-path batch.
+fn append_paired_file_nodes_selected(
+    store: &AtlasStore,
+    matcher: &FilePathMatcher,
+    target: usize,
+    content_selection: ContentSelection,
+    selected: &mut Vec<IndexedNode>,
+) -> ServiceResult<()> {
+    if selected.len() >= target {
+        return Ok(());
+    }
+    let seen = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<HashSet<_>>();
+    let mut candidates = selected
+        .iter()
+        .flat_map(|node| paired_path_candidates(&node.node.path))
+        .filter(|path| !seen.contains(path) && matcher.is_match(path))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    let hydrated = store
+        .load_nodes_by_paths(&candidates)?
+        .into_iter()
+        .filter(|node| node.node.kind == NodeKind::File)
+        .map(|node| (node.node.path.clone(), node))
+        .collect::<HashMap<_, _>>();
+    let classifications = file_content_classifications_by_path(store, hydrated.keys().cloned())?;
+    for path in candidates {
+        if selected.len() >= target {
+            break;
+        }
+        if classifications
+            .get(&path)
+            .is_some_and(|classification| content_selection.includes(*classification))
+            && let Some(node) = hydrated.get(&path)
+        {
+            selected.push(node.clone());
+        }
+    }
+    Ok(())
+}
+
 /// Build a concise reason when a source/test counterpart is indexed.
 fn paired_path_reason(store: &AtlasStore, path: &str) -> ServiceResult<Option<String>> {
     for candidate in paired_path_candidates(path) {
@@ -2286,25 +2779,29 @@ fn join_repo_path(prefix: &str, leaf: &str) -> String {
 fn next_report_suggestions(
     query: &str,
     folders: &[RankedNode],
-    files: &[RankedNode],
+    files: &[ClassifiedRankedNode],
+    content_selection: ContentSelection,
 ) -> Vec<String> {
     let mut suggestions = Vec::new();
+    let selection = content_selection
+        .explicit_value()
+        .map_or_else(String::new, |value| format!(" --content-selection {value}"));
     if let Some(file) = files.first() {
         let path = quoted_command_arg(&file.node.node.path);
-        suggestions.push(format!("projectatlas summary {path} --limit 25"));
-        suggestions.push(format!("projectatlas outline {path}"));
+        suggestions.push(format!("projectatlas summary {path} --limit 25{selection}"));
+        suggestions.push(format!("projectatlas outline {path}{selection}"));
     }
     if let Some(folder) = folders.first() {
         let query_arg = quoted_command_arg(query);
         let folder_arg = quoted_command_arg(&folder.node.node.path);
         suggestions.push(format!(
-            "projectatlas files {query_arg} --folder {folder_arg} --limit 5"
+            "projectatlas files {query_arg} --folder {folder_arg} --limit 5{selection}"
         ));
     }
     if !query.trim().is_empty() {
         let query_arg = quoted_command_arg(query);
         suggestions.push(format!(
-            "projectatlas search {query_arg} --file-pattern **/* --context-lines 2"
+            "projectatlas search {query_arg} --file-pattern **/* --context-lines 2{selection}"
         ));
     }
     suggestions.truncate(4);
@@ -2357,6 +2854,47 @@ fn load_ranked_file_nodes_matching_glob(
     Ok(selected)
 }
 
+/// Load ranked DB pages until enough classification-eligible files are found.
+fn load_ranked_file_nodes_matching_selection(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    matcher: &FilePathMatcher,
+    target: usize,
+    content_selection: ContentSelection,
+) -> ServiceResult<Vec<IndexedNode>> {
+    let batch_size = target.saturating_mul(20).clamp(50, 500);
+    let mut offset = 0usize;
+    let mut selected = Vec::new();
+    loop {
+        let batch = store.load_ranked_nodes(query, NodeKind::File, folder, batch_size, offset)?;
+        if batch.is_empty() {
+            break;
+        }
+        offset = offset.saturating_add(batch.len());
+        let candidates = batch
+            .into_iter()
+            .filter(|node| matcher.is_match(&node.node.path))
+            .collect::<Vec<_>>();
+        let classifications = file_content_classifications_by_path(
+            store,
+            candidates.iter().map(|node| node.node.path.clone()),
+        )?;
+        for node in candidates {
+            if classifications
+                .get(&node.node.path)
+                .is_some_and(|classification| content_selection.includes(*classification))
+            {
+                selected.push(node);
+                if selected.len() >= target {
+                    return Ok(selected);
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
 /// Append indexed-text hits after ordinary ranked file results.
 fn append_content_ranked_file_nodes(
     store: &AtlasStore,
@@ -2390,6 +2928,57 @@ fn append_content_ranked_file_nodes(
         }
         Ok(selected.len() < target)
     })?;
+    Ok(())
+}
+
+/// Append selected indexed-text hits after ordinary ranked file results.
+fn append_content_ranked_file_nodes_selected(
+    store: &AtlasStore,
+    query: &str,
+    folder: Option<&str>,
+    matcher: &FilePathMatcher,
+    target: usize,
+    content_selection: ContentSelection,
+    selected: &mut Vec<IndexedNode>,
+) -> ServiceResult<()> {
+    let terms = normalize_ranking_terms(query);
+    if terms.is_empty() {
+        return Ok(());
+    }
+    let mut seen = selected
+        .iter()
+        .map(|node| node.node.path.clone())
+        .collect::<HashSet<_>>();
+    store.visit_file_texts_for_fallback(
+        None,
+        None,
+        |metadata| {
+            Ok(
+                if path_is_inside_folder(&metadata.path, folder)
+                    && matcher.is_match(&metadata.path)
+                    && content_selection.includes(metadata.classification)
+                {
+                    FileTextAdmission::Read
+                } else {
+                    FileTextAdmission::Skip
+                },
+            )
+        },
+        |text| {
+            if selected.len() >= target {
+                return Ok(false);
+            }
+            let indexed_text = normalized_search_text(&text.content, false);
+            if !seen.contains(&text.path)
+                && terms.iter().any(|term| indexed_text.contains(term))
+                && let Some(node) = store.load_node_by_path(&text.path)?
+            {
+                seen.insert(text.path);
+                selected.push(node);
+            }
+            Ok(selected.len() < target)
+        },
+    )?;
     Ok(())
 }
 
@@ -2465,10 +3054,41 @@ pub fn read_indexed_code_slice(
     start_line: usize,
     end_line: Option<usize>,
 ) -> ServiceResult<CodeSlice> {
+    read_indexed_code_slice_with_selection(
+        store,
+        file,
+        start_line,
+        end_line,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Read an exact indexed line slice after enforcing classified-content selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, is not an
+/// indexed project file, has invalid line numbers, or source cannot be read.
+pub fn read_indexed_code_slice_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
     let native_file = indexed_native_path(store, &file_key)?;
     let content = read_file_content(&native_file)?;
-    read_indexed_code_slice_from_source(store, file, start_line, end_line, &content)
+    let mut draft = read_code_slice(
+        &content,
+        &file_key,
+        start_line,
+        end_line,
+        CodeSliceBudget::default(),
+    )?;
+    draft.slice.classification = Some(classification);
+    Ok(draft.slice)
 }
 
 /// Read an exact line slice from caller-verified source bytes.
@@ -2483,13 +3103,40 @@ pub fn read_indexed_code_slice_from_source(
     end_line: Option<usize>,
     source: &str,
 ) -> ServiceResult<CodeSlice> {
-    read_indexed_code_slice_from_source_bounded(
+    read_indexed_code_slice_from_source_bounded_with_selection(
         store,
         file,
         start_line,
         end_line,
         source,
         CodeSliceBudget::default(),
+        ContentSelection::UnspecifiedLegacy,
+    )
+    .map(|draft| draft.slice)
+}
+
+/// Read an exact line slice from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, is not
+/// indexed, or the requested line range is invalid.
+pub fn read_indexed_code_slice_from_source_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
+    read_indexed_code_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        start_line,
+        end_line,
+        source,
+        CodeSliceBudget::default(),
+        content_selection,
     )
     .map(|draft| draft.slice)
 }
@@ -2508,8 +3155,37 @@ pub fn read_indexed_code_slice_from_source_bounded(
     source: &str,
     output_budget: CodeSliceBudget,
 ) -> ServiceResult<CodeSliceDraft> {
+    read_indexed_code_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        start_line,
+        end_line,
+        source,
+        output_budget,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Read a bounded line slice from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, is not
+/// indexed, has invalid line numbers, or cannot fit the output budget.
+pub fn read_indexed_code_slice_from_source_bounded_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    start_line: usize,
+    end_line: Option<usize>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSliceDraft> {
     let file_key = validated_indexed_file_key(store, file)?;
-    read_code_slice(source, &file_key, start_line, end_line, output_budget)
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
+    let mut draft = read_code_slice(source, &file_key, start_line, end_line, output_budget)?;
+    draft.slice.classification = Some(classification);
+    Ok(draft)
 }
 
 /// Read a symbol body by exact symbol name and optional disambiguators.
@@ -2523,10 +3199,34 @@ pub fn read_symbol_slice(
     file: &Path,
     selector: &SymbolSliceSelector<'_>,
 ) -> ServiceResult<CodeSlice> {
+    read_symbol_slice_with_selection(store, file, selector, ContentSelection::UnspecifiedLegacy)
+}
+
+/// Read an exact indexed symbol body after classified-content selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, the
+/// symbol is absent or ambiguous, its selector rejects it, or source fails.
+pub fn read_symbol_slice_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
     let native_file = indexed_native_path(store, &file_key)?;
     let content = read_file_content(&native_file)?;
-    read_symbol_slice_from_source(store, file, selector, &content)
+    read_symbol_slice_from_source_for_file(
+        store,
+        &file_key,
+        selector,
+        &content,
+        CodeSliceBudget::default(),
+        classification,
+    )
+    .map(|draft| draft.slice)
 }
 
 /// Read a symbol body from caller-verified source bytes.
@@ -2541,8 +3241,39 @@ pub fn read_symbol_slice_from_source(
     selector: &SymbolSliceSelector<'_>,
     source: &str,
 ) -> ServiceResult<CodeSlice> {
-    read_symbol_slice_from_source_bounded(store, file, selector, source, CodeSliceBudget::default())
-        .map(|draft| draft.slice)
+    read_symbol_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        selector,
+        source,
+        CodeSliceBudget::default(),
+        ContentSelection::UnspecifiedLegacy,
+    )
+    .map(|draft| draft.slice)
+}
+
+/// Read an exact symbol body from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, or the
+/// symbol is absent, ambiguous, rejected by the selector, or out of range.
+pub fn read_symbol_slice_from_source_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSlice> {
+    read_symbol_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        selector,
+        source,
+        CodeSliceBudget::default(),
+        content_selection,
+    )
+    .map(|draft| draft.slice)
 }
 
 /// Read a byte-bounded symbol body from caller-verified source bytes.
@@ -2559,9 +3290,53 @@ pub fn read_symbol_slice_from_source_bounded(
     source: &str,
     output_budget: CodeSliceBudget,
 ) -> ServiceResult<CodeSliceDraft> {
+    read_symbol_slice_from_source_bounded_with_selection(
+        store,
+        file,
+        selector,
+        source,
+        output_budget,
+        ContentSelection::UnspecifiedLegacy,
+    )
+}
+
+/// Read a bounded symbol body from verified source after classified selection.
+///
+/// # Errors
+///
+/// Returns an error when the file is outside the explicit selection, the
+/// symbol cannot be selected exactly, or its body cannot fit the output budget.
+pub fn read_symbol_slice_from_source_bounded_with_selection(
+    store: &AtlasStore,
+    file: &Path,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+    content_selection: ContentSelection,
+) -> ServiceResult<CodeSliceDraft> {
     let file_key = validated_indexed_file_key(store, file)?;
+    let classification = selected_file_classification(store, &file_key, content_selection)?;
+    read_symbol_slice_from_source_for_file(
+        store,
+        &file_key,
+        selector,
+        source,
+        output_budget,
+        classification,
+    )
+}
+
+/// Select and slice one symbol after its owning file classification is admitted.
+fn read_symbol_slice_from_source_for_file(
+    store: &AtlasStore,
+    file_key: &str,
+    selector: &SymbolSliceSelector<'_>,
+    source: &str,
+    output_budget: CodeSliceBudget,
+    classification: ContentClassification,
+) -> ServiceResult<CodeSliceDraft> {
     let requested_kind = selector.kind.map(parse_symbol_kind).transpose()?;
-    let mut symbols = store.load_symbols_by_exact_file_and_name(&file_key, selector.name)?;
+    let mut symbols = store.load_symbols_by_exact_file_and_name(file_key, selector.name)?;
     if let Some(parent) = selector.parent {
         symbols.retain(|symbol| symbol.parent.as_deref() == Some(parent));
     }
@@ -2590,13 +3365,15 @@ pub fn read_symbol_slice_from_source_bounded(
             )));
         }
     };
-    read_code_slice(
+    let mut draft = read_code_slice(
         source,
-        &file_key,
+        file_key,
         symbol.line_start,
         Some(symbol.line_end),
         output_budget,
-    )
+    )?;
+    draft.slice.classification = Some(classification);
+    Ok(draft)
 }
 
 /// Normalize and validate a user-supplied path as a repository-relative file key.
@@ -2619,8 +3396,8 @@ fn validated_indexed_file_key(store: &AtlasStore, file: &Path) -> ServiceResult<
 }
 
 /// Load the project root recorded by the latest scan.
-fn indexed_project_root(store: &AtlasStore) -> ServiceResult<PathBuf> {
-    store.project_root()?.map(PathBuf::from).ok_or_else(|| {
+fn indexed_project_root(store: &AtlasStore) -> ServiceResult<CanonicalProjectRoot> {
+    store.project_root_identity()?.ok_or_else(|| {
         ServiceError::InvalidInput(
             "indexed project root is missing; run projectatlas scan <project-root> first"
                 .to_string(),
@@ -2630,7 +3407,9 @@ fn indexed_project_root(store: &AtlasStore) -> ServiceResult<PathBuf> {
 
 /// Build an absolute native path for a previously validated indexed file key.
 fn indexed_native_path(store: &AtlasStore, file_key: &str) -> ServiceResult<PathBuf> {
-    Ok(indexed_project_root(store)?.join(repo_path_to_native(file_key)))
+    Ok(indexed_project_root(store)?
+        .as_path()
+        .join(repo_path_to_native(file_key)))
 }
 
 /// Read source text for a selected file.
@@ -2713,6 +3492,7 @@ fn mark_search_truncated(report: &mut SearchReport, reason: &'static str) {
 fn inspect_search_text(
     report: &mut SearchReport,
     text: &IndexedFileText,
+    classification: ContentClassification,
     matcher: &LineMatcher,
     context_lines: usize,
     needed: usize,
@@ -2723,6 +3503,7 @@ fn inspect_search_text(
     append_line_matches(
         report,
         &text.path,
+        classification,
         &lines,
         matcher,
         context_lines,
@@ -2753,17 +3534,15 @@ enum LineMatcher {
     Regex(regex::Regex),
     /// Literal substring matching.
     Literal {
-        /// Normalized literal needle.
+        /// Original literal needle for conservative candidate acceleration.
         needle: String,
-        /// Whether matching is case-sensitive.
-        case_sensitive: bool,
+        /// Escaped literal matcher using the regex mode's Unicode folding.
+        matcher: regex::Regex,
     },
     /// Fuzzy subsequence matching.
     Fuzzy {
-        /// Normalized fuzzy needle.
-        needle: String,
-        /// Whether matching is case-sensitive.
-        case_sensitive: bool,
+        /// One exact or Unicode-folded character class per pattern scalar.
+        needle: Vec<ClassUnicode>,
     },
 }
 
@@ -2796,14 +3575,8 @@ impl LineMatcher {
     fn is_match(&self, line: &str) -> bool {
         match self {
             Self::Regex(regex) => regex.is_match(line),
-            Self::Literal {
-                needle,
-                case_sensitive,
-            } => normalized_search_text(line, *case_sensitive).contains(needle),
-            Self::Fuzzy {
-                needle,
-                case_sensitive,
-            } => fuzzy_subsequence_matches(needle, &normalized_search_text(line, *case_sensitive)),
+            Self::Literal { matcher, .. } => matcher.is_match(line),
+            Self::Fuzzy { needle } => fuzzy_subsequence_matches(needle, line),
         }
     }
 }
@@ -2812,6 +3585,7 @@ impl LineMatcher {
 fn append_line_matches(
     report: &mut SearchReport,
     path: &str,
+    classification: ContentClassification,
     lines: &[&str],
     matcher: &LineMatcher,
     context_lines: usize,
@@ -2836,6 +3610,7 @@ fn append_line_matches(
         }
         let row = SearchMatch {
             path: path.to_string(),
+            classification,
             line: index + 1,
             context_before: context_before(lines, index, context_lines),
             text: (*line).to_string(),
@@ -2873,7 +3648,7 @@ fn append_line_matches(
     control.check(IndexWorkStage::TextIndex)
 }
 
-/// Normalize search text for case-sensitive or insensitive matching.
+/// Normalize ranking text for case-sensitive or ASCII-insensitive comparison.
 fn normalized_search_text(text: &str, case_sensitive: bool) -> String {
     if case_sensitive {
         text.to_string()
@@ -2883,16 +3658,17 @@ fn normalized_search_text(text: &str, case_sensitive: bool) -> String {
 }
 
 /// Return whether every needle character appears in candidate order.
-fn fuzzy_subsequence_matches(needle: &str, candidate: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let mut needle = needle.chars();
+fn fuzzy_subsequence_matches(needle: &[ClassUnicode], candidate: &str) -> bool {
+    let mut needle = needle.iter();
     let Some(mut expected) = needle.next() else {
         return true;
     };
     for character in candidate.chars() {
-        if character == expected {
+        if expected
+            .ranges()
+            .iter()
+            .any(|range| range.start() <= character && character <= range.end())
+        {
             let Some(next) = needle.next() else {
                 return true;
             };
@@ -2988,6 +3764,7 @@ fn read_code_slice(
     Ok(CodeSliceDraft {
         slice: CodeSlice {
             path: file_key.to_string(),
+            classification: None,
             start_line,
             end_line: end_index,
             line_count,
@@ -3379,7 +4156,8 @@ fn exported_symbol_names(symbols: &[CodeSymbol]) -> Vec<String> {
 mod tests {
     use super::*;
     use projectatlas_core::graph::{
-        CoverageRecord, GraphIdentityText, GraphLimitKind, RepositoryNodePath,
+        CoverageRecord, GraphIdentityField, GraphIdentityRejectionReason, GraphIdentityText,
+        GraphLimitKind, RepositoryNodePath, SourceSpan,
     };
     use projectatlas_core::symbols::{ParserKind, SymbolGraph};
     use projectatlas_core::telemetry::{
@@ -3388,6 +4166,34 @@ mod tests {
     use projectatlas_core::{Node, Purpose, PurposeSource, PurposeStatus, normalized_parent};
     use std::error::Error;
     use std::io;
+
+    #[cfg(unix)]
+    #[test]
+    fn file_summary_reads_non_utf8_native_root_without_display_reconstruction()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b's', b'r', b'c', 0x80]));
+        fs::create_dir(&root)?;
+        fs::write(root.join("entry.rs"), "pub fn native_root() {}\n")?;
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&root)?;
+        let node = test_node("entry.rs", "native-root-hash");
+        store.replace_scan(std::slice::from_ref(&node))?;
+        index_test_file_texts(&mut store, &root, std::slice::from_ref(&node))?;
+
+        let report = build_file_summary(&store, Path::new("entry.rs"), 10)?;
+        require_eq(
+            &report.source_status,
+            &SOURCE_STATUS_LIVE.to_string(),
+            "non-UTF-8 root source status",
+        )?;
+        require_eq(&report.line_count, &1, "non-UTF-8 root source line count")?;
+        Ok(())
+    }
 
     #[test]
     fn token_report_service_selects_typed_reports_and_requires_a_project_binding()
@@ -3488,6 +4294,13 @@ mod tests {
             &report.agent_efficiency.state,
             &AgentEfficiencyEvidenceState::Partial,
             "published benchmark state",
+        )?;
+        let comparison =
+            load_agent_efficiency_comparison(&store, Some(Path::new("published.json")))?;
+        require_eq(
+            &comparison.state,
+            &AgentEfficiencyEvidenceState::Partial,
+            "standalone benchmark enrichment state",
         )?;
         let frozen = report
             .agent_efficiency
@@ -3660,6 +4473,17 @@ mod tests {
             )?);
         }
         publication.replace_repository_graph(project, &[], &[], &[], &coverage)?;
+        publication.replace_graph_identity_rejections(
+            project,
+            &[GraphIdentityRejection {
+                path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+                span: SourceSpan::new(1, 0, 1, 2)?,
+                parser: ParserKind::TreeSitter,
+                field: GraphIdentityField::Symbol,
+                reason: GraphIdentityRejectionReason::Empty,
+                fact_index: 0,
+            }],
+        )?;
         publication.complete()?;
         drop(store);
 
@@ -3749,6 +4573,13 @@ mod tests {
             "truncated coverage lower bound",
         )?;
         require_eq(&truncated.continuation, &Some(1), "coverage continuation")?;
+        require(
+            truncated
+                .rows
+                .iter()
+                .any(|row| row.path == "src/lib.rs" && row.identity_rejections.len() == 1),
+            "structured coverage omitted typed identity rejection details",
+        )?;
         let exhausted = load_coverage_discovery(
             &store,
             RepositoryCoverageQuery {
@@ -3766,6 +4597,216 @@ mod tests {
             &exhausted.total,
             &CoverageTotalState::Unknown,
             "exhausted nonzero continuation total",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn coverage_discovery_bounds_long_identity_rejection_details() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("bounded-coverage-service");
+        fs::create_dir_all(&root)?;
+        let db_path = root.join("projectatlas.db");
+        let mut store = AtlasStore::open_for_project(&db_path, &root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("bounded coverage fixture identity is missing"))?;
+        let generation = IndexGeneration::new(1);
+        let long_path = format!("src/{}/entry.ts", "segment".repeat(400));
+        let path = RepositoryNodePath::new(Path::new(&long_path))?;
+        let later_path = RepositoryNodePath::new(Path::new("src/later.ts"))?;
+        let complete_path = RepositoryNodePath::new(Path::new("src/complete.ts"))?;
+        let coverage = CoverageRecord::new(
+            CoverageScope::Path { path: path.clone() },
+            None,
+            CoverageState::Partial,
+            10_000,
+            10_000,
+            generation,
+            Some(GraphIdentityText::new("identity details retained")?),
+            None,
+        )?;
+        let later_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: later_path.clone(),
+            },
+            None,
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("identity details evicted")?),
+            Some(GraphLimitKind::Rows),
+        )?;
+        let later_documents_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: later_path.clone(),
+            },
+            Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+            CoverageState::Partial,
+            1,
+            1,
+            generation,
+            Some(GraphIdentityText::new("identity details evicted")?),
+            None,
+        )?;
+        let complete_coverage = CoverageRecord::new(
+            CoverageScope::Path {
+                path: complete_path.clone(),
+            },
+            None,
+            CoverageState::Complete,
+            1,
+            0,
+            generation,
+            None,
+            None,
+        )?;
+        let rejections = (0..GraphLimits::MAX_ROWS)
+            .map(|fact_index| {
+                Ok(GraphIdentityRejection {
+                    path: path.clone(),
+                    span: SourceSpan::new(fact_index + 1, 0, fact_index + 1, 1)?,
+                    parser: ParserKind::TreeSitter,
+                    field: GraphIdentityField::Symbol,
+                    reason: GraphIdentityRejectionReason::Empty,
+                    fact_index: u64::from(fact_index),
+                })
+            })
+            .collect::<Result<Vec<_>, projectatlas_core::graph::GraphContractError>>()?;
+        {
+            let mut publication = store.begin_index_publication("bounded-coverage")?;
+            publication.begin_scan_replacement()?;
+            publication.upsert_scan_node_batch(&[
+                test_node(&long_path, "bounded-coverage-hash"),
+                test_node("src/later.ts", "later-coverage-hash"),
+                test_node("src/complete.ts", "complete-coverage-hash"),
+            ])?;
+            publication.finish_scan_replacement()?;
+            publication.replace_symbol_graph(&SymbolGraph {
+                path: later_path.as_str().to_string(),
+                language: Some("typescript".to_string()),
+                parser: ParserKind::TreeSitter,
+                symbols: Vec::new(),
+                relations: Vec::new(),
+            })?;
+            publication.replace_repository_graph(
+                project,
+                &[],
+                &[],
+                &[],
+                &[
+                    coverage,
+                    later_coverage,
+                    later_documents_coverage,
+                    complete_coverage,
+                ],
+            )?;
+            publication.replace_graph_identity_rejections(project, &rejections)?;
+            publication.complete()?;
+        }
+        let query = RepositoryCoverageQuery {
+            start_index: 0,
+            limit: 1,
+            path_prefix: Some(long_path),
+            parser: None,
+            provider: None,
+            relation: None,
+            state: None,
+            reason: None,
+        };
+        let first = load_coverage_discovery(&store, query.clone())?;
+        let second = load_coverage_discovery(&store, query)?;
+        require_eq(&first, &second, "bounded coverage determinism")?;
+        require_eq(&first.returned, &1, "bounded coverage row count")?;
+        require_eq(
+            &first.rows[0].identity_rejections.len(),
+            &(COVERAGE_IDENTITY_REJECTION_LIMIT as usize),
+            "bounded identity rejection detail count",
+        )?;
+        require_eq(
+            &first.identity_rejections_limit,
+            &COVERAGE_IDENTITY_REJECTION_LIMIT,
+            "bounded identity rejection detail limit",
+        )?;
+        require_eq(
+            &first.identity_rejections_truncated,
+            &true,
+            "bounded identity rejection truncation state",
+        )?;
+        let encoded = serde_json::to_vec(&first)?;
+        require(
+            encoded.len() <= GraphLimits::MAX_OUTPUT_BYTES as usize,
+            "bounded coverage exceeded the encoded-output ceiling",
+        )?;
+
+        let later = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(later_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(&later.returned, &1, "publication-cap causal coverage row")?;
+        require(
+            later.rows[0].identity_rejections.is_empty(),
+            "publication-cap causal path unexpectedly retained rejection details",
+        )?;
+        require_eq(
+            &later.identity_rejections_truncated,
+            &true,
+            "publication-cap causal coverage truncation state",
+        )?;
+        let later_documents = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(later_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                state: None,
+                reason: Some("identity details evicted".to_string()),
+            },
+        )?;
+        require_eq(
+            &later_documents.returned,
+            &1,
+            "relation-filtered publication-cap coverage row",
+        )?;
+        require(
+            later_documents.rows[0].identity_rejections.is_empty(),
+            "relation-filtered publication-cap path unexpectedly retained rejection details",
+        )?;
+        require_eq(
+            &later_documents.identity_rejections_truncated,
+            &true,
+            "relation-filtered publication-cap coverage lost companion truncation marker",
+        )?;
+        let complete = load_coverage_discovery(
+            &store,
+            RepositoryCoverageQuery {
+                start_index: 0,
+                limit: 1,
+                path_prefix: Some(complete_path.as_str().to_string()),
+                parser: None,
+                provider: None,
+                relation: None,
+                state: None,
+                reason: None,
+            },
+        )?;
+        require_eq(
+            &complete.identity_rejections_truncated,
+            &false,
+            "unrelated identity-detail overflow marked a complete path",
         )?;
         Ok(())
     }
@@ -4810,6 +5851,356 @@ mod tests {
     }
 
     #[test]
+    fn classified_summary_search_and_ranking_filter_before_result_limits()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("docs"))?;
+        fs::write(root.join("src/a.rs"), "needle source\n")?;
+        fs::write(root.join("docs/guide.md"), "needle documentation\n")?;
+        fs::write(root.join("settings.toml"), "needle = 'configuration'\n")?;
+        let nodes = [
+            test_node_with_language("src/a.rs", "hash-source", ".rs", "rust"),
+            test_node_with_language("docs/guide.md", "hash-documentation", ".md", "markdown"),
+            test_node_with_language("settings.toml", "hash-configuration", ".toml", "toml"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("classified service fixture project identity is missing")?;
+        let mut publication = store.begin_index_publication("classified-service-test")?;
+        publication.upsert_file_content_classification_batch(&[
+            projectatlas_db::FileContentClassification {
+                path: "src/a.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "docs/guide.md".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "settings.toml".to_string(),
+                classification: ContentClassification::ConfigurationData,
+            },
+        ])?;
+        publication.replace_repository_graph(project, &[], &[], &[], &[])?;
+        publication.complete()?;
+        store.set_purpose(
+            "docs/guide.md",
+            "Misleading source-code wording must not override classification",
+            PurposeSource::Agent,
+        )?;
+
+        let summary = build_file_summary_with_selection(
+            &store,
+            Path::new("docs/guide.md"),
+            10,
+            ContentSelection::Documentation,
+        )?;
+        require_eq(
+            &summary.classification,
+            &ContentClassification::Documentation,
+            "summary classification",
+        )?;
+        require(
+            summary.file_purpose.contains("source-code wording")
+                && summary.classification == ContentClassification::Documentation,
+            "purpose mutation overrode the registry-owned file classification",
+        )?;
+        let legacy_summary = build_file_summary(&store, Path::new("docs/guide.md"), 10)?;
+        let explicit_legacy_summary = build_file_summary_with_selection(
+            &store,
+            Path::new("docs/guide.md"),
+            10,
+            ContentSelection::UnspecifiedLegacy,
+        )?;
+        require_eq(
+            &serde_json::to_value(&legacy_summary)?,
+            &serde_json::to_value(&explicit_legacy_summary)?,
+            "legacy summary wrapper compatibility",
+        )?;
+        let slice = read_indexed_code_slice_from_source_with_selection(
+            &store,
+            Path::new("docs/guide.md"),
+            1,
+            Some(1),
+            "# Guide\n",
+            ContentSelection::Documentation,
+        )?;
+        require_eq(
+            &slice.classification,
+            &Some(ContentClassification::Documentation),
+            "indexed slice classification",
+        )?;
+        if !matches!(
+            build_file_summary_with_selection(
+                &store,
+                Path::new("docs/guide.md"),
+                10,
+                ContentSelection::Source,
+            ),
+            Err(ServiceError::InvalidInput(message)) if message.contains("outside the selected content")
+        ) {
+            return Err(io::Error::other(
+                "summary accepted a file outside the explicit content selection",
+            )
+            .into());
+        }
+
+        let legacy = search_indexed_files(&store, "needle", false, false, false, None, 0, 0, 10)?;
+        let explicit_legacy = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: false,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: None,
+                context_lines: 0,
+                start_index: 0,
+                limit: 10,
+                content_selection: ContentSelection::UnspecifiedLegacy,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        require_eq(
+            &serde_json::to_value(&legacy)?,
+            &serde_json::to_value(&explicit_legacy)?,
+            "legacy search wrapper compatibility",
+        )?;
+        require_eq(&legacy.returned, &3, "legacy mixed search rows")?;
+        require(
+            legacy.results.iter().map(|row| row.classification).eq([
+                ContentClassification::Documentation,
+                ContentClassification::ConfigurationData,
+                ContentClassification::Source,
+            ]),
+            "legacy search omitted or reordered mixed classifications",
+        )?;
+
+        for regex in [false, true] {
+            let documentation = search_indexed_files_with_control(
+                &store,
+                &SearchQuery {
+                    pattern: "needle",
+                    regex,
+                    fuzzy: false,
+                    case_sensitive: false,
+                    file_pattern: None,
+                    context_lines: 0,
+                    start_index: 0,
+                    limit: 1,
+                    content_selection: ContentSelection::Documentation,
+                    retrieval_mode: SearchRetrievalMode::Lexical,
+                },
+                None,
+            )?;
+            require(
+                documentation.returned == 1
+                    && documentation.results[0].path == "docs/guide.md"
+                    && documentation.results[0].classification
+                        == ContentClassification::Documentation,
+                "documentation selection was applied after the search result limit",
+            )?;
+        }
+
+        let both = search_indexed_files_with_control(
+            &store,
+            &SearchQuery {
+                pattern: "needle",
+                regex: true,
+                fuzzy: false,
+                case_sensitive: false,
+                file_pattern: None,
+                context_lines: 0,
+                start_index: 0,
+                limit: 10,
+                content_selection: ContentSelection::Both,
+                retrieval_mode: SearchRetrievalMode::Lexical,
+            },
+            None,
+        )?;
+        require(
+            both.returned == 2
+                && both.results.iter().all(|row| {
+                    matches!(
+                        row.classification,
+                        ContentClassification::Source | ContentClassification::Documentation
+                    )
+                }),
+            "both selection did not exclude configuration data",
+        )?;
+
+        for selection in [ContentSelection::Source, ContentSelection::Both] {
+            let ranked = load_classified_ranked_file_nodes_with_reasons(
+                &store,
+                "a",
+                None,
+                Some("src/*.rs"),
+                1,
+                false,
+                selection,
+            )?;
+            require(
+                ranked.len() == 1 && ranked[0].node.node.path == "src/a.rs",
+                "classified ranking failed on an absent inferred test counterpart",
+            )?;
+        }
+
+        let ranked = load_classified_ranked_file_nodes_with_reasons(
+            &store,
+            "",
+            None,
+            None,
+            1,
+            false,
+            ContentSelection::Documentation,
+        )?;
+        require(
+            ranked.len() == 1
+                && ranked[0].node.node.path == "docs/guide.md"
+                && ranked[0].classification == ContentClassification::Documentation,
+            "documentation selection was applied after the ranked-file limit",
+        )?;
+        let documentation_next =
+            build_next_report_with_selection(&store, "", Some(1), ContentSelection::Documentation)?;
+        require(
+            !documentation_next.suggestions.is_empty()
+                && documentation_next
+                    .suggestions
+                    .iter()
+                    .all(|suggestion| suggestion.contains("--content-selection documentation")),
+            "classified next suggestions lost the explicit content selection",
+        )?;
+        let legacy_next = build_next_report(&store, "", Some(3))?;
+        let explicit_legacy_next = build_next_report_with_selection(
+            &store,
+            "",
+            Some(3),
+            ContentSelection::UnspecifiedLegacy,
+        )?;
+        require_eq(
+            &serde_json::to_value(&legacy_next)?,
+            &serde_json::to_value(&explicit_legacy_next)?,
+            "legacy next wrapper compatibility",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn search_unicode_case_folding_preserves_persisted_lines_and_candidate_parity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        let pairs = [
+            ("FÜR", "für"),
+            ("CAFÉ", "café"),
+            ("GRÜßE", "Grüße"),
+            ("русский", "Русский"),
+            ("ΟΣ", "οσ"),
+            ("ΟΣ", "ος"),
+            ("kelvin", "\u{212a}elvin"),
+            ("source", "ſource"),
+            ("NEEDLE", "needle"),
+            ("[FÜR]", "[für]"),
+        ];
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(root)?;
+        for (pattern, source) in pairs {
+            let content = format!("// heading\n{source}\n{source}\n");
+            fs::write(root.join("src/example.rs"), &content)?;
+            let nodes = [test_node("src/example.rs", "hash-example")];
+            store.replace_scan(&nodes)?;
+            index_test_file_texts(&mut store, root, &nodes)?;
+            let escaped = regex::escape(pattern);
+            for (regex, fuzzy) in [(false, false), (false, true), (true, false)] {
+                let query = if regex { escaped.as_str() } else { pattern };
+                let report = search_indexed_files(
+                    &store,
+                    query,
+                    regex,
+                    fuzzy,
+                    false,
+                    Some("src/*.rs"),
+                    0,
+                    0,
+                    10,
+                )?;
+                require_eq(&report.returned, &2, &format!("Unicode matches: {pattern}"))?;
+                require_eq(&report.total_is_complete, &true, "complete Unicode search")?;
+                require_eq(&report.truncated, &false, "untruncated Unicode search")?;
+                if !regex && !fuzzy && pattern.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+                    require_eq(
+                        &report.strategy,
+                        &"fts5-bm25-candidates-exact-verified".to_string(),
+                        "Unicode equivalents admitted by acceleration",
+                    )?;
+                }
+                for (row, line) in report.results.iter().zip([2, 3]) {
+                    require_eq(&row.line, &line, "original line position")?;
+                    require_eq(&row.text, &source.to_string(), "original Unicode text")?;
+                }
+                let sensitive = search_indexed_files(
+                    &store,
+                    query,
+                    regex,
+                    fuzzy,
+                    true,
+                    Some("src/*.rs"),
+                    0,
+                    0,
+                    10,
+                )?;
+                require_eq(&sensitive.returned, &0, "case-sensitive negative")?;
+                let page = search_indexed_files(
+                    &store,
+                    query,
+                    regex,
+                    fuzzy,
+                    false,
+                    Some("src/*.rs"),
+                    0,
+                    1,
+                    1,
+                )?;
+                require_eq(&page.returned, &1, "bounded Unicode page")?;
+                require_eq(&page.results[0].line, &3, "Unicode page position")?;
+                require_eq(&page.truncated, &true, "Unicode result bound")?;
+                require_eq(&page.total_is_complete, &false, "bounded total is partial")?;
+            }
+        }
+        fs::write(root.join("src/example.rs"), "Straße\ncafe\u{301}\nf_ü_r\n")?;
+        let nodes = [test_node("src/example.rs", "hash-controls")];
+        store.replace_scan(&nodes)?;
+        index_test_file_texts(&mut store, root, &nodes)?;
+        for (regex, fuzzy) in [(false, false), (false, true), (true, false)] {
+            for pattern in ["STRASSE", "CAFÉ"] {
+                let report =
+                    search_indexed_files(&store, pattern, regex, fuzzy, false, None, 0, 0, 10)?;
+                require_eq(
+                    &report.returned,
+                    &0,
+                    "no expansion or canonical normalization",
+                )?;
+            }
+            let subsequence =
+                search_indexed_files(&store, "FÜR", regex, fuzzy, false, None, 0, 0, 10)?;
+            require_eq(
+                &subsequence.returned,
+                &usize::from(fuzzy),
+                "Unicode subsequence",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn search_fts_candidates_preserve_fallback_results_and_unsafe_shapes_fall_back()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -4843,6 +6234,7 @@ mod tests {
                 context_lines: 0,
                 start_index: 0,
                 limit: 20,
+                content_selection: ContentSelection::UnspecifiedLegacy,
                 retrieval_mode: SearchRetrievalMode::Lexical,
             },
             None,
@@ -4865,6 +6257,7 @@ mod tests {
                 context_lines: 0,
                 start_index: 0,
                 limit: 20,
+                content_selection: ContentSelection::UnspecifiedLegacy,
                 retrieval_mode: SearchRetrievalMode::Lexical,
             },
             None,
@@ -4917,6 +6310,7 @@ mod tests {
                     context_lines: 0,
                     start_index: 0,
                     limit: 20,
+                    content_selection: ContentSelection::UnspecifiedLegacy,
                     retrieval_mode: SearchRetrievalMode::Lexical,
                 },
                 None,
@@ -4954,6 +6348,7 @@ mod tests {
                     context_lines: 0,
                     start_index: 0,
                     limit: 20,
+                    content_selection: ContentSelection::UnspecifiedLegacy,
                     retrieval_mode: SearchRetrievalMode::Lexical,
                 },
                 None,
@@ -4969,6 +6364,7 @@ mod tests {
                     context_lines: 0,
                     start_index: 0,
                     limit: 20,
+                    content_selection: ContentSelection::UnspecifiedLegacy,
                     retrieval_mode: SearchRetrievalMode::Lexical,
                 },
                 None,
@@ -5024,6 +6420,7 @@ mod tests {
             context_lines: 0,
             start_index: MATCHING_FILES - 1,
             limit: 1,
+            content_selection: ContentSelection::UnspecifiedLegacy,
             retrieval_mode: SearchRetrievalMode::Lexical,
         };
         let overflow = search_indexed_files_with_control(&store, &request, None)?;
@@ -5104,6 +6501,7 @@ mod tests {
             context_lines: 0,
             start_index: 0,
             limit: 20,
+            content_selection: ContentSelection::UnspecifiedLegacy,
             retrieval_mode: SearchRetrievalMode::Lexical,
         };
 
@@ -5198,10 +6596,11 @@ mod tests {
         let line_match = append_line_matches(
             &mut line_report,
             "src/a.rs",
+            ContentClassification::Source,
             &["needle"],
             &LineMatcher::Literal {
                 needle: "needle".to_string(),
-                case_sensitive: true,
+                matcher: RegexBuilder::new("needle").build()?,
             },
             0,
             1,
@@ -5825,12 +7224,17 @@ mod tests {
 
     /// Build a representative file node.
     fn test_node(path: &str, hash: &str) -> Node {
+        test_node_with_language(path, hash, ".rs", "rust")
+    }
+
+    /// Build a representative file node with an explicit registry language.
+    fn test_node_with_language(path: &str, hash: &str, extension: &str, language: &str) -> Node {
         Node {
             path: path.to_string(),
             kind: NodeKind::File,
             parent_path: normalized_parent(path),
-            extension: Some(".rs".to_string()),
-            language: Some("rust".to_string()),
+            extension: Some(extension.to_string()),
+            language: Some(language.to_string()),
             size_bytes: Some(12),
             mtime_ns: Some(10),
             content_hash: Some(hash.to_string()),
@@ -5887,6 +7291,7 @@ mod tests {
             documentation: None,
             line_start: 1,
             line_end: 1,
+            source_selector: None,
             parent: None,
             parser: ParserKind::TreeSitter,
             detail: None,
@@ -5908,6 +7313,15 @@ mod tests {
             &vec![caller.to_string()],
             "import alias called-by",
         )
+    }
+
+    /// Return one ordinary test error instead of panicking inside fallible tests.
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message).into())
+        }
     }
 
     /// Require two test values to be equal without panicking.

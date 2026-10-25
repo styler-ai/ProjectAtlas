@@ -1,22 +1,23 @@
 //! Purpose: Own deterministic language capability and detection truth.
 
 use blake3::Hasher;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::OnceLock;
 
 /// Version of the generated language registry contract.
-pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 3;
+pub const LANGUAGE_CAPABILITY_REGISTRY_VERSION: u32 = 5;
 
 /// Version of the direct and embedded semantic-provider projection.
 pub const SEMANTIC_PROVIDER_CONTRACT_VERSION: u32 = 1;
 
 /// Version of the accepted language capability floor.
-pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 5;
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION: u32 = 19;
 
 /// Version of exact detector precedence and content-matching semantics.
 pub const LANGUAGE_DETECTION_POLICY_VERSION: u32 = 1;
@@ -55,6 +56,122 @@ pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST: &str =
 /// binding ProjectAtlas-owned parser provenance to the 0.4.2 runtime.
 pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST: &str =
     "07a3d2c45a4736bc764e44016a6ba9b7f9ea1b769b0100604702160528679bc7";
+
+/// Historical acceptance seal for capability-set version 6.
+///
+/// Version 6 preserves version 5 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.3 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST: &str =
+    "e9342f2b06b083a72ecc58af0afe4ba12f0ec33321225199bb0c9be4f4375c7a";
+
+/// Historical acceptance seal for capability-set version 7.
+///
+/// Version 7 preserves version 6 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.4 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST: &str =
+    "50fcac887dffecc27f1b7d365ff5da991f2a86dc15e0474ef5bcc339c58bfd60";
+
+/// Historical acceptance seal for capability-set version 8.
+///
+/// Version 8 adds registry-owned content roles and bounded Markdown heading
+/// symbols without weakening any version 7 capability.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V8_DIGEST: &str =
+    "2b26ae43b74475ea0dcb78d5b182329d500d76c33b2d87470d303400886ead1b";
+
+/// Historical acceptance seal for capability-set version 9.
+///
+/// Version 9 preserves version 8 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.5-rc1 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V9_DIGEST: &str =
+    "5fa0073094df29fba7160cecf85afa3ba5a9bcfa7ee4b5a53cde9e371b0077d2";
+
+/// Historical acceptance seal for capability-set version 10.
+///
+/// Version 10 preserves version 9 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.5-rc2 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V10_DIGEST: &str =
+    "cbede576a7b2ab4309798075210b59dbece0cf99cc7874a9659fd17f3c2d961f";
+
+/// Historical acceptance seal for capability-set version 11.
+///
+/// Version 11 preserves version 10 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.5-rc3 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST: &str =
+    "3776f19c62b3debfcae13715e3bdc3ec3029978a4f7ba1428b7a06d433524915";
+
+/// Historical acceptance seal for capability-set version 12.
+///
+/// Version 12 preserves version 11 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.4.5 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST: &str =
+    "bae01db588d8e6c8666bb1afd66ffcbffb3022c23c68df52f9822c291f9d895c";
+
+/// Acceptance seal for the built-in PHP grammar capability set.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST: &str =
+    "63ccc321601fcc207a7540163abb9cff9547d41e43b8b696073e22707db4a3d1";
+
+/// Acceptance seal for PDF and DOCX alongside the built-in PHP grammar.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST: &str =
+    "323321adb18b8f7c9ddc045949fc097bd0e6933422228c2c25a8ee5b07daeac9";
+
+/// Historical acceptance seal for capability-set version 15.
+///
+/// Version 15 preserves version 14 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc1 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST: &str =
+    "f560cb41478d81ac46b3ac5d79ad9e94a27a235f1b4209091c4e0220298d2b1a";
+
+/// Historical acceptance seal for capability-set version 16.
+///
+/// Version 16 preserves version 15 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc2 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST: &str =
+    "75c823b204d197423793ef0201c4263d1fbee247d93f257036b73bde5cf52f3a";
+
+/// Historical acceptance seal for capability-set version 17.
+///
+/// Version 17 preserves version 16 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc3 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V17_DIGEST: &str =
+    "7aa4b331c6cb96f9d4742763bcaed5d8fc23c8e1bd8a6f472d0d7f55e262abff";
+
+/// Historical acceptance seal for capability-set version 18.
+///
+/// Version 18 preserves version 17 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0-rc4 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V18_DIGEST: &str =
+    "4a39b74da7ce3fd8d0727769a921d82f463303b67404140225e53a0338a2aeaf";
+
+/// Historical acceptance seal for capability-set version 19.
+///
+/// Version 19 preserves version 18 membership and capability strength while
+/// binding ProjectAtlas-owned parser provenance to the 0.5.0 runtime.
+pub const ACCEPTED_LANGUAGE_CAPABILITY_SET_V19_DIGEST: &str =
+    "b6487e0f64f8ad10160530f4ccb77ed9ce0273b2a5892f7a083a011100a471bb";
+
+/// Historical digest seals indexed by accepted capability-set version.
+const HISTORICAL_ACCEPTED_LANGUAGE_CAPABILITY_DIGESTS: [&str;
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION as usize] = [
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V1_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V6_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V7_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V8_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V9_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V10_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V11_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V12_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V13_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V14_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V15_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V16_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V17_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V18_DIGEST,
+    ACCEPTED_LANGUAGE_CAPABILITY_SET_V19_DIGEST,
+];
 
 /// Maximum content prefix inspected by the bounded content/dialect detector.
 pub const LANGUAGE_CONTENT_DETECTION_MAX_BYTES: usize = 512;
@@ -227,6 +344,8 @@ pub enum TreeSitterGrammar {
     C,
     /// C++ grammar.
     Cpp,
+    /// PHP grammar.
+    Php,
 }
 
 impl TreeSitterGrammar {
@@ -245,6 +364,7 @@ impl TreeSitterGrammar {
         Self::Zig,
         Self::C,
         Self::Cpp,
+        Self::Php,
     ];
 
     /// Return the exact Cargo package that provides this built-in grammar.
@@ -263,6 +383,7 @@ impl TreeSitterGrammar {
             Self::Zig => "tree-sitter-zig",
             Self::C => "tree-sitter-c",
             Self::Cpp => "tree-sitter-cpp",
+            Self::Php => "tree-sitter-php",
         }
     }
 
@@ -270,7 +391,7 @@ impl TreeSitterGrammar {
     #[must_use]
     pub const fn version(self) -> &'static str {
         match self {
-            Self::Rust | Self::C => "0.24.2",
+            Self::Rust | Self::C | Self::Php => "0.24.2",
             Self::Python | Self::JavaScript | Self::Go => "0.25.0",
             Self::TypeScript | Self::Tsx => "0.23.2",
             Self::Java | Self::CSharp => "0.23.5",
@@ -294,6 +415,10 @@ pub enum SymbolParserOwner {
     Vue,
     /// `ProjectAtlas` `PowerShell` extraction.
     PowerShell,
+    /// `ProjectAtlas` Markdown heading and explicit-reference extraction.
+    Markdown,
+    /// Bounded PDF and DOCX text and evidence extraction.
+    Document,
     /// Conservative `ProjectAtlas` fallback extraction.
     Fallback,
     /// No definition or relationship extractor is available.
@@ -467,6 +592,151 @@ pub struct LanguageCapabilityFixtures {
     pub negative_path: &'static str,
 }
 
+/// Derived role of one admitted repository file.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentClassification {
+    /// Program, template, query, build, or style source.
+    Source,
+    /// Human-facing documentation or specification content.
+    Documentation,
+    /// Structured configuration or data content.
+    ConfigurationData,
+    /// Eligible UTF-8 text without a more specific registry role.
+    OtherText,
+    /// Admitted metadata whose content is binary or invalid UTF-8.
+    Opaque,
+}
+
+impl ContentClassification {
+    /// Complete stable persisted classification set.
+    pub const ALL: [Self; 5] = [
+        Self::Source,
+        Self::Documentation,
+        Self::ConfigurationData,
+        Self::OtherText,
+        Self::Opaque,
+    ];
+
+    /// Return the stable database and payload spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Documentation => "documentation",
+            Self::ConfigurationData => "configuration_data",
+            Self::OtherText => "other_text",
+            Self::Opaque => "opaque",
+        }
+    }
+
+    /// Parse one stable persisted classification.
+    #[must_use]
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "source" => Some(Self::Source),
+            "documentation" => Some(Self::Documentation),
+            "configuration_data" => Some(Self::ConfigurationData),
+            "other_text" => Some(Self::OtherText),
+            "opaque" => Some(Self::Opaque),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ContentClassification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Caller selection applied to classified repository content.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentSelection {
+    /// The request omitted selection and must retain the legacy candidate universe.
+    #[default]
+    #[serde(skip)]
+    UnspecifiedLegacy,
+    /// Select only source files for ordinary candidates and graph frontiers.
+    Source,
+    /// Select only documentation for ordinary candidates and graph frontiers.
+    Documentation,
+    /// Select source and documentation while excluding other classifications.
+    Both,
+}
+
+impl ContentSelection {
+    /// Return the explicit wire spelling, or `None` for an omitted legacy request.
+    #[must_use]
+    pub const fn explicit_value(self) -> Option<&'static str> {
+        match self {
+            Self::UnspecifiedLegacy => None,
+            Self::Source => Some("source"),
+            Self::Documentation => Some("documentation"),
+            Self::Both => Some("both"),
+        }
+    }
+
+    /// Return whether the classification belongs to this selection.
+    #[must_use]
+    pub const fn includes(self, classification: ContentClassification) -> bool {
+        match self {
+            Self::UnspecifiedLegacy => true,
+            Self::Source => matches!(classification, ContentClassification::Source),
+            Self::Documentation => {
+                matches!(classification, ContentClassification::Documentation)
+            }
+            Self::Both => matches!(
+                classification,
+                ContentClassification::Source | ContentClassification::Documentation
+            ),
+        }
+    }
+}
+
+/// Invalid explicit content selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentSelectionParseError {
+    /// Rejected caller value retained for adapter diagnostics.
+    requested: String,
+}
+
+impl ContentSelectionParseError {
+    /// Borrow the rejected caller input.
+    #[must_use]
+    pub fn requested(&self) -> &str {
+        &self.requested
+    }
+}
+
+impl fmt::Display for ContentSelectionParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unsupported content selection {:?}; expected source, documentation, or both",
+            self.requested
+        )
+    }
+}
+
+impl Error for ContentSelectionParseError {}
+
+impl FromStr for ContentSelection {
+    type Err = ContentSelectionParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "source" => Ok(Self::Source),
+            "documentation" => Ok(Self::Documentation),
+            "both" => Ok(Self::Both),
+            _ => Err(ContentSelectionParseError {
+                requested: value.to_owned(),
+            }),
+        }
+    }
+}
+
 /// One accepted canonical language capability row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct LanguageCapability {
@@ -474,6 +744,8 @@ pub struct LanguageCapability {
     pub id: &'static str,
     /// Compatibility aliases accepted only for explicit selection.
     pub aliases: &'static [&'static str],
+    /// Registry-owned content role.
+    pub classification: ContentClassification,
     /// Compatibility parser tier.
     pub parser_support: LanguageParserSupport,
     /// Closed symbol parser owner.
@@ -666,6 +938,16 @@ macro_rules! embedded_language_or_none {
     };
 }
 
+/// Default a registry row to source unless it declares a non-source role.
+macro_rules! content_classification_or_source {
+    () => {
+        ContentClassification::Source
+    };
+    ($classification:expr) => {
+        $classification
+    };
+}
+
 /// Generate typed capability and detection projections from one local manifest.
 macro_rules! define_language_registry {
     (
@@ -673,6 +955,7 @@ macro_rules! define_language_registry {
             $(
                 $id:literal => {
                     aliases: [$($alias:literal),* $(,)?],
+                    $(classification: $classification:expr,)?
                     parser_support: $parser_support:ident,
                     symbol_parser: $symbol_parser:expr,
                     structural_summary: $structural_summary:expr,
@@ -689,6 +972,7 @@ macro_rules! define_language_registry {
             $(
                 $optional_id:literal => {
                     aliases: [$($optional_alias:literal),* $(,)?],
+                    $(classification: $optional_classification:expr,)?
                     extension: $optional_extension:literal
                 }
             ),* $(,)?
@@ -711,6 +995,7 @@ macro_rules! define_language_registry {
             $(LanguageCapability {
                 id: $id,
                 aliases: &[$($alias),*],
+                classification: content_classification_or_source!($($classification)?),
                 parser_support: LanguageParserSupport::$parser_support,
                 symbol_parser: $symbol_parser,
                 semantic_provider: semantic_provider_or_unavailable!($($semantic_provider)?),
@@ -729,6 +1014,7 @@ macro_rules! define_language_registry {
             $(LanguageCapability {
                 id: $optional_id,
                 aliases: &[$($optional_alias),*],
+                classification: content_classification_or_source!($($optional_classification)?),
                 parser_support: LanguageParserSupport::Fallback,
                 symbol_parser: SymbolParserOwner::Fallback,
                 semantic_provider: SemanticProviderOwner::Unavailable,
@@ -849,20 +1135,22 @@ define_language_registry! {
         "cpp" => { aliases: ["c++"], parser_support: Native, symbol_parser: SymbolParserOwner::TreeSitter(TreeSitterGrammar::Cpp), structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.cpp", negative: "fixture.cpp.bak", provenance: CapabilityProvenance::TreeSitter(TreeSitterGrammar::Cpp) },
         "h" => { aliases: [], parser_support: Native, symbol_parser: SymbolParserOwner::TreeSitter(TreeSitterGrammar::C), structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.h", negative: "fixture.h.bak", provenance: CapabilityProvenance::TreeSitter(TreeSitterGrammar::C) },
         "hpp" => { aliases: [], parser_support: Native, symbol_parser: SymbolParserOwner::TreeSitter(TreeSitterGrammar::Cpp), structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.hpp", negative: "fixture.hpp.bak", provenance: CapabilityProvenance::TreeSitter(TreeSitterGrammar::Cpp) },
-        "cargo-manifest" => { aliases: [], parser_support: Manifest, symbol_parser: SymbolParserOwner::CargoManifest, structural_summary: Some(StructuralSummaryOwner::Toml), support: SUPPORTED_SEMANTIC, semantic_provider: SemanticProviderOwner::Cargo, positive: "Cargo.toml", negative: "Cargo.toml.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "cargo-lock" => { aliases: [], parser_support: Manifest, symbol_parser: SymbolParserOwner::CargoManifest, structural_summary: None, support: SUPPORTED_NATIVE, positive: "Cargo.lock", negative: "Cargo.lock.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "cargo-manifest" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Manifest, symbol_parser: SymbolParserOwner::CargoManifest, structural_summary: Some(StructuralSummaryOwner::Toml), support: SUPPORTED_SEMANTIC, semantic_provider: SemanticProviderOwner::Cargo, positive: "Cargo.toml", negative: "Cargo.toml.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "cargo-lock" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Manifest, symbol_parser: SymbolParserOwner::CargoManifest, structural_summary: None, support: SUPPORTED_NATIVE, positive: "Cargo.lock", negative: "Cargo.lock.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "vue" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Vue, structural_summary: None, support: SUPPORTED_NATIVE, embedded_language: EmbeddedLanguageCapability { host_kind: EmbeddedHostKind::Component, semantic_provider: SemanticProviderOwner::EcmaScript }, positive: "Fixture.vue", negative: "Fixture.vue.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "markdown" => { aliases: ["md"], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Markdown), support: SUPPORTED_STRUCTURAL, positive: "fixture.md", negative: "fixture.md.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "json" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Json), support: SUPPORTED_STRUCTURAL, positive: "fixture.json", negative: "fixture.json.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "yaml" => { aliases: ["yml"], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Yaml), support: SUPPORTED_STRUCTURAL, positive: "fixture.yml", negative: "fixture.yml.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "markdown" => { aliases: ["md"], classification: ContentClassification::Documentation, parser_support: Structural, symbol_parser: SymbolParserOwner::Markdown, structural_summary: Some(StructuralSummaryOwner::Markdown), support: SUPPORTED_NATIVE, positive: "fixture.md", negative: "fixture.md.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "pdf" => { aliases: [], classification: ContentClassification::Documentation, parser_support: Structural, symbol_parser: SymbolParserOwner::Document, structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.pdf", negative: "fixture.pdf.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "docx" => { aliases: [], classification: ContentClassification::Documentation, parser_support: Structural, symbol_parser: SymbolParserOwner::Document, structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.docx", negative: "fixture.docx.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "json" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Json), support: SUPPORTED_STRUCTURAL, positive: "fixture.json", negative: "fixture.json.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "yaml" => { aliases: ["yml"], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Yaml), support: SUPPORTED_STRUCTURAL, positive: "fixture.yml", negative: "fixture.yml.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "css" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Css), support: SUPPORTED_STRUCTURAL, positive: "fixture.css", negative: "fixture.css.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "html" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Html), support: SUPPORTED_STRUCTURAL, embedded_language: EmbeddedLanguageCapability { host_kind: EmbeddedHostKind::HtmlLike, semantic_provider: SemanticProviderOwner::EcmaScript }, positive: "fixture.html", negative: "fixture.html.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "toon" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Toon), support: SUPPORTED_STRUCTURAL, positive: "fixture.toon", negative: "fixture.toon.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "toon" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Toon), support: SUPPORTED_STRUCTURAL, positive: "fixture.toon", negative: "fixture.toon.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "dockerfile" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "Dockerfile", negative: "Dockerfile.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "makefile" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "Makefile", negative: "Makefile.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "text" => { aliases: ["txt"], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::ConfigText), support: SUPPORTED_STRUCTURAL, positive: "fixture.txt", negative: "fixture.txt.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "toml" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Toml), support: SUPPORTED_STRUCTURAL, positive: "fixture.toml", negative: "fixture.toml.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "xml" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Xml), support: SUPPORTED_STRUCTURAL, positive: "fixture.xml", negative: "fixture.xml.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "text" => { aliases: ["txt"], classification: ContentClassification::OtherText, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::ConfigText), support: SUPPORTED_STRUCTURAL, positive: "fixture.txt", negative: "fixture.txt.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "toml" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Toml), support: SUPPORTED_STRUCTURAL, positive: "fixture.toml", negative: "fixture.toml.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "xml" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::Xml), support: SUPPORTED_STRUCTURAL, positive: "fixture.xml", negative: "fixture.xml.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "svelte" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, embedded_language: EmbeddedLanguageCapability { host_kind: EmbeddedHostKind::Template, semantic_provider: SemanticProviderOwner::EcmaScript }, positive: "Fixture.svelte", negative: "Fixture.svelte.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "astro" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "Fixture.astro", negative: "Fixture.astro.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "jsp" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.jsp", negative: "fixture.jsp.bak", provenance: CapabilityProvenance::ProjectAtlas },
@@ -879,9 +1167,9 @@ define_language_registry! {
         "erb" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.erb", negative: "fixture.erb.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "sql" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.sql", negative: "fixture.sql.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "graphql" => { aliases: ["gql"], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.gql", negative: "fixture.gql.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "config" => { aliases: [], parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::ConfigText), support: SUPPORTED_STRUCTURAL, positive: "fixture.ini", negative: "fixture.ini.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "config" => { aliases: [], classification: ContentClassification::ConfigurationData, parser_support: Structural, symbol_parser: SymbolParserOwner::Unavailable, structural_summary: Some(StructuralSummaryOwner::ConfigText), support: SUPPORTED_STRUCTURAL, positive: "fixture.ini", negative: "fixture.ini.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "ruby" => { aliases: ["rb"], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.rb", negative: "fixture.rb.bak", provenance: CapabilityProvenance::ProjectAtlas },
-        "php" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.php", negative: "fixture.php.bak", provenance: CapabilityProvenance::ProjectAtlas },
+        "php" => { aliases: [], parser_support: Native, symbol_parser: SymbolParserOwner::TreeSitter(TreeSitterGrammar::Php), structural_summary: None, support: SUPPORTED_NATIVE, positive: "fixture.php", negative: "fixture.php.bak", provenance: CapabilityProvenance::TreeSitter(TreeSitterGrammar::Php) },
         "swift" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.swift", negative: "fixture.swift.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "scala" => { aliases: [], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.scala", negative: "fixture.scala.bak", provenance: CapabilityProvenance::ProjectAtlas },
         "shell" => { aliases: ["sh"], parser_support: Fallback, symbol_parser: SymbolParserOwner::Fallback, structural_summary: None, support: SUPPORTED_FALLBACK, positive: "fixture.sh", negative: "fixture.sh.bak", provenance: CapabilityProvenance::ProjectAtlas },
@@ -904,18 +1192,18 @@ define_language_registry! {
         "agda" => { aliases: [], extension: ".agda" },
         "al" => { aliases: [], extension: ".al" },
         "arduino" => { aliases: [], extension: ".ino" },
-        "asciidoc" => { aliases: [], extension: ".adoc" },
+        "asciidoc" => { aliases: [], classification: ContentClassification::Documentation, extension: ".adoc" },
         "asm" => { aliases: [], extension: ".s" },
         "awk" => { aliases: [], extension: ".awk" },
-        "beancount" => { aliases: [], extension: ".beancount" },
-        "bibtex" => { aliases: [], extension: ".bib" },
+        "beancount" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".beancount" },
+        "bibtex" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".bib" },
         "bicep" => { aliases: [], extension: ".bicep" },
         "bitbake" => { aliases: [], extension: ".bb" },
         "blade" => { aliases: [], extension: ".blade" },
         "brightscript" => { aliases: [], extension: ".brs" },
         "bsl" => { aliases: [], extension: ".bsl" },
         "c3" => { aliases: [], extension: ".c3" },
-        "caddy" => { aliases: [], extension: ".caddyfile" },
+        "caddy" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".caddyfile" },
         "cairo" => { aliases: [], extension: ".cairo" },
         "capnp" => { aliases: [], extension: ".capnp" },
         "cedar" => { aliases: [], extension: ".cedar" },
@@ -931,19 +1219,19 @@ define_language_registry! {
         "commonlisp" => { aliases: [], extension: ".lisp" },
         "cooklang" => { aliases: [], extension: ".cook" },
         "corn" => { aliases: [], extension: ".corn" },
-        "cpon" => { aliases: [], extension: ".cpon" },
+        "cpon" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".cpon" },
         "crystal" => { aliases: [], extension: ".cr" },
         "cst" => { aliases: [], extension: ".cst" },
-        "csv" => { aliases: [], extension: ".csv" },
+        "csv" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".csv" },
         "cuda" => { aliases: [], extension: ".cu" },
         "cue" => { aliases: [], extension: ".cue" },
         "cylc" => { aliases: [], extension: ".cylc" },
         "d" => { aliases: [], extension: ".d" },
-        "desktop" => { aliases: [], extension: ".desktop" },
+        "desktop" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".desktop" },
         "devicetree" => { aliases: [], extension: ".dts" },
         "dhall" => { aliases: [], extension: ".dhall" },
-        "diff" => { aliases: [], extension: ".diff" },
-        "djot" => { aliases: [], extension: ".dj" },
+        "diff" => { aliases: [], classification: ContentClassification::OtherText, extension: ".diff" },
+        "djot" => { aliases: [], classification: ContentClassification::Documentation, extension: ".dj" },
         "dot" => { aliases: [], extension: ".dot" },
         "dtd" => { aliases: [], extension: ".dtd" },
         "ebnf" => { aliases: [], extension: ".ebnf" },
@@ -970,23 +1258,23 @@ define_language_registry! {
         "gdscript" => { aliases: [], extension: ".gd" },
         "gdshader" => { aliases: [], extension: ".gdshader" },
         "gherkin" => { aliases: [], extension: ".feature" },
-        "gitattributes" => { aliases: [], extension: ".gitattributes" },
+        "gitattributes" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".gitattributes" },
         "gleam" => { aliases: [], extension: ".gleam" },
         "glsl" => { aliases: [], extension: ".glsl" },
         "gn" => { aliases: [], extension: ".gn" },
         "gnuplot" => { aliases: [], extension: ".gp" },
-        "godot_resource" => { aliases: [], extension: ".tres" },
-        "gomod" => { aliases: [], extension: ".mod" },
+        "godot_resource" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".tres" },
+        "gomod" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".mod" },
         "gotmpl" => { aliases: [], extension: ".gotmpl" },
         "gren" => { aliases: [], extension: ".gren" },
         "hack" => { aliases: [], extension: ".hack" },
         "hare" => { aliases: [], extension: ".hare" },
         "haxe" => { aliases: [], extension: ".hx" },
-        "hcl" => { aliases: [], extension: ".hcl" },
+        "hcl" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".hcl" },
         "heex" => { aliases: [], extension: ".heex" },
-        "hjson" => { aliases: [], extension: ".hjson" },
+        "hjson" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".hjson" },
         "hlsl" => { aliases: [], extension: ".hlsl" },
-        "hocon" => { aliases: [], extension: ".hocon" },
+        "hocon" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".hocon" },
         "hoon" => { aliases: [], extension: ".hoon" },
         "http" => { aliases: [], extension: ".http" },
         "hurl" => { aliases: [], extension: ".hurl" },
@@ -996,15 +1284,15 @@ define_language_registry! {
         "janet" => { aliases: [], extension: ".janet" },
         "jinja2" => { aliases: [], extension: ".j2" },
         "jq" => { aliases: [], extension: ".jq" },
-        "json5" => { aliases: [], extension: ".json5" },
+        "json5" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".json5" },
         "jsonnet" => { aliases: [], extension: ".jsonnet" },
         "julia" => { aliases: [], extension: ".jl" },
         "just" => { aliases: [], extension: ".just" },
         "kcl" => { aliases: [], extension: ".k" },
-        "kdl" => { aliases: [], extension: ".kdl" },
-        "latex" => { aliases: [], extension: ".tex" },
+        "kdl" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".kdl" },
+        "latex" => { aliases: [], classification: ContentClassification::Documentation, extension: ".tex" },
         "lean" => { aliases: [], extension: ".lean" },
-        "ledger" => { aliases: [], extension: ".ldg" },
+        "ledger" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".ldg" },
         "linkerscript" => { aliases: [], extension: ".lds" },
         "llvm" => { aliases: [], extension: ".ll" },
         "luau" => { aliases: [], extension: ".luau" },
@@ -1023,18 +1311,18 @@ define_language_registry! {
         "nim" => { aliases: [], extension: ".nim" },
         "ninja" => { aliases: [], extension: ".ninja" },
         "nix" => { aliases: [], extension: ".nix" },
-        "norg" => { aliases: [], extension: ".norg" },
+        "norg" => { aliases: [], classification: ContentClassification::Documentation, extension: ".norg" },
         "nqc" => { aliases: [], extension: ".nqc" },
         "nushell" => { aliases: [], extension: ".nu" },
         "ocamllex" => { aliases: [], extension: ".mll" },
         "odin" => { aliases: [], extension: ".odin" },
         "openscad" => { aliases: [], extension: ".scad" },
-        "org" => { aliases: [], extension: ".org" },
+        "org" => { aliases: [], classification: ContentClassification::Documentation, extension: ".org" },
         "pascal" => { aliases: [], extension: ".pas" },
-        "pem" => { aliases: [], extension: ".pem" },
-        "pgn" => { aliases: [], extension: ".pgn" },
+        "pem" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".pem" },
+        "pgn" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".pgn" },
         "pkl" => { aliases: [], extension: ".pkl" },
-        "po" => { aliases: [], extension: ".po" },
+        "po" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".po" },
         "poe_filter" => { aliases: [], extension: ".filter" },
         "pony" => { aliases: [], extension: ".pony" },
         "postscript" => { aliases: [], extension: ".ps" },
@@ -1042,7 +1330,7 @@ define_language_registry! {
         "prolog" => { aliases: [], extension: ".pro" },
         "promql" => { aliases: [], extension: ".promql" },
         "prql" => { aliases: [], extension: ".prql" },
-        "psv" => { aliases: [], extension: ".psv" },
+        "psv" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".psv" },
         "puppet" => { aliases: [], extension: ".pp" },
         "purescript" => { aliases: [], extension: ".purs" },
         "ql" => { aliases: [], extension: ".ql" },
@@ -1056,9 +1344,9 @@ define_language_registry! {
         "rescript" => { aliases: [], extension: ".res" },
         "robot" => { aliases: [], extension: ".robot" },
         "roc" => { aliases: [], extension: ".roc" },
-        "ron" => { aliases: [], extension: ".ron" },
-        "rst" => { aliases: [], extension: ".rst" },
-        "rtf" => { aliases: [], extension: ".rtf" },
+        "ron" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".ron" },
+        "rst" => { aliases: [], classification: ContentClassification::Documentation, extension: ".rst" },
+        "rtf" => { aliases: [], classification: ContentClassification::Documentation, extension: ".rtf" },
         "scheme" => { aliases: [], extension: ".scm" },
         "slang" => { aliases: [], extension: ".slang" },
         "smali" => { aliases: [], extension: ".smali" },
@@ -1082,17 +1370,17 @@ define_language_registry! {
         "teal" => { aliases: [], extension: ".tl" },
         "templ" => { aliases: [], extension: ".templ" },
         "tera" => { aliases: [], extension: ".tera" },
-        "terraform" => { aliases: [], extension: ".tf" },
-        "textproto" => { aliases: [], extension: ".textproto" },
+        "terraform" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".tf" },
+        "textproto" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".textproto" },
         "thrift" => { aliases: [], extension: ".thrift" },
         "tlaplus" => { aliases: [], extension: ".tla" },
-        "todotxt" => { aliases: [], extension: ".todotxt" },
-        "tsv" => { aliases: [], extension: ".tsv" },
-        "turtle" => { aliases: [], extension: ".ttl" },
+        "todotxt" => { aliases: [], classification: ContentClassification::OtherText, extension: ".todotxt" },
+        "tsv" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".tsv" },
+        "turtle" => { aliases: [], classification: ContentClassification::ConfigurationData, extension: ".ttl" },
         "twig" => { aliases: [], extension: ".twig" },
         "typespec" => { aliases: [], extension: ".tsp" },
         "typoscript" => { aliases: [], extension: ".typoscript" },
-        "typst" => { aliases: [], extension: ".typst" },
+        "typst" => { aliases: [], classification: ContentClassification::Documentation, extension: ".typst" },
         "uxntal" => { aliases: [], extension: ".tal" },
         "v" => { aliases: [], extension: ".v" },
         "vb" => { aliases: [], extension: ".vb" },
@@ -1119,7 +1407,7 @@ define_language_registry! {
         ".py" => "python", ".pyw" => "python", ".js" => "javascript", ".jsx" => "javascript", ".ts" => "typescript", ".tsx" => "tsx", ".mjs" => "javascript", ".cjs" => "javascript", ".d.ts" => "typescript", ".java" => "java", ".c" => "c", ".cpp" => "cpp", ".h" => "h", ".hpp" => "hpp", ".cxx" => "cpp", ".cc" => "cpp", ".hxx" => "hpp", ".hh" => "hpp", ".cs" => "csharp", ".go" => "go", ".m" => "objective-c", ".mm" => "objective-c", ".rb" => "ruby", ".php" => "php", ".swift" => "swift", ".kt" => "kotlin", ".kts" => "kotlin", ".rs" => "rust", ".scala" => "scala", ".sh" => "shell", ".bash" => "shell", ".zsh" => "shell", ".ps1" => "powershell", ".psm1" => "powershell", ".psd1" => "powershell", ".bat" => "batch", ".cmd" => "batch", ".r" => "r", ".R" => "r", ".pl" => "perl", ".pm" => "perl", ".lua" => "lua", ".dart" => "dart", ".hs" => "haskell", ".ml" => "ocaml", ".mli" => "ocaml", ".fs" => "fsharp", ".fsx" => "fsharp", ".clj" => "clojure", ".cljs" => "clojure", ".vim" => "vim", ".zig" => "zig", ".zon" => "zig", ".html" => "html", ".htm" => "html", ".css" => "css", ".scss" => "css", ".sass" => "css", ".less" => "css", ".stylus" => "css", ".styl" => "css", ".md" => "markdown", ".mdx" => "markdown", ".json" => "json", ".jsonc" => "json", ".xml" => "xml", ".yml" => "yaml", ".yaml" => "yaml", ".toml" => "toml", ".toon" => "toon", ".txt" => "text", ".ini" => "config", ".cfg" => "config", ".conf" => "config", ".vue" => "vue", ".svelte" => "svelte", ".astro" => "astro", ".jsp" => "jsp", ".jspx" => "jsp", ".jspf" => "jsp", ".tag" => "jsp-tag", ".tagx" => "jsp-tag", ".gsp" => "gsp", ".properties" => "config", ".gradle" => "groovy", ".groovy" => "groovy", ".proto" => "protobuf", ".hbs" => "handlebars", ".handlebars" => "handlebars", ".ejs" => "ejs", ".pug" => "pug", ".ftl" => "freemarker", ".mustache" => "mustache", ".liquid" => "liquid", ".erb" => "erb", ".sql" => "sql", ".ddl" => "sql", ".dml" => "sql", ".mysql" => "sql", ".postgresql" => "sql", ".psql" => "sql", ".sqlite" => "sql", ".mssql" => "sql", ".oracle" => "sql", ".ora" => "sql", ".db2" => "sql", ".proc" => "sql", ".procedure" => "sql", ".func" => "sql", ".function" => "sql", ".view" => "sql", ".trigger" => "sql", ".index" => "sql", ".migration" => "sql", ".seed" => "sql", ".fixture" => "sql", ".schema" => "sql", ".cql" => "sql", ".cypher" => "sql", ".sparql" => "sql", ".gql" => "graphql", ".liquibase" => "sql", ".flyway" => "sql"
     }
     additional_extensions {
-        ".env" => "config", ".gitignore" => "config", ".dockerignore" => "config", ".editorconfig" => "config"
+        ".env" => "config", ".gitignore" => "config", ".dockerignore" => "config", ".editorconfig" => "config", ".pdf" => "pdf", ".docx" => "docx"
     }
     content_interpreters {
         "python" => { language: "python", version_suffix: true },
@@ -1168,6 +1456,25 @@ pub fn language_capability(language: &str) -> Option<&'static LanguageCapability
         .copied()
 }
 
+/// Classify one already-admitted file from registry truth and UTF-8 validity.
+///
+/// Admission and ignore policy remain owned by the scanner. Registry truth wins
+/// for known rows; only otherwise unknown content falls back to UTF-8 evidence.
+#[must_use]
+pub fn content_classification(language: Option<&str>, valid_utf8: bool) -> ContentClassification {
+    if let Some(classification) = language
+        .and_then(language_capability)
+        .map(|capability| capability.classification)
+    {
+        return classification;
+    }
+    if valid_utf8 {
+        ContentClassification::OtherText
+    } else {
+        ContentClassification::Opaque
+    }
+}
+
 /// Return all accepted language rows as generated documentation inputs.
 #[must_use]
 pub const fn language_documentation_rows() -> &'static [LanguageCapability] {
@@ -1182,6 +1489,8 @@ pub fn tree_sitter_grammar(language: &str) -> Option<TreeSitterGrammar> {
         SymbolParserOwner::CargoManifest
         | SymbolParserOwner::Vue
         | SymbolParserOwner::PowerShell
+        | SymbolParserOwner::Markdown
+        | SymbolParserOwner::Document
         | SymbolParserOwner::Fallback
         | SymbolParserOwner::Unavailable => None,
     }
@@ -1408,6 +1717,8 @@ pub struct LanguageCapabilityReportRow {
     pub id: &'static str,
     /// Compatibility aliases; these never add to capability counts.
     pub aliases: &'static [&'static str],
+    /// Registry-owned content role.
+    pub classification: ContentClassification,
     /// Exact filename detector rules owned by this row.
     pub exact_filenames: Vec<&'static str>,
     /// Compound extension detector rules owned by this row.
@@ -1509,6 +1820,7 @@ pub fn language_capability_report_rows() -> Vec<LanguageCapabilityReportRow> {
         .map(|capability| LanguageCapabilityReportRow {
             id: capability.id,
             aliases: capability.aliases,
+            classification: capability.classification,
             exact_filenames: rules_for_language(EXACT_FILENAME_RULES, capability.id),
             compound_extensions: rules_for_language(COMPOUND_EXTENSION_RULES, capability.id),
             extensions: rules_for_language(EXTENSION_RULES, capability.id),
@@ -1604,9 +1916,11 @@ already accepted detector owner. Extensionless, ambiguous, duplicate, pseudo, or
 catalog entries remain unadvertised until a separate deterministic rule and evidence exist.\n\n",
     );
     output.push_str(
-        "| Language | Aliases | Detection rules | Parser owner | Parsed | Symbols | Semantic | Embedded source | Benchmarked | Optional pack | Provenance | License |\n",
+        "| Language | Classification | Aliases | Detection rules | Parser owner | Parsed | Symbols | Semantic | Embedded source | Benchmarked | Optional pack | Provenance | License |\n",
     );
-    output.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    output.push_str(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
     for row in &capability_rows {
         let rules = detector_rule_summary(row);
         let aliases = list_or_dash(row.aliases.iter().copied());
@@ -1614,8 +1928,9 @@ catalog entries remain unadvertised until a separate deterministic rule and evid
         let provenance = format!("{}@{}", row.provenance_source, row.provenance_version);
         writeln!(
             &mut output,
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | `{}` | `{}` |",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | `{}` | `{}` |",
             row.id,
+            row.classification,
             aliases,
             rules,
             symbol_parser_label(row.symbol_parser),
@@ -1668,6 +1983,8 @@ fn symbol_parser_label(owner: SymbolParserOwner) -> String {
         SymbolParserOwner::CargoManifest => "projectatlas:cargo-manifest".to_string(),
         SymbolParserOwner::Vue => "projectatlas:vue".to_string(),
         SymbolParserOwner::PowerShell => "projectatlas:powershell".to_string(),
+        SymbolParserOwner::Markdown => "projectatlas:markdown".to_string(),
+        SymbolParserOwner::Document => "projectatlas:documents".to_string(),
         SymbolParserOwner::Fallback => "projectatlas:fallback".to_string(),
         SymbolParserOwner::Unavailable => "unavailable".to_string(),
     }
@@ -1832,6 +2149,7 @@ fn hash_language_registry_with_content_rules(
         for alias in capability.aliases {
             hash_value(&mut hasher, alias);
         }
+        hash_value(&mut hasher, capability.classification.as_str());
         let support = if accepted_only {
             capability.accepted_minimum
         } else {
@@ -1967,7 +2285,9 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
                 SymbolParserOwner::TreeSitter(_)
                 | SymbolParserOwner::CargoManifest
                 | SymbolParserOwner::Vue
-                | SymbolParserOwner::PowerShell,
+                | SymbolParserOwner::PowerShell
+                | SymbolParserOwner::Markdown
+                | SymbolParserOwner::Document,
             ) => {}
             (support, owner) => {
                 return Err(LanguageRegistryError::new(format!(
@@ -2078,18 +2398,22 @@ pub fn validate_language_registry() -> Result<(), LanguageRegistryError> {
         )));
     }
     let accepted_digest = accepted_language_capability_digest();
-    let expected_accepted_digest = match ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION {
-        1 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V1_DIGEST,
-        2 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V2_DIGEST,
-        3 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V3_DIGEST,
-        4 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V4_DIGEST,
-        5 => ACCEPTED_LANGUAGE_CAPABILITY_SET_V5_DIGEST,
-        version => {
-            return Err(LanguageRegistryError::new(format!(
-                "accepted language capability-set version {version} lacks a historical digest seal"
-            )));
-        }
-    };
+    let version_index = ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION
+        .checked_sub(1)
+        .and_then(|version| usize::try_from(version).ok())
+        .ok_or_else(|| {
+            LanguageRegistryError::new(format!(
+                "accepted language capability-set version {ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION} lacks a historical digest seal"
+            ))
+        })?;
+    let expected_accepted_digest = HISTORICAL_ACCEPTED_LANGUAGE_CAPABILITY_DIGESTS
+        .get(version_index)
+        .copied()
+        .ok_or_else(|| {
+            LanguageRegistryError::new(format!(
+                "accepted language capability-set version {ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION} lacks a historical digest seal"
+            ))
+        })?;
     if accepted_digest != expected_accepted_digest {
         return Err(LanguageRegistryError::new(format!(
             "accepted language capability-set version {ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION} changed from {expected_accepted_digest} to {accepted_digest}; bump the set version for an explicit compatibility decision"
@@ -2221,6 +2545,113 @@ mod tests {
         } else {
             Err(io::Error::other(message.into()).into())
         }
+    }
+
+    #[test]
+    fn content_classification_is_registry_owned_and_utf8_safe() -> Result<(), Box<dyn Error>> {
+        require_test(
+            content_classification(Some("rust"), true) == ContentClassification::Source,
+            "Rust did not retain its source classification",
+        )?;
+        require_test(
+            content_classification(Some("markdown"), true) == ContentClassification::Documentation,
+            "Markdown did not retain its documentation classification",
+        )?;
+        require_test(
+            content_classification(Some("json"), true) == ContentClassification::ConfigurationData,
+            "JSON did not retain its configuration/data classification",
+        )?;
+        require_test(
+            content_classification(None, true) == ContentClassification::OtherText,
+            "unknown UTF-8 content was not classified as other text",
+        )?;
+        require_test(
+            content_classification(Some("rust"), false) == ContentClassification::Source,
+            "known language classification did not take precedence over UTF-8 fallback",
+        )?;
+        require_test(
+            content_classification(None, false) == ContentClassification::Opaque,
+            "unknown invalid UTF-8 content was not opaque",
+        )?;
+        require_test(
+            language_capability("rst").map(|row| row.classification)
+                == Some(ContentClassification::Documentation),
+            "optional documentation rows lost registry-owned classification",
+        )?;
+        require_test(
+            language_capability("csv").map(|row| row.classification)
+                == Some(ContentClassification::ConfigurationData),
+            "optional structured-data rows lost registry-owned classification",
+        )?;
+
+        let rendered = render_language_support_markdown()?;
+        require_test(
+            rendered.contains("| Language | Classification | Aliases |"),
+            "generated capability matrix omitted the classification column",
+        )?;
+        require_test(
+            rendered.contains("| `markdown` | `documentation` |"),
+            "generated capability matrix omitted Markdown's documentation role",
+        )
+    }
+
+    #[test]
+    fn content_classification_storage_and_selection_contracts_are_closed()
+    -> Result<(), Box<dyn Error>> {
+        for classification in ContentClassification::ALL {
+            require_test(
+                ContentClassification::from_db(classification.as_str()) == Some(classification),
+                format!("classification {classification} did not round-trip"),
+            )?;
+            require_test(
+                serde_json::from_str::<ContentClassification>(&serde_json::to_string(
+                    &classification,
+                )?)? == classification,
+                format!("classification {classification} wire spelling did not round-trip"),
+            )?;
+        }
+        require_test(
+            ContentClassification::from_db("generated").is_none(),
+            "unsupported generated classification was accepted",
+        )?;
+
+        require_test(
+            ContentSelection::default() == ContentSelection::UnspecifiedLegacy
+                && ContentSelection::default().explicit_value().is_none(),
+            "omitted selection no longer preserves the distinct legacy state",
+        )?;
+        require_test(
+            ContentSelection::UnspecifiedLegacy.includes(ContentClassification::ConfigurationData)
+                && ContentSelection::Source.includes(ContentClassification::Source)
+                && !ContentSelection::Source.includes(ContentClassification::Documentation)
+                && ContentSelection::Documentation.includes(ContentClassification::Documentation)
+                && ContentSelection::Both.includes(ContentClassification::Source)
+                && ContentSelection::Both.includes(ContentClassification::Documentation)
+                && !ContentSelection::Both.includes(ContentClassification::OtherText),
+            "content selection admitted the wrong classification",
+        )?;
+        require_test(
+            "source".parse::<ContentSelection>()? == ContentSelection::Source
+                && "documentation".parse::<ContentSelection>()? == ContentSelection::Documentation
+                && "both".parse::<ContentSelection>()? == ContentSelection::Both,
+            "an explicit selection failed to parse",
+        )?;
+        let invalid = "".parse::<ContentSelection>().err().ok_or_else(|| {
+            std::io::Error::other("empty explicit content selection was accepted")
+        })?;
+        require_test(
+            invalid.requested().is_empty()
+                && invalid
+                    .to_string()
+                    .contains("source, documentation, or both"),
+            "invalid selection did not retain the typed allowed-value diagnostic",
+        )?;
+        require_test(
+            serde_json::to_string(&ContentSelection::Source)? == "\"source\""
+                && serde_json::to_string(&ContentSelection::UnspecifiedLegacy).is_err()
+                && serde_json::from_str::<ContentSelection>("\"unspecified_legacy\"").is_err(),
+            "the internal legacy state leaked into the caller-visible wire contract",
+        )
     }
 
     #[test]
@@ -2394,6 +2825,12 @@ mod tests {
         require_test(
             include_str!("../../../docs/language-support.md") == rendered,
             "checked-in language support document is stale",
+        )?;
+        require_test(
+            include_str!(
+                "../../../plugins/projectatlas/skills/projectatlas/references/language-support.md"
+            ) == rendered,
+            "bundled skill language support reference is stale",
         )
     }
 

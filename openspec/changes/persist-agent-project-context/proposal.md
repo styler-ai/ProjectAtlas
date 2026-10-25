@@ -20,7 +20,7 @@ Agent harnesses can preserve a recent transcript, compact a long conversation, r
 - Treating Git history or a hosted repository as more authoritative than the selected current local source state.
 - A background daemon, generic memory-provider abstraction, generic database export/import product, or one MCP tool per administrative operation.
 
-This change is deferred until after v0.4.0 and is ready for implementation only after #308 has merged, shipped, and been exercised through the database, publication, freshness, session-brief, and MCP-surface boundaries it depends on.
+This change is accepted for `v0.6.0-00` as a direct native sub-issue of release owner #493. It is blocked by #310 and begins only after stable v0.5.0 plus #310 establish the public tool inventory, compatibility policy, and additive migration boundary. The already-landed #308 database, publication, freshness, session-brief, and MCP foundations are prerequisites to revalidate in task 1.2; stale partial #314 work is input for comparison only, never an implementation baseline.
 
 ## Acceptance criteria
 
@@ -56,7 +56,8 @@ This change is deferred until after v0.4.0 and is ready for implementation only 
 
 ### Modified Capabilities
 
-- None. The capability is additive; requests that do not ask for Memory Atlas recovery preserve existing behavior and defaults.
+- `atlas_session_brief`: adds optional Memory Atlas recovery; omitted recovery fields preserve the existing schema, defaults, and output budget.
+- `atlas_settings`: adds content-free Memory Atlas capability, effective budget, pressure, count, and revision fields without returning record text.
 
 ## Impact
 
@@ -64,3 +65,4 @@ This change is deferred until after v0.4.0 and is ready for implementation only 
 - The existing SQLite schema and migration path gain authored Memory Atlas tables and one bounded context revision; no new runtime dependency or crate is expected.
 - `atlas_session_brief`, settings, packaged ProjectAtlas skills, plugin lifecycle guidance, generated host artifacts, and agent documentation gain additive Memory Atlas behavior.
 - Shared unit, integration, concurrency, migration, CLI/MCP, host-contract, security, and compatibility tests verify behavior. Line coverage and mutation testing run once against the completed issue, not between task slices.
+- Native hierarchy is visible through #493: #314 is one direct child, remains blocked by #310 for implementation order, and must complete before the feature-free release owner performs v0.6.0 installed-product acceptance and closes last.

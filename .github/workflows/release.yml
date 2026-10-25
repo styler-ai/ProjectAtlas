@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.3.0)"
+        description: "Stable or release-candidate version (for example v1.2.3 or v1.2.3-rc1)"
         required: true
         type: string
       prepublish_only:
@@ -29,25 +29,119 @@ permissions:
 
 env:
   RELEASE_VERSION: ${{ inputs.version }}
-  RUSTUP_TOOLCHAIN: "1.93.1"
+
+concurrency:
+  group: projectatlas-release-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.release_version.outputs.package_version }}
+      release_tag: ${{ steps.release_version.outputs.tag }}
+      stable_tag: ${{ steps.release_version.outputs.stable_tag }}
+      milestone: ${{ steps.release_version.outputs.milestone }}
+      is_prerelease: ${{ steps.release_version.outputs.is_prerelease }}
+      current_stable_tag: ${{ steps.current_stable.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
 
-      - name: Setup Rust
+      - name: Classify release version
+        id: release_version
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
-          rustup default "$RUSTUP_TOOLCHAIN"
+          python3 .github/scripts/release_version.py --self-test
+          python3 .github/scripts/release_version.py \
+            "$RELEASE_VERSION" \
+            --source release \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Resolve current stable release
+        id: current_stable
+        if: ${{ steps.release_version.outputs.is_prerelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          python3 .github/scripts/release_version.py "$tag" --source release |
+            grep -Fx 'is_prerelease=false' > /dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify workspace version
+        env:
+          EXPECTED_PACKAGE_VERSION: ${{ steps.release_version.outputs.package_version }}
+        run: |
+          version="$(awk -F'"' '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { if (in_workspace_package) exit }
+            in_workspace_package && /^version = / { print $2; exit }
+          ' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read workspace package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$EXPECTED_PACKAGE_VERSION" ]]; then
+            echo "Cargo.toml version $version does not match requested $EXPECTED_PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Enforce RC-first promotion
+        if: ${{ !inputs.prepublish_only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_IS_PRERELEASE: ${{ steps.release_version.outputs.is_prerelease }}
+          EXPECTED_STABLE_TAG: ${{ steps.release_version.outputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXPECTED_IS_PRERELEASE" == "true" ]]; then
+            if git rev-parse "$EXPECTED_STABLE_TAG^{commit}" >/dev/null 2>&1; then
+              echo "Cannot publish an RC after stable tag $EXPECTED_STABLE_TAG exists" >&2
+              exit 1
+            fi
+            exit 0
+          fi
+          releases="$RUNNER_TEMP/projectatlas-github-releases.json"
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/releases?per_page=100" --slurp > "$releases"
+          python3 .github/scripts/release_version.py \
+            "$RELEASE_VERSION" \
+            --source release \
+            --require-prior-rc-from "$releases" \
+            --require-prior-rc-ancestor-of "$GITHUB_SHA"
+
+      - name: Require exact main head for publication
+        if: ${{ !inputs.prepublish_only }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main:refs/remotes/origin/main
+          head_commit="$(git rev-parse HEAD^{commit})"
+          main_commit="$(git rev-parse refs/remotes/origin/main^{commit})"
+          if [[ "$head_commit" != "$GITHUB_SHA" || "$head_commit" != "$main_commit" ]]; then
+            echo "Release publication requires the exact origin/main head" >&2
+            exit 1
+          fi
+
+      - name: Rust toolchain preflight
+        run: |
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
+
+      - name: Repository source policy lints
+        timeout-minutes: 2
+        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-deny@0.20.2
+
+      - name: Verify fixed PDF parser
+        timeout-minutes: 10
+        run: python3 packaging/pdf-parser/build.py --install-target --validate
 
       - name: Format
         run: cargo fmt --all --check
@@ -58,17 +152,37 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Rust source contract lints
-        timeout-minutes: 2
-        run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
-
       - name: Dependency policy
         run: cargo deny --locked --all-features check -D warnings
+
+      - name: Issue checklist self-test
+        run: |
+          npm ci --ignore-scripts --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          python3 .github/scripts/issue-checklists.py --self-test
 
       - name: Tests
         run: cargo test --workspace --all-features --locked
 
+      - name: Holistic classified worktree agent E2E
+        timeout-minutes: 10
+        run: cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored --nocapture
+
+      - name: Graph, symbol, purpose, and viewport regressions
+        timeout-minutes: 10
+        run: |
+          cargo test --locked -p projectatlas-cli --test e2e_navigation csharp_symbol_identity_boundary_preserves_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation deep_qualified_symbol_parents_preserve_full_and_incremental_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation partial_markdown_limit_persists_without_losing_complete_publication -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance lint_formats_share_typed_cli_and_mcp_report -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation classified_document_navigation_agrees_across_cli_and_mcp -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance conditional_purpose_review_cli_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance persistent_mcp_purpose_review_reconciles_source_before_apply -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_maintenance token_tui_cli_respects_selected_terminal_viewport -- --exact --include-ignored --nocapture
+          cargo test --locked -p projectatlas-cli token_tui::tests -- --nocapture
+
       - name: Filtered custom harness compatibility
+        timeout-minutes: 10
         run: cargo test --locked -p projectatlas-cli --all-features task_errors_classify_only_typed_cancellation_as_canceled
 
       - name: Doc tests
@@ -80,14 +194,14 @@ jobs:
       - name: Release notes generator self-test
         run: python3 .github/scripts/release-notes.py --self-test
 
-      - name: Issue checklist self-test
-        run: python3 .github/scripts/issue-checklists.py --self-test
-
       - name: Optional-parser proof-input unit test
         run: python3 .github/scripts/test-optional-parser-proof-inputs.py
 
       - name: Optional-parser release-asset self-test
         run: python3 .github/scripts/verify-optional-parser-release-assets.py --self-test
+
+      - name: Main Atlas seed release-asset self-test
+        run: python3 .github/scripts/verify-main-atlas-seed-release-assets.py --self-test
 
       - name: MCP composition integrity
         run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
@@ -98,28 +212,6 @@ jobs:
       - name: Published benchmark measurement locks
         run: python3 .github/scripts/verify-published-benchmark-locks.py
 
-      - name: Verify version
-        run: |
-          requested="$RELEASE_VERSION"
-          if [[ ! "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
-          requested="${requested#v}"
-          version="$(awk -F'"' '
-            /^\[workspace.package\]/ { in_workspace_package = 1; next }
-            /^\[/ { if (in_workspace_package) exit }
-            in_workspace_package && /^version = / { print $2; exit }
-          ' Cargo.toml)"
-          if [[ -z "$version" ]]; then
-            echo "Could not read workspace package version from Cargo.toml" >&2
-            exit 1
-          fi
-          if [[ "$version" != "$requested" ]]; then
-            echo "Cargo.toml version $version does not match requested $requested" >&2
-            exit 1
-          fi
-
       - name: Release issue checklist gate
         if: ${{ !inputs.prepublish_only }}
         env:
@@ -127,13 +219,16 @@ jobs:
         run: |
           python3 .github/scripts/issue-checklists.py \
             --repo "$GITHUB_REPOSITORY" \
-            --milestone "${RELEASE_VERSION}-00"
+            --publication-version "$RELEASE_VERSION"
 
   package-unix:
     name: package ${{ matrix.label }}
     needs: verify
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -151,34 +246,99 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup Rust
+      - name: Rust toolchain preflight
         run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-          rustup default "$RUSTUP_TOOLCHAIN"
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          python3 .github/scripts/verify-rust-toolchain.py --install
 
       - name: Build
         run: cargo build --locked -p projectatlas-cli --release
 
       - name: Build packaged contract runner
         run: |
-          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
-          contract="$(find target/release/deps -maxdepth 1 -type f -name 'e2e-*' -perm -111 -print -quit)"
-          if [[ -z "$contract" ]]; then
-            echo "Compiled packaged contract runner was not found" >&2
-            exit 1
-          fi
+          contract_target="$RUNNER_TEMP/projectatlas-contract-target"
+          CARGO_TARGET_DIR="$contract_target" cargo test --locked --release --all-features -p projectatlas-cli \
+            --test e2e_delivery --test e2e_lifecycle --test e2e_navigation \
+            --test e2e_worktrees --test e2e_maintenance --no-run
+          CARGO_TARGET_DIR="$contract_target" cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
           mkdir -p contract-artifacts
-          cp "$contract" contract-artifacts/projectatlas-packaged-contract
+          mkdir -p contract-artifacts/bin
+          for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
+            binary="$(find "$contract_target/release/deps" -maxdepth 1 -type f -name "${binary_name}-*" -perm -111 -print -quit)"
+            if [[ -z "$binary" ]]; then
+              echo "Compiled packaged contract binary was not found: $binary_name" >&2
+              exit 1
+            fi
+            cp "$binary" "contract-artifacts/bin/$binary_name"
+          done
+          cp "$contract_target/release/optional_parser_pack_release" contract-artifacts/bin/optional_parser_pack_release
+          cat > contract-artifacts/projectatlas-packaged-contract <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="$(cd "$(dirname "$0")" && pwd)"
+          if [[ "${1:-}" == "--list" ]]; then
+            for binary in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
+              "$root/bin/$binary" --list
+            done
+            exit 0
+          fi
+          case "${1:-}" in
+            mcp_advertised_tools_*|mcp_stdio_*|packaged_cli_*|*plugin*|*installer*|*release_binary*|installed_hosts_read_generated_configs_and_report_native_status)
+              binary=e2e_delivery ;;
+            mcp_tools_list_*|csharp_symbol_*|deep_qualified_*|partial_markdown_*|classified_document_*|docx_symbols_*|map_response_*|full_repository_*|installed_candidate_without_git_*|compiler_config_*|pdf_rendering_resource_stop_preserves_source_and_repairs|pdf_parser_limits_preserve_cli_and_mcp_publication|bounded_pdf_and_docx_reach_cli_and_mcp_navigation)
+              binary=e2e_navigation ;;
+            lint_formats_*|token_tui_*|token_cli_*|conditional_purpose_*|persistent_mcp_purpose_*)
+              binary=e2e_maintenance ;;
+            holistic_agent_worktree_*|*watch*|*federation*)
+              binary=e2e_worktrees ;;
+            init_*|installed_candidate_version_*|persistent_mcp_stdin_*|supported_predecessor_*|implicit_bare_root*|generated_mcp_config_*|mcp_server_*|mcp_clean_shutdown_*|parser_pack_*|linux_btrfs_*|bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation)
+              binary=e2e_lifecycle ;;
+            *)
+              echo "unknown packaged contract test: ${1:-<missing>}" >&2
+              exit 2 ;;
+          esac
+          exec "$root/bin/$binary" "$@"
+          SH
+          chmod +x contract-artifacts/projectatlas-packaged-contract
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          CARGO_BIN_EXE_projectatlas="$GITHUB_WORKSPACE/target/release/projectatlas" \
+            "$contract" posix_plugin_lock_rejects_indirection_and_survives_crash --exact --include-ignored --nocapture
 
       - name: Package
         run: |
           archive="projectatlas-${RELEASE_VERSION}-${{ matrix.suffix }}.tar.gz"
           mkdir -p "dist/projectatlas"
           cp target/release/projectatlas "dist/projectatlas/"
-          cp README.md LICENSE "dist/projectatlas/"
+          if [[ "$RELEASE_IS_PRERELEASE" == "true" ]]; then
+            release_channel_guidance="This archive is the ${RELEASE_VERSION} prerelease. For the stable channel, use [$RELEASE_CURRENT_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$RELEASE_CURRENT_STABLE_TAG)."
+          else
+            release_channel_guidance="This archive is the ${RELEASE_VERSION} stable release."
+          fi
+          sed \
+            -e "s|@RELEASE_VERSION@|${RELEASE_VERSION}|g" \
+            -e "s|@PACKAGE_VERSION@|${RELEASE_VERSION#v}|g" \
+            -e "s|@RELEASE_CHANNEL_GUIDANCE@|${release_channel_guidance}|g" \
+            packaging/release-readme.md > "dist/projectatlas/README.md"
+          cp LICENSE "dist/projectatlas/"
+          cp packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md "dist/projectatlas/PDF-PARSER.md"
           tar -czf "$archive" -C dist projectatlas
           mkdir -p release-assets
           mv "$archive" release-assets/
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          archive_digest="$("${digest_command[@]}" "release-assets/$archive" | awk '{print $1}')"
+          runtime_digest="$("${digest_command[@]}" "dist/projectatlas/projectatlas" | awk '{print $1}')"
+          if [ -z "$archive_digest" ] || [ -z "$runtime_digest" ]; then
+            echo "Authoritative packaged digest capture failed." >&2
+            exit 1
+          fi
+          {
+            printf '%s  %s\n' "$archive_digest" "$archive"
+            printf '%s  %s\n' "$runtime_digest" "projectatlas/projectatlas"
+          } > "contract-artifacts/$archive.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -199,15 +359,20 @@ jobs:
     needs: verify
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      RELEASE_IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      RELEASE_CURRENT_STABLE_TAG: ${{ needs.verify.outputs.current_stable_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup Rust
+      - name: Rust toolchain preflight
         shell: pwsh
         run: |
-          rustup toolchain install "$env:RUSTUP_TOOLCHAIN" --profile minimal
-          rustup default "$env:RUSTUP_TOOLCHAIN"
+          python3 .github/scripts/verify-rust-toolchain.py --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python3 .github/scripts/verify-rust-toolchain.py --install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build
         shell: pwsh
@@ -216,45 +381,116 @@ jobs:
       - name: Build packaged contract runner
         shell: pwsh
         run: |
-          cargo test --locked --release -p projectatlas-cli --test e2e --no-run
-          $contracts = @(Get-ChildItem -LiteralPath "target\release\deps" -Filter "e2e-*.exe" -File)
-          if ($contracts.Count -ne 1) {
-            throw "Expected one compiled packaged contract runner, found $($contracts.Count)."
+          $contractTarget = Join-Path $env:RUNNER_TEMP "projectatlas-contract-target"
+          $env:CARGO_TARGET_DIR = $contractTarget
+          cargo test --locked --release --all-features -p projectatlas-cli --test e2e_delivery --test e2e_lifecycle --test e2e_navigation --test e2e_worktrees --test e2e_maintenance --no-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --all-features -p projectatlas-cli --bin optional_parser_pack_release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
+          New-Item -ItemType Directory -Force -Path "contract-artifacts\bin" | Out-Null
+          foreach ($binaryName in @("e2e_delivery", "e2e_lifecycle", "e2e_navigation", "e2e_worktrees", "e2e_maintenance")) {
+            $contracts = @(Get-ChildItem -LiteralPath (Join-Path $contractTarget "release\deps") -Filter "$binaryName-*.exe" -File)
+            if ($contracts.Count -ne 1) {
+              throw "Expected one packaged contract binary for $binaryName, found $($contracts.Count)."
+            }
+            Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\bin\$binaryName.exe"
           }
-          & $contracts[0].FullName persistent_mcp_stdin_does_not_block_repository_startup_probes --exact --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Persistent MCP Git config stdin release regression failed with exit code $LASTEXITCODE."
+          Copy-Item -LiteralPath (Join-Path $contractTarget "release\optional_parser_pack_release.exe") -Destination "contract-artifacts\bin\optional_parser_pack_release.exe"
+          @'
+          param(
+            [Parameter(ValueFromRemainingArguments = $true)]
+            [string[]] $Arguments
+          )
+          $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+          function Resolve-ContractBinary([string] $TestName) {
+            switch -Wildcard ($TestName) {
+              "mcp_advertised_tools_*" { return "e2e_delivery.exe" }
+              "packaged_cli_*" { return "e2e_delivery.exe" }
+              "installed_hosts_read_generated_configs_and_report_native_status" { return "e2e_delivery.exe" }
+              "installed_candidate_version_*" { return "e2e_lifecycle.exe" }
+              "*plugin*" { return "e2e_delivery.exe" }
+              "*installer*" { return "e2e_delivery.exe" }
+              "*release_binary*" { return "e2e_delivery.exe" }
+              "mcp_tools_list_*" { return "e2e_navigation.exe" }
+              "csharp_symbol_*" { return "e2e_navigation.exe" }
+              "deep_qualified_*" { return "e2e_navigation.exe" }
+              "partial_markdown_*" { return "e2e_navigation.exe" }
+              "classified_document_*" { return "e2e_navigation.exe" }
+              "docx_symbols_*" { return "e2e_navigation.exe" }
+              "map_response_*" { return "e2e_navigation.exe" }
+              "installed_candidate_without_git_*" { return "e2e_navigation.exe" }
+              "compiler_config_*" { return "e2e_navigation.exe" }
+              "pdf_rendering_resource_stop_preserves_source_and_repairs" { return "e2e_navigation.exe" }
+              "pdf_parser_limits_preserve_cli_and_mcp_publication" { return "e2e_navigation.exe" }
+              "bounded_pdf_and_docx_reach_cli_and_mcp_navigation" { return "e2e_navigation.exe" }
+              "lint_formats_*" { return "e2e_maintenance.exe" }
+              "token_tui_*" { return "e2e_maintenance.exe" }
+              "conditional_purpose_*" { return "e2e_maintenance.exe" }
+              "persistent_mcp_purpose_*" { return "e2e_maintenance.exe" }
+              "holistic_agent_worktree_*" { return "e2e_worktrees.exe" }
+              "*watch*" { return "e2e_worktrees.exe" }
+              "*federation*" { return "e2e_worktrees.exe" }
+              "persistent_mcp_stdin_*" { return "e2e_lifecycle.exe" }
+              "supported_predecessor_*" { return "e2e_lifecycle.exe" }
+              "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation" { return "e2e_lifecycle.exe" }
+              "implicit_bare_root*" { return "e2e_lifecycle.exe" }
+              "generated_mcp_config_*" { return "e2e_lifecycle.exe" }
+              "mcp_server_*" { return "e2e_lifecycle.exe" }
+              "parser_pack_*" { return "e2e_lifecycle.exe" }
+              "linux_btrfs_*" { return "e2e_lifecycle.exe" }
+              default { throw "Unknown packaged contract test: $TestName" }
+            }
           }
-          & $contracts[0].FullName mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Advertised MCP tool contract release regression failed with exit code $LASTEXITCODE."
+          if ($Arguments.Count -eq 1 -and $Arguments[0] -eq "--list") {
+            foreach ($binaryName in @("e2e_delivery.exe", "e2e_lifecycle.exe", "e2e_navigation.exe", "e2e_worktrees.exe", "e2e_maintenance.exe")) {
+              & (Join-Path $root "bin\$binaryName") --list
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            exit 0
           }
-          & $contracts[0].FullName implicit_bare_root --nocapture
+          $binary = Resolve-ContractBinary $Arguments[0]
+          & (Join-Path $root "bin\$binary") @Arguments
+          exit $LASTEXITCODE
+          '@ | Set-Content -LiteralPath "contract-artifacts\projectatlas-packaged-contract.ps1" -Encoding utf8
+
+      - name: Run Windows release-mode lifecycle contracts
+        shell: pwsh
+        run: |
+          $env:CARGO_BIN_EXE_projectatlas = Join-Path $env:GITHUB_WORKSPACE "target/release/projectatlas.exe"
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          & pwsh -NoProfile -File $contractRunner implicit_bare_root --nocapture
           if ($LASTEXITCODE -ne 0) {
             throw "Bare-root database preflight release regression failed with exit code $LASTEXITCODE."
           }
-          & $contracts[0].FullName generated_mcp_config_preserves_explicit_conventional_database_authority --exact --nocapture
+          & pwsh -NoProfile -File $contractRunner generated_mcp_config_preserves_explicit_conventional_database_authority --exact --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) {
             throw "Generated MCP database authority release regression failed with exit code $LASTEXITCODE."
           }
-          New-Item -ItemType Directory -Force -Path "contract-artifacts" | Out-Null
-          Copy-Item -LiteralPath $contracts[0].FullName -Destination "contract-artifacts\projectatlas-packaged-contract.exe"
 
       - name: Package
         shell: pwsh
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
-            Write-Error "Release version must match vMAJOR.MINOR.PATCH"
-            exit 1
-          }
           $archive = "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
           New-Item -ItemType Directory -Force -Path "dist/projectatlas" | Out-Null
           Copy-Item "target/release/projectatlas.exe" "dist/projectatlas/"
-          Copy-Item "README.md" "dist/projectatlas/"
+          $packageVersion = $env:RELEASE_VERSION.TrimStart('v')
+          if ($env:RELEASE_IS_PRERELEASE -eq "true") {
+            $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) prerelease. For the stable channel, use [$env:RELEASE_CURRENT_STABLE_TAG (stable)](https://github.com/styler-ai/ProjectAtlas/releases/tag/$env:RELEASE_CURRENT_STABLE_TAG)."
+          } else {
+            $releaseChannelGuidance = "This archive is the $($env:RELEASE_VERSION) stable release."
+          }
+          (Get-Content "packaging/release-readme.md" -Raw).Replace("@RELEASE_VERSION@", $env:RELEASE_VERSION).Replace("@PACKAGE_VERSION@", $packageVersion).Replace("@RELEASE_CHANNEL_GUIDANCE@", $releaseChannelGuidance) |
+            Set-Content -LiteralPath "dist/projectatlas/README.md" -Encoding utf8
           Copy-Item "LICENSE" "dist/projectatlas/"
+          Copy-Item "packaging/pdf-parser/vendor/pdf-extract/PROJECTATLAS.md" "dist/projectatlas/PDF-PARSER.md"
           Compress-Archive -Path "dist/projectatlas/*" -DestinationPath $archive -Force
           New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
           Move-Item -LiteralPath $archive -Destination "release-assets/"
+          $archiveDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path "release-assets" $archive)).Hash.ToLowerInvariant()
+          $runtimeDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath "dist/projectatlas/projectatlas.exe").Hash.ToLowerInvariant()
+          @("$archiveDigest  $archive", "$runtimeDigest  projectatlas.exe") |
+            Set-Content -LiteralPath (Join-Path "contract-artifacts" "$archive.sha256") -Encoding utf8
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -281,12 +517,18 @@ jobs:
           - os: ubuntu-latest
             label: linux-x64-posix
             suffix: x86_64-unknown-linux-gnu
+            codex_package: codex-linux-x64
+            codex_target: x86_64-unknown-linux-musl
           - os: macos-15-intel
             label: macos-x64-posix
             suffix: x86_64-apple-darwin
+            codex_package: codex-darwin-x64
+            codex_target: x86_64-apple-darwin
           - os: macos-14
             label: macos-arm64-posix
             suffix: aarch64-apple-darwin
+            codex_package: codex-darwin-arm64
+            codex_target: aarch64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -303,24 +545,183 @@ jobs:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts
 
+      - name: Prepare published predecessor upgrade inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 .github/scripts/prepare-published-predecessor.py
+          --suffix "${{ matrix.suffix }}"
+          --destination "$RUNNER_TEMP/projectatlas-published-predecessor"
+
+      - name: Install isolated native Codex for published-predecessor proof
+        if: ${{ !inputs.prepublish_only }}
+        env:
+          CODEX_PACKAGE: ${{ matrix.codex_package }}
+          CODEX_TARGET: ${{ matrix.codex_target }}
+        run: |
+          set -euo pipefail
+          codex_root="$RUNNER_TEMP/projectatlas-native-codex"
+          mkdir -p "$codex_root"
+          : > "$codex_root/npmrc"
+          codex_package_suffix="${CODEX_PACKAGE#codex-}"
+          codex_metadata="$codex_root/codex-optional-dependencies.json"
+          npm view --cache "$codex_root/npm-cache" --userconfig "$codex_root/npmrc" @openai/codex@0.162.1 optionalDependencies --json > "$codex_metadata"
+          codex_install_spec="@openai/$CODEX_PACKAGE@npm:@openai/codex@0.162.1-$codex_package_suffix"
+          node -e 'const fs = require("node:fs"); const [file, alias, expected] = process.argv.slice(1); const dependencies = JSON.parse(fs.readFileSync(file, "utf8")); if (dependencies[alias] !== expected) { throw new Error(`Codex registry alias mismatch for ${alias}`); }' "$codex_metadata" "@openai/$CODEX_PACKAGE" "npm:@openai/codex@0.162.1-$codex_package_suffix"
+          npm install --prefix "$codex_root" --cache "$codex_root/npm-cache" --userconfig "$codex_root/npmrc" --no-save --ignore-scripts "$codex_install_spec"
+          codex_package_manifest="$codex_root/node_modules/@openai/$CODEX_PACKAGE/package.json"
+          node -e 'const fs = require("node:fs"); const [file, suffix] = process.argv.slice(1); const manifest = JSON.parse(fs.readFileSync(file, "utf8")); if (manifest.name !== "@openai/codex" || manifest.version !== `0.162.1-${suffix}`) { throw new Error("Installed Codex alias package metadata mismatch"); }' "$codex_package_manifest" "$codex_package_suffix"
+          codex_command="$codex_root/node_modules/@openai/$CODEX_PACKAGE/vendor/$CODEX_TARGET/bin/codex"
+          if [ ! -x "$codex_command" ]; then
+            echo "Version-pinned native Codex executable is missing: $codex_command" >&2
+            exit 1
+          fi
+          codex_version="$("$codex_command" --version)"
+          if [[ "$codex_version" != "codex-cli 0.162.1" ]]; then
+            echo "Native Codex version mismatch: $codex_version" >&2
+            exit 1
+          fi
+          {
+            echo "PROJECTATLAS_CODEX_COMMAND=$codex_command"
+            echo "PROJECTATLAS_CODEX_VERSION=0.162.1"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare isolated macOS arm64 host state
+        if: matrix.label == 'macos-arm64-posix'
+        run: |
+          set -euo pipefail
+          isolation_root="$RUNNER_TEMP/projectatlas-macos-arm64-clean"
+          for path in "$isolation_root" "$isolation_root/home" "$isolation_root/config" "$isolation_root/cache" "$isolation_root/state" "$isolation_root/codex" "$isolation_root/tmp"; do
+            if [ -e "$path" ]; then
+              echo "Clean macOS lifecycle path already exists: $path" >&2
+              exit 1
+            fi
+          done
+          mkdir -p "$isolation_root" "$isolation_root/home" "$isolation_root/config" "$isolation_root/cache" "$isolation_root/state" "$isolation_root/codex" "$isolation_root/tmp"
+          {
+            echo "HOME=$isolation_root/home"
+            echo "XDG_CONFIG_HOME=$isolation_root/config"
+            echo "XDG_CACHE_HOME=$isolation_root/cache"
+            echo "XDG_STATE_HOME=$isolation_root/state"
+            echo "CODEX_HOME=$isolation_root/codex"
+            echo "TMPDIR=$isolation_root/tmp"
+            echo "PATH=$isolation_root/home/.local/bin:$isolation_root/home/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+            echo "PROJECTATLAS_SKIP_USER_PATH_UPDATE=1"
+            echo "PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE=1"
+            echo "PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE=1"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### Clean macOS arm64 installed lifecycle"
+            echo
+            echo "HOME, XDG config/cache/state, CODEX_HOME, TMPDIR, PATH, project root, and database are isolated under RUNNER_TEMP."
+            echo "The following steps must use the downloaded packaged runtime via PROJECTATLAS_MCP_CONTRACT_EXECUTABLE."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore packaged contract execute permissions
+        run: |
+          set -euo pipefail
+          for binary_name in e2e_delivery e2e_lifecycle e2e_navigation e2e_worktrees e2e_maintenance; do
+            binary="contract-artifacts/bin/$binary_name"
+            if [ ! -f "$binary" ]; then
+              echo "Downloaded packaged contract binary was not found: $binary" >&2
+              exit 1
+            fi
+            chmod +x "$binary"
+          done
+          verifier="contract-artifacts/bin/optional_parser_pack_release"
+          if [ ! -f "$verifier" ]; then
+            echo "Downloaded packaged parser-pack release verifier was not found: $verifier" >&2
+            exit 1
+          fi
+          chmod +x "$verifier"
+          echo "PROJECTATLAS_PARSER_PACK_RELEASE_VERIFIER=$PWD/$verifier" >> "$GITHUB_ENV"
+
       - name: Install packaged runtime through plugin
-        timeout-minutes: 5
+        timeout-minutes: 20
         env:
           PROJECTATLAS_SUFFIX: ${{ matrix.suffix }}
+          PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE: "1"
+          PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE: "1"
+          PROJECTATLAS_RELEASE_PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
         run: |
           archive="release-assets/projectatlas-${RELEASE_VERSION}-${PROJECTATLAS_SUFFIX}.tar.gz"
           mkdir -p "$RUNNER_TEMP/projectatlas-prepublish"
           tar -xzf "$archive" -C "$RUNNER_TEMP/projectatlas-prepublish"
           runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
           chmod +x "$runtime"
+          if command -v shasum >/dev/null 2>&1; then
+            digest_command=(shasum -a 256)
+          else
+            digest_command=(sha256sum)
+          fi
+          archive_name="${archive##*/}"
+          manifest="contract-artifacts/$archive_name.sha256"
+          if [ ! -f "$manifest" ]; then
+            echo "Authoritative packaged digest manifest was not found: $manifest" >&2
+            exit 1
+          fi
+          expected_archive_digest="$(awk -v name="$archive_name" '$2 == name { print $1 }' "$manifest")"
+          expected_runtime_digest="$(awk '$2 == "projectatlas/projectatlas" { print $1 }' "$manifest")"
+          archive_digest="$("${digest_command[@]}" "$archive" | awk '{print $1}')"
+          runtime_digest="$("${digest_command[@]}" "$runtime" | awk '{print $1}')"
+          if ! [[ "$expected_archive_digest" =~ ^[[:xdigit:]]{64}$ ]] \
+            || ! [[ "$expected_runtime_digest" =~ ^[[:xdigit:]]{64}$ ]] \
+            || [ "$archive_digest" != "$expected_archive_digest" ] \
+            || [ "$runtime_digest" != "$expected_runtime_digest" ]; then
+            echo "Packaged candidate digest does not match its authoritative manifest." >&2
+            exit 1
+          fi
+          local_release_root="$RUNNER_TEMP/projectatlas-local-release"
+          local_release_dir="$local_release_root/$RELEASE_VERSION"
+          mkdir -p "$local_release_dir"
+          cp "$archive" "$local_release_dir/$archive_name"
+          printf '%s  %s\n' "$archive_digest" "$archive_name" > "$local_release_dir/SHA256SUMS"
+          release_server_log="$RUNNER_TEMP/projectatlas-release-server.log"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$local_release_root" > "$release_server_log" 2>&1 &
+          release_server_pid=$!
+          trap 'kill "$release_server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if curl --fail --silent "http://127.0.0.1:8765/$RELEASE_VERSION/SHA256SUMS" > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 50 ]; then
+              cat "$release_server_log" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
           project_root="$RUNNER_TEMP/projectatlas-installer-prepublish"
+          if [ -e "$project_root" ]; then
+            echo "Packaged lifecycle project root was not clean: $project_root" >&2
+            exit 1
+          fi
           mkdir -p "$project_root"
-          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RUNTIME_PATH="$runtime" \
+          PROJECTATLAS_VERSION="$RELEASE_VERSION" PROJECTATLAS_RELEASE_BASE_URL="http://127.0.0.1:8765" \
             bash ./plugins/projectatlas/scripts/install-runtime.sh "$project_root"
-          PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
-          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" config --print)
-          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$runtime" ignore list)
-          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$runtime" python3 <<'PY'
+          installed_runtime="$HOME/.local/bin/projectatlas"
+          if [ ! -x "$installed_runtime" ]; then
+            echo "Packaged runtime was not installed at the selected user path: $installed_runtime" >&2
+            exit 1
+          fi
+          installed_runtime_digest="$("${digest_command[@]}" "$installed_runtime" | awk '{print $1}')"
+          if [ "$installed_runtime_digest" != "$expected_runtime_digest" ]; then
+            echo "Installed packaged runtime digest does not match its authoritative manifest." >&2
+            exit 1
+          fi
+          echo "PROJECTATLAS_PACKAGED_RUNTIME=$installed_runtime" >> "$GITHUB_ENV"
+          PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" --require-version "$RELEASE_VERSION" --format json runtime-info
+          {
+            echo
+            echo "- packaged archive: $archive"
+            echo "- packaged archive SHA-256: $archive_digest"
+            echo "- extracted runtime: $runtime"
+            echo "- extracted runtime SHA-256: $runtime_digest"
+            echo "- installed runtime: $installed_runtime"
+            echo "- installed runtime SHA-256: $installed_runtime_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" config --print)
+          (cd "$project_root" && PROJECTATLAS_NO_TELEMETRY=1 "$installed_runtime" ignore list)
+          PROJECT_ROOT="$project_root" PROJECTATLAS_RUNTIME="$installed_runtime" python3 <<'PY'
           import json
           import os
           from pathlib import Path
@@ -360,19 +761,184 @@ jobs:
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
           PY
-          chmod +x contract-artifacts/projectatlas-packaged-contract
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          if ! inventory="$("$contract" --list)"; then
+            echo "Packaged contract inventory failed." >&2
+            exit 1
+          fi
+          for test in \
+            mcp_advertised_tools_own_their_real_sqlite_effects \
+            mcp_tools_list_preserves_frozen_contracts_without_index_state \
+            packaged_cli_surface_preserves_frozen_routes_and_defaults \
+            packaged_cli_commands_own_their_real_sqlite_effects \
+            map_response_preserves_legacy_file_and_separates_format_from_json_sidecar \
+            packaged_cli_upgrades_published_predecessor_without_losing_state
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$installed_runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
+
+      - name: Install exact real host CLIs for native reader proof
+        timeout-minutes: 10
+        shell: bash
+        run: bash .github/scripts/install-real-host-readers.sh
+
+      - name: Real installed packaged host reader proof
+        timeout-minutes: 15
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
+        run: |
+          set -euo pipefail
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          test=installed_hosts_read_generated_configs_and_report_native_status
+          if ! inventory="$("$contract" --list)"; then
+            echo "Packaged host reader contract inventory failed." >&2
+            exit 1
+          fi
+          matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+          if [ "$matches" -ne 1 ]; then
+            echo "Packaged host reader contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+            exit 1
+          fi
           PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
           PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            contract-artifacts/projectatlas-packaged-contract \
-              mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+            "$contract" "$test" --exact --include-ignored --nocapture
+
+      - name: Clean macOS arm64 holistic packaged lifecycle
+        if: matrix.label == 'macos-arm64-posix'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          inventory="$("$contract" --list)"
+          test=scan_and_watch_preserve_atomic_publication_across_roots
+          for test in "$test" \
+            init_bootstrap_creates_db_scan_report_and_host_configs \
+            installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            mcp_server_stays_bound_to_one_project_database \
+            mcp_clean_shutdown_seals_runtime_instances_across_restarts \
+            parser_pack_supported_only_commands_refuse_unsupported_macos_before_state_access \
+            packaged_cli_surface_preserves_frozen_routes_and_defaults \
+            packaged_cli_commands_own_their_real_sqlite_effects \
+            mcp_advertised_tools_own_their_real_sqlite_effects \
+            mcp_stdio_serves_toon_tool_payloads \
+            full_repository_intelligence_flow_indexes_database_and_commands \
+            classified_document_navigation_agrees_across_cli_and_mcp \
+            docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch \
+            holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp \
+            token_cli_and_mcp_preserve_average_maximum_edge_accounting \
+            posix_installer_accepts_symlinked_runtime_path
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
+
+      - name: Installed-candidate regression and upgrade contracts
+        timeout-minutes: 20
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+        run: |
+          set -euo pipefail
+          runtime="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          if ! inventory="$("$contract" --list)"; then
+            echo "Installed-candidate contract inventory failed." >&2
+            exit 1
+          fi
+          for test in \
+            installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui \
+            bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation \
+            pdf_rendering_resource_stop_preserves_source_and_repairs \
+            pdf_parser_limits_preserve_cli_and_mcp_publication \
+            bounded_pdf_and_docx_reach_cli_and_mcp_navigation \
+            csharp_symbol_identity_boundary_preserves_full_and_incremental_publication \
+            deep_qualified_symbol_parents_preserve_full_and_incremental_publication \
+            partial_markdown_limit_persists_without_losing_complete_publication \
+            lint_formats_share_typed_cli_and_mcp_report \
+            token_tui_cli_respects_selected_terminal_viewport \
+            classified_document_navigation_agrees_across_cli_and_mcp \
+            docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch \
+            conditional_purpose_review_cli_reconciles_source_before_apply \
+            persistent_mcp_purpose_review_reconciles_source_before_apply \
+            persistent_mcp_stdin_does_not_block_repository_startup_probes \
+            installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability \
+            compiler_config_utf8_bom_refreshes_through_cli_and_mcp \
+            supported_predecessor_recovery_preserves_explicit_database_selection \
+            plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp \
+            posix_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail \
+            posix_plugin_update_refuses_unavailable_or_ambiguous_inventory \
+            posix_plugin_inventory_without_jq_rejects_split_object_fields \
+            posix_plugin_update_serializes_restore_before_the_next_installer_reads_state \
+            posix_plugin_update_refuses_retained_recovery_state_before_mutation \
+            posix_plugin_restore_rejects_hostile_paths_and_retains_recovery_state \
+            posix_plugin_lock_rejects_indirection_and_survives_crash
+          do
+            matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+            if [ "$matches" -ne 1 ]; then
+              echo "Installed-candidate contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+              exit 1
+            fi
+            PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
+            PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
+              "$contract" "$test" --exact --include-ignored --nocapture
+          done
+
+      - name: Installed-candidate native Btrfs database placement contract
+        if: matrix.label == 'linux-x64-posix'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes btrfs-progs
+          image="$RUNNER_TEMP/projectatlas-btrfs-installed.img"
+          mount_root="$RUNNER_TEMP/projectatlas-btrfs-installed"
+          subvolume="$mount_root/projectatlas-subvolume"
+          mkdir -p "$mount_root"
+          truncate -s 256M "$image"
+          sudo mkfs.btrfs -f "$image"
+          cleanup() {
+            if mountpoint -q "$mount_root"; then
+              sudo umount "$mount_root"
+            fi
+          }
+          trap cleanup EXIT
+          sudo mount -o loop "$image" "$mount_root"
+          sudo btrfs subvolume create "$subvolume"
+          sudo chown "$(id -u):$(id -g)" "$subvolume"
+          runtime="$RUNNER_TEMP/projectatlas-prepublish/projectatlas/projectatlas"
+          contract="contract-artifacts/projectatlas-packaged-contract"
+          chmod +x "$contract"
+          if ! inventory="$("$contract" --list)"; then
+            echo "Btrfs contract inventory failed." >&2
+            exit 1
+          fi
+          test=linux_btrfs_subvolume_database_supports_cli_and_persistent_mcp_reopen
+          matches="$(printf '%s\n' "$inventory" | awk -v expected="${test}: test" '$0 == expected { matches += 1 } END { print matches + 0 }')"
+          if [ "$matches" -ne 1 ]; then
+            echo "Btrfs contract inventory must contain exactly one '${test}: test' line; found $matches." >&2
+            exit 1
+          fi
+          PROJECTATLAS_BTRFS_TEST_ROOT="$subvolume" \
           PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
-          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            contract-artifacts/projectatlas-packaged-contract \
-              packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
-          PROJECTATLAS_MCP_CONTRACT_EXECUTABLE="$runtime" \
-          PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/projectatlas" \
-            contract-artifacts/projectatlas-packaged-contract \
-              packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
+            "$contract" "$test" --exact --include-ignored --nocapture
 
   prepublish-installer-smoke-windows:
     name: prepublish installer smoke windows-x64
@@ -394,14 +960,93 @@ jobs:
           name: packaged-contract-runner-x86_64-pc-windows-msvc
           path: contract-artifacts
 
-      - name: Install packaged runtime through plugin
-        timeout-minutes: 5
+      - name: Prepare published predecessor upgrade inputs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python .github/scripts/prepare-published-predecessor.py
+          --suffix x86_64-pc-windows-msvc
+          --destination "$env:RUNNER_TEMP/projectatlas-published-predecessor"
+
+      - name: Install isolated native Codex for published-predecessor proof
+        if: ${{ !inputs.prepublish_only }}
         shell: pwsh
         run: |
+          $codexRoot = Join-Path $env:RUNNER_TEMP "projectatlas-native-codex"
+          New-Item -ItemType Directory -Force -Path $codexRoot | Out-Null
+          $npmConfig = Join-Path $codexRoot "npmrc"
+          [System.IO.File]::WriteAllText($npmConfig, "")
+          $npmCache = Join-Path $codexRoot "npm-cache"
+          $codexPackage = "codex-win32-x64"
+          $codexPackageSuffix = "win32-x64"
+          $codexMetadataPath = Join-Path $codexRoot "codex-optional-dependencies.json"
+          $codexMetadata = npm --cache $npmCache --userconfig $npmConfig view @openai/codex@0.162.1 optionalDependencies --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned Codex registry metadata lookup failed with exit code $LASTEXITCODE."
+          }
+          [System.IO.File]::WriteAllText($codexMetadataPath, ($codexMetadata -join "`n"))
+          $optionalDependencies = Get-Content -Raw -LiteralPath $codexMetadataPath | ConvertFrom-Json -AsHashtable
+          $codexAlias = "@openai/$codexPackage"
+          $codexInstallSpec = "${codexAlias}@npm:@openai/codex@0.162.1-$codexPackageSuffix"
+          if ($optionalDependencies[$codexAlias] -cne "npm:@openai/codex@0.162.1-$codexPackageSuffix") {
+            throw "Pinned Codex registry alias does not match $codexInstallSpec."
+          }
+          npm install --prefix $codexRoot --cache $npmCache --userconfig $npmConfig --no-save --ignore-scripts $codexInstallSpec
+          if ($LASTEXITCODE -ne 0) {
+            throw "Pinned native Codex installation failed with exit code $LASTEXITCODE."
+          }
+          $codexPackageManifest = Join-Path $codexRoot "node_modules\@openai\$codexPackage\package.json"
+          $installedCodexPackage = Get-Content -Raw -LiteralPath $codexPackageManifest | ConvertFrom-Json
+          if ($installedCodexPackage.name -cne "@openai/codex" -or $installedCodexPackage.version -cne "0.162.1-$codexPackageSuffix") {
+            throw "Installed Codex alias package metadata does not match the pinned platform package."
+          }
+          $codexCommand = Join-Path $codexRoot "node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe"
+          if (-not (Test-Path -LiteralPath $codexCommand -PathType Leaf)) {
+            throw "Version-pinned native Codex executable is missing: $codexCommand"
+          }
+          $codexVersion = (& $codexCommand --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $codexVersion -cne "codex-cli 0.162.1") {
+            throw "Native Codex version mismatch: $codexVersion"
+          }
+          "PROJECTATLAS_CODEX_COMMAND=$codexCommand" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "PROJECTATLAS_CODEX_VERSION=0.162.1" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Install packaged runtime through plugin
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          PROJECTATLAS_SKIP_CODEX_PLUGIN_UPDATE: "1"
+          PROJECTATLAS_SKIP_CODEX_MCP_REGISTRY_UPDATE: "1"
+          PROJECTATLAS_RELEASE_PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
+        run: |
           $archive = Join-Path "release-assets" "projectatlas-$($env:RELEASE_VERSION)-x86_64-pc-windows-msvc.zip"
+          $archiveName = [System.IO.Path]::GetFileName($archive)
+          $manifest = Join-Path "contract-artifacts" "$archiveName.sha256"
+          if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+            throw "Authoritative packaged digest manifest was not found: $manifest"
+          }
+          $digests = @{}
+          foreach ($line in Get-Content -LiteralPath $manifest) {
+            if ($line -cnotmatch '^([a-f0-9]{64})  (.+)$' -or $digests.ContainsKey($Matches[2])) {
+              throw "Authoritative packaged digest manifest is malformed or ambiguous."
+            }
+            $digests[$Matches[2]] = $Matches[1]
+          }
+          if ($digests.Count -ne 2 -or -not $digests.ContainsKey($archiveName) -or -not $digests.ContainsKey("projectatlas.exe")) {
+            throw "Authoritative packaged digest manifest has unexpected members."
+          }
+          $archiveDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($archiveDigest -cne $digests[$archiveName]) {
+            throw "Packaged candidate archive digest does not match its authoritative manifest."
+          }
           $extractRoot = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish"
           Expand-Archive -Path $archive -DestinationPath $extractRoot -Force
           $runtime = Join-Path $extractRoot "projectatlas.exe"
+          $runtimeDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $runtime).Hash.ToLowerInvariant()
+          if ($runtimeDigest -cne $digests["projectatlas.exe"]) {
+            throw "Packaged candidate runtime digest does not match its authoritative manifest."
+          }
           $projectRoot = Join-Path $env:RUNNER_TEMP "projectatlas-installer-prepublish"
           New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
           .\plugins\projectatlas\scripts\install-runtime.ps1 -ProjectRoot $projectRoot -ProjectAtlasVersion $env:RELEASE_VERSION -RuntimePath $runtime
@@ -461,18 +1106,110 @@ jobs:
           Assert-Equal ([System.IO.Path]::GetFullPath($opencodeServer.cwd)) $expectedRoot "OpenCode cwd mismatch"
           $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = $expectedRuntime
           $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"))
-          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.exe"
-          & $contractRunner mcp_advertised_tools_own_their_real_sqlite_effects --exact --nocapture
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          $inventory = @(& pwsh -NoProfile -File $contractRunner --list)
           if ($LASTEXITCODE -ne 0) {
-            throw "Packaged MCP contract failed with exit code $LASTEXITCODE."
+            throw "Packaged contract inventory failed with exit code $LASTEXITCODE."
           }
-          & $contractRunner packaged_cli_surface_preserves_v0326_routes_and_defaults --exact --nocapture
-          if ($LASTEXITCODE -ne 0) {
-            throw "Packaged CLI surface contract failed with exit code $LASTEXITCODE."
+          foreach ($test in @(
+            "mcp_advertised_tools_own_their_real_sqlite_effects",
+            "mcp_tools_list_preserves_frozen_contracts_without_index_state",
+            "packaged_cli_surface_preserves_frozen_routes_and_defaults",
+            "packaged_cli_commands_own_their_real_sqlite_effects",
+            "map_response_preserves_legacy_file_and_separates_format_from_json_sidecar",
+            "packaged_cli_upgrades_published_predecessor_without_losing_state"
+          )) {
+            $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
+            if ($matches -ne 1) {
+              throw "Packaged contract inventory must contain exactly one '${test}: test' line; found $matches."
+            }
+            & pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Packaged contract '$test' failed with exit code $LASTEXITCODE."
+            }
           }
-          & $contractRunner packaged_cli_commands_own_their_real_sqlite_effects --exact --nocapture
+
+      - name: Install exact real host CLIs for native reader proof
+        timeout-minutes: 10
+        shell: bash
+        run: bash .github/scripts/install-real-host-readers.sh
+
+      - name: Real installed packaged host reader proof
+        timeout-minutes: 15
+        shell: pwsh
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+          PROJECTATLAS_REQUIRE_REAL_HOST_READERS: "1"
+        run: |
+          $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish\projectatlas.exe"
+          $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          $test = "installed_hosts_read_generated_configs_and_report_native_status"
+          $inventory = @(& pwsh -NoProfile -File $contractRunner --list)
           if ($LASTEXITCODE -ne 0) {
-            throw "Packaged CLI behavior contract failed with exit code $LASTEXITCODE."
+            throw "Packaged host reader contract inventory failed with exit code $LASTEXITCODE."
+          }
+          $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
+          if ($matches -ne 1) {
+            throw "Packaged host reader contract inventory must contain exactly one '${test}: test' line; found $matches."
+          }
+          & pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged host reader contract '$test' failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Installed-candidate regression and upgrade contracts
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          PROJECTATLAS_NO_TELEMETRY: "1"
+        run: |
+          $env:PROJECTATLAS_MCP_CONTRACT_EXECUTABLE = Join-Path $env:RUNNER_TEMP "projectatlas-prepublish\projectatlas.exe"
+          $env:PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT = Join-Path $env:GITHUB_WORKSPACE "plugins\projectatlas"
+          $contractRunner = Join-Path "contract-artifacts" "projectatlas-packaged-contract.ps1"
+          $inventory = @(& pwsh -NoProfile -File $contractRunner --list)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed-candidate contract inventory failed with exit code $LASTEXITCODE."
+          }
+          foreach ($test in @(
+            "installed_candidate_version_is_consistent_across_cli_runtime_and_token_tui",
+            "bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation",
+            "pdf_rendering_resource_stop_preserves_source_and_repairs",
+            "pdf_parser_limits_preserve_cli_and_mcp_publication",
+            "bounded_pdf_and_docx_reach_cli_and_mcp_navigation",
+            "csharp_symbol_identity_boundary_preserves_full_and_incremental_publication",
+            "deep_qualified_symbol_parents_preserve_full_and_incremental_publication",
+            "partial_markdown_limit_persists_without_losing_complete_publication",
+            "lint_formats_share_typed_cli_and_mcp_report",
+            "token_tui_cli_respects_selected_terminal_viewport",
+            "classified_document_navigation_agrees_across_cli_and_mcp",
+            "docx_symbols_and_partial_coverage_survive_scan_reopen_and_watch",
+            "conditional_purpose_review_cli_reconciles_source_before_apply",
+            "persistent_mcp_purpose_review_reconciles_source_before_apply",
+            "persistent_mcp_stdin_does_not_block_repository_startup_probes",
+            "installed_candidate_without_git_keeps_navigation_and_typed_vcs_unavailability",
+            "compiler_config_utf8_bom_refreshes_through_cli_and_mcp",
+            "supported_predecessor_recovery_preserves_explicit_database_selection",
+            "plugin_update_replaces_stale_runtime_configs_and_launches_new_mcp",
+            "windows_plugin_update_preserves_prior_integration_when_all_replacement_adds_fail",
+            "windows_plugin_update_refuses_unavailable_or_ambiguous_inventory",
+            "windows_plugin_restore_rejects_cache_junction_and_retains_recovery_snapshot",
+            "windows_plugin_snapshot_rejects_reparse_above_codex_home_before_mutation",
+            "windows_plugin_snapshot_cleanup_refuses_path_swap_without_outside_deletion",
+            "windows_plugin_snapshot_cleanup_failure_retains_usable_direct_snapshot",
+            "windows_plugin_update_serializes_restore_before_the_next_installer_reads_state",
+            "windows_plugin_update_fails_closed_when_lock_root_cannot_be_canonicalized",
+            "windows_plugin_update_refuses_retained_recovery_state_before_mutation",
+            "windows_plugin_restore_rejects_config_directory_and_retains_recovery_snapshot"
+          )) {
+            $matches = @($inventory | Where-Object { $_ -ceq "${test}: test" }).Count
+            if ($matches -ne 1) {
+              throw "Installed-candidate contract inventory must contain exactly one '${test}: test' line; found $matches."
+            }
+            & pwsh -NoProfile -File $contractRunner $test --exact --include-ignored --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installed-candidate contract '$test' failed with exit code $LASTEXITCODE."
+            }
           }
 
   parser-pack-assets:
@@ -556,7 +1293,10 @@ jobs:
     name: publish
     if: ${{ !inputs.prepublish_only }}
     needs:
-      [prepublish-installer-smoke-unix, prepublish-installer-smoke-windows, parser-pack-assets]
+      - verify
+      - prepublish-installer-smoke-unix
+      - prepublish-installer-smoke-windows
+      - parser-pack-assets
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -564,6 +1304,8 @@ jobs:
       pull-requests: read
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      EXPECTED_RELEASE_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+      EXPECTED_STABLE_TAG: ${{ needs.verify.outputs.stable_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -577,18 +1319,38 @@ jobs:
           pattern: projectatlas-*
           merge-multiple: true
 
+      - name: Install publication checklist parser
+        run: npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+
       - name: Prepare release assets
         run: |
-          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release version must match vMAJOR.MINOR.PATCH" >&2
-            exit 1
-          fi
+          set -euo pipefail
           git fetch --tags
+          latest_before="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
           release_exists=false
-          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+          release_json="$RUNNER_TEMP/projectatlas-release.json"
+          if gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease,assets > "$release_json" 2>/dev/null; then
             release_exists=true
+            if ! jq -e \
+              --arg tag "$RELEASE_VERSION" \
+              --argjson prerelease "$EXPECTED_RELEASE_PRERELEASE" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == $prerelease' \
+              "$release_json" > /dev/null; then
+              echo "Existing release is draft, has the wrong tag, or has the wrong prerelease classification" >&2
+              exit 1
+            fi
             echo "Release $RELEASE_VERSION already exists; continuing asset repair publish."
           fi
+          latest_policy=(--resolve-expected-latest --latest-before "$latest_before")
+          if [[ "$release_exists" == "true" ]]; then
+            latest_policy+=(--release-exists)
+          fi
+          expected_latest="$({
+            python3 .github/scripts/release_version.py \
+              "$RELEASE_VERSION" \
+              --source release \
+              "${latest_policy[@]}"
+          } | sed -n 's/^expected_latest=//p')"
           if git rev-parse "$RELEASE_VERSION^{commit}" >/dev/null 2>&1; then
             tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
             head_commit="$(git rev-parse HEAD)"
@@ -606,6 +1368,41 @@ jobs:
             exit 1
           fi
           echo "PROJECTATLAS_RELEASE_EXISTS=$release_exists" >> "$GITHUB_ENV"
+          echo "PROJECTATLAS_EXPECTED_LATEST=$expected_latest" >> "$GITHUB_ENV"
+          python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+            --source release-assets \
+            --release-tag "$RELEASE_VERSION" \
+            --list-file "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt"
+          : > "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
+          if [[ "$release_exists" == "true" ]]; then
+            hosted_seed_dir="$RUNNER_TEMP/projectatlas-hosted-main-seed"
+            mkdir -p "$hosted_seed_dir"
+            hosted_seed_count="$(
+              jq '[.assets[].name | select(startswith("projectatlas-main-atlas-seed-"))] | length' \
+                "$release_json"
+            )"
+            if [[ "$hosted_seed_count" -gt 0 ]]; then
+              gh release download "$RELEASE_VERSION" \
+                --pattern 'projectatlas-main-atlas-seed-*' \
+                --dir "$hosted_seed_dir"
+              python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+                --source "$hosted_seed_dir" \
+                --staged-source release-assets \
+                --release-tag "$RELEASE_VERSION" \
+                --list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
+              if [[ "$(wc -l < "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt")" -ne "$hosted_seed_count" ]]; then
+                echo "Existing release contains duplicate or non-regular main Atlas seed assets" >&2
+                exit 1
+              fi
+              if [[ ! -s "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt" ]]; then
+                while IFS= read -r seed_asset; do
+                  cp "$hosted_seed_dir/$seed_asset" "release-assets/$seed_asset"
+                done < "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt"
+                cp "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
+                  "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt"
+              fi
+            fi
+          fi
           (
             cd release-assets
             mapfile -d '' assets < <(find . -maxdepth 1 -type f -name "projectatlas-${RELEASE_VERSION}-*" -printf '%f\0' | sort -z)
@@ -613,22 +1410,112 @@ jobs:
               echo "No release archives matched projectatlas-${RELEASE_VERSION}-*" >&2
               exit 1
             fi
+            mapfile -t seed_assets < "$RUNNER_TEMP/projectatlas-main-atlas-seed-assets.txt"
+            assets+=("${seed_assets[@]}")
+            declare -A expected_assets=()
+            for asset in "${assets[@]}"; do
+              expected_assets["$asset"]=1
+            done
+            mapfile -d '' inventory < <(find . -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+            if [[ ${#inventory[@]} -ne ${#expected_assets[@]} ]]; then
+              echo "Release artifact inventory contains an unexpected, duplicate, or non-regular entry" >&2
+              exit 1
+            fi
+            for entry in "${inventory[@]}"; do
+              if [[ -z "${expected_assets[$entry]+present}" ]]; then
+                echo "Unexpected release artifact: $entry" >&2
+                exit 1
+              fi
+            done
             : > SHA256SUMS
             for asset in "${assets[@]}"; do
               sha256sum "$asset" >> SHA256SUMS
             done
           )
 
+      - name: Revalidate exact main head before release mutation
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-notes.py > release-notes.md
+          git fetch --force origin main:refs/remotes/origin/main
+          head_commit="$(git rev-parse HEAD^{commit})"
+          main_commit="$(git rev-parse refs/remotes/origin/main^{commit})"
+          if [[ "$head_commit" != "$GITHUB_SHA" || "$head_commit" != "$main_commit" ]]; then
+            echo "Release mutation requires the exact current origin/main head" >&2
+            exit 1
+          fi
+
       - name: Create GitHub release
         run: |
-          python3 .github/scripts/release-notes.py > release-notes.md
+          set -euo pipefail
+          require_release_mutation_ready() {
+            python3 .github/scripts/issue-checklists.py \
+              --repo "$GITHUB_REPOSITORY" \
+              --publication-version "$RELEASE_VERSION"
+            if [[ "$EXPECTED_RELEASE_PRERELEASE" != "true" ]]; then
+              return
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$EXPECTED_STABLE_TAG" > /dev/null; then
+              echo "Cannot publish an RC after stable tag $EXPECTED_STABLE_TAG exists" >&2
+              exit 1
+            else
+              status=$?
+              if [[ "$status" -ne 2 ]]; then
+                echo "Could not verify that stable tag $EXPECTED_STABLE_TAG is absent" >&2
+                exit "$status"
+              fi
+            fi
+          }
           if [[ "${PROJECTATLAS_RELEASE_EXISTS:-false}" == "true" ]]; then
-            gh release upload "$RELEASE_VERSION" release-assets/* --clobber
+            python3 .github/scripts/verify-main-atlas-seed-release-assets.py \
+              --repair-upload-source release-assets \
+              --immutable-list-file "$RUNNER_TEMP/projectatlas-hosted-main-atlas-seed-assets.txt" \
+              --upload-list-file "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
+            mapfile -t upload_assets < "$RUNNER_TEMP/projectatlas-release-repair-assets.txt"
+            require_release_mutation_ready
+            gh release upload "$RELEASE_VERSION" "${upload_assets[@]}" --clobber
           else
+            classification=()
+            if [[ "$EXPECTED_RELEASE_PRERELEASE" == "true" ]]; then
+              classification+=(--prerelease --latest=false)
+            fi
+            require_release_mutation_ready
             gh release create "$RELEASE_VERSION" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_VERSION" \
-              --notes-file release-notes.md
+              --notes-file release-notes.md \
+              "${classification[@]}"
+          fi
+
+      - name: Verify hosted release state
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/projectatlas-published-release.json"
+          gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease > "$release_json"
+          jq -e \
+            --arg tag "$RELEASE_VERSION" \
+            --argjson prerelease "$EXPECTED_RELEASE_PRERELEASE" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == $prerelease' \
+            "$release_json" > /dev/null
+          git fetch --tags --force
+          tag_commit="$(git rev-parse "$RELEASE_VERSION^{commit}")"
+          head_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Published tag points to $tag_commit, not workflow head $head_commit" >&2
+            exit 1
+          fi
+          expected_latest="${PROJECTATLAS_EXPECTED_LATEST:?}"
+          latest_after=""
+          for attempt in 1 2 3 4 5 6; do
+            latest_after="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+            if [[ "$latest_after" == "$expected_latest" ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$latest_after" != "$expected_latest" ]]; then
+            echo "GitHub Latest is '$latest_after', expected '$expected_latest'" >&2
+            exit 1
           fi
 
   installer-smoke-unix:
@@ -702,6 +1589,123 @@ jobs:
           require(Path(command[0]).resolve() == runtime, "opencode command path mismatch")
           require_args(command[1:])
           require(Path(opencode["cwd"]).resolve() == root, "opencode cwd mismatch")
+          PY
+
+      - name: Holistic release-candidate E2E
+        if: matrix.label == 'linux-x64-posix' && contains(env.RELEASE_VERSION, '-rc')
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/projectatlas-release-e2e.json"
+          gh release view "$RELEASE_VERSION" --json tagName,isDraft,isPrerelease > "$release_json"
+          jq -e --arg tag "$RELEASE_VERSION" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true' \
+            "$release_json" > /dev/null
+          latest_tag="$(gh api "/repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" == "$RELEASE_VERSION" ]]; then
+            echo "Release candidate $RELEASE_VERSION unexpectedly became GitHub Latest" >&2
+            exit 1
+          fi
+          python3 .github/scripts/release_version.py "$latest_tag" --source release |
+            grep -Fx 'is_prerelease=false' > /dev/null
+
+          project_root="$RUNNER_TEMP/projectatlas-release-e2e"
+          runtime="$HOME/.local/bin/projectatlas"
+          mkdir -p "$project_root/src"
+          printf '%s\n' 'pub fn release_e2e_marker() {}' > "$project_root/src/lib.rs"
+          (
+            cd "$project_root"
+            PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" init
+            PROJECTATLAS_NO_TELEMETRY=1 "$runtime" --require-version "$RELEASE_VERSION" watch --once
+          )
+          PROJECT_ROOT="$project_root" python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_ROOT"]).resolve()
+          config = json.loads((root / ".projectatlas" / "projectatlas.mcp.json").read_text(encoding="utf-8"))
+          server = config["mcpServers"]["projectatlas"]
+          def tool_text(name, response):
+              if not isinstance(response, dict):
+                  raise ValueError(f"MCP tool {name} omitted response id 2")
+              if "error" in response:
+                  raise ValueError(f"MCP tool {name} returned a protocol error: {response['error']}")
+              result = response.get("result")
+              if not isinstance(result, dict):
+                  raise ValueError(f"MCP tool {name} omitted its result object: {response}")
+              is_error = result.get("isError")
+              if not isinstance(is_error, bool) or is_error:
+                  raise ValueError(f"MCP tool {name} returned isError={is_error!r}: {result}")
+              content = result.get("content")
+              if not isinstance(content, list) or not content:
+                  raise ValueError(f"MCP tool {name} returned no content: {result}")
+              text = "\n".join(
+                  block["text"]
+                  for block in content
+                  if isinstance(block, dict) and isinstance(block.get("text"), str)
+              )
+              if not text.strip():
+                  raise ValueError(f"MCP tool {name} returned no text content: {result}")
+              return text
+
+          def call_tool(name, arguments):
+              messages = [
+                  {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "projectatlas-release-e2e", "version": "0.1.0"}}},
+                  {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+                  {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+              ]
+              completed = subprocess.run(
+                  [server["command"], *server["args"]],
+                  cwd=server.get("cwd", root),
+                  env={**os.environ, "PROJECTATLAS_NO_TELEMETRY": "1"},
+                  input="\n".join(json.dumps(message) for message in messages) + "\n",
+                  text=True,
+                  capture_output=True,
+                  timeout=30,
+                  check=False,
+              )
+              if completed.returncode != 0:
+                  raise SystemExit(f"release MCP exited {completed.returncode}: {completed.stderr}")
+              responses = {
+                  response["id"]: response
+                  for line in completed.stdout.splitlines()
+                  if (response := json.loads(line)).get("id") is not None
+              }
+              try:
+                  return tool_text(name, responses.get(2))
+              except ValueError as error:
+                  raise SystemExit(f"{error}: {completed.stdout}") from error
+
+          for invalid_response in [
+              None,
+              {"id": 2, "error": {"code": -32603, "message": "fault"}},
+              {"id": 2},
+              {"id": 2, "result": {"isError": True, "content": [{"type": "text", "text": "fault"}]}},
+              {"id": 2, "result": {"isError": False, "content": []}},
+          ]:
+              try:
+                  tool_text("fault-probe", invalid_response)
+              except ValueError:
+                  pass
+              else:
+                  raise SystemExit(f"release MCP response validator accepted: {invalid_response}")
+
+          brief = call_tool("atlas_session_brief", {"project_path": str(root), "query": "release_e2e_marker", "compact": True})
+          source = call_tool("atlas_slice", {"project_path": str(root), "file": "src/lib.rs", "start_line": 1, "end_line": 1})
+          if "index_status: available" not in brief or "release_e2e_marker" not in source:
+              raise SystemExit(f"release MCP contract incomplete:\n{brief}\n{source}")
+          purpose = "Own the installed release-candidate source marker."
+          purpose_result = call_tool("atlas_purpose_set", {"project_path": str(root), "path": "src/lib.rs", "purpose": purpose})
+          scan = call_tool("atlas_scan", {"project_path": str(root), "path": "."})
+          if "scan:" not in scan:
+              raise SystemExit(f"release MCP scan returned no success report:\n{scan}")
+          summary = call_tool("atlas_file_summary", {"project_path": str(root), "file": "src/lib.rs"})
+          if "status: approved" not in purpose_result or purpose not in summary or "release_e2e_marker" not in summary:
+              raise SystemExit(f"release MCP purpose contract incomplete:\n{purpose_result}\n{summary}")
           PY
 
   installer-smoke-windows:

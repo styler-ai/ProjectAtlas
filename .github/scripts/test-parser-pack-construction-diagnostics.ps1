@@ -57,66 +57,110 @@ function Invoke-BoundedDiagnosticChild {
         PipeCompleted = $false
         Disposed = $false
         ExitCode = -1
+        OperationElapsedMilliseconds = 0L
         StandardOutput = ''
         StandardError = ''
     }
     $process = $null
     $operationFailure = $null
+    $operationClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $outputTask = $null
+    $errorTask = $null
     try {
-        $process = [System.Diagnostics.Process]::Start($StartInfo)
-        if ($null -eq $process) {
-            throw "Could not start bounded diagnostic child."
-        }
-        $outputTask = $process.StandardOutput.ReadToEndAsync()
-        $errorTask = $process.StandardError.ReadToEndAsync()
-        $finished = $process.WaitForExit($OperationTimeoutMilliseconds)
-        if (-not $finished) {
-            $receipt.TimedOut = $true
-            $process.Kill($true)
-            if (-not $process.WaitForExit(5000)) {
-                throw "Timed-out diagnostic child could not be reaped."
+        try {
+            $process = [System.Diagnostics.Process]::Start($StartInfo)
+            if ($null -eq $process) {
+                throw "Could not start bounded diagnostic child."
             }
-        }
-        $receipt.ReapedBeforePipeCollection = $process.HasExited
-        if (-not $receipt.ReapedBeforePipeCollection) {
-            throw "Diagnostic child was not reaped before pipe collection."
-        }
-        $pipeTasks = [System.Threading.Tasks.Task[]]@($outputTask, $errorTask)
-        $receipt.PipeCompleted = [System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)
-        if (-not $receipt.PipeCompleted) {
-            throw "Diagnostic child pipes did not close inside the fixed deadline."
-        }
-        $receipt.StandardOutput = $outputTask.Result
-        $receipt.StandardError = $errorTask.Result
-        if ($receipt.StandardOutput.Length -gt 4096 -or
-            $receipt.StandardError.Length -gt 4096) {
-            throw "Diagnostic child exceeded its fixed pipe-output limit."
-        }
-        $receipt.ExitCode = $process.ExitCode
-    }
-    catch {
-        $operationFailure = $_.Exception
-    }
-    finally {
-        if ($null -ne $process) {
-            try {
-                if (-not $process.HasExited) {
-                    $process.Kill($true)
-                    if (-not $process.WaitForExit(5000)) {
-                        throw "Fallback diagnostic child termination could not be reaped."
-                    }
+            $outputTask = $process.StandardOutput.ReadToEndAsync()
+            $errorTask = $process.StandardError.ReadToEndAsync()
+            $finished = $process.WaitForExit($OperationTimeoutMilliseconds)
+            $receipt.OperationElapsedMilliseconds = $operationClock.ElapsedMilliseconds
+            if (-not $finished) {
+                $receipt.TimedOut = $true
+                $process.Kill($true)
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Timed-out diagnostic child could not be reaped."
                 }
             }
-            finally {
-                $process.Dispose()
-                $receipt.Disposed = $true
+            $receipt.ReapedBeforePipeCollection = $process.HasExited
+            if (-not $receipt.ReapedBeforePipeCollection) {
+                throw "Diagnostic child was not reaped before pipe collection."
+            }
+            $pipeTasks = [System.Threading.Tasks.Task[]]@($outputTask, $errorTask)
+            $receipt.PipeCompleted = [System.Threading.Tasks.Task]::WaitAll($pipeTasks, 5000)
+            if (-not $receipt.PipeCompleted) {
+                throw "Diagnostic child pipes did not close inside the fixed deadline."
+            }
+            $receipt.StandardOutput = $outputTask.Result
+            $receipt.StandardError = $errorTask.Result
+            if ($receipt.StandardOutput.Length -gt 4096 -or
+                $receipt.StandardError.Length -gt 4096) {
+                throw "Diagnostic child exceeded its fixed pipe-output limit."
+            }
+            $receipt.ExitCode = $process.ExitCode
+        }
+        catch {
+            $operationFailure = $_.Exception
+        }
+        finally {
+            if ($null -ne $process) {
+                try {
+                    if (-not $process.HasExited) {
+                        $process.Kill($true)
+                        if (-not $process.WaitForExit(5000)) {
+                            throw "Fallback diagnostic child termination could not be reaped."
+                        }
+                    }
+                }
+                finally {
+                    $process.Dispose()
+                    $receipt.Disposed = $true
+                }
+            }
+        }
+        if ($null -ne $operationFailure) {
+            throw $operationFailure
+        }
+    }
+    catch {
+        $failure = $_
+        try {
+            $phaseText = ''
+            if ($null -ne $errorTask -and $errorTask.IsCompletedSuccessfully) {
+                $phaseText = $errorTask.Result
+                $phaseText = $phaseText.Substring(0, [Math]::Min(4096, $phaseText.Length))
+            }
+            $phases = Format-NamedObjectDiagnosticPhases -StandardError $phaseText
+            $observation =
+                "operation_elapsed_ms=$($receipt.OperationElapsedMilliseconds), " +
+                "observed_elapsed_ms=$($operationClock.ElapsedMilliseconds), " +
+                "phases=$phases, reaped=$($receipt.ReapedBeforePipeCollection), " +
+                "pipes_completed=$($receipt.PipeCompleted), disposed=$($receipt.Disposed)."
+            $failure.Exception.Data['ProjectAtlasDiagnosticObservation'] = $observation
+            [Console]::Error.WriteLine("Diagnostic child failure observation: $observation")
+        }
+        catch {
+            # Supplemental observation must never replace the original failure.
+        }
+        throw $failure
+    }
+    return $receipt
+}
+
+function Format-NamedObjectDiagnosticPhases {
+    param([string]$StandardError)
+
+    $phases = [System.Collections.Generic.List[string]]::new()
+    foreach ($row in ($StandardError -split '\r?\n')) {
+        if ($row -cmatch '\Anamed-object-phase=(initialization|native-compilation|native-setup|descendant-launch|descendant-wait|descendant-complete|result-write) elapsed_ms=([0-9]{1,10})\z') {
+            if ($phases.Count -lt 7) {
+                $phases.Add("$($Matches[1])@$($Matches[2])ms")
             }
         }
     }
-    if ($null -ne $operationFailure) {
-        throw $operationFailure
-    }
-    return $receipt
+    if ($phases.Count -eq 0) { return 'none' }
+    return $phases -join ','
 }
 
 $production = Get-Item -LiteralPath $ProductionScript -Force
@@ -150,6 +194,8 @@ foreach ($name in @(
     "Invoke-Checked",
     "Write-ConstructionStatus",
     "Assert-CargoConstructionEnvironment",
+    "Get-CargoCacheTag",
+    "Write-CargoCacheTag",
     "Assert-ReusableCargoTarget",
     "Initialize-ReusableCargoTarget"
 )) {
@@ -282,7 +328,10 @@ try {
         -MaximumBytes 1024
     Require `
         ($miss.disposition -eq "miss" -and
-            [System.IO.Directory]::Exists($cacheBuild)) `
+            [System.IO.Directory]::Exists($cacheBuild) -and
+            [System.IO.File]::ReadAllText(
+                [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")
+            ) -ceq (Get-CargoCacheTag)) `
         "Absent reusable Cargo target did not produce a clean miss."
     $cacheDependency = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($cacheBuild, "release", "deps")
@@ -298,9 +347,44 @@ try {
         -MaximumBytes 1024
     Require `
         ($hit.disposition -eq "hit" -and
-            $hit.entries -eq 3 -and
-            $hit.bytes -eq 10) `
+            $hit.entries -eq 4 -and
+            $hit.bytes -eq (
+                10 + [System.Text.Encoding]::UTF8.GetByteCount((Get-CargoCacheTag))
+            )) `
         "Valid reusable Cargo target was not admitted with exact metrics."
+
+    Remove-Item `
+        -LiteralPath ([System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")) `
+        -Force
+    $missingTagRejected = Initialize-ReusableCargoTarget `
+        -OutputDirectory $cacheOutput `
+        -BuildDirectory $cacheBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($missingTagRejected.disposition -eq "rejected" -and
+            [System.IO.File]::ReadAllText(
+                [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")
+            ) -ceq (Get-CargoCacheTag) -and
+            @(Get-ChildItem -LiteralPath $cacheBuild -Force).Count -eq 1) `
+        "Missing reusable Cargo cache tag was not quarantined and recreated."
+
+    [System.IO.File]::WriteAllText(
+        [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG"),
+        "invalid cache tag"
+    )
+    $invalidTagRejected = Initialize-ReusableCargoTarget `
+        -OutputDirectory $cacheOutput `
+        -BuildDirectory $cacheBuild `
+        -MaximumEntries 8 `
+        -MaximumBytes 1024
+    Require `
+        ($invalidTagRejected.disposition -eq "rejected" -and
+            [System.IO.File]::ReadAllText(
+                [System.IO.Path]::Combine($cacheBuild, "CACHEDIR.TAG")
+            ) -ceq (Get-CargoCacheTag) -and
+            @(Get-ChildItem -LiteralPath $cacheBuild -Force).Count -eq 1) `
+        "Invalid reusable Cargo cache tag was not quarantined and recreated."
 
     $fileRootOutput = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "cargo-cache-file-root")
@@ -323,6 +407,7 @@ try {
     $entryLimitBuild = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($entryLimitOutput, "build")
     ).FullName
+    Write-CargoCacheTag -BuildDirectory $entryLimitBuild
     [System.IO.File]::WriteAllText(
         [System.IO.Path]::Combine($entryLimitBuild, "first"),
         "1"
@@ -351,6 +436,7 @@ try {
     $byteLimitBuild = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($byteLimitOutput, "build")
     ).FullName
+    Write-CargoCacheTag -BuildDirectory $byteLimitBuild
     [System.IO.File]::WriteAllText(
         [System.IO.Path]::Combine($byteLimitBuild, "oversized"),
         "12"
@@ -375,6 +461,7 @@ try {
     $linkBuild = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($linkOutput, "build")
     ).FullName
+    Write-CargoCacheTag -BuildDirectory $linkBuild
     $linkTarget = [System.IO.Directory]::CreateDirectory(
         [System.IO.Path]::Combine($testRoot, "cargo-cache-link-target")
     ).FullName
@@ -399,8 +486,11 @@ try {
         ($link.disposition -eq "rejected" -and
             $quarantines.Count -eq 1 -and
             [System.IO.Directory]::Exists($linkBuild) -and
-            @(Get-ChildItem -LiteralPath $linkBuild -Force).Count -eq 0) `
-        "Path-indirected reusable Cargo target did not fall back to an empty build."
+            @(Get-ChildItem -LiteralPath $linkBuild -Force).Count -eq 1 -and
+            [System.IO.File]::Exists(
+                [System.IO.Path]::Combine($linkBuild, "CACHEDIR.TAG")
+            )) `
+        "Path-indirected reusable Cargo target did not fall back to a tagged build."
 
     Require `
         ($workflowText.Contains("clean_construction:") -and
@@ -465,13 +555,15 @@ try {
             ) -and
             $runtimeBoundaryMeasurementText.Contains('[AllowEmptyString()]')) `
         "Absent-pack control must build the runnable CLI core without the optional supervisor."
+    Require `
+        (-not $cliManifestText.Contains("pulldown-cmark")) `
+        "The Markdown parser dependency must remain outside the main CLI ownership boundary."
     foreach ($dependency in @(
         "blake3",
         "clap",
         "cssparser",
         "jsonc-parser",
         "notify",
-        "pulldown-cmark",
         "projectatlas-db",
         "projectatlas-fs",
         "projectatlas-service",
@@ -786,7 +878,8 @@ public static class ProjectAtlasBuildContractFaultProbe
             Console.Out.Write("contract-row\r\n\r\n");
             return 0;
         }
-        Console.Out.Write(new string('a', 4096));
+        Console.Error.WriteLine("named-object-phase=native-compilation elapsed_ms=12");
+        Console.Out.Write(new string('a', 4097));
         return 0;
     }
 }
@@ -1115,6 +1208,62 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 $boundedDiagnosticText.Contains('finally {')) `
             "Bounded diagnostic child changed reap, pipe, or disposal ordering."
 
+        $phaseSummary = Format-NamedObjectDiagnosticPhases -StandardError (
+            "named-object-phase=initialization elapsed_ms=0`n" +
+            "private C:/secret/environment.txt`n" +
+            "named-object-phase=native-compilation elapsed_ms=12`n" +
+            "named-object-phase=unknown elapsed_ms=13`n" +
+            "named-object-phase=descendant-wait elapsed_ms=-1`n" +
+            "named-object-phase=result-write elapsed_ms=99999999999"
+        )
+        Require `
+            ($phaseSummary -ceq 'initialization@0ms,native-compilation@12ms' -and
+                (Format-NamedObjectDiagnosticPhases -StandardError '') -ceq 'none') `
+            "Named-object phase formatting admitted arbitrary or invalid child text."
+        Require `
+            ((Format-NamedObjectDiagnosticPhases -StandardError (
+                (@('named-object-phase=initialization elapsed_ms=0') * 20) -join "`n"
+            )).Split(',').Count -eq 7) `
+            "Named-object phase formatting exceeded its fixed checkpoint count."
+
+        $failureStart = [System.Diagnostics.ProcessStartInfo]::new()
+        $failureStart.FileName = $overflowProbe
+        $failureStart.UseShellExecute = $false
+        $failureStart.CreateNoWindow = $true
+        $failureStart.RedirectStandardOutput = $true
+        $failureStart.RedirectStandardError = $true
+        $observedFailure = $null
+        try {
+            [void](Invoke-BoundedDiagnosticChild `
+                -StartInfo $failureStart -OperationTimeoutMilliseconds 15000)
+        }
+        catch { $observedFailure = $_.Exception }
+        Require `
+            ($null -ne $observedFailure -and
+                $observedFailure.Message -ceq
+                    'Diagnostic child exceeded its fixed pipe-output limit.' -and
+                $observedFailure.Data['ProjectAtlasDiagnosticObservation'] -match
+                    'phases=native-compilation@12ms, reaped=True, pipes_completed=True, disposed=True\.') `
+            "Diagnostic output failure lost its original cause, fixed phase, or disposal evidence."
+
+        $failureStart.FileName = [System.IO.Path]::Combine($testRoot, 'missing-diagnostic-child.exe')
+        $observedFailure = $null
+        try {
+            [void](Invoke-BoundedDiagnosticChild `
+                -StartInfo $failureStart -OperationTimeoutMilliseconds 15000)
+        }
+        catch { $observedFailure = $_.Exception }
+        Require `
+            ($null -ne $observedFailure -and
+                $observedFailure.Data['ProjectAtlasDiagnosticObservation'] -match 'phases=none,') `
+            "Diagnostic startup failure invented a completed stream or lost its observation."
+        $nativeFailure = $observedFailure
+        while ($null -ne $nativeFailure.InnerException) {
+            $nativeFailure = $nativeFailure.InnerException
+        }
+        Require ($nativeFailure -is [System.ComponentModel.Win32Exception]) `
+            "Diagnostic startup observation replaced the original native failure."
+
         $timeoutStart = [System.Diagnostics.ProcessStartInfo]::new()
         $timeoutStart.FileName =
             [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -1352,11 +1501,13 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                 Name = 'combined'
                 Fault = 'operation-and-cleanup'
                 ExitCode = 129
+                OperationTimeoutMilliseconds = 15000
             },
             [pscustomobject]@{
                 Name = 'native'
                 Fault = 'descendant-open-not-found'
                 ExitCode = 127
+                OperationTimeoutMilliseconds = 30000
             }
         )) {
             $faultId = [Guid]::NewGuid().ToString('N')
@@ -1388,14 +1539,37 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
             }
             $faultReceipt = Invoke-BoundedDiagnosticChild `
                 -StartInfo $faultStart `
-                -OperationTimeoutMilliseconds 15000
+                -OperationTimeoutMilliseconds $faultRow.OperationTimeoutMilliseconds
+            $faultPhases = Format-NamedObjectDiagnosticPhases `
+                -StandardError $faultReceipt.StandardError
+            Write-Output (
+                "Named-object $($faultRow.Name) observation: " +
+                "operation_elapsed_ms=$($faultReceipt.OperationElapsedMilliseconds), " +
+                "phases=$faultPhases."
+            )
             Require `
                 (-not $faultReceipt.TimedOut -and
                     $faultReceipt.ReapedBeforePipeCollection -and
                     $faultReceipt.PipeCompleted -and
                     $faultReceipt.Disposed -and
                     $faultReceipt.ExitCode -eq $faultRow.ExitCode) `
-                "Named-object $($faultRow.Name) fault lost its stable process boundary."
+                ("Named-object $($faultRow.Name) fault lost its stable process boundary: " +
+                    "timed_out=$($faultReceipt.TimedOut), exit_code=$($faultReceipt.ExitCode), " +
+                    "reaped=$($faultReceipt.ReapedBeforePipeCollection), " +
+                    "pipes_completed=$($faultReceipt.PipeCompleted), disposed=$($faultReceipt.Disposed), " +
+                    "operation_elapsed_ms=$($faultReceipt.OperationElapsedMilliseconds), " +
+                    "phases=$faultPhases.")
+            $expectedPhases = if ($faultRow.Name -ceq 'combined') {
+                'initialization,result-write'
+            }
+            else {
+                'initialization,native-compilation,native-setup,descendant-launch,' +
+                    'descendant-wait,descendant-complete,result-write'
+            }
+            Require `
+                (($faultPhases -replace '@[0-9]+ms', '') -ceq $expectedPhases -and
+                    $faultReceipt.StandardOutput.Length -eq 0) `
+                "Named-object fault lost fixed phase evidence or changed its stdout contract."
             $faultRecord = Read-NamedObjectProbeRecord -Path $faultResult
             if ($faultRow.Name -eq 'combined') {
                 $combinedMessage = Format-NamedObjectProbeFailure `
@@ -1430,6 +1604,35 @@ Add-Type -Path $SourcePath -OutputAssembly $OutputPath -OutputType ConsoleApplic
                     "Descendant OpenSemaphore failure lost its native error code."
             }
         }
+
+        $blockedProbe = "$probeScript.blocked.ps1"
+        $nativeCompilation = 'Add-Type -TypeDefinition $nativeProbeSource -Language CSharp -ErrorAction Stop'
+        Require ($probeSource.Contains($nativeCompilation)) `
+            "Expected the existing native compilation checkpoint."
+        [System.IO.File]::WriteAllText(
+            $blockedProbe,
+            $probeSource.Replace($nativeCompilation, 'Start-Sleep -Seconds 30'),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $faultStart.ArgumentList[6] = $blockedProbe
+        $blockedReceipt = Invoke-BoundedDiagnosticChild `
+            -StartInfo $faultStart `
+            -OperationTimeoutMilliseconds 15000
+        $blockedPhases = Format-NamedObjectDiagnosticPhases `
+            -StandardError $blockedReceipt.StandardError
+        Require `
+            ($blockedReceipt.TimedOut -and
+                $blockedReceipt.ReapedBeforePipeCollection -and
+                $blockedReceipt.PipeCompleted -and $blockedReceipt.Disposed -and
+                ($blockedPhases -replace '@[0-9]+ms', '') -ceq
+                    'initialization,native-compilation') `
+            "Named-object outer timeout lost its last owned phase or cleanup evidence."
+        Write-Output (
+            "Named-object controlled timeout observation: " +
+            "operation_elapsed_ms=$($blockedReceipt.OperationElapsedMilliseconds), " +
+            "phases=$blockedPhases, reaped=$($blockedReceipt.ReapedBeforePipeCollection), " +
+            "pipes_completed=$($blockedReceipt.PipeCompleted), disposed=$($blockedReceipt.Disposed)."
+        )
 
         $diagnosticSeed.Dispose()
 
@@ -3640,6 +3843,127 @@ exit 7
             $status.exit_code -eq 7 -and
             $script:constructionFailureExitCode -eq 7) `
         "Failure diagnostic changed the authoritative status record."
+
+    $parallelCommand = ${function:Invoke-Checked}.ToString()
+    $parallelTail = ${function:Add-BoundedDiagnosticTail}.ToString()
+    $parallelFailureCommand = @'
+[Console]::Out.Write("parallel-stdout-head" + ("o" * 30000) + "parallel-stdout-tail")
+[Console]::Error.Write("parallel-stderr-head" + ("e" * 30000) + "parallel-stderr-tail")
+exit 7
+'@
+    $parallelFailure = @(
+        [pscustomobject]@{ index = 0; command = $parallelFailureCommand } |
+            ForEach-Object -Parallel {
+                $index = [string]$_.index
+                try {
+                    Set-Item -Path Function:global:Add-BoundedDiagnosticTail -Value $using:parallelTail
+                    Set-Item -Path Function:global:Invoke-Checked -Value $using:parallelCommand
+                    $commandDiagnosticTailBytes = 24576
+                    Invoke-Checked `
+                        -Executable $using:pwsh `
+                        -Arguments @("-NoProfile", "-Command", [string]$_.command) `
+                        -Role "artifact assembly $index" `
+                        -ReturnReceipt
+                }
+                catch {
+                    [pscustomobject]@{
+                        role = "parallel artifact construction $index"
+                        exit_code = 1
+                        stdout = ""
+                        stderr = $_.Exception.Message
+                    }
+                }
+            } `
+            -ThrottleLimit 1
+    ) | Select-Object -First 1
+    Require `
+        ($parallelFailure.role -eq "artifact assembly 0" -and
+            $parallelFailure.exit_code -eq 7) `
+        "Parallel native failure lost its role or exit code."
+    Write-BoundedConstructionDiagnostic `
+        -Role ([string]$parallelFailure.role) `
+        -StandardOutput ([string]$parallelFailure.stdout) `
+        -StandardError ([string]$parallelFailure.stderr)
+    $parallelDiagnostic = Get-Item -LiteralPath $script:constructionDiagnosticPath -Force
+    $parallelDiagnosticText = [System.IO.File]::ReadAllText($parallelDiagnostic.FullName)
+    Require `
+        ($parallelDiagnostic.Length -le $constructionDiagnosticMaxBytes -and
+            $parallelDiagnosticText.Contains("artifact assembly 0") -and
+            $parallelDiagnosticText.Contains("parallel-stdout-tail") -and
+            $parallelDiagnosticText.Contains("parallel-stderr-tail") -and
+            -not $parallelDiagnosticText.Contains("parallel-stdout-head") -and
+            -not $parallelDiagnosticText.Contains("parallel-stderr-head")) `
+        "Parallel native failure did not retain bounded stream tails."
+
+    $parallelSuccess = @(
+        [pscustomobject]@{ index = 1 } |
+            ForEach-Object -Parallel {
+                $index = [string]$_.index
+                try {
+                    Set-Item -Path Function:global:Add-BoundedDiagnosticTail -Value $using:parallelTail
+                    Set-Item -Path Function:global:Invoke-Checked -Value $using:parallelCommand
+                    $commandDiagnosticTailBytes = 24576
+                    Invoke-Checked `
+                        -Executable $using:pwsh `
+                        -Arguments @(
+                            "-NoProfile",
+                            "-Command",
+                            '[Console]::Out.Write("parallel-success"); [Console]::Error.Write("parallel-success-error"); exit 0'
+                        ) `
+                        -Role "artifact assembly $index" `
+                        -ReturnReceipt
+                }
+                catch {
+                    [pscustomobject]@{
+                        role = "parallel artifact construction $index"
+                        exit_code = 1
+                        stdout = ""
+                        stderr = $_.Exception.Message
+                    }
+                }
+            } `
+            -ThrottleLimit 1
+    ) | Select-Object -First 1
+    Require `
+        ($parallelSuccess.role -eq "artifact assembly 1" -and
+            $parallelSuccess.exit_code -eq 0 -and
+            $parallelSuccess.stdout -eq "parallel-success" -and
+            $parallelSuccess.stderr -eq "parallel-success-error") `
+        "Parallel successful command did not preserve its stream receipt."
+
+    $parallelStartFailure = Invoke-Checked `
+        -Executable ([System.IO.Path]::Combine($testRoot, "missing-command.exe")) `
+        -Arguments @("--version") `
+        -Role "artifact assembly start" `
+        -ReturnReceipt
+    Require `
+        ($parallelStartFailure.exit_code -eq 1 -and
+            $parallelStartFailure.stderr.Length -gt 0) `
+        "Parallel command startup failure did not return one diagnostic receipt."
+
+    $parallelRunspaceFailure = @(
+        [pscustomobject]@{ index = 2 } |
+            ForEach-Object -Parallel {
+                $index = [string]$_.index
+                try {
+                    throw "parallel runspace failure self-test"
+                }
+                catch {
+                    [pscustomobject]@{
+                        role = "parallel artifact construction $index"
+                        exit_code = 1
+                        stdout = ""
+                        stderr = $_.Exception.Message
+                    }
+                }
+            } `
+            -ThrottleLimit 1
+    ) | Select-Object -First 1
+    Require `
+        ($parallelRunspaceFailure.role -eq "parallel artifact construction 2" -and
+            $parallelRunspaceFailure.exit_code -eq 1 -and
+            $parallelRunspaceFailure.stderr -eq "parallel runspace failure self-test") `
+        "Parallel runspace failure did not return one diagnostic receipt."
     if ($env:OS -eq "Windows_NT") {
         & (Join-Path $PSScriptRoot "test-parser-pack-runtime-containment-verifier.ps1")
     }

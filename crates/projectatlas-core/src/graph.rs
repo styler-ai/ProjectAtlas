@@ -1,6 +1,6 @@
 //! Typed, project-qualified repository graph contracts.
 
-use crate::symbols::{RelationKind, SymbolKind};
+use crate::symbols::{ParserKind, RelationKind, SymbolKind};
 use crate::{CoreError, IndexGeneration, validated_repo_file_key, validated_repo_node_key};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -14,8 +14,10 @@ const ENTITY_KEY_DOMAIN: &str = "projectatlas.graph.entity.v1";
 const RELATION_KEY_DOMAIN: &str = "projectatlas.graph.relation.v1";
 /// Canonical identity namespace for repository resolution keys.
 const RESOLUTION_KEY_DOMAIN: &str = "projectatlas.graph.resolution.v1";
-/// Largest accepted identity component in bytes.
-const MAX_IDENTITY_BYTES: usize = 4_096;
+/// Largest accepted repository graph identity component in bytes.
+pub const MAX_GRAPH_IDENTITY_BYTES: usize = 4_096;
+/// Reserved namespace for compact graph-derived qualified symbol scopes.
+pub const QUALIFIED_SYMBOL_SCOPE_PREFIX: &str = "@projectatlas.scope.v1:";
 /// Maximum portable canonical resolver material retained in a derived snapshot.
 const MAX_PORTABLE_RESOLUTION_IDENTITY_BYTES: usize = 32 * 1_024;
 
@@ -96,6 +98,131 @@ pub enum GraphContractError {
     },
 }
 
+/// Parser-derived identity field that failed strict graph admission.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphIdentityField {
+    /// Cargo package name.
+    Package,
+    /// Symbol name.
+    Symbol,
+    /// Containing symbol name.
+    Parent,
+    /// Symbol signature used by the entity selector.
+    Signature,
+    /// Relation source name.
+    #[serde(rename = "relation.source")]
+    RelationSource,
+    /// Relation target name.
+    #[serde(rename = "relation.target")]
+    RelationTarget,
+    /// Derived canonical resolution key component.
+    ResolutionKey,
+}
+
+impl fmt::Display for GraphIdentityField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Package => "package",
+            Self::Symbol => "symbol",
+            Self::Parent => "parent",
+            Self::Signature => "signature",
+            Self::RelationSource => "relation.source",
+            Self::RelationTarget => "relation.target",
+            Self::ResolutionKey => "resolution-key",
+        })
+    }
+}
+
+/// Stable coarse category for a rejected parser-derived graph identity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphIdentityRejectionReason {
+    /// The identity was empty or whitespace-only.
+    Empty,
+    /// The identity had surrounding whitespace.
+    SurroundingWhitespace,
+    /// The identity contained a control character.
+    ControlCharacters,
+    /// The identity exceeded the graph identity byte bound.
+    Oversized,
+    /// The identity used the reserved derived-scope namespace.
+    ReservedNamespace,
+    /// A derived identity contract failed for another reason.
+    Contract,
+}
+
+impl GraphIdentityRejectionReason {
+    /// Classify one graph-contract failure without retaining rejected text.
+    #[must_use]
+    pub fn from_error(error: &GraphContractError) -> Self {
+        match error {
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text must not be empty" =>
+            {
+                Self::Empty
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text must not contain surrounding whitespace" =>
+            {
+                Self::SurroundingWhitespace
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text contains control characters" =>
+            {
+                Self::ControlCharacters
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason == "identity text exceeds the byte limit" =>
+            {
+                Self::Oversized
+            }
+            GraphContractError::InvalidIdentityText { reason }
+                if *reason
+                    == "source symbol identity uses the reserved derived-scope namespace" =>
+            {
+                Self::ReservedNamespace
+            }
+            _ => Self::Contract,
+        }
+    }
+}
+
+impl fmt::Display for GraphIdentityRejectionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "empty",
+            Self::SurroundingWhitespace => "surrounding-whitespace",
+            Self::ControlCharacters => "control-characters",
+            Self::Oversized => "oversized",
+            Self::ReservedNamespace => "reserved-namespace",
+            Self::Contract => "contract",
+        })
+    }
+}
+
+/// One bounded, generation-owned parser identity rejection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraphIdentityRejection {
+    /// Repository-relative source path containing the rejected fact.
+    pub path: RepositoryNodePath,
+    /// Exact bounded source span of the rejected fact.
+    pub span: SourceSpan,
+    /// Parser strategy that produced the rejected fact.
+    pub parser: ParserKind,
+    /// Identity field that failed admission.
+    pub field: GraphIdentityField,
+    /// Stable rejection category without the rejected raw value.
+    pub reason: GraphIdentityRejectionReason,
+    /// Internal parser-fact ordinal used to distinguish same-span facts.
+    ///
+    /// This identity is durable but intentionally omitted from the public wire
+    /// shape; it only prevents distinct parser observations that share a line
+    /// and zero-column fallback from collapsing in storage.
+    #[serde(skip)]
+    pub fact_index: u64,
+}
+
 /// Stable identity of one `ProjectAtlas` index across supported moves and upgrades.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProjectInstanceId([u8; 16]);
@@ -162,7 +289,7 @@ impl TryFrom<&str> for ProjectInstanceId {
             });
         }
         let mut bytes = [0_u8; 16];
-        for (index, pair) in compact.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in compact.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = decode_hex(pair[0]).ok_or(GraphContractError::InvalidProjectInstanceId {
                 reason: "identifier contains a non-hexadecimal digit",
             })?;
@@ -208,13 +335,12 @@ impl<'de> Deserialize<'de> for ProjectInstanceId {
 pub struct GraphIdentityText(String);
 
 impl GraphIdentityText {
-    /// Validate one graph identity component.
+    /// Validate one borrowed graph identity without allocating or changing it.
     ///
     /// # Errors
     ///
     /// Returns an error for blank, padded, oversized, or control-bearing text.
-    pub fn new(value: impl Into<String>) -> Result<Self, GraphContractError> {
-        let value = value.into();
+    pub fn validate(value: &str) -> Result<(), GraphContractError> {
         if value.trim().is_empty() {
             return Err(GraphContractError::InvalidIdentityText {
                 reason: "identity text must not be empty",
@@ -225,7 +351,7 @@ impl GraphIdentityText {
                 reason: "identity text must not contain surrounding whitespace",
             });
         }
-        if value.len() > MAX_IDENTITY_BYTES {
+        if value.len() > MAX_GRAPH_IDENTITY_BYTES {
             return Err(GraphContractError::InvalidIdentityText {
                 reason: "identity text exceeds the byte limit",
             });
@@ -235,6 +361,17 @@ impl GraphIdentityText {
                 reason: "identity text contains control characters",
             });
         }
+        Ok(())
+    }
+
+    /// Validate one graph identity component.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for blank, padded, oversized, or control-bearing text.
+    pub fn new(value: impl Into<String>) -> Result<Self, GraphContractError> {
+        let value = value.into();
+        Self::validate(&value)?;
         Ok(Self(value))
     }
 
@@ -650,6 +787,8 @@ impl GraphEntity {
 pub enum ExtendedRelationKind {
     /// A source references a declaration or resource.
     References,
+    /// Documentation explicitly describes a validated repository target.
+    Documents,
     /// A test exercises a source target.
     Tests,
     /// A route or protocol entry reaches a handler.
@@ -676,12 +815,13 @@ pub enum GraphRelationKind {
 
 impl GraphRelationKind {
     /// Complete stable persisted relation-kind set.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Legacy(RelationKind::Contains),
         Self::Legacy(RelationKind::Imports),
         Self::Legacy(RelationKind::Calls),
         Self::Legacy(RelationKind::DependsOn),
         Self::Extended(ExtendedRelationKind::References),
+        Self::Extended(ExtendedRelationKind::Documents),
         Self::Extended(ExtendedRelationKind::Tests),
         Self::Extended(ExtendedRelationKind::RoutesTo),
         Self::Extended(ExtendedRelationKind::Configures),
@@ -714,6 +854,7 @@ impl GraphRelationKind {
             Self::Legacy(RelationKind::Calls) => "legacy:calls",
             Self::Legacy(RelationKind::DependsOn) => "legacy:depends-on",
             Self::Extended(ExtendedRelationKind::References) => "extended:references",
+            Self::Extended(ExtendedRelationKind::Documents) => "extended:documents",
             Self::Extended(ExtendedRelationKind::Tests) => "extended:tests",
             Self::Extended(ExtendedRelationKind::RoutesTo) => "extended:routes-to",
             Self::Extended(ExtendedRelationKind::Configures) => "extended:configures",
@@ -721,6 +862,69 @@ impl GraphRelationKind {
             Self::Extended(ExtendedRelationKind::Reads) => "extended:reads",
             Self::Extended(ExtendedRelationKind::Writes) => "extended:writes",
         }
+    }
+}
+
+/// Closed reason that an explicit document target did not resolve.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentTargetUnresolvedReason {
+    /// No indexed target exists for the normalized selector.
+    Missing,
+    /// Effective ignore or admission policy excludes the target.
+    Ignored,
+    /// Normalization or canonicalization would leave the selected root.
+    OutsideRoot,
+    /// Exact-case identity is absent or conflicts under case folding.
+    CaseConflict,
+    /// The candidate names an unsupported target kind or syntax.
+    Unsupported,
+    /// No complete static repository selector could be extracted.
+    NoStaticTarget,
+}
+
+impl DocumentTargetUnresolvedReason {
+    /// Complete stable persisted reason set.
+    pub const ALL: [Self; 6] = [
+        Self::Missing,
+        Self::Ignored,
+        Self::OutsideRoot,
+        Self::CaseConflict,
+        Self::Unsupported,
+        Self::NoStaticTarget,
+    ];
+
+    /// Return the stable database and payload spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Ignored => "ignored",
+            Self::OutsideRoot => "outside_root",
+            Self::CaseConflict => "case_conflict",
+            Self::Unsupported => "unsupported",
+            Self::NoStaticTarget => "no_static_target",
+        }
+    }
+
+    /// Parse one stable persisted reason.
+    #[must_use]
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "missing" => Some(Self::Missing),
+            "ignored" => Some(Self::Ignored),
+            "outside_root" => Some(Self::OutsideRoot),
+            "case_conflict" => Some(Self::CaseConflict),
+            "unsupported" => Some(Self::Unsupported),
+            "no_static_target" => Some(Self::NoStaticTarget),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for DocumentTargetUnresolvedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -1714,6 +1918,8 @@ impl RelationOccurrence {
 pub enum CoverageState {
     /// Every supported item was covered.
     Complete,
+    /// Complete document extraction found no supported static targets.
+    NoCandidates,
     /// Some supported items were covered and some were omitted.
     Partial,
     /// Extraction failed for the whole scope.
@@ -1741,28 +1947,65 @@ pub enum CoverageScope {
     },
 }
 
-/// Absolute product limit that a coverage or query row reached.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GraphLimitKind {
+/// Define the closed graph-limit domain from one variant-to-spelling inventory.
+macro_rules! define_graph_limit_kinds {
+    ($( $(#[$variant_meta:meta])* $variant:ident => $stable_name:literal),+ $(,)?) => {
+        /// Absolute product limit that a coverage or query row reached.
+        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+        pub enum GraphLimitKind {
+            $(
+                $(#[$variant_meta])*
+                #[serde(rename = $stable_name)]
+                $variant,
+            )+
+        }
+
+        impl GraphLimitKind {
+            /// Closed ordered inventory of every supported graph limit kind.
+            pub const ALL: [Self; define_graph_limit_kinds!(@count $($variant),+)] = [
+                $(Self::$variant,)+
+            ];
+
+            /// Return the stable persistence and serialization spelling.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $stable_name,)+
+                }
+            }
+
+            /// Parse one stable persistence and serialization spelling.
+            #[must_use]
+            pub fn from_stable_name(value: &str) -> Option<Self> {
+                Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+            }
+        }
+    };
+    (@count $($variant:ident),+) => {
+        <[()]>::len(&[$(define_graph_limit_kinds!(@unit $variant)),+])
+    };
+    (@unit $variant:ident) => { () };
+}
+
+define_graph_limit_kinds! {
     /// Result-row limit.
-    Rows,
+    Rows => "rows",
     /// Unique or active node limit.
-    Nodes,
+    Nodes => "nodes",
     /// Inspected logical-edge limit.
-    Edges,
+    Edges => "edges",
     /// Per-relation source-occurrence limit.
-    Occurrences,
+    Occurrences => "occurrences",
     /// Node-simple visited-state limit.
-    Visited,
+    Visited => "visited",
     /// Decoded or retained intermediate-memory byte limit.
-    IntermediateBytes,
+    IntermediateBytes => "intermediate_bytes",
     /// Elapsed request deadline.
-    Deadline,
+    Deadline => "deadline",
     /// Traversal-depth limit.
-    Depth,
+    Depth => "depth",
     /// Encoded-output byte limit.
-    OutputBytes,
+    OutputBytes => "output_bytes",
 }
 
 /// Coverage report with counts consistent with its lifecycle state.
@@ -1813,8 +2056,16 @@ impl CoverageRecord {
             .ok_or(GraphContractError::InvalidCoverage {
                 reason: "coverage counts overflow",
             })?;
+        if state == CoverageState::NoCandidates
+            && relation != Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents))
+        {
+            return Err(GraphContractError::InvalidCoverage {
+                reason: "no-candidates coverage requires the documents relation",
+            });
+        }
         let valid_counts = match state {
             CoverageState::Complete => omitted == 0,
+            CoverageState::NoCandidates => covered == 0 && omitted == 0,
             CoverageState::Partial => covered > 0 && omitted > 0,
             CoverageState::Failed
             | CoverageState::Ignored
@@ -1827,12 +2078,16 @@ impl CoverageRecord {
                 reason: "coverage state contradicts covered and omitted counts",
             });
         }
-        if state == CoverageState::Complete && (reason.is_some() || reached_limit.is_some()) {
+        if matches!(state, CoverageState::Complete | CoverageState::NoCandidates)
+            && (reason.is_some() || reached_limit.is_some())
+        {
             return Err(GraphContractError::InvalidCoverage {
-                reason: "complete coverage cannot report an omission reason or limit",
+                reason: "trusted coverage cannot report an omission reason or limit",
             });
         }
-        if state != CoverageState::Complete && reason.is_none() {
+        if !matches!(state, CoverageState::Complete | CoverageState::NoCandidates)
+            && reason.is_none()
+        {
             return Err(GraphContractError::InvalidCoverage {
                 reason: "non-complete coverage requires an actionable reason",
             });
@@ -2169,7 +2424,7 @@ fn decode_canonical_fields(mut canonical: &str) -> Option<Vec<&str>> {
         }
         canonical = canonical.get(separator + 1..)?;
         if length == 0
-            || length > MAX_IDENTITY_BYTES
+            || length > MAX_GRAPH_IDENTITY_BYTES
             || length > canonical.len()
             || !canonical.is_char_boundary(length)
         {
@@ -2184,7 +2439,9 @@ fn decode_canonical_fields(mut canonical: &str) -> Option<Vec<&str>> {
 
 /// Apply the original identity-field constraints to portable canonical data.
 fn valid_canonical_identity_field(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_IDENTITY_BYTES && !value.chars().any(char::is_control)
+    !value.is_empty()
+        && value.len() <= MAX_GRAPH_IDENTITY_BYTES
+        && !value.chars().any(char::is_control)
 }
 
 /// Append an optional identity field without conflating absent and empty values.
@@ -2234,15 +2491,16 @@ const fn decode_hex(value: u8) -> Option<u8> {
 mod tests {
     use super::{
         CanonicalResolutionKey, Completeness, ConfidenceClass, CoverageRecord, CoverageScope,
-        CoverageState, EntityResolutionKey, EntitySelector, ExtendedRelationKind, ExternalSelector,
-        GraphContractError, GraphEntity, GraphEntityKey, GraphIdentityText, GraphLimitKind,
-        GraphLimits, GraphRelationKind, LogicalRelation, PackageSelector, PortableResolutionKey,
-        ProjectInstanceId, RelationDependencyKey, RelationOccurrence, RelationResolution,
-        RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, ReusableTargetSelector,
-        SourceSpan, StableKey, SymbolSelector,
+        CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
+        ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphEntityKey,
+        GraphIdentityField, GraphIdentityRejection, GraphIdentityRejectionReason,
+        GraphIdentityText, GraphLimitKind, GraphLimits, GraphRelationKind, LogicalRelation,
+        PackageSelector, PortableResolutionKey, ProjectInstanceId, RelationDependencyKey,
+        RelationOccurrence, RelationResolution, RepositoryFilePath, RepositoryNodePath,
+        ResolutionKeyDomain, ReusableTargetSelector, SourceSpan, StableKey, SymbolSelector,
     };
     use crate::IndexGeneration;
-    use crate::symbols::{RelationKind, SymbolKind};
+    use crate::symbols::{ParserKind, RelationKind, SymbolKind};
     use std::io;
     use std::num::NonZeroU32;
     use std::path::Path;
@@ -2740,7 +2998,7 @@ mod tests {
             "control-bearing identity text was accepted",
         )?;
         require(
-            GraphIdentityText::new("x".repeat(super::MAX_IDENTITY_BYTES + 1)).is_err(),
+            GraphIdentityText::new("x".repeat(super::MAX_GRAPH_IDENTITY_BYTES + 1)).is_err(),
             "oversized identity text was accepted",
         )?;
         require(
@@ -2773,6 +3031,71 @@ mod tests {
         require(
             package == serde_json::from_str(&serde_json::to_string(&package)?)?,
             "package selector did not round-trip",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_identity_rejection_wire_names_are_typed_and_stable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        require(
+            serde_json::to_string(&GraphIdentityField::RelationSource)? == r#""relation.source""#,
+            "relation-source field changed its dotted wire name",
+        )?;
+        require(
+            serde_json::from_str::<GraphIdentityField>(r#""relation.target""#)?
+                == GraphIdentityField::RelationTarget,
+            "relation-target field lost its dotted wire name",
+        )?;
+        let rejection = GraphIdentityRejection {
+            path: RepositoryNodePath::new(Path::new("src/lib.rs"))?,
+            span: SourceSpan::new(2, 0, 2, 8)?,
+            parser: ParserKind::TreeSitter,
+            field: GraphIdentityField::RelationTarget,
+            reason: GraphIdentityRejectionReason::ControlCharacters,
+            fact_index: 0,
+        };
+        require(
+            serde_json::from_str::<GraphIdentityRejection>(&serde_json::to_string(&rejection)?)?
+                == rejection,
+            "typed graph rejection did not round-trip",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_limit_kind_inventory_and_stable_names_stay_exhaustive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let serialized = serde_json::to_string(&GraphLimitKind::ALL)?;
+        require(
+            serialized
+                == r#"["rows","nodes","edges","occurrences","visited","intermediate_bytes","deadline","depth","output_bytes"]"#,
+            "graph limit stable protocol drifted without an explicit migration",
+        )?;
+        let mut names = std::collections::BTreeSet::new();
+        for kind in GraphLimitKind::ALL {
+            let stable_name = kind.as_str();
+            require(
+                names.insert(stable_name),
+                "graph limit inventory contains a duplicate stable name",
+            )?;
+            let encoded = serde_json::to_string(&kind)?;
+            require(
+                encoded == format!("\"{stable_name}\""),
+                "graph limit serde spelling drifted from its stable name",
+            )?;
+            require(
+                serde_json::from_str::<GraphLimitKind>(&encoded)? == kind,
+                "graph limit serde value did not round-trip",
+            )?;
+            require(
+                GraphLimitKind::from_stable_name(stable_name) == Some(kind),
+                "graph limit stable-name parsing did not round-trip",
+            )?;
+        }
+        require(
+            GraphLimitKind::from_stable_name("unknown").is_none(),
+            "unknown graph limit stable name was accepted",
         )?;
         Ok(())
     }
@@ -3182,6 +3505,40 @@ mod tests {
     }
 
     #[test]
+    fn documents_relation_and_unresolved_reasons_are_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let documents = GraphRelationKind::Extended(ExtendedRelationKind::Documents);
+        require(
+            GraphRelationKind::ALL.contains(&documents)
+                && documents.as_str() == "extended:documents"
+                && documents.legacy_kind().is_none(),
+            "documents relation was not added as an extended persisted family",
+        )?;
+        require(
+            serde_json::to_string(&documents)?
+                == "{\"scope\":\"extended\",\"value\":\"documents\"}",
+            "documents relation wire spelling drifted",
+        )?;
+
+        for reason in DocumentTargetUnresolvedReason::ALL {
+            require(
+                DocumentTargetUnresolvedReason::from_db(reason.as_str()) == Some(reason),
+                "document unresolved reason did not round-trip",
+            )?;
+            require(
+                serde_json::from_str::<DocumentTargetUnresolvedReason>(&serde_json::to_string(
+                    &reason,
+                )?)? == reason,
+                "document unresolved reason wire spelling did not round-trip",
+            )?;
+        }
+        require(
+            DocumentTargetUnresolvedReason::from_db("external").is_none(),
+            "unsupported document unresolved reason was accepted",
+        )
+    }
+
+    #[test]
     fn coverage_state_enforces_consistent_counts_and_reasons()
     -> Result<(), Box<dyn std::error::Error>> {
         let complete = CoverageRecord::new(
@@ -3195,6 +3552,63 @@ mod tests {
             None,
         )?;
         require(complete.total() == 8, "complete coverage total drifted")?;
+
+        let no_candidates = CoverageRecord::new(
+            CoverageScope::Project,
+            Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+            CoverageState::NoCandidates,
+            0,
+            0,
+            IndexGeneration::new(9),
+            None,
+            None,
+        )?;
+        require(
+            no_candidates.total() == 0,
+            "zero-candidate coverage total drifted",
+        )?;
+        require(
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                CoverageState::NoCandidates,
+                1,
+                0,
+                IndexGeneration::new(9),
+                None,
+                None,
+            )
+            .is_err(),
+            "zero-candidate coverage accepted a covered row",
+        )?;
+        require(
+            CoverageRecord::new(
+                CoverageScope::Project,
+                Some(GraphRelationKind::Extended(ExtendedRelationKind::Documents)),
+                CoverageState::NoCandidates,
+                0,
+                0,
+                IndexGeneration::new(9),
+                Some(GraphIdentityText::new("unexpected reason")?),
+                None,
+            )
+            .is_err(),
+            "zero-candidate coverage accepted an omission reason",
+        )?;
+        require(
+            CoverageRecord::new(
+                CoverageScope::Project,
+                None,
+                CoverageState::NoCandidates,
+                0,
+                0,
+                IndexGeneration::new(9),
+                None,
+                None,
+            )
+            .is_err(),
+            "zero-candidate coverage accepted a non-document relation",
+        )?;
 
         let partial = CoverageRecord::new(
             CoverageScope::Path {

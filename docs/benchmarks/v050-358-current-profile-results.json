@@ -1,0 +1,2827 @@
+{
+  "issue": 358,
+  "scope": "Current optimized Windows resource profile; historical shared-pool rejection remains separate",
+  "preregistration": "v050-358-current-profile-preregistration.json",
+  "cases": {
+    "small": {
+      "corpus": {
+        "files": 7,
+        "bytes": 1503,
+        "identity_kind": "git-tree-manifest-sha256",
+        "tree_sha256": "ab5fc4021855ad75667519cb905d7542536cf7bc4104a33a8e2d8994ca60d050",
+        "git_tree": "ed36b93e8c1ab43e2684e38e6df8ab5574da8b20"
+      },
+      "persistent": {
+        "database_bytes": 667648,
+        "wal_bytes": 0,
+        "shm_bytes": 32768,
+        "staging_bytes": 0,
+        "stage_directories": 0,
+        "total_bytes": 700416
+      },
+      "graph_digest": {
+        "sha256": "6262bbe69cbf2b648a1578e7b89937f817d91d7130f42e0101361dd127a5faa9",
+        "record_count": 245,
+        "table_rows": {
+          "entities": 29,
+          "relations": 19,
+          "occurrences": 19,
+          "resolution_keys": 80,
+          "exports": 79,
+          "dependencies": 13,
+          "coverage": 6,
+          "identity_rejections": 0
+        }
+      },
+      "database_profile": {
+        "page_size": 4096,
+        "page_count": 163,
+        "page_bytes": 667648,
+        "freelist_pages": 0,
+        "freelist_ratio": 0.0,
+        "quick_check": "ok",
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "wal_autocheckpoint": 1000,
+        "sqlite_stat1_present": false,
+        "query_plans": {
+          "entity_path_lookup": {
+            "details": [
+              "SEARCH graph_entities USING INDEX idx_graph_entities_path (repository_path=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          },
+          "outbound_relation_lookup": {
+            "details": [
+              "SEARCH graph_relations USING COVERING INDEX idx_graph_relations_source_kind (source_entity_key=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          },
+          "relation_occurrence_lookup": {
+            "details": [
+              "SEARCH graph_relation_occurrences USING COVERING INDEX sqlite_autoindex_graph_relation_occurrences_1 (relation_key=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          }
+        }
+      },
+      "cold": {
+        "wall_seconds": 0.390582,
+        "cpu_seconds": 0.125,
+        "peak_rss_bytes": 14426112,
+        "peak_private_commit_bytes": 4190208,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 5,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 675849,
+        "process_write_transfer_bytes": 3661768,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 4096,
+          "wal_bytes": 560352,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "reported_parser_workers": 6,
+      "unchanged_watch": {
+        "wall_seconds": 0.229212,
+        "cpu_seconds": 0.09375,
+        "peak_rss_bytes": 9252864,
+        "peak_private_commit_bytes": 2326528,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 4,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 563527,
+        "process_write_transfer_bytes": 0,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 659456,
+          "wal_bytes": 0,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "post_query_telemetry": {
+        "raw_rows": 26,
+        "raw_logical_bytes": 12352
+      },
+      "diagnostic_checks": [
+        {
+          "name": "minimum indexed files",
+          "observed": 7,
+          "operator": ">=",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "full scan wall seconds",
+          "observed": 0.390582,
+          "operator": "<=",
+          "threshold": 30,
+          "passed": true
+        },
+        {
+          "name": "MCP startup milliseconds",
+          "observed": 115.581,
+          "operator": "<=",
+          "threshold": 250,
+          "passed": true
+        },
+        {
+          "name": "full scan peak RSS bytes",
+          "observed": 14426112,
+          "operator": "<=",
+          "threshold": 268435456,
+          "passed": true
+        },
+        {
+          "name": "worker process bound",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 16,
+          "passed": true
+        },
+        {
+          "name": "reported parser workers",
+          "observed": 6,
+          "operator": "<=",
+          "threshold": 16,
+          "passed": true
+        },
+        {
+          "name": "process-tree threads",
+          "observed": 5,
+          "operator": "<=",
+          "threshold": 20,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh wall seconds",
+          "observed": 0.229212,
+          "operator": "<=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "repeated query p95 milliseconds",
+          "observed": 74.844,
+          "operator": "<=",
+          "threshold": 250,
+          "passed": true
+        },
+        {
+          "name": "bounded output bytes",
+          "observed": 1714,
+          "operator": "<=",
+          "threshold": 262144,
+          "passed": true
+        },
+        {
+          "name": "retained RSS growth bytes",
+          "observed": 2551808,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "retained thread growth",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 2,
+          "passed": true
+        },
+        {
+          "name": "retained child process growth",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "persistent bytes",
+          "observed": 700416,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "post-scan database bytes",
+          "observed": 659456,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "final database bytes",
+          "observed": 667648,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "complete terminal scan I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "complete terminal unchanged-refresh I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "full scan source/input read-transfer amplification ratio (reported)",
+          "observed": 449.666667,
+          "operator": "reported",
+          "threshold": null,
+          "passed": true
+        },
+        {
+          "name": "full scan output-efficiency read-transfer ratio",
+          "observed": 1.022528,
+          "operator": "<=",
+          "threshold": 40,
+          "passed": true
+        },
+        {
+          "name": "full scan process read-transfer bytes",
+          "observed": 675849,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "full scan source/input write-transfer amplification ratio (reported)",
+          "observed": 2436.306055,
+          "operator": "reported",
+          "threshold": null,
+          "passed": true
+        },
+        {
+          "name": "full scan output-efficiency write-transfer ratio",
+          "observed": 5.540083,
+          "operator": "<=",
+          "threshold": 32,
+          "passed": true
+        },
+        {
+          "name": "full scan process write-transfer bytes",
+          "observed": 3661768,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh process read-transfer bytes",
+          "observed": 563527,
+          "operator": "<=",
+          "threshold": 1048576,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh process write-transfer bytes",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "peak WAL bytes versus scale database cap",
+          "observed": 560352,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "peak staging bytes versus scale database cap",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "final WAL bytes",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "final graph stages",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "symbol parse timeouts",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "filesystem profile",
+          "observed": "supported_local",
+          "operator": "==",
+          "threshold": "supported_local",
+          "passed": true
+        },
+        {
+          "name": "journal mode",
+          "observed": "wal",
+          "operator": "==",
+          "threshold": "wal",
+          "passed": true
+        },
+        {
+          "name": "schema compatibility",
+          "observed": "current",
+          "operator": "==",
+          "threshold": "current",
+          "passed": true
+        },
+        {
+          "name": "synchronous mode",
+          "observed": "full",
+          "operator": "==",
+          "threshold": "full",
+          "passed": true
+        },
+        {
+          "name": "normal busy timeout milliseconds",
+          "observed": 5000,
+          "operator": "==",
+          "threshold": 5000,
+          "passed": true
+        },
+        {
+          "name": "telemetry busy timeout milliseconds",
+          "observed": 25,
+          "operator": "==",
+          "threshold": 25,
+          "passed": true
+        },
+        {
+          "name": "WAL autocheckpoint pages",
+          "observed": 1000,
+          "operator": "==",
+          "threshold": 1000,
+          "passed": true
+        },
+        {
+          "name": "preregistered telemetry state",
+          "observed": {
+            "raw_rows": 0,
+            "raw_rows_after_queries": 26,
+            "writes_since_checkpoint": 0,
+            "checkpoint_state": "not_due"
+          },
+          "operator": "matches",
+          "threshold": "enabled",
+          "passed": true
+        },
+        {
+          "name": "SQLite statistics policy",
+          "observed": {
+            "policy": "not_configured",
+            "state": "not_initialized",
+            "sqlite_stat1_present": false
+          },
+          "operator": "==",
+          "threshold": {
+            "policy": "not_configured",
+            "state": "not_initialized",
+            "sqlite_stat1_present": false
+          },
+          "passed": true
+        },
+        {
+          "name": "database quick check",
+          "observed": "ok",
+          "operator": "==",
+          "threshold": "ok",
+          "passed": true
+        },
+        {
+          "name": "representative SQLite query plans",
+          "observed": {
+            "shape_count": 3,
+            "all_use_index": true,
+            "temporary_btree": false
+          },
+          "operator": "==",
+          "threshold": {
+            "shape_count": 3,
+            "all_use_index": true,
+            "temporary_btree": false
+          },
+          "passed": true
+        },
+        {
+          "name": "database page bytes",
+          "observed": 667648,
+          "operator": "==",
+          "threshold": 667648,
+          "passed": true
+        },
+        {
+          "name": "database freelist ratio",
+          "observed": 0.0,
+          "operator": "<=",
+          "threshold": 0.05,
+          "passed": true
+        },
+        {
+          "name": "maximum indexed files",
+          "observed": 7,
+          "operator": "<=",
+          "threshold": 100,
+          "passed": true
+        },
+        {
+          "name": "stable publication starts complete",
+          "observed": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 1,
+            "authored_purpose_revision": 0
+          },
+          "operator": "complete",
+          "threshold": "stable complete publication with fingerprint",
+          "passed": true
+        },
+        {
+          "name": "publication remains stable across repeated queries",
+          "observed": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 1,
+            "authored_purpose_revision": 0
+          },
+          "operator": "==",
+          "threshold": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 1,
+            "authored_purpose_revision": 0
+          },
+          "passed": true
+        },
+        {
+          "name": "bounded query process read bytes",
+          "observed": 3331847,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "bounded query active nodes",
+          "observed": 1,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "bounded query visited nodes",
+          "observed": 1,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "fallback search runs",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "fallback search reports selected text bytes",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "fallback selected text bytes",
+          "observed": 1392,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "fallback search seconds",
+          "observed": 0.076979,
+          "operator": "<=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "relation query runs",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "relation requested rows",
+          "observed": 4,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "relation returned rows",
+          "observed": 3,
+          "operator": "<=",
+          "threshold": 256,
+          "passed": true
+        },
+        {
+          "name": "relation decoded bytes",
+          "observed": 376,
+          "operator": "<=",
+          "threshold": 262144,
+          "passed": true
+        },
+        {
+          "name": "relation hydrated entities",
+          "observed": 2,
+          "operator": "<=",
+          "threshold": 64,
+          "passed": true
+        },
+        {
+          "name": "relation hydrated purpose paths",
+          "observed": 3,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    "medium": {
+      "corpus": {
+        "files": 1028,
+        "bytes": 101548,
+        "identity_kind": "git-tree-manifest-sha256",
+        "tree_sha256": "30ff7d8f9a4bd3aedce5d47bf5c340bf97d4500c8c9b45e499bdc34b85ad5e43",
+        "git_tree": "f2047a675c127726aa804e20ca6e050b65c7fe18",
+        "caller_files": 1024
+      },
+      "persistent": {
+        "database_bytes": 19136512,
+        "wal_bytes": 0,
+        "shm_bytes": 32768,
+        "staging_bytes": 0,
+        "stage_directories": 0,
+        "total_bytes": 19169280
+      },
+      "graph_digest": {
+        "sha256": "54b61d877b60dff12c033f7906372ecbbc9df394af893c548a467c9489dcc3d2",
+        "record_count": 30772,
+        "table_rows": {
+          "entities": 3082,
+          "relations": 2048,
+          "occurrences": 2048,
+          "resolution_keys": 10260,
+          "exports": 10259,
+          "dependencies": 2048,
+          "coverage": 1027,
+          "identity_rejections": 0
+        }
+      },
+      "database_profile": {
+        "page_size": 4096,
+        "page_count": 4672,
+        "page_bytes": 19136512,
+        "freelist_pages": 92,
+        "freelist_ratio": 0.019692,
+        "quick_check": "ok",
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "wal_autocheckpoint": 1000,
+        "sqlite_stat1_present": false,
+        "query_plans": {
+          "entity_path_lookup": {
+            "details": [
+              "SEARCH graph_entities USING INDEX idx_graph_entities_path (repository_path=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          },
+          "outbound_relation_lookup": {
+            "details": [
+              "SEARCH graph_relations USING COVERING INDEX idx_graph_relations_source_kind (source_entity_key=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          },
+          "relation_occurrence_lookup": {
+            "details": [
+              "SEARCH graph_relation_occurrences USING COVERING INDEX sqlite_autoindex_graph_relation_occurrences_1 (relation_key=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          }
+        }
+      },
+      "cold": {
+        "wall_seconds": 2.339334,
+        "cpu_seconds": 2.0,
+        "peak_rss_bytes": 40603648,
+        "peak_private_commit_bytes": 31326208,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 20,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 102072286,
+        "process_write_transfer_bytes": 450857800,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 17940480,
+          "wal_bytes": 18342272,
+          "shm_bytes": 65536,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "reported_parser_workers": 16,
+      "unchanged_watch": {
+        "wall_seconds": 0.288656,
+        "cpu_seconds": 0.34375,
+        "peak_rss_bytes": 12673024,
+        "peak_private_commit_bytes": 3260416,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 4,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 1167373,
+        "process_write_transfer_bytes": 0,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 17940480,
+          "wal_bytes": 0,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "narrow_watch": {
+        "wall_seconds": 1.134229,
+        "cpu_seconds": 0.1875,
+        "peak_rss_bytes": 22536192,
+        "peak_private_commit_bytes": 11624448,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 5,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 6089612,
+        "process_write_transfer_bytes": 1023332,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 18374656,
+          "wal_bytes": 16409992,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "expanded_guidance": {
+        "wall_seconds": 1.712198,
+        "cpu_seconds": 0.640625,
+        "peak_rss_bytes": 22749184,
+        "peak_private_commit_bytes": 11816960,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 6,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 23057085,
+        "process_write_transfer_bytes": 0,
+        "terminal_io_complete": true,
+        "returncode": 1,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 18718720,
+          "wal_bytes": 16541832,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "explicit_rebuild": {
+        "wall_seconds": 2.199476,
+        "cpu_seconds": 2.5625,
+        "peak_rss_bytes": 40763392,
+        "peak_private_commit_bytes": 32436224,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 20,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 147115884,
+        "process_write_transfer_bytes": 530491560,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 19136512,
+          "wal_bytes": 18148632,
+          "shm_bytes": 65536,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "post_query_telemetry": {
+        "raw_rows": 26,
+        "raw_logical_bytes": 12172
+      },
+      "diagnostic_checks": [
+        {
+          "name": "minimum indexed files",
+          "observed": 1028,
+          "operator": ">=",
+          "threshold": 1000,
+          "passed": true
+        },
+        {
+          "name": "full scan wall seconds",
+          "observed": 2.339334,
+          "operator": "<=",
+          "threshold": 180,
+          "passed": true
+        },
+        {
+          "name": "MCP startup milliseconds",
+          "observed": 107.963,
+          "operator": "<=",
+          "threshold": 250,
+          "passed": true
+        },
+        {
+          "name": "full scan peak RSS bytes",
+          "observed": 40603648,
+          "operator": "<=",
+          "threshold": 268435456,
+          "passed": true
+        },
+        {
+          "name": "worker process bound",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 16,
+          "passed": true
+        },
+        {
+          "name": "reported parser workers",
+          "observed": 16,
+          "operator": "<=",
+          "threshold": 16,
+          "passed": true
+        },
+        {
+          "name": "process-tree threads",
+          "observed": 20,
+          "operator": "<=",
+          "threshold": 20,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh wall seconds",
+          "observed": 0.288656,
+          "operator": "<=",
+          "threshold": 30,
+          "passed": true
+        },
+        {
+          "name": "repeated query p95 milliseconds",
+          "observed": 76.939,
+          "operator": "<=",
+          "threshold": 500,
+          "passed": true
+        },
+        {
+          "name": "bounded output bytes",
+          "observed": 36052,
+          "operator": "<=",
+          "threshold": 262144,
+          "passed": true
+        },
+        {
+          "name": "retained RSS growth bytes",
+          "observed": 3981312,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "retained thread growth",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 2,
+          "passed": true
+        },
+        {
+          "name": "retained child process growth",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "persistent bytes",
+          "observed": 19169280,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "post-scan database bytes",
+          "observed": 17940480,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "final database bytes",
+          "observed": 19136512,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "complete terminal scan I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "complete terminal unchanged-refresh I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "full scan source/input read-transfer amplification ratio (reported)",
+          "observed": 1005.162938,
+          "operator": "reported",
+          "threshold": null,
+          "passed": true
+        },
+        {
+          "name": "full scan output-efficiency read-transfer ratio",
+          "observed": 5.657473,
+          "operator": "<=",
+          "threshold": 40,
+          "passed": true
+        },
+        {
+          "name": "full scan process read-transfer bytes",
+          "observed": 102072286,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "full scan source/input write-transfer amplification ratio (reported)",
+          "observed": 4439.849135,
+          "operator": "reported",
+          "threshold": null,
+          "passed": true
+        },
+        {
+          "name": "full scan output-efficiency write-transfer ratio",
+          "observed": 24.989308,
+          "operator": "<=",
+          "threshold": 32,
+          "passed": true
+        },
+        {
+          "name": "full scan process write-transfer bytes",
+          "observed": 450857800,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh process read-transfer bytes",
+          "observed": 1167373,
+          "operator": "<=",
+          "threshold": 4194304,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh process write-transfer bytes",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "peak WAL bytes versus scale database cap",
+          "observed": 18342272,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "peak staging bytes versus scale database cap",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "final WAL bytes",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "final graph stages",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "symbol parse timeouts",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "filesystem profile",
+          "observed": "supported_local",
+          "operator": "==",
+          "threshold": "supported_local",
+          "passed": true
+        },
+        {
+          "name": "journal mode",
+          "observed": "wal",
+          "operator": "==",
+          "threshold": "wal",
+          "passed": true
+        },
+        {
+          "name": "schema compatibility",
+          "observed": "current",
+          "operator": "==",
+          "threshold": "current",
+          "passed": true
+        },
+        {
+          "name": "synchronous mode",
+          "observed": "full",
+          "operator": "==",
+          "threshold": "full",
+          "passed": true
+        },
+        {
+          "name": "normal busy timeout milliseconds",
+          "observed": 5000,
+          "operator": "==",
+          "threshold": 5000,
+          "passed": true
+        },
+        {
+          "name": "telemetry busy timeout milliseconds",
+          "observed": 25,
+          "operator": "==",
+          "threshold": 25,
+          "passed": true
+        },
+        {
+          "name": "WAL autocheckpoint pages",
+          "observed": 1000,
+          "operator": "==",
+          "threshold": 1000,
+          "passed": true
+        },
+        {
+          "name": "preregistered telemetry state",
+          "observed": {
+            "raw_rows": 0,
+            "raw_rows_after_queries": 26,
+            "writes_since_checkpoint": 0,
+            "checkpoint_state": "not_due"
+          },
+          "operator": "matches",
+          "threshold": "enabled",
+          "passed": true
+        },
+        {
+          "name": "SQLite statistics policy",
+          "observed": {
+            "policy": "not_configured",
+            "state": "not_initialized",
+            "sqlite_stat1_present": false
+          },
+          "operator": "==",
+          "threshold": {
+            "policy": "not_configured",
+            "state": "not_initialized",
+            "sqlite_stat1_present": false
+          },
+          "passed": true
+        },
+        {
+          "name": "database quick check",
+          "observed": "ok",
+          "operator": "==",
+          "threshold": "ok",
+          "passed": true
+        },
+        {
+          "name": "representative SQLite query plans",
+          "observed": {
+            "shape_count": 3,
+            "all_use_index": true,
+            "temporary_btree": false
+          },
+          "operator": "==",
+          "threshold": {
+            "shape_count": 3,
+            "all_use_index": true,
+            "temporary_btree": false
+          },
+          "passed": true
+        },
+        {
+          "name": "database page bytes",
+          "observed": 19136512,
+          "operator": "==",
+          "threshold": 19136512,
+          "passed": true
+        },
+        {
+          "name": "database freelist ratio",
+          "observed": 0.019692,
+          "operator": "<=",
+          "threshold": 0.05,
+          "passed": true
+        },
+        {
+          "name": "scan one-core CPU percent",
+          "observed": 85.494,
+          "operator": ">=",
+          "threshold": 60,
+          "passed": true
+        },
+        {
+          "name": "stable publication starts complete",
+          "observed": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 5,
+            "authored_purpose_revision": 0
+          },
+          "operator": "complete",
+          "threshold": "stable complete publication with fingerprint",
+          "passed": true
+        },
+        {
+          "name": "publication remains stable across repeated queries",
+          "observed": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 5,
+            "authored_purpose_revision": 0
+          },
+          "operator": "==",
+          "threshold": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 5,
+            "authored_purpose_revision": 0
+          },
+          "passed": true
+        },
+        {
+          "name": "bounded query process read bytes",
+          "observed": 3749765,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "bounded query active nodes",
+          "observed": 21,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "bounded query visited nodes",
+          "observed": 21,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "fallback search runs",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "fallback search reports selected text bytes",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "fallback selected text bytes",
+          "observed": 1671,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "fallback search seconds",
+          "observed": 0.073224,
+          "operator": "<=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "relation query runs",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "relation requested rows",
+          "observed": 44,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "relation returned rows",
+          "observed": 63,
+          "operator": "<=",
+          "threshold": 256,
+          "passed": true
+        },
+        {
+          "name": "relation decoded bytes",
+          "observed": 26736,
+          "operator": "<=",
+          "threshold": 262144,
+          "passed": true
+        },
+        {
+          "name": "relation hydrated entities",
+          "observed": 45,
+          "operator": "<=",
+          "threshold": 64,
+          "passed": true
+        },
+        {
+          "name": "relation hydrated purpose paths",
+          "observed": 66,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "complete narrow terminal I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "narrow text candidates",
+          "observed": 1,
+          "operator": "==",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "narrow parsed source files",
+          "observed": 1,
+          "operator": "==",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "narrow watcher readiness publication",
+          "observed": 2,
+          "operator": "==",
+          "threshold": 2,
+          "passed": true
+        },
+        {
+          "name": "narrow publication generation",
+          "observed": 3,
+          "operator": "==",
+          "threshold": 3,
+          "passed": true
+        },
+        {
+          "name": "narrow watcher backend",
+          "observed": "notify",
+          "operator": "==",
+          "threshold": "notify",
+          "passed": true
+        },
+        {
+          "name": "narrow relation resolution",
+          "observed": {
+            "resolved": 2048
+          },
+          "operator": "==",
+          "threshold": {
+            "resolved": 2048
+          },
+          "passed": true
+        },
+        {
+          "name": "narrow edit-to-refresh seconds",
+          "observed": 1.134229,
+          "operator": "<=",
+          "threshold": 30,
+          "passed": true
+        },
+        {
+          "name": "narrow refresh process read-transfer bytes",
+          "observed": 6089612,
+          "operator": "<=",
+          "threshold": 8388608,
+          "passed": true
+        },
+        {
+          "name": "narrow refresh process write-transfer bytes",
+          "observed": 1023332,
+          "operator": "<=",
+          "threshold": 2097152,
+          "passed": true
+        },
+        {
+          "name": "publication writer probe attempts",
+          "observed": 47,
+          "operator": ">",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "publication writer-unavailable upper bound seconds",
+          "observed": 0.035621,
+          "operator": "<=",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "expanded watcher readiness publication",
+          "observed": 4,
+          "operator": "==",
+          "threshold": 4,
+          "passed": true
+        },
+        {
+          "name": "complete expanded terminal I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "expanded closure guidance scope",
+          "observed": "full",
+          "operator": "==",
+          "threshold": "full",
+          "passed": true
+        },
+        {
+          "name": "expanded closure changed graph footprint",
+          "observed": 10001,
+          "operator": ">",
+          "threshold": 1024,
+          "passed": true
+        },
+        {
+          "name": "expanded closure modified graph footprint",
+          "observed": 10001,
+          "operator": "==",
+          "threshold": 10001,
+          "passed": true
+        },
+        {
+          "name": "expanded closure added graph footprint",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "expanded closure removed graph footprint",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "expanded closure sample path count",
+          "observed": 8,
+          "operator": "between",
+          "threshold": "1..1024",
+          "passed": true
+        },
+        {
+          "name": "expanded closure sample identifies fixture source",
+          "observed": [
+            ".projectatlas/projectatlas.db",
+            ".projectatlas/projectatlas.db-wal",
+            "src/caller_0000.rs",
+            "src/caller_0001.rs",
+            "src/caller_0002.rs",
+            "src/caller_0003.rs",
+            "src/caller_0004.rs",
+            "src/caller_0005.rs"
+          ],
+          "operator": "contains",
+          "threshold": "src/hub.rs or src/caller_*.rs",
+          "passed": true
+        },
+        {
+          "name": "expanded closure returns refresh guidance",
+          "observed": "refresh_required",
+          "operator": "==",
+          "threshold": "refresh_required",
+          "passed": true
+        },
+        {
+          "name": "expanded closure guidance reason",
+          "observed": "dependency_closure_limit",
+          "operator": "==",
+          "threshold": "dependency_closure_limit",
+          "passed": true
+        },
+        {
+          "name": "expanded guidance preserves generation",
+          "observed": 4,
+          "operator": "==",
+          "threshold": 4,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance wall seconds",
+          "observed": 1.712198,
+          "operator": "<=",
+          "threshold": 180,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance process read-transfer bytes",
+          "observed": 23057085,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance process write-transfer bytes",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 2097152,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance writer probe attempts",
+          "observed": 74,
+          "operator": ">",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance writer-unavailable seconds",
+          "observed": 0.040791,
+          "operator": "<=",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "complete rebuild terminal I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild generation",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild resolved relations",
+          "observed": 1024,
+          "operator": "==",
+          "threshold": 1024,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild unresolved relations",
+          "observed": 1024,
+          "operator": "==",
+          "threshold": 1024,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild wall seconds",
+          "observed": 2.199476,
+          "operator": "<=",
+          "threshold": 180,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild input-efficiency read-transfer ratio",
+          "observed": 7.816838,
+          "operator": "<=",
+          "threshold": 40,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild process read-transfer bytes",
+          "observed": 147115884,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": false
+        },
+        {
+          "name": "explicit rebuild input-efficiency write-transfer ratio",
+          "observed": 28.187077,
+          "operator": "<=",
+          "threshold": 32,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild process write-transfer bytes",
+          "observed": 530491560,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "incremental and rebuild leave no graph stage",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        }
+      ],
+      "passed": false
+    },
+    "large": {
+      "corpus": {
+        "files": 4100,
+        "bytes": 405676,
+        "identity_kind": "git-tree-manifest-sha256",
+        "tree_sha256": "321c30c0b647f02dcf0164fa90d41cbb242430d1de687418a6c04b66ac30467e",
+        "git_tree": "fa59dfa2a35624d5f316931ee76768a3e89286e0",
+        "caller_files": 4096
+      },
+      "persistent": {
+        "database_bytes": 72572928,
+        "wal_bytes": 0,
+        "shm_bytes": 32768,
+        "staging_bytes": 0,
+        "stage_directories": 0,
+        "total_bytes": 72605696
+      },
+      "graph_digest": {
+        "sha256": "5d9a71f10dea9e9d4f0508b99c12faad68c9f0e571cfe4b010a87914632ae81c",
+        "record_count": 122253,
+        "table_rows": {
+          "entities": 12201,
+          "relations": 8192,
+          "occurrences": 8192,
+          "resolution_keys": 40689,
+          "exports": 40688,
+          "dependencies": 8192,
+          "coverage": 4099,
+          "identity_rejections": 0
+        }
+      },
+      "database_profile": {
+        "page_size": 4096,
+        "page_count": 17718,
+        "page_bytes": 72572928,
+        "freelist_pages": 433,
+        "freelist_ratio": 0.024438,
+        "quick_check": "ok",
+        "journal_mode": "wal",
+        "synchronous": 2,
+        "wal_autocheckpoint": 1000,
+        "sqlite_stat1_present": false,
+        "query_plans": {
+          "entity_path_lookup": {
+            "details": [
+              "SEARCH graph_entities USING INDEX idx_graph_entities_path (repository_path=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          },
+          "outbound_relation_lookup": {
+            "details": [
+              "SEARCH graph_relations USING COVERING INDEX idx_graph_relations_source_kind (source_entity_key=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          },
+          "relation_occurrence_lookup": {
+            "details": [
+              "SEARCH graph_relation_occurrences USING COVERING INDEX sqlite_autoindex_graph_relation_occurrences_1 (relation_key=?)"
+            ],
+            "uses_temporary_btree": false,
+            "uses_index": true
+          }
+        }
+      },
+      "cold": {
+        "wall_seconds": 10.467258,
+        "cpu_seconds": 10.984375,
+        "peak_rss_bytes": 130793472,
+        "peak_private_commit_bytes": 126627840,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 20,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 900325430,
+        "process_write_transfer_bytes": 2185769564,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 69685248,
+          "wal_bytes": 70390232,
+          "shm_bytes": 163840,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "reported_parser_workers": 16,
+      "unchanged_watch": {
+        "wall_seconds": 0.289354,
+        "cpu_seconds": 0.640625,
+        "peak_rss_bytes": 16715776,
+        "peak_private_commit_bytes": 11091968,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 20,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 2987021,
+        "process_write_transfer_bytes": 0,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 69685248,
+          "wal_bytes": 0,
+          "shm_bytes": 32768,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "narrow_watch": {
+        "wall_seconds": 1.424903,
+        "cpu_seconds": 0.796875,
+        "peak_rss_bytes": 31698944,
+        "peak_private_commit_bytes": 25882624,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 21,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 141647756,
+        "process_write_transfer_bytes": 1642048,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 71262208,
+          "wal_bytes": 64272032,
+          "shm_bytes": 131072,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "expanded_guidance": {
+        "wall_seconds": 8.441561,
+        "cpu_seconds": 7.25,
+        "peak_rss_bytes": 30519296,
+        "peak_private_commit_bytes": 18653184,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 5,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 4216980157,
+        "process_write_transfer_bytes": 0,
+        "terminal_io_complete": true,
+        "returncode": 1,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 72572928,
+          "wal_bytes": 64799392,
+          "shm_bytes": 131072,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "explicit_rebuild": {
+        "wall_seconds": 11.839484,
+        "cpu_seconds": 13.359375,
+        "peak_rss_bytes": 130859008,
+        "peak_private_commit_bytes": 126742528,
+        "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+        "peak_threads": 20,
+        "peak_processes": 1,
+        "worker_process_bound": 0,
+        "process_read_transfer_bytes": 1335591316,
+        "process_write_transfer_bytes": 2656418860,
+        "terminal_io_complete": true,
+        "returncode": 0,
+        "timed_out": false,
+        "peak_storage": {
+          "database_bytes": 72572928,
+          "wal_bytes": 70979392,
+          "shm_bytes": 163840,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        }
+      },
+      "post_query_telemetry": {
+        "raw_rows": 26,
+        "raw_logical_bytes": 12172
+      },
+      "diagnostic_checks": [
+        {
+          "name": "minimum indexed files",
+          "observed": 4100,
+          "operator": ">=",
+          "threshold": 1000,
+          "passed": true
+        },
+        {
+          "name": "full scan wall seconds",
+          "observed": 10.467258,
+          "operator": "<=",
+          "threshold": 180,
+          "passed": true
+        },
+        {
+          "name": "MCP startup milliseconds",
+          "observed": 108.971,
+          "operator": "<=",
+          "threshold": 250,
+          "passed": true
+        },
+        {
+          "name": "full scan peak RSS bytes",
+          "observed": 130793472,
+          "operator": "<=",
+          "threshold": 268435456,
+          "passed": true
+        },
+        {
+          "name": "worker process bound",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 16,
+          "passed": true
+        },
+        {
+          "name": "reported parser workers",
+          "observed": 16,
+          "operator": "<=",
+          "threshold": 16,
+          "passed": true
+        },
+        {
+          "name": "process-tree threads",
+          "observed": 20,
+          "operator": "<=",
+          "threshold": 20,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh wall seconds",
+          "observed": 0.289354,
+          "operator": "<=",
+          "threshold": 30,
+          "passed": true
+        },
+        {
+          "name": "repeated query p95 milliseconds",
+          "observed": 97.109,
+          "operator": "<=",
+          "threshold": 500,
+          "passed": true
+        },
+        {
+          "name": "bounded output bytes",
+          "observed": 36084,
+          "operator": "<=",
+          "threshold": 262144,
+          "passed": true
+        },
+        {
+          "name": "retained RSS growth bytes",
+          "observed": 4378624,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "retained thread growth",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 2,
+          "passed": true
+        },
+        {
+          "name": "retained child process growth",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "persistent bytes",
+          "observed": 72605696,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "post-scan database bytes",
+          "observed": 69685248,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "final database bytes",
+          "observed": 72572928,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "complete terminal scan I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "complete terminal unchanged-refresh I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "full scan source/input read-transfer amplification ratio (reported)",
+          "observed": 2219.321404,
+          "operator": "reported",
+          "threshold": null,
+          "passed": true
+        },
+        {
+          "name": "full scan output-efficiency read-transfer ratio",
+          "observed": 12.845107,
+          "operator": "<=",
+          "threshold": 40,
+          "passed": true
+        },
+        {
+          "name": "full scan process read-transfer bytes",
+          "observed": 900325430,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": false
+        },
+        {
+          "name": "full scan source/input write-transfer amplification ratio (reported)",
+          "observed": 5387.968635,
+          "operator": "reported",
+          "threshold": null,
+          "passed": true
+        },
+        {
+          "name": "full scan output-efficiency write-transfer ratio",
+          "observed": 31.184773,
+          "operator": "<=",
+          "threshold": 32,
+          "passed": true
+        },
+        {
+          "name": "full scan process write-transfer bytes",
+          "observed": 2185769564,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": false
+        },
+        {
+          "name": "unchanged refresh process read-transfer bytes",
+          "observed": 2987021,
+          "operator": "<=",
+          "threshold": 4194304,
+          "passed": true
+        },
+        {
+          "name": "unchanged refresh process write-transfer bytes",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "peak WAL bytes versus scale database cap",
+          "observed": 70390232,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "peak staging bytes versus scale database cap",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": true
+        },
+        {
+          "name": "final WAL bytes",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "final graph stages",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "symbol parse timeouts",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "filesystem profile",
+          "observed": "supported_local",
+          "operator": "==",
+          "threshold": "supported_local",
+          "passed": true
+        },
+        {
+          "name": "journal mode",
+          "observed": "wal",
+          "operator": "==",
+          "threshold": "wal",
+          "passed": true
+        },
+        {
+          "name": "schema compatibility",
+          "observed": "current",
+          "operator": "==",
+          "threshold": "current",
+          "passed": true
+        },
+        {
+          "name": "synchronous mode",
+          "observed": "full",
+          "operator": "==",
+          "threshold": "full",
+          "passed": true
+        },
+        {
+          "name": "normal busy timeout milliseconds",
+          "observed": 5000,
+          "operator": "==",
+          "threshold": 5000,
+          "passed": true
+        },
+        {
+          "name": "telemetry busy timeout milliseconds",
+          "observed": 25,
+          "operator": "==",
+          "threshold": 25,
+          "passed": true
+        },
+        {
+          "name": "WAL autocheckpoint pages",
+          "observed": 1000,
+          "operator": "==",
+          "threshold": 1000,
+          "passed": true
+        },
+        {
+          "name": "preregistered telemetry state",
+          "observed": {
+            "raw_rows": 0,
+            "raw_rows_after_queries": 26,
+            "writes_since_checkpoint": 0,
+            "checkpoint_state": "not_due"
+          },
+          "operator": "matches",
+          "threshold": "enabled",
+          "passed": true
+        },
+        {
+          "name": "SQLite statistics policy",
+          "observed": {
+            "policy": "not_configured",
+            "state": "not_initialized",
+            "sqlite_stat1_present": false
+          },
+          "operator": "==",
+          "threshold": {
+            "policy": "not_configured",
+            "state": "not_initialized",
+            "sqlite_stat1_present": false
+          },
+          "passed": true
+        },
+        {
+          "name": "database quick check",
+          "observed": "ok",
+          "operator": "==",
+          "threshold": "ok",
+          "passed": true
+        },
+        {
+          "name": "representative SQLite query plans",
+          "observed": {
+            "shape_count": 3,
+            "all_use_index": true,
+            "temporary_btree": false
+          },
+          "operator": "==",
+          "threshold": {
+            "shape_count": 3,
+            "all_use_index": true,
+            "temporary_btree": false
+          },
+          "passed": true
+        },
+        {
+          "name": "database page bytes",
+          "observed": 72572928,
+          "operator": "==",
+          "threshold": 72572928,
+          "passed": true
+        },
+        {
+          "name": "database freelist ratio",
+          "observed": 0.024438,
+          "operator": "<=",
+          "threshold": 0.05,
+          "passed": true
+        },
+        {
+          "name": "scan one-core CPU percent",
+          "observed": 104.94,
+          "operator": ">=",
+          "threshold": 60,
+          "passed": true
+        },
+        {
+          "name": "stable publication starts complete",
+          "observed": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 5,
+            "authored_purpose_revision": 0
+          },
+          "operator": "complete",
+          "threshold": "stable complete publication with fingerprint",
+          "passed": true
+        },
+        {
+          "name": "publication remains stable across repeated queries",
+          "observed": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 5,
+            "authored_purpose_revision": 0
+          },
+          "operator": "==",
+          "threshold": {
+            "state": "complete",
+            "contract_fingerprint": "50eec2f00e1b8e67c629248bf5ffae7e78b58303366a38a53e7e0653481281ed",
+            "generation": 5,
+            "authored_purpose_revision": 0
+          },
+          "passed": true
+        },
+        {
+          "name": "bounded query process read bytes",
+          "observed": 4272547,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": true
+        },
+        {
+          "name": "bounded query active nodes",
+          "observed": 21,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "bounded query visited nodes",
+          "observed": 21,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "fallback search runs",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "fallback search reports selected text bytes",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "fallback selected text bytes",
+          "observed": 1671,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": true
+        },
+        {
+          "name": "fallback search seconds",
+          "observed": 0.073895,
+          "operator": "<=",
+          "threshold": 10,
+          "passed": true
+        },
+        {
+          "name": "relation query runs",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "relation requested rows",
+          "observed": 44,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "relation returned rows",
+          "observed": 63,
+          "operator": "<=",
+          "threshold": 256,
+          "passed": true
+        },
+        {
+          "name": "relation decoded bytes",
+          "observed": 26736,
+          "operator": "<=",
+          "threshold": 262144,
+          "passed": true
+        },
+        {
+          "name": "relation hydrated entities",
+          "observed": 45,
+          "operator": "<=",
+          "threshold": 64,
+          "passed": true
+        },
+        {
+          "name": "relation hydrated purpose paths",
+          "observed": 66,
+          "operator": "<=",
+          "threshold": 128,
+          "passed": true
+        },
+        {
+          "name": "complete narrow terminal I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "narrow text candidates",
+          "observed": 1,
+          "operator": "==",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "narrow parsed source files",
+          "observed": 1,
+          "operator": "==",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "narrow watcher readiness publication",
+          "observed": 2,
+          "operator": "==",
+          "threshold": 2,
+          "passed": true
+        },
+        {
+          "name": "narrow publication generation",
+          "observed": 3,
+          "operator": "==",
+          "threshold": 3,
+          "passed": true
+        },
+        {
+          "name": "narrow watcher backend",
+          "observed": "notify",
+          "operator": "==",
+          "threshold": "notify",
+          "passed": true
+        },
+        {
+          "name": "narrow relation resolution",
+          "observed": {
+            "resolved": 8192
+          },
+          "operator": "==",
+          "threshold": {
+            "resolved": 8192
+          },
+          "passed": true
+        },
+        {
+          "name": "narrow edit-to-refresh seconds",
+          "observed": 1.424903,
+          "operator": "<=",
+          "threshold": 30,
+          "passed": true
+        },
+        {
+          "name": "narrow refresh process read-transfer bytes",
+          "observed": 141647756,
+          "operator": "<=",
+          "threshold": 8388608,
+          "passed": false
+        },
+        {
+          "name": "narrow refresh process write-transfer bytes",
+          "observed": 1642048,
+          "operator": "<=",
+          "threshold": 2097152,
+          "passed": true
+        },
+        {
+          "name": "publication writer probe attempts",
+          "observed": 57,
+          "operator": ">",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "publication writer-unavailable upper bound seconds",
+          "observed": 0.12234,
+          "operator": "<=",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "expanded watcher readiness publication",
+          "observed": 4,
+          "operator": "==",
+          "threshold": 4,
+          "passed": true
+        },
+        {
+          "name": "complete expanded terminal I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "expanded closure guidance scope",
+          "observed": "full",
+          "operator": "==",
+          "threshold": "full",
+          "passed": true
+        },
+        {
+          "name": "expanded closure changed graph footprint",
+          "observed": 10001,
+          "operator": ">",
+          "threshold": 4096,
+          "passed": true
+        },
+        {
+          "name": "expanded closure modified graph footprint",
+          "observed": 10001,
+          "operator": "==",
+          "threshold": 10001,
+          "passed": true
+        },
+        {
+          "name": "expanded closure added graph footprint",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "expanded closure removed graph footprint",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "expanded closure sample path count",
+          "observed": 8,
+          "operator": "between",
+          "threshold": "1..4096",
+          "passed": true
+        },
+        {
+          "name": "expanded closure sample identifies fixture source",
+          "observed": [
+            ".projectatlas/projectatlas.db",
+            ".projectatlas/projectatlas.db-shm",
+            ".projectatlas/projectatlas.db-wal",
+            "src/caller_0000.rs",
+            "src/caller_0001.rs",
+            "src/caller_0002.rs",
+            "src/caller_0003.rs",
+            "src/caller_0004.rs"
+          ],
+          "operator": "contains",
+          "threshold": "src/hub.rs or src/caller_*.rs",
+          "passed": true
+        },
+        {
+          "name": "expanded closure returns refresh guidance",
+          "observed": "refresh_required",
+          "operator": "==",
+          "threshold": "refresh_required",
+          "passed": true
+        },
+        {
+          "name": "expanded closure guidance reason",
+          "observed": "dependency_closure_limit",
+          "operator": "==",
+          "threshold": "dependency_closure_limit",
+          "passed": true
+        },
+        {
+          "name": "expanded guidance preserves generation",
+          "observed": 4,
+          "operator": "==",
+          "threshold": 4,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance wall seconds",
+          "observed": 8.441561,
+          "operator": "<=",
+          "threshold": 180,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance process read-transfer bytes",
+          "observed": 4216980157,
+          "operator": "<=",
+          "threshold": 67108864,
+          "passed": false
+        },
+        {
+          "name": "expanded guidance process write-transfer bytes",
+          "observed": 0,
+          "operator": "<=",
+          "threshold": 2097152,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance writer probe attempts",
+          "observed": 364,
+          "operator": ">",
+          "threshold": 0,
+          "passed": true
+        },
+        {
+          "name": "expanded guidance writer-unavailable seconds",
+          "observed": 0.039584,
+          "operator": "<=",
+          "threshold": 1,
+          "passed": true
+        },
+        {
+          "name": "complete rebuild terminal I/O observation",
+          "observed": true,
+          "operator": "==",
+          "threshold": true,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild generation",
+          "observed": 5,
+          "operator": "==",
+          "threshold": 5,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild resolved relations",
+          "observed": 4096,
+          "operator": "==",
+          "threshold": 4096,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild unresolved relations",
+          "observed": 4096,
+          "operator": "==",
+          "threshold": 4096,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild wall seconds",
+          "observed": 11.839484,
+          "operator": "<=",
+          "threshold": 180,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild input-efficiency read-transfer ratio",
+          "observed": 18.301107,
+          "operator": "<=",
+          "threshold": 40,
+          "passed": true
+        },
+        {
+          "name": "explicit rebuild process read-transfer bytes",
+          "observed": 1335591316,
+          "operator": "<=",
+          "threshold": 134217728,
+          "passed": false
+        },
+        {
+          "name": "explicit rebuild input-efficiency write-transfer ratio",
+          "observed": 36.399911,
+          "operator": "<=",
+          "threshold": 32,
+          "passed": false
+        },
+        {
+          "name": "explicit rebuild process write-transfer bytes",
+          "observed": 2656418860,
+          "operator": "<=",
+          "threshold": 536870912,
+          "passed": false
+        },
+        {
+          "name": "incremental and rebuild leave no graph stage",
+          "observed": 0,
+          "operator": "==",
+          "threshold": 0,
+          "passed": true
+        }
+      ],
+      "passed": false
+    }
+  },
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.3",
+    "psutil": "7.0.0",
+    "logical_cpus": 16,
+    "telemetry": "enabled"
+  },
+  "runtime": {
+    "version": "projectatlas 0.4.5",
+    "runtime_sha256": "7734bc465af75157e2ddaeb4c2e32677349285193ccadda8a04a5c63dad132e8",
+    "runtime_bytes": 58554368,
+    "checkout_head": "9967a9f4e60ed8e174821b517bc19b7b32d76c95",
+    "checkout_head_method": "git-rev-parse-enclosing-checkout-not-build-provenance"
+  },
+  "concurrency": {
+    "passed": true,
+    "wall_seconds": 4.740528,
+    "cross_root_resources": {
+      "method": "sum-of-per-process-peaks-conservative-upper-bound",
+      "peak_rss_bytes": 90312704,
+      "peak_private_commit_bytes": 71716864,
+      "peak_worker_processes": 0,
+      "worker_process_bound": 0,
+      "peak_threads": 24,
+      "cpu_seconds": 4.828125,
+      "process_read_transfer_bytes": 292504804,
+      "process_write_transfer_bytes": 846259400,
+      "terminal_io_complete": true,
+      "reported_parser_worker_bound": 2
+    },
+    "resource_envelope": {
+      "logical_cpus": 16,
+      "worker_budget": 16,
+      "workers_per_process": 8,
+      "configured_worker_budget": 16,
+      "worker_arguments_passed": true,
+      "configured_worker_budget_passed": true,
+      "reported_parser_worker_budget_passed": true,
+      "peak_rss_budget": 536870912,
+      "passed": true
+    },
+    "same_root": {
+      "before": {
+        "nodes": 1030,
+        "symbols": 3075,
+        "symbol_relations": 2048,
+        "graph_entities": 3082,
+        "graph_relations": 2048,
+        "graph_relation_occurrences": 2048,
+        "graph_resolution_keys": 10259,
+        "graph_relation_dependencies": 2048,
+        "graph_coverage": 1027,
+        "generation": 2,
+        "relation_resolution": {
+          "resolved": 2048
+        }
+      },
+      "after": {
+        "nodes": 1030,
+        "symbols": 3075,
+        "symbol_relations": 2048,
+        "graph_entities": 3082,
+        "graph_relations": 2048,
+        "graph_relation_occurrences": 2048,
+        "graph_resolution_keys": 10259,
+        "graph_relation_dependencies": 2048,
+        "graph_coverage": 1027,
+        "generation": 3,
+        "relation_resolution": {
+          "resolved": 2048
+        }
+      },
+      "resources": {
+        "method": "sum-of-per-process-peaks-conservative-upper-bound",
+        "peak_rss_bytes": 88621056,
+        "peak_private_commit_bytes": 70107136,
+        "peak_worker_processes": 0,
+        "worker_process_bound": 0,
+        "peak_threads": 16,
+        "cpu_seconds": 2.96875,
+        "process_read_transfer_bytes": 147653182,
+        "process_write_transfer_bytes": 422862940,
+        "terminal_io_complete": true,
+        "reported_parser_worker_bound": 1
+      },
+      "passed": true
+    },
+    "cross_root": [
+      {
+        "before": {
+          "nodes": 1030,
+          "symbols": 3075,
+          "symbol_relations": 2048,
+          "graph_entities": 3082,
+          "graph_relations": 2048,
+          "graph_relation_occurrences": 2048,
+          "graph_resolution_keys": 10259,
+          "graph_relation_dependencies": 2048,
+          "graph_coverage": 1027,
+          "generation": 1,
+          "relation_resolution": {
+            "resolved": 2048
+          }
+        },
+        "after": {
+          "nodes": 1030,
+          "symbols": 3075,
+          "symbol_relations": 2048,
+          "graph_entities": 3082,
+          "graph_relations": 2048,
+          "graph_relation_occurrences": 2048,
+          "graph_resolution_keys": 10259,
+          "graph_relation_dependencies": 2048,
+          "graph_coverage": 1027,
+          "generation": 2,
+          "relation_resolution": {
+            "resolved": 2048
+          }
+        }
+      },
+      {
+        "before": {
+          "nodes": 1030,
+          "symbols": 3075,
+          "symbol_relations": 2048,
+          "graph_entities": 3082,
+          "graph_relations": 2048,
+          "graph_relation_occurrences": 2048,
+          "graph_resolution_keys": 10259,
+          "graph_relation_dependencies": 2048,
+          "graph_coverage": 1027,
+          "generation": 1,
+          "relation_resolution": {
+            "resolved": 2048
+          }
+        },
+        "after": {
+          "nodes": 1030,
+          "symbols": 3075,
+          "symbol_relations": 2048,
+          "graph_entities": 3082,
+          "graph_relations": 2048,
+          "graph_relation_occurrences": 2048,
+          "graph_resolution_keys": 10259,
+          "graph_relation_dependencies": 2048,
+          "graph_coverage": 1027,
+          "generation": 2,
+          "relation_resolution": {
+            "resolved": 2048
+          }
+        }
+      }
+    ]
+  },
+  "contention": {
+    "passed": true,
+    "before": {
+      "nodes": 1030,
+      "symbols": 3075,
+      "symbol_relations": 2048,
+      "graph_entities": 3082,
+      "graph_relations": 2048,
+      "graph_relation_occurrences": 2048,
+      "graph_resolution_keys": 10259,
+      "graph_relation_dependencies": 2048,
+      "graph_coverage": 1027,
+      "generation": 2,
+      "relation_resolution": {
+        "resolved": 2048
+      }
+    },
+    "after_blocked_run": {
+      "nodes": 1030,
+      "symbols": 3075,
+      "symbol_relations": 2048,
+      "graph_entities": 3082,
+      "graph_relations": 2048,
+      "graph_relation_occurrences": 2048,
+      "graph_resolution_keys": 10259,
+      "graph_relation_dependencies": 2048,
+      "graph_coverage": 1027,
+      "generation": 2,
+      "relation_resolution": {
+        "resolved": 2048
+      }
+    },
+    "after_retry": {
+      "nodes": 1030,
+      "symbols": 3075,
+      "symbol_relations": 2048,
+      "graph_entities": 3082,
+      "graph_relations": 2048,
+      "graph_relation_occurrences": 2048,
+      "graph_resolution_keys": 10259,
+      "graph_relation_dependencies": 2048,
+      "graph_coverage": 1027,
+      "generation": 3,
+      "relation_resolution": {
+        "resolved": 2048
+      }
+    },
+    "typed_busy": true,
+    "blocked_run": {
+      "wall_seconds": 0.218629,
+      "cpu_seconds": 0.234375,
+      "peak_rss_bytes": 13094912,
+      "peak_private_commit_bytes": 5197824,
+      "allocation_measurement": "sampled-private-commit-footprint-not-allocation-events",
+      "peak_threads": 4,
+      "peak_processes": 1,
+      "worker_process_bound": 0,
+      "process_read_transfer_bytes": 1167420,
+      "process_write_transfer_bytes": 0,
+      "terminal_io_complete": true,
+      "returncode": 1,
+      "timed_out": false,
+      "peak_storage": {
+        "database_bytes": 18391040,
+        "wal_bytes": 0,
+        "shm_bytes": 32768,
+        "staging_bytes": 0,
+        "stage_directories": 0
+      }
+    }
+  },
+  "cancellation": {
+    "passed": true,
+    "active_work_observed": true,
+    "terminal_state": "canceled",
+    "cancellation_seconds": 0.048108,
+    "before": {
+      "nodes": 4102,
+      "symbols": 12194,
+      "symbol_relations": 8192,
+      "graph_entities": 12201,
+      "graph_relations": 8192,
+      "graph_relation_occurrences": 8192,
+      "graph_resolution_keys": 40689,
+      "graph_relation_dependencies": 8192,
+      "graph_coverage": 4099,
+      "generation": 5,
+      "relation_resolution": {
+        "resolved": 4096,
+        "unresolved": 4096
+      }
+    },
+    "after": {
+      "nodes": 4102,
+      "symbols": 12194,
+      "symbol_relations": 8192,
+      "graph_entities": 12201,
+      "graph_relations": 8192,
+      "graph_relation_occurrences": 8192,
+      "graph_resolution_keys": 40689,
+      "graph_relation_dependencies": 8192,
+      "graph_coverage": 4099,
+      "generation": 5,
+      "relation_resolution": {
+        "resolved": 4096,
+        "unresolved": 4096
+      }
+    },
+    "final": {
+      "nodes": 4102,
+      "symbols": 12194,
+      "symbol_relations": 8192,
+      "graph_entities": 12201,
+      "graph_relations": 8192,
+      "graph_relation_occurrences": 8192,
+      "graph_resolution_keys": 40689,
+      "graph_relation_dependencies": 8192,
+      "graph_coverage": 4099,
+      "generation": 5,
+      "relation_resolution": {
+        "resolved": 4096,
+        "unresolved": 4096
+      }
+    },
+    "writer_released_before_server_close": true,
+    "survivors": []
+  },
+  "termination": {
+    "passed": true,
+    "scope": "default-core in-process scan parent",
+    "quiescence_seconds": 0.033103,
+    "known_processes": 1,
+    "survivors": [],
+    "checkpoint": {
+      "busy": 0,
+      "log_frames": 0,
+      "checkpointed_frames": 0
+    },
+    "final_storage": {
+      "database_bytes": 557056,
+      "wal_bytes": 0,
+      "shm_bytes": 32768,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 589824
+    },
+    "recovery_profile": {
+      "page_size": 4096,
+      "page_count": 136,
+      "page_bytes": 557056,
+      "freelist_pages": 0,
+      "freelist_ratio": 0.0,
+      "quick_check": "ok",
+      "journal_mode": "wal",
+      "synchronous": 2,
+      "wal_autocheckpoint": 1000,
+      "sqlite_stat1_present": false,
+      "query_plans": {
+        "entity_path_lookup": {
+          "details": [
+            "SEARCH graph_entities USING INDEX idx_graph_entities_path (repository_path=?)"
+          ],
+          "uses_temporary_btree": false,
+          "uses_index": true
+        },
+        "outbound_relation_lookup": {
+          "details": [
+            "SEARCH graph_relations USING COVERING INDEX idx_graph_relations_source_kind (source_entity_key=?)"
+          ],
+          "uses_temporary_btree": false,
+          "uses_index": true
+        },
+        "relation_occurrence_lookup": {
+          "details": [
+            "SEARCH graph_relation_occurrences USING COVERING INDEX sqlite_autoindex_graph_relation_occurrences_1 (relation_key=?)"
+          ],
+          "uses_temporary_btree": false,
+          "uses_index": true
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Single-run current observations, not a statistical speedup comparison against historical debug binaries.",
+    "Private committed memory is a sampled allocation footprint, not allocator event counts.",
+    "Transaction and staging peaks are sampled; exact individual stage duration and normal checkpoint frame timing are unavailable.",
+    "The unchanged v0.4 diagnostic I/O caps are preserved, including every failed cell; no pool adoption is justified by this profile.",
+    "Windows exact terminal owned-tree I/O; hosted Linux and macOS coverage establishes behavior, not equivalent resource measurements."
+  ],
+  "graph_digest_recomputation": {
+    "scope": "Read-only recomputation from retained SQLite databases; measurement observations and frozen inputs unchanged",
+    "harness_sha256": "d1c5ff41b917d1e181fb4f486383a1b9ea8f8380c7fb908dd2c54a30325446eb",
+    "normalization": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields",
+    "cases": {
+      "small": {
+        "sha256": "c43e83ea82ce07e8a2af7aaa0b5896db14ffc051c612f0bf2eb098db06ec612d",
+        "record_count": 245,
+        "table_rows": {
+          "entities": 29,
+          "relations": 19,
+          "occurrences": 19,
+          "resolution_keys": 80,
+          "exports": 79,
+          "dependencies": 13,
+          "coverage": 6,
+          "identity_rejections": 0
+        }
+      },
+      "medium": {
+        "sha256": "d9a51ff16f9cdca80e971ab8fc9f15b012ff65ae3089cddb7cfa5093991a0624",
+        "record_count": 30772,
+        "table_rows": {
+          "entities": 3082,
+          "relations": 2048,
+          "occurrences": 2048,
+          "resolution_keys": 10260,
+          "exports": 10259,
+          "dependencies": 2048,
+          "coverage": 1027,
+          "identity_rejections": 0
+        }
+      },
+      "large": {
+        "sha256": "c6d74d40c87b09b76bc55fb435fdf83daf605d34ee73248f2b8d3a222984fd9e",
+        "record_count": 122253,
+        "table_rows": {
+          "entities": 12201,
+          "relations": 8192,
+          "occurrences": 8192,
+          "resolution_keys": 40689,
+          "exports": 40688,
+          "dependencies": 8192,
+          "coverage": 4099,
+          "identity_rejections": 0
+        }
+      }
+    }
+  }
+}

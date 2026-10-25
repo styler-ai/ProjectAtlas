@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
+from enum import Enum
+from functools import lru_cache
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlsplit
+
+if TYPE_CHECKING:
+    from release_version import ReleaseVersion
 
 
 UNORDERED_LIST_MARKER_RE = r"[-*+]"
@@ -21,6 +32,22 @@ HEADING_RE = re.compile(r"(?m)^(#{1,6})\s+(.+?)\s*$")
 TASK_SECTION_HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?(?:-->|$)")
 FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+ARCHITECTURE_NA_RE = re.compile(r"(?is)^N/A:\s*(\S(?:.*\S)?)$")
+GITHUB_RENDERED_HEADING_PREFIX = "user-content-"
+IMPLEMENTATION_TASK_HEADING = "implementation tasks"
+ACCEPTANCE_TASK_HEADING = "acceptance and review tasks"
+MERMAID_ATTEMPT_TIMEOUT_SECONDS = 30
+MERMAID_VALIDATION_BUDGET_SECONDS = 120
+ACCEPTANCE_REVIEW_TASKS = (
+    "Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.",
+    "Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.",
+    "Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.",
+    "Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.",
+    "Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.",
+)
+COMPLEXITY_LABELS = frozenset(
+    {"complexity:low", "complexity:medium", "complexity:high", "complexity:very-high"}
+)
 MARKDOWN_LINK_RE = re.compile(
     r"\[(?:[^\[\]\n]|\[[^\[\]\n]*\])+\]"
     r"\(\s*<?([^)>\s]+)>?"
@@ -28,7 +55,7 @@ MARKDOWN_LINK_RE = re.compile(
 )
 MITIGATION_RE = re.compile(
     rf"(?mi)^[ ]{{0,3}}{UNORDERED_LIST_MARKER_RE}\s+\[([ xX])\]\s+(.+?)\s+"
-    r"\(OpenSpec tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
+    r"\((OpenSpec|Implementation) tasks:\s*(\d+(?:\.\d+)*(?:\s*,\s*\d+(?:\.\d+)*)*)\)\s*$"
 )
 EXACT_HEAD_PROOF_RE = re.compile(r"(?i)\bexact[- ]head\b")
 EXACT_HEAD_REQUIREMENT_RE = re.compile(
@@ -91,6 +118,63 @@ REQUIRED_OPEN_ISSUE_HEADINGS = (
     "non-goals",
     "pre-mortem",
 )
+RELEASE_MILESTONE_RE = re.compile(
+    r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-stable)?-00$"
+)
+REQUIRED_PROPOSAL_HEADINGS = {"why", "what changes", "capabilities", "impact"}
+REQUIRED_DESIGN_HEADINGS = {
+    "goals / non-goals",
+    "decisions",
+    "risks / trade-offs",
+    "migration plan",
+    "dependencies / cross-issue impact",
+    "open questions",
+}
+ISSUE_REFERENCE_RE = re.compile(
+    r"(?:#[1-9][0-9]*|GH-[1-9][0-9]*|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*)"
+)
+EXPLICIT_OWNER_RE = re.compile(
+    r"^(Fixes|Closes|Resolves|Refs) #([1-9][0-9]*)[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+EXPLICIT_QUALIFIED_OWNER_RE = re.compile(
+    r"^(?:Fixes|Closes|Resolves|Refs)[ \t]+"
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#[1-9][0-9]*[ \t]*\r?$",
+    re.IGNORECASE | re.MULTILINE,
+)
+MAX_PR_STATE_REFRESH_PULL_REQUESTS = 1_000
+PR_STATE_WORKFLOW_RUNS_PER_PAGE = 100
+MAX_PR_STATE_WORKFLOW_RUN_PAGES = 10
+PR_STATE_NATIVE_TITLE_RE = re.compile(
+    r"^pr-state\|[0-9a-f]{40}\|([1-9][0-9]*)\|([0-9a-f]{40})$"
+)
+COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
+COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^)]*)\)")
+ISSUE_STATE_QUERY = """
+query($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, after: $endCursor, states: [OPEN, CLOSED]) {
+      nodes {
+        number
+        state
+        labels(first: 100) {
+          totalCount
+          nodes {
+            name
+          }
+        }
+        milestone {
+          title
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"""
 
 
 @dataclass(frozen=True)
@@ -102,14 +186,34 @@ class Owner:
     last_task: str | None = None
 
 
-def run(args: list[str]) -> str:
+class MermaidValidationOutcome(Enum):
+    VALID = "valid"
+    INVALID = "invalid syntax"
+    TIMED_OUT = "timed out"
+    UNAVAILABLE = "unavailable execution"
+
+
+class MermaidValidationBudget:
+    """One fixed parser deadline shared by an IssueOps validation run."""
+
+    def __init__(self) -> None:
+        self.deadline = time.monotonic() + MERMAID_VALIDATION_BUDGET_SECONDS
+
+    def can_admit(self, attempts: int) -> bool:
+        return (
+            self.deadline - time.monotonic()
+            >= attempts * MERMAID_ATTEMPT_TIMEOUT_SECONDS
+        )
+
+
+def run(args: list[str], *, raw_output: bool = False) -> str | bytes:
     """Run one fixed command without a shell."""
 
     process = subprocess.run(
         args,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
+        text=not raw_output,
+        encoding=None if raw_output else "utf-8",
         timeout=120,
         check=False,
     )
@@ -212,23 +316,204 @@ def github_heading_slug(heading: str) -> str:
     ).replace(" ", "-")
 
 
+def markdown_headings(text: str) -> list[tuple[str, int, int, int]]:
+    """Return visible headings as fragment, level, start, and end offsets."""
+
+    masked = HTML_COMMENT_RE.sub(
+        lambda match: "".join(
+            character if character in "\r\n" else " " for character in match.group(0)
+        ),
+        text or "",
+    )
+    headings: list[tuple[str, int, int, int]] = []
+    next_suffix: dict[str, int] = {}
+    used: set[str] = set()
+    fence_character = ""
+    fence_length = 0
+    offset = 0
+    for line in masked.splitlines(keepends=True):
+        fence = FENCE_RE.match(line)
+        if fence_character:
+            marker = fence.group(1) if fence else ""
+            if (
+                marker
+                and marker[0] == fence_character
+                and len(marker) >= fence_length
+                and not line[fence.end() :].strip()
+            ):
+                fence_character = ""
+                fence_length = 0
+        elif fence:
+            marker = fence.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+        else:
+            heading = HEADING_RE.match(line)
+            if heading:
+                base = github_heading_slug(heading.group(2))
+                if base:
+                    suffix = next_suffix.get(base, 0)
+                    fragment = base if suffix == 0 else f"{base}-{suffix}"
+                    while fragment in used:
+                        suffix += 1
+                        fragment = f"{base}-{suffix}"
+                    used.add(fragment)
+                    next_suffix[base] = suffix + 1
+                    headings.append(
+                        (
+                            fragment,
+                            len(heading.group(1)),
+                            offset + heading.start(),
+                            offset + heading.end(),
+                        )
+                    )
+        offset += len(line)
+    return headings
+
+
 def markdown_heading_fragments(text: str) -> set[str]:
     """Return rendered heading fragments, including GitHub duplicate suffixes."""
 
-    fragments: set[str] = set()
-    next_suffix: dict[str, int] = {}
-    for heading in HEADING_RE.finditer(visible_markdown(text)):
-        base = github_heading_slug(heading.group(2))
-        if not base:
+    return {fragment for fragment, _, _, _ in markdown_headings(text)}
+
+
+def markdown_heading_section(text: str, fragment: str) -> str | None:
+    """Return the raw Markdown body owned by one rendered heading fragment."""
+
+    headings = markdown_headings(text)
+    for index, (candidate, level, _, end) in enumerate(headings):
+        if candidate != fragment:
             continue
-        suffix = next_suffix.get(base, 0)
-        fragment = base if suffix == 0 else f"{base}-{suffix}"
-        while fragment in fragments:
-            suffix += 1
-            fragment = f"{base}-{suffix}"
-        fragments.add(fragment)
-        next_suffix[base] = suffix + 1
-    return fragments
+        section_end = len(text)
+        for _, later_level, later_start, _ in headings[index + 1 :]:
+            if later_level <= level:
+                section_end = later_start
+                break
+        return text[end:section_end]
+    return None
+
+
+def mermaid_diagram_blocks(section: str) -> list[str]:
+    """Return structurally eligible fenced Mermaid diagram bodies."""
+
+    diagrams: list[str] = []
+    fence_character = ""
+    fence_length = 0
+    mermaid = False
+    body: list[str] = []
+    for line in section.splitlines():
+        fence = FENCE_RE.match(line)
+        if fence_character:
+            marker = fence.group(1) if fence else ""
+            if (
+                marker
+                and marker[0] == fence_character
+                and len(marker) >= fence_length
+                and not line[fence.end() :].strip()
+            ):
+                if mermaid:
+                    meaningful = [
+                        value
+                        for value in (candidate.strip() for candidate in body)
+                        if value and not value.startswith("%%")
+                    ]
+                    if meaningful[:1] == ["---"]:
+                        try:
+                            frontmatter_end = meaningful.index("---", 1)
+                        except ValueError:
+                            meaningful = []
+                        else:
+                            meaningful = meaningful[frontmatter_end + 1 :]
+                    if len(meaningful) > 1:
+                        diagrams.append("\n".join(body))
+                fence_character = ""
+                fence_length = 0
+                mermaid = False
+                body = []
+            elif mermaid:
+                body.append(line)
+        elif fence:
+            marker = fence.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+            mermaid = line[fence.end() :].strip().casefold() == "mermaid"
+    return diagrams
+
+
+def _run_mermaid_parser(diagram: str) -> MermaidValidationOutcome:
+    """Run one uncached attempt against the repository-locked Mermaid parser."""
+
+    node = shutil.which("node")
+    validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
+    mermaid_package = validator.parent / "node_modules" / "mermaid" / "package.json"
+    if node is None or not mermaid_package.is_file():
+        return MermaidValidationOutcome.UNAVAILABLE
+    return _run_mermaid_process([node, str(validator)], diagram)
+
+
+def _run_mermaid_process(command: list[str], diagram: str) -> MermaidValidationOutcome:
+    """Run one bounded Mermaid process and preserve its failure class."""
+
+    try:
+        result = subprocess.run(
+            command,
+            input=f"{diagram}\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=MERMAID_ATTEMPT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return MermaidValidationOutcome.TIMED_OUT
+    except OSError:
+        return MermaidValidationOutcome.UNAVAILABLE
+    if result.returncode == 0:
+        return MermaidValidationOutcome.VALID
+    if result.returncode == 1:
+        return MermaidValidationOutcome.INVALID
+    return MermaidValidationOutcome.UNAVAILABLE
+
+
+@lru_cache(maxsize=64)
+def mermaid_syntax_is_valid(
+    diagram: str, mermaid_budget: MermaidValidationBudget | None = None
+) -> MermaidValidationOutcome:
+    """Return the final bounded result for one diagram."""
+
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
+    if not mermaid_budget.can_admit(2):
+        return MermaidValidationOutcome.TIMED_OUT
+    outcome = _run_mermaid_parser(diagram)
+    if outcome is not MermaidValidationOutcome.TIMED_OUT:
+        return outcome
+    if not mermaid_budget.can_admit(1):
+        return MermaidValidationOutcome.TIMED_OUT
+    return _run_mermaid_parser(diagram)
+
+
+def mermaid_diagram_outcomes(
+    section: str, mermaid_budget: MermaidValidationBudget | None = None
+) -> list[MermaidValidationOutcome]:
+    """Validate eligible blocks until one is accepted or blocks are exhausted."""
+
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
+    outcomes: list[MermaidValidationOutcome] = []
+    for diagram in mermaid_diagram_blocks(section):
+        outcome = mermaid_syntax_is_valid(diagram, mermaid_budget)
+        outcomes.append(outcome)
+        if outcome is MermaidValidationOutcome.VALID:
+            break
+    return outcomes
+
+
+def contains_mermaid_diagram(
+    section: str, mermaid_budget: MermaidValidationBudget | None = None
+) -> bool:
+    """Return whether a fenced Mermaid block is structurally and syntactically real."""
+
+    return MermaidValidationOutcome.VALID in mermaid_diagram_outcomes(
+        section, mermaid_budget
+    )
 
 
 def parse_tasks(text: str) -> list[tuple[bool, str]]:
@@ -247,6 +532,14 @@ def task_id(task: tuple[bool, str]) -> str:
 
 def heading_matches_openspec_tasks(heading: str) -> bool:
     return clean(heading).lower() in {"openspec tasks", "openspec task checklist"}
+
+
+def heading_matches_implementation_tasks(heading: str) -> bool:
+    return clean(heading).casefold() == IMPLEMENTATION_TASK_HEADING
+
+
+def heading_matches_acceptance_tasks(heading: str) -> bool:
+    return clean(heading).casefold() == ACCEPTANCE_TASK_HEADING
 
 
 def heading_is_task_subsection(heading: str) -> bool:
@@ -297,7 +590,13 @@ def parse_section_tasks(
             is_owned_subsection = heading_is_task_subsection(
                 next_heading.group(2)
             ) and heading_owns_matching_tasks(text, headings, next_index)
-            if is_boundary_level and not is_owned_subsection:
+            is_acceptance_boundary = heading_matches_acceptance_tasks(
+                next_heading.group(2)
+            )
+            if (
+                (is_boundary_level or is_acceptance_boundary)
+                and not is_owned_subsection
+            ):
                 end = next_heading.start()
                 break
         tasks.extend(parse_tasks(text[heading.end() : end]))
@@ -324,10 +623,17 @@ def validate_unique_issue_ownership(
             issue_owners[owner.issue] = change
 
 
-def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
-    path = Path(path)
-    with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
+def parse_issue_map_payload(
+    payload: object,
+    source: str | Path,
+    *,
+    candidate_change_names: set[str] | None = None,
+) -> dict[str, tuple[Owner, ...]]:
+    """Parse one issue-map payload from an explicitly selected authority."""
+
+    path = Path(source)
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
     if payload.get("schema_version") != 2:
         raise SystemExit(f"{path} must use schema_version 2")
     changes = payload.get("changes", {})
@@ -368,12 +674,18 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
             raise SystemExit(f"{path} primary issue for {change} must own the first range")
         mapped[str(change)] = tuple(parsed)
 
-    changes_dir = path.parent / "changes"
-    if changes_dir.exists():
-        missing = sorted(
+    if candidate_change_names is None:
+        changes_dir = path.parent / "changes"
+        change_names = {
             child.name
             for child in changes_dir.iterdir()
-            if child.is_dir() and (child / "tasks.md").exists() and child.name not in mapped
+            if child.is_dir() and (child / "tasks.md").exists()
+        } if changes_dir.exists() else set()
+    else:
+        change_names = candidate_change_names
+    if change_names:
+        missing = sorted(
+            change for change in change_names if change not in mapped
         )
         if missing:
             raise SystemExit(
@@ -383,7 +695,35 @@ def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
     return mapped
 
 
-def issue_payload(repo: str, number: int) -> dict[str, object]:
+def load_issue_map(path: str | Path) -> dict[str, tuple[Owner, ...]]:
+    path = Path(path)
+    with path.open(encoding="utf-8") as handle:
+        return parse_issue_map_text(handle.read(), path)
+
+
+def parse_issue_map_text(
+    text: str,
+    source: str | Path,
+    *,
+    candidate_change_names: set[str] | None = None,
+) -> dict[str, tuple[Owner, ...]]:
+    """Decode and validate issue-map text from one selected authority."""
+
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"{source} is not valid JSON") from error
+    return parse_issue_map_payload(
+        payload, source, candidate_change_names=candidate_change_names
+    )
+
+
+def issue_payload(
+    repo: str, number: int, *, include_body: bool = True
+) -> dict[str, object]:
+    fields = "state,number,labels,milestone"
+    if include_body:
+        fields = "body,title,state,url,number,labels,milestone"
     payload = gh_json(
         [
             "issue",
@@ -392,7 +732,7 @@ def issue_payload(repo: str, number: int) -> dict[str, object]:
             "-R",
             repo,
             "--json",
-            "body,title,state,url",
+            fields,
         ]
     )
     if not isinstance(payload, dict):
@@ -400,21 +740,573 @@ def issue_payload(repo: str, number: int) -> dict[str, object]:
     return payload
 
 
-def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+def pull_request_payload(repo: str, number: int) -> dict[str, object]:
+    """Return the title and body used to resolve a pull request owner."""
+
+    payload = gh_json(
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "title,body",
+        ]
+    )
+    if not isinstance(payload, dict):
+        raise SystemExit(f"GitHub pull request #{number} did not return an object")
+    return payload
+
+
+def referenced_issue_numbers(
+    repo: str, title: object, body: object
+) -> list[int]:
+    """Return distinct local issue numbers from the existing PR reference syntax."""
+
+    if not isinstance(title, str) or not isinstance(body, str):
+        raise SystemExit("GitHub pull request title and body must be text")
+    numbers: set[int] = set()
+    for reference in ISSUE_REFERENCE_RE.findall(f"{title}\n{body}"):
+        if "#" in reference and not reference.startswith(("#", "GH-")):
+            qualified_repo = reference.rsplit("#", 1)[0]
+            if qualified_repo.casefold() != repo.casefold():
+                continue
+        number_text = reference.rsplit("#", 1)[-1]
+        if reference.startswith("GH-"):
+            number_text = reference[3:]
+        numbers.add(int(number_text))
+    return sorted(numbers)
+
+
+def explicit_owner_numbers(repo: str, body: str) -> list[int]:
+    """Prefer one local owner-reference kind over incidental changelog links."""
+
+    body = visible_markdown(body)
+    if any(
+        qualified_repo.casefold() != repo.casefold()
+        for qualified_repo in EXPLICIT_QUALIFIED_OWNER_RE.findall(body)
+    ):
+        raise SystemExit("pull request ownership reference must name this repository")
+    owners = EXPLICIT_OWNER_RE.findall(body)
+    closing = {int(number) for kind, number in owners if kind.casefold() != "refs"}
+    non_closing = {int(number) for kind, number in owners if kind.casefold() == "refs"}
+    if closing and non_closing:
+        raise SystemExit("pull request must not mix closing and non-closing owner references")
+    return sorted(closing | non_closing)
+
+
+def pull_request_body(payload: dict[str, object]) -> str:
+    body = payload.get("body")
+    if body is None:
+        return ""
+    if not isinstance(body, str):
+        raise SystemExit("GitHub pull request body must be text")
+    return body
+
+
+def pull_request_owner_issue(repo: str, payload: dict[str, object]) -> int:
+    """Resolve exactly one owner from the established PR issue-reference contract."""
+
+    body = pull_request_body(payload)
+    candidates = referenced_issue_numbers(repo, payload.get("title"), body)
+    candidates = explicit_owner_numbers(repo, body) or candidates
+    if len(candidates) != 1:
+        raise SystemExit(
+            "pull request must reference exactly one owning issue; "
+            f"found {len(candidates)} candidates"
+        )
+    return candidates[0]
+
+
+def pr_state_refreshes(
+    repo: str,
+    issue_number: int,
+    pull_requests: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if len(pull_requests) >= MAX_PR_STATE_REFRESH_PULL_REQUESTS:
+        raise SystemExit("open pull-request inventory reached the refresh bound")
+    refreshes = []
+    for pull_request in pull_requests:
+        body = pull_request_body(pull_request)
+        owners = referenced_issue_numbers(repo, pull_request.get("title"), body)
+        try:
+            explicit_owners = explicit_owner_numbers(repo, body)
+        except SystemExit:
+            # Local refs can still trigger failure publication for malformed owners.
+            explicit_owners = []
+        owners = explicit_owners or owners
+        if issue_number not in owners:
+            continue
+        base = pull_request.get("baseRefName")
+        if not isinstance(base, str) or not base:
+            raise SystemExit("GitHub returned an invalid pull-request base branch")
+        if base not in ("main", "dev"):
+            continue
+        number = pull_request.get("number")
+        head = pull_request.get("headRefOid")
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number < 1
+            or not isinstance(head, str)
+            or re.fullmatch(r"[0-9a-f]{40}", head) is None
+        ):
+            raise SystemExit("GitHub returned an invalid pull-request refresh identity")
+        refreshes.append(
+            {
+                "number": number,
+                "head": head,
+            }
+        )
+    return refreshes
+
+
+def matching_pr_state_run(
+    pull_request: int,
+    head: str,
+    default_branch: str,
+    workflow_runs: object,
+) -> dict[str, object] | None:
+    if not isinstance(workflow_runs, list):
+        raise SystemExit("PR-state workflow runs did not return a list")
+    for workflow_run in workflow_runs:
+        if not isinstance(workflow_run, dict):
+            raise SystemExit("PR-state workflow run was not an object")
+        if (
+            workflow_run.get("event") != "pull_request_target"
+            or not pr_state_workflow_path(workflow_run.get("path"), default_branch)
+        ):
+            continue
+        title = workflow_run.get("display_title")
+        match = PR_STATE_NATIVE_TITLE_RE.fullmatch(title) if isinstance(title, str) else None
+        source_head = workflow_run.get("head_sha")
+        if (
+            match is None
+            or int(match.group(1)) != pull_request
+            or match.group(2) != head
+            or not isinstance(source_head, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_head) is None
+        ):
+            continue
+        identifier = workflow_run.get("id")
+        status = workflow_run.get("status")
+        if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier < 1:
+            raise SystemExit("PR-state workflow run had an invalid identity")
+        if not isinstance(status, str):
+            raise SystemExit("PR-state workflow run had an invalid status")
+        return {
+            "id": identifier,
+            "status": status,
+            "run_attempt": workflow_run.get("run_attempt"),
+        }
+    return None
+
+
+def pr_state_workflow_run_page(repo: str, page: int) -> list[object]:
+    payload = gh_api_json(
+        [
+            "--method",
+            "GET",
+            f"repos/{repo}/actions/workflows/pr-state.yml/runs",
+            "-f",
+            "event=pull_request_target",
+            "-f",
+            f"per_page={PR_STATE_WORKFLOW_RUNS_PER_PAGE}",
+            "-f",
+            f"page={page}",
+            "-f",
+            "sort=created",
+            "-f",
+            "direction=desc",
+        ]
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
+        raise SystemExit("PR-state workflow-run query did not return a run list")
+    return payload["workflow_runs"]
+
+
+def find_pr_state_workflow_run(
+    repo: str, pull_request: int, head: str, default_branch: str
+) -> tuple[dict[str, object] | None, bool]:
+    for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1):
+        runs = pr_state_workflow_run_page(repo, page)
+        workflow_run = matching_pr_state_run(pull_request, head, default_branch, runs)
+        if workflow_run is not None:
+            return workflow_run, False
+        if len(runs) < PR_STATE_WORKFLOW_RUNS_PER_PAGE:
+            return None, False
+    return None, True
+
+
+def pr_state_workflow_path(path: object, default_branch: str) -> bool:
+    if not isinstance(path, str):
+        return False
+    workflow = ".github/workflows/pr-state.yml"
+    return path == workflow or path in (
+        f"{workflow}@{default_branch}",
+        f"{workflow}@refs/heads/{default_branch}",
+    )
+
+
+def pr_state_default_branch(repo: str) -> str:
+    payload = gh_api_json(["repos/" + repo])
+    if not isinstance(payload, dict):
+        raise SystemExit("GitHub repository did not return an object")
+    branch = payload.get("default_branch")
+    if not isinstance(branch, str) or not branch:
+        raise SystemExit("GitHub repository returned an invalid default branch")
+    return branch
+
+
+def pr_state_live_pull_request(
+    repo: str, number: int, expected_head: str
+) -> dict[str, object] | None:
+    payload = gh_api_json([f"repos/{repo}/pulls/{number}"])
+    if not isinstance(payload, dict):
+        raise SystemExit("GitHub pull request did not return an object")
+    base = payload.get("base")
+    head = payload.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise SystemExit("GitHub pull request returned an invalid head or base")
+    if (
+        payload.get("number") != number
+        or payload.get("state") != "open"
+        or base.get("ref") not in ("main", "dev")
+        or head.get("sha") != expected_head
+    ):
+        return None
+    return payload
+
+
+def validate_pr_state_owner(repo: str, number: int, head: str) -> int:
+    pull_request = pr_state_live_pull_request(repo, number, head)
+    if pull_request is None:
+        raise SystemExit("pull request is no longer open at the trusted source head")
+    owner_issue = pull_request_owner_issue(
+        repo,
+        {"title": pull_request.get("title"), "body": pull_request.get("body")},
+    )
+    pr_milestone = pull_request.get("milestone")
+    pr_milestone_number = (
+        pr_milestone.get("number") if isinstance(pr_milestone, dict) else None
+    )
+    if (
+        not isinstance(pr_milestone_number, int)
+        or isinstance(pr_milestone_number, bool)
+        or pr_milestone_number < 1
+    ):
+        raise SystemExit("pull request must be assigned to a milestone")
+    issue = gh_api_json([f"repos/{repo}/issues/{owner_issue}"])
+    if not isinstance(issue, dict):
+        raise SystemExit("owning issue did not return an object")
+    if "pull_request" in issue or issue.get("state") != "open":
+        raise SystemExit("pull request owner must be an open issue")
+    issue_milestone = issue.get("milestone")
+    issue_milestone_number = (
+        issue_milestone.get("number") if isinstance(issue_milestone, dict) else None
+    )
+    if (
+        not isinstance(issue_milestone_number, int)
+        or isinstance(issue_milestone_number, bool)
+        or issue_milestone_number < 1
+    ):
+        raise SystemExit("owning issue must be assigned to a milestone")
+    if issue_milestone_number != pr_milestone_number:
+        raise SystemExit("pull request milestone must match its owning issue")
+    return owner_issue
+
+
+def refresh_pr_state_for_issue(repo: str, issue_number: int) -> None:
+    payload = gh_json(
+        [
+            "pr",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            str(MAX_PR_STATE_REFRESH_PULL_REQUESTS),
+            "--json",
+            "number,title,body,headRefOid,baseRefName",
+        ]
+    )
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise SystemExit("GitHub open pull requests did not return an object list")
+    refreshes = pr_state_refreshes(repo, issue_number, payload)
+    default_branch = pr_state_default_branch(repo)
+    for refresh in refreshes:
+        pull_request = int(refresh["number"])
+        head = str(refresh["head"])
+        workflow_run, search_truncated = find_pr_state_workflow_run(
+            repo, pull_request, head, default_branch
+        )
+        for attempt in range(30):
+            if attempt > 0 and workflow_run is None:
+                workflow_run = matching_pr_state_run(
+                    pull_request,
+                    head,
+                    default_branch,
+                    pr_state_workflow_run_page(repo, 1),
+                )
+            elif attempt > 0 and workflow_run["status"] != "completed":
+                selected_run_id = workflow_run["id"]
+                latest_run = gh_api_json(
+                    [f"repos/{repo}/actions/runs/{selected_run_id}"]
+                )
+                if not isinstance(latest_run, dict) or latest_run.get("id") != selected_run_id:
+                    raise SystemExit("PR-state workflow-run lookup returned the wrong identity")
+                workflow_run = matching_pr_state_run(
+                    pull_request, head, default_branch, [latest_run]
+                )
+                if workflow_run is None:
+                    raise SystemExit("PR-state workflow run changed identity during refresh")
+            if workflow_run is not None and workflow_run["status"] == "completed":
+                break
+            if attempt == 29:
+                if workflow_run is None:
+                    if search_truncated:
+                        raise SystemExit(
+                            "PR-state workflow-run search reached its "
+                            f"{MAX_PR_STATE_WORKFLOW_RUN_PAGES}-page bound without "
+                            f"finding a current-head run for pull request #{pull_request}"
+                        )
+                    raise SystemExit(
+                        f"no PR-state workflow run found for pull request #{pull_request}"
+                    )
+                raise SystemExit(
+                    f"latest PR-state workflow run for pull request #{pull_request} "
+                    "did not complete within the refresh bound"
+                )
+            time.sleep(2)
+        run(
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                f"repos/{repo}/actions/runs/{workflow_run['id']}/rerun",
+            ]
+        )
+    print(f"re-ran pr-state for {len(refreshes)} pull request(s)")
+
+
+def candidate_owner_issue_from_subjects(subjects: str) -> int:
+    """Resolve one owner from commit subjects using the required ``(#NNN)`` form."""
+
+    owners: list[int] = []
+    for subject in subjects.splitlines():
+        markers = COMMIT_ISSUE_MARKER_RE.findall(subject)
+        references = COMMIT_ISSUE_REFERENCE_RE.findall(subject)
+        if (
+            subject.count("(#") != len(markers)
+            or len(markers) != 1
+            or len(references) != 1
+            or markers[0] != references[0]
+        ):
+            raise SystemExit(
+                "candidate branch commits must reference exactly one owning issue "
+                "with one well-formed (#NNN) marker per subject"
+            )
+        owners.append(int(references[0]))
+    if len(owners) == 0 or len(set(owners)) != 1:
+        raise SystemExit(
+            "candidate branch commits must reference exactly one owning issue "
+            f"with (#NNN); found {len(set(owners))} candidates"
+        )
+    return owners[0]
+
+
+def issue_state_payloads(repo: str) -> list[dict[str, object]]:
+    """Fetch complete native issue state and metadata for repository gates."""
+
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            f"query={ISSUE_STATE_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+        ]
+    )
+    if not isinstance(payload, list):
+        raise SystemExit("GitHub GraphQL pagination did not return page objects")
+    issues: list[dict[str, object]] = []
+    for page in payload:
+        if not isinstance(page, dict):
+            raise SystemExit("GitHub GraphQL pagination returned a non-object page")
+        data = page.get("data")
+        repository = data.get("repository") if isinstance(data, dict) else None
+        connection = repository.get("issues") if isinstance(repository, dict) else None
+        page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+        nodes = connection.get("nodes") if isinstance(connection, dict) else None
+        if (
+            not isinstance(connection, dict)
+            or not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+            or not isinstance(page_info.get("hasNextPage"), bool)
+            or not (
+                isinstance(page_info.get("endCursor"), str)
+                or page_info.get("endCursor") is None
+            )
+        ):
+            raise SystemExit("GitHub GraphQL issue page had an invalid shape")
+        for issue in nodes:
+            if not isinstance(issue, dict):
+                raise SystemExit("GitHub GraphQL issue page returned a non-object issue")
+            labels = issue.get("labels")
+            label_nodes = labels.get("nodes") if isinstance(labels, dict) else None
+            total_count = labels.get("totalCount") if isinstance(labels, dict) else None
+            if (
+                not isinstance(label_nodes, list)
+                or not all(isinstance(label, dict) for label in label_nodes)
+                or not isinstance(total_count, int)
+                or isinstance(total_count, bool)
+                or total_count < 0
+                or total_count != len(label_nodes)
+            ):
+                raise SystemExit("GitHub GraphQL issue labels were incomplete")
+            milestone = issue.get("milestone")
+            if milestone is not None and not isinstance(milestone, dict):
+                raise SystemExit("GitHub GraphQL issue metadata had an invalid shape")
+            issues.append(
+                {
+                    "number": issue.get("number"),
+                    "state": issue.get("state"),
+                    "labels": label_nodes,
+                    "milestone": milestone,
+                }
+            )
+    return issues
+
+
+def check_open_issue_complexity(repo: str) -> list[str]:
+    failures: list[str] = []
+    for issue in issue_state_payloads(repo):
+        number = positive_issue(issue.get("number"), "issue number")
+        failures.extend(
+            f"#{number} issue contract {failure}"
+            for failure in complexity_label_failures(issue)
+        )
+    return failures
+
+
+def check_issue_complexity(
+    repo: str,
+    number: int,
+    issue: dict[str, object] | None = None,
+) -> list[str]:
+    """Validate complexity for one issue selected by a scoped dispatch."""
+
+    if issue is None:
+        issue = issue_payload(repo, number, include_body=False)
+    return [
+        f"#{number} issue contract {failure}"
+        for failure in complexity_label_failures(issue)
+    ]
+
+
+def check_complexity_for_dispatch(
+    repo: str,
+    *,
+    pull_request: int | None,
+    planned_issue: int | None,
+    candidate_issue: int | None = None,
+    pull_request_owner: int | None = None,
+    pull_request_owner_error: str | None = None,
+    planned_issue_payload: dict[str, object] | None = None,
+) -> list[str]:
+    """Keep complexity validation aligned with the active IssueOps boundary."""
+
+    if pull_request is not None:
+        if pull_request_owner_error is not None:
+            return []
+        if pull_request_owner is not None:
+            return check_issue_complexity(repo, pull_request_owner)
+        try:
+            owner_issue = pull_request_owner_issue(
+                repo, pull_request_payload(repo, pull_request)
+            )
+        except SystemExit:
+            # The PR checker reports the fail-closed ownership error itself.
+            return []
+        return check_issue_complexity(repo, owner_issue)
+    if candidate_issue is not None:
+        return check_issue_complexity(repo, candidate_issue)
+    if planned_issue is not None:
+        return check_issue_complexity(repo, planned_issue, planned_issue_payload)
+    return check_open_issue_complexity(repo)
+
+
+def issue_task_headings(
+    issue: dict[str, object],
+) -> tuple[str, list[re.Match[str]], list[re.Match[str]], list[re.Match[str]]]:
     body = issue.get("body", "")
     if not isinstance(body, str):
         raise SystemExit("GitHub issue body must be text")
     visible_body = visible_markdown(body)
-    authoritative_headings = [
+    headings = list(HEADING_RE.finditer(visible_body))
+    implementation = [
         heading
-        for heading in HEADING_RE.finditer(visible_body)
+        for heading in headings
+        if heading_matches_implementation_tasks(heading.group(2))
+    ]
+    acceptance = [
+        heading
+        for heading in headings
+        if heading_matches_acceptance_tasks(heading.group(2))
+    ]
+    legacy = [
+        heading
+        for heading in headings
         if heading_matches_openspec_tasks(heading.group(2))
     ]
-    if len(authoritative_headings) != 1:
+    return visible_body, implementation, acceptance, legacy
+
+
+def issue_checklist_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+    """Parse the active two-list contract; closed issue bodies are inert."""
+
+    state = str(issue.get("state", "")).upper()
+    if state == "CLOSED":
+        return []
+    if state != "OPEN":
         raise SystemExit(
-            "GitHub issue must contain exactly one visible OpenSpec task heading"
+            f"GitHub issue state must be OPEN or CLOSED; found {state or 'UNKNOWN'}"
         )
-    return parse_section_tasks(visible_body, heading_matches_openspec_tasks)
+    visible_body, implementation, _acceptance, legacy = issue_task_headings(issue)
+    if len(implementation) != 1:
+        raise SystemExit(
+            "GitHub open issue must contain exactly one visible Implementation Tasks heading"
+        )
+    if legacy:
+        raise SystemExit(
+            "GitHub open issue must not retain a legacy OpenSpec task heading"
+        )
+    return parse_section_tasks(visible_body, heading_matches_implementation_tasks)
+
+
+def acceptance_review_tasks(issue: dict[str, object]) -> list[tuple[bool, str]]:
+    visible_body, _, acceptance, _ = issue_task_headings(issue)
+    if len(acceptance) != 1:
+        raise SystemExit(
+            "GitHub issue must contain exactly one visible Acceptance and Review Tasks heading"
+        )
+    acceptance_heading = acceptance[0]
+    acceptance_end = len(visible_body)
+    for heading in HEADING_RE.finditer(visible_body, acceptance_heading.end()):
+        acceptance_end = heading.start()
+        break
+    return parse_section_tasks(
+        visible_body[acceptance_heading.start() : acceptance_end],
+        heading_matches_acceptance_tasks,
+    )
 
 
 def heading_section(
@@ -431,9 +1323,340 @@ def heading_section(
     return text[heading.end() : end].strip()
 
 
-def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> list[str]:
+def named_markdown_section(text: str, name: str) -> str | None:
+    """Return one uniquely named visible Markdown section."""
+
+    visible = visible_markdown(text)
+    headings = list(HEADING_RE.finditer(visible))
+    matches = [
+        index
+        for index, heading in enumerate(headings)
+        if clean(heading.group(2)).casefold() == name.casefold()
+    ]
+    if len(matches) != 1:
+        return None
+    return heading_section(visible, headings, matches[0])
+
+
+def required_markdown_section_failures(
+    text: str, names: set[str], document: str
+) -> list[str]:
+    """Require one non-empty visible section for every named heading."""
+
+    visible = visible_markdown(text)
+    headings = list(HEADING_RE.finditer(visible))
+    failures: list[str] = []
+    for name in sorted(names):
+        matches = [
+            index
+            for index, heading in enumerate(headings)
+            if clean(heading.group(2)).casefold() == name
+        ]
+        if len(matches) != 1:
+            failures.append(
+                f"{document} section {name!r} must appear exactly once; found {len(matches)}"
+            )
+            continue
+        body = heading_section(visible, headings, matches[0])
+        if not clean(HEADING_RE.sub("", body)):
+            failures.append(f"{document} section {name!r} must not be empty")
+    return failures
+
+
+def openspec_readiness_failures(root: Path, change: str) -> list[str]:
+    """Validate the bounded artifacts required before milestone planning."""
+
+    change_root = root / "openspec" / "changes" / change
+    failures: list[str] = []
+    documents: dict[str, str] = {}
+    for name in ("proposal.md", "design.md"):
+        path = change_root / name
+        try:
+            documents[name] = path.read_text(encoding="utf-8")
+        except OSError:
+            failures.append(f"{change} is not implementation-ready: missing readable {name}")
+    proposal = documents.get("proposal.md")
+    if proposal is not None:
+        failures.extend(
+            f"{change} {failure}"
+            for failure in required_markdown_section_failures(
+                proposal, REQUIRED_PROPOSAL_HEADINGS, "proposal"
+            )
+        )
+    design = documents.get("design.md")
+    if design is not None:
+        failures.extend(
+            f"{change} {failure}"
+            for failure in required_markdown_section_failures(
+                design, REQUIRED_DESIGN_HEADINGS, "design"
+            )
+        )
+        dependencies = named_markdown_section(design, "dependencies / cross-issue impact")
+        if dependencies is not None and not (
+            re.search(r"#\d+", dependencies)
+            or ARCHITECTURE_NA_RE.fullmatch(dependencies.strip())
+        ):
+            failures.append(
+                f"{change} design must name cross-issue dependencies or use a reasoned N/A"
+            )
+        open_questions = named_markdown_section(design, "open questions")
+        if open_questions is not None and clean(open_questions).casefold() not in {
+            "none",
+            "none.",
+        }:
+            failures.append(f"{change} still has unresolved open questions")
+    specs_root = change_root / "specs"
+    specs = sorted(specs_root.glob("*/spec.md")) if specs_root.is_dir() else []
+    if not specs:
+        failures.append(f"{change} is not implementation-ready: no delta spec")
+    for spec in specs:
+        try:
+            text = visible_markdown(spec.read_text(encoding="utf-8"))
+        except OSError:
+            failures.append(f"{change} has an unreadable delta spec: {spec}")
+            continue
+        if re.search(r"(?m)^### Requirement:\s+\S", text) is None:
+            failures.append(f"{change} delta spec has no requirement: {spec}")
+        if re.search(r"(?m)^#### Scenario:\s+\S", text) is None:
+            failures.append(f"{change} delta spec has no scenario: {spec}")
+    try:
+        _, tasks = local_tasks(root, change)
+    except SystemExit as error:
+        failures.append(str(error))
+    else:
+        contract_tasks = [task for task in tasks if task_id(task).startswith("1.")]
+        if not contract_tasks or any(not checked for checked, _ in contract_tasks):
+            failures.append(
+                f"{change} contract/specification tasks must be present and checked before milestone planning"
+            )
+    return failures
+
+
+def planned_issue_failures(
+    issue: dict[str, object],
+    issue_map: dict[str, tuple[Owner, ...]],
+    root: Path,
+) -> list[str]:
+    """Validate one open issue when it is assigned to a release milestone."""
+
+    if str(issue.get("state", "")).upper() != "OPEN":
+        return []
+    milestone = issue.get("milestone")
+    if not isinstance(milestone, dict):
+        return []
+    title = milestone.get("title")
+    if not isinstance(title, str) or RELEASE_MILESTONE_RE.fullmatch(title) is None:
+        return []
+    number = positive_issue(issue.get("number"), "issue number")
+    issue_to_change = {
+        owner.issue: change for change, owners in issue_map.items() for owner in owners
+    }
+    failures: list[str] = []
+    change = issue_to_change.get(number)
+    if change is None:
+        failures.append(
+            f"#{number} cannot be planned in {title}: no local OpenSpec mapping"
+        )
+        return failures
+    labels = issue.get("labels")
+    status_labels = {
+        label.get("name")
+        for label in (labels if isinstance(labels, list) else [])
+        if isinstance(label, dict)
+        and isinstance(label.get("name"), str)
+        and str(label.get("name")).startswith("status:")
+    }
+    if status_labels != {"status:ready"}:
+        failures.append(
+            f"#{number} cannot be planned in {title}: expected only status:ready, found "
+            f"{', '.join(sorted(status_labels)) or 'no status label'}"
+        )
+    failures.extend(openspec_readiness_failures(root, change))
+    return failures
+
+
+@lru_cache(maxsize=1)
+def git_object_id_length() -> int | None:
+    """Return the repository's native hexadecimal object ID length."""
+
+    try:
+        object_format = run(["git", "rev-parse", "--show-object-format"])
+    except (OSError, SystemExit, subprocess.SubprocessError):
+        return None
+    if not isinstance(object_format, str):
+        return None
+    return {"sha1": 40, "sha256": 64}.get(object_format.strip())
+
+
+def candidate_tree_blob_oid(candidate_tree_ref: str, path: str) -> str | None:
+    """Return one exact regular-file blob from the selected candidate tree."""
+
+    try:
+        path_bytes = path.encode("utf-8")
+        if b"\0" in path_bytes:
+            return None
+        output = run(
+            ["git", "ls-tree", "-z", candidate_tree_ref, "--", path],
+            raw_output=True,
+        )
+    except (OSError, SystemExit, UnicodeEncodeError, ValueError, subprocess.SubprocessError):
+        return None
+    object_id_length = git_object_id_length()
+    if not isinstance(output, bytes) or object_id_length is None:
+        return None
+    records = output.split(b"\0")
+    if len(records) != 2 or records[1] != b"":
+        return None
+    metadata, separator, entry_path = records[0].partition(b"\t")
+    fields = metadata.split()
+    if not (
+        separator == b"\t"
+        and entry_path == path_bytes
+        and len(fields) == 3
+        and fields[0] in {b"100644", b"100755"}
+        and fields[1] == b"blob"
+        and len(fields[2]) == object_id_length
+        and all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
+    ):
+        return None
+    return fields[2].decode("ascii")
+
+
+def candidate_tree_change_names(
+    candidate_tree_ref: str, root: Path, issue_map_path: str | Path
+) -> set[str]:
+    """List mapped OpenSpec change names from the candidate tree only."""
+
+    relative = candidate_tree_relative_path(root, issue_map_path)
+    if relative is None:
+        raise SystemExit(
+            f"candidate branch issue-map {issue_map_path!s} is outside repository root {root}"
+        )
+    parent, separator, _ = relative.rpartition("/")
+    changes_path = f"{parent + '/' if separator else ''}changes"
+    try:
+        output = run(
+            ["git", "ls-tree", "-r", "-z", candidate_tree_ref, "--", changes_path],
+            raw_output=True,
+        )
+    except (OSError, SystemExit, subprocess.SubprocessError) as error:
+        raise SystemExit(
+            f"candidate branch OpenSpec changes are unreadable in candidate tree "
+            f"{candidate_tree_ref!r}"
+        ) from error
+    if not isinstance(output, bytes):
+        raise SystemExit("candidate branch OpenSpec changes returned non-binary tree data")
+    object_id_length = git_object_id_length()
+    if object_id_length is None:
+        raise SystemExit("candidate branch Git object format is unsupported or unreadable")
+    records = output.split(b"\0")
+    if not records or records[-1] != b"":
+        raise SystemExit("candidate branch OpenSpec changes returned malformed tree data")
+    prefix = f"{changes_path}/".encode("utf-8")
+    names: set[str] = set()
+    for record in records[:-1]:
+        metadata, separator, entry_path = record.partition(b"\t")
+        fields = metadata.split()
+        if (
+            separator != b"\t"
+            or len(fields) != 3
+            or len(fields[2]) != object_id_length
+            or fields[1] not in {b"blob", b"tree", b"commit"}
+            or not all(byte in b"0123456789abcdefABCDEF" for byte in fields[2])
+            or not fields[0]
+            or not all(byte in b"01234567" for byte in fields[0])
+            or not entry_path.startswith(prefix)
+        ):
+            raise SystemExit("candidate branch OpenSpec changes returned malformed tree data")
+        try:
+            path_text = entry_path.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise SystemExit(
+                "candidate branch OpenSpec changes contain a non-UTF-8 path"
+            ) from error
+        suffix = "/tasks.md"
+        if path_text.endswith(suffix):
+            change = path_text[len(prefix.decode("utf-8")) : -len(suffix)]
+            if change and "/" not in change:
+                names.add(change)
+    return names
+
+
+def candidate_tree_contains_regular_file(candidate_tree_ref: str, path: str) -> bool:
+    """Require one exact regular-file entry in the selected candidate tree."""
+
+    return candidate_tree_blob_oid(candidate_tree_ref, path) is not None
+
+
+def candidate_tree_relative_path(root: Path, path: str | Path) -> str | None:
+    """Return a safe lexical repository path without following worktree links."""
+
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.absolute().relative_to(root.absolute())
+        except ValueError:
+            return None
+    parts = candidate.parts
+    if not parts or any(
+        part in {"", ".", ".."}
+        or "\0" in part
+        or "/" in part
+        or "\\" in part
+        or ":" in part
+        for part in parts
+    ):
+        return None
+    return "/".join(parts)
+
+
+def candidate_tree_file_text(
+    candidate_tree_ref: str,
+    root: Path,
+    path: str | Path,
+    label: str,
+) -> str:
+    """Read UTF-8 bytes directly from one regular file in the candidate tree."""
+
+    relative = candidate_tree_relative_path(root, path)
+    if relative is None:
+        raise SystemExit(
+            f"candidate branch {label} {path!s} is outside repository root {root}"
+        )
+    blob_oid = candidate_tree_blob_oid(candidate_tree_ref, relative)
+    if blob_oid is None:
+        raise SystemExit(
+            f"candidate branch {label} {path!s} must be a tracked regular file "
+            f"in candidate tree {candidate_tree_ref!r}"
+        )
+    try:
+        content = run(["git", "cat-file", "blob", blob_oid], raw_output=True)
+        if not isinstance(content, bytes):
+            raise ValueError("git cat-file returned text instead of bytes")
+        return content.decode("utf-8")
+    except (OSError, UnicodeError, ValueError, SystemExit, subprocess.SubprocessError) as error:
+        raise SystemExit(
+            f"candidate branch {label} {path!s} contents are unreadable in "
+            f"candidate tree {candidate_tree_ref!r}"
+        ) from error
+
+
+def architecture_diagram_link_failures(
+    section: str,
+    repo: str,
+    root: Path,
+    mermaid_budget: MermaidValidationBudget | None = None,
+    candidate_tree_ref: str | None = None,
+) -> list[str]:
     """Validate durable local architecture-document links for one issue section."""
 
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
+    if ARCHITECTURE_NA_RE.fullmatch(section.strip()):
+        return []
+    if re.match(r"(?is)^\s*N/?A\b", section):
+        return [
+            "'architecture diagrams' N/A decision must use 'N/A: <reason>' with a non-empty reason"
+        ]
     matches = list(MARKDOWN_LINK_RE.finditer(section))
     urls = [match.group(1) for match in matches]
     if not urls:
@@ -462,9 +1685,9 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
                 f"architecture diagram link {url!r} must target repository {repo!r} over HTTPS"
             )
             continue
-        if segments[2:5] != ["blob", "dev", "docs"]:
+        if segments[2:5] != ["blob", "main", "docs"]:
             failures.append(
-                f"architecture diagram link {url!r} must use /blob/dev/docs/"
+                f"architecture diagram link {url!r} must use /blob/main/docs/"
             )
             continue
         relative_parts = segments[5:]
@@ -481,22 +1704,34 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
             continue
         if len(relative_parts) != 1:
             failures.append(
-                f"architecture diagram link {url!r} must target one direct document under /blob/dev/docs/"
+                f"architecture diagram link {url!r} must target one direct document under /blob/main/docs/"
             )
             continue
-        candidate = docs_root.joinpath(*relative_parts).resolve()
-        try:
-            candidate.relative_to(docs_root)
-        except ValueError:
-            failures.append(
-                f"architecture diagram link {url!r} escapes the local docs directory"
-            )
-            continue
+        if candidate_tree_ref is not None:
+            candidate_tree_path = Path("docs", relative_parts[0]).as_posix()
+            if not candidate_tree_contains_regular_file(
+                candidate_tree_ref, candidate_tree_path
+            ):
+                failures.append(
+                    f"architecture diagram link {url!r} has no tracked regular Markdown file "
+                    f"in candidate tree {candidate_tree_ref!r}"
+                )
+                continue
+        candidate = docs_root.joinpath(*relative_parts)
+        if candidate_tree_ref is None:
+            candidate = candidate.resolve()
+            try:
+                candidate.relative_to(docs_root)
+            except ValueError:
+                failures.append(
+                    f"architecture diagram link {url!r} escapes the local docs directory"
+                )
+                continue
         if candidate.suffix.casefold() != ".md":
             failures.append(
                 f"architecture diagram link {url!r} must target a Markdown document"
             )
-        elif not candidate.is_file():
+        elif candidate_tree_ref is None and not candidate.is_file():
             failures.append(
                 f"architecture diagram link {url!r} has no matching local documentation file"
             )
@@ -506,19 +1741,112 @@ def architecture_diagram_link_failures(section: str, repo: str, root: Path) -> l
             )
         else:
             try:
-                fragments = markdown_heading_fragments(
-                    candidate.read_text(encoding="utf-8")
-                )
-            except OSError as error:
+                if candidate_tree_ref is None:
+                    document = candidate.read_text(encoding="utf-8")
+                else:
+                    document = candidate_tree_file_text(
+                        candidate_tree_ref,
+                        root,
+                        Path("docs", relative_parts[0]),
+                        "architecture diagram",
+                    )
+            except (OSError, SystemExit) as error:
                 failures.append(
                     f"architecture diagram link {url!r} documentation could not be read: {error}"
                 )
                 continue
             fragment = unquote(parsed.fragment)
-            if fragment not in fragments:
+            if not fragment.startswith(GITHUB_RENDERED_HEADING_PREFIX):
+                failures.append(
+                    f"architecture diagram link {url!r} must use the browser-native "
+                    f"#{GITHUB_RENDERED_HEADING_PREFIX}<heading> fragment"
+                )
+                continue
+            heading_fragment = fragment.removeprefix(GITHUB_RENDERED_HEADING_PREFIX)
+            diagram_section = markdown_heading_section(document, heading_fragment)
+            if diagram_section is None:
                 failures.append(
                     f"architecture diagram link {url!r} has no matching GitHub-style heading fragment"
                 )
+            else:
+                outcomes = mermaid_diagram_outcomes(diagram_section, mermaid_budget)
+                if MermaidValidationOutcome.VALID not in outcomes:
+                    if outcomes:
+                        classes = ", ".join(
+                            dict.fromkeys(outcome.value for outcome in outcomes)
+                        )
+                        diagnostic = f"; parser outcome: {classes}"
+                    else:
+                        diagnostic = ""
+                    failures.append(
+                        f"architecture diagram link {url!r} must target a section containing a non-empty "
+                        "fenced Mermaid block accepted by the locked syntax parser"
+                        f"{diagnostic}"
+                    )
+    return failures
+
+
+def complexity_label_failures(issue: dict[str, object]) -> list[str]:
+    """Validate the singular vocabulary-only complexity label on open issues."""
+
+    if str(issue.get("state", "")).upper() != "OPEN":
+        return []
+    labels = issue.get("labels")
+    complexity = [
+        label.get("name")
+        for label in (labels if isinstance(labels, list) else [])
+        if isinstance(label, dict)
+        and isinstance(label.get("name"), str)
+        and str(label["name"]).startswith("complexity:")
+    ]
+    invalid = sorted(set(complexity) - COMPLEXITY_LABELS)
+    if invalid:
+        return [
+            "open issue complexity labels must use exactly one of "
+            f"{', '.join(sorted(COMPLEXITY_LABELS))}; found unknown "
+            f"{', '.join(invalid)}"
+        ]
+    if len(complexity) != 1:
+        found = ", ".join(complexity) if complexity else "none"
+        return [
+            "open issue must carry exactly one complexity label from "
+            f"{', '.join(sorted(COMPLEXITY_LABELS))}; found {found}"
+        ]
+    return []
+
+
+def acceptance_state_failures(
+    expected_tasks: list[tuple[bool, str]],
+    acceptance_tasks: list[tuple[bool, str]],
+    *,
+    require_complete: bool,
+) -> list[str]:
+    failures: list[str] = []
+    if any(not checked for checked, _ in expected_tasks):
+        if any(checked for checked, _ in acceptance_tasks):
+            failures.append(
+                "acceptance and review tasks must be unchecked while implementation tasks are incomplete"
+            )
+        if require_complete:
+            failures.append(
+                "closed or release-complete issue must have both implementation and acceptance tasks checked"
+            )
+        return failures
+    saw_unchecked = False
+    for index, (checked, _) in enumerate(acceptance_tasks, start=1):
+        if not checked:
+            saw_unchecked = True
+        elif saw_unchecked:
+            failures.append(
+                f"acceptance and review task {index} is checked after an unchecked task"
+            )
+    if require_complete and (
+        any(not checked for checked, _ in expected_tasks)
+        or any(not checked for checked, _ in acceptance_tasks)
+    ):
+        failures.append(
+            "closed or release-complete issue must have both implementation and acceptance tasks checked"
+        )
     return failures
 
 
@@ -527,23 +1855,36 @@ def issue_contract_failures(
     expected_tasks: list[tuple[bool, str]],
     repo: str,
     root: Path,
+    mermaid_budget: MermaidValidationBudget | None = None,
+    candidate_tree_ref: str | None = None,
 ) -> list[str]:
-    """Validate the concise #305 issue shape for open mapped work."""
+    """Validate the two-list #305 issue shape and its state transition."""
 
-    if issue.get("state") != "OPEN":
+    state = str(issue.get("state", "")).upper()
+    if state == "CLOSED":
         return []
+    if state != "OPEN":
+        return [
+            f"GitHub issue state must be OPEN or CLOSED; found {state or 'UNKNOWN'}"
+        ]
     body = issue.get("body", "")
     if not isinstance(body, str):
         return ["body is not text"]
-    visible_body = visible_markdown(body)
-    if requires_exact_head_proof(visible_body):
-        return [
-            "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
-        ]
-    headings = list(HEADING_RE.finditer(visible_body))
-    normalized = [clean(heading.group(2)).lower() for heading in headings]
+    visible_body, implementation_headings, acceptance_headings, legacy_headings = (
+        issue_task_headings(issue)
+    )
     failures: list[str] = []
+    if requires_exact_head_proof(visible_body):
+        failures.append(
+            "must bind proof to behavior-relevant inputs instead of exact-head commit identity"
+        )
+    if legacy_headings:
+        failures.append(
+            "open mapped issues must use Implementation Tasks, not a legacy OpenSpec task heading"
+        )
     positions: list[int] = []
+    headings = list(HEADING_RE.finditer(visible_body))
+    normalized = [clean(heading.group(2)).casefold() for heading in headings]
     for required in REQUIRED_OPEN_ISSUE_HEADINGS:
         matches = [index for index, value in enumerate(normalized) if value == required]
         if len(matches) != 1:
@@ -555,14 +1896,31 @@ def issue_contract_failures(
         positions.append(index)
         if not heading_section(visible_body, headings, index):
             failures.append(f"{required!r} section must not be empty")
-    task_positions = [
-        index
-        for index, heading in enumerate(headings)
-        if heading_matches_openspec_tasks(heading.group(2))
-    ]
-    if len(task_positions) == 1:
-        positions.append(task_positions[0])
-    if len(positions) == len(REQUIRED_OPEN_ISSUE_HEADINGS) + 1 and positions != sorted(
+    if len(implementation_headings) != 1:
+        failures.append(
+            "must contain exactly one visible non-empty 'implementation tasks' section"
+        )
+    else:
+        positions.append(
+            next(
+                index
+                for index, heading in enumerate(headings)
+                if heading.start() == implementation_headings[0].start()
+            )
+        )
+    if len(acceptance_headings) != 1:
+        failures.append(
+            "must contain exactly one visible non-empty 'acceptance and review tasks' section"
+        )
+    else:
+        positions.append(
+            next(
+                index
+                for index, heading in enumerate(headings)
+                if heading.start() == acceptance_headings[0].start()
+            )
+        )
+    if len(positions) == len(REQUIRED_OPEN_ISSUE_HEADINGS) + 2 and positions != sorted(
         positions
     ):
         failures.append("required issue sections must follow the #305 order")
@@ -575,8 +1933,26 @@ def issue_contract_failures(
             visible_body, headings, architecture_indexes[0]
         )
         failures.extend(
-            architecture_diagram_link_failures(architecture_section, repo, root)
+            architecture_diagram_link_failures(
+                architecture_section,
+                repo,
+                root,
+                mermaid_budget,
+                candidate_tree_ref,
+            )
         )
+
+    try:
+        acceptance = acceptance_review_tasks(issue)
+    except SystemExit as error:
+        acceptance = []
+        failures.append(str(error))
+    failures.extend(acceptance_task_failures(acceptance, require_complete=False))
+    failures.extend(
+        acceptance_state_failures(
+            expected_tasks, acceptance, require_complete=False
+        )
+    )
 
     premortem_indexes = [
         index for index, value in enumerate(normalized) if value == "pre-mortem"
@@ -609,22 +1985,28 @@ def issue_contract_failures(
     if len(mitigation_matches) != len(mitigation_tasks):
         failures.append(
             "every pre-mortem mitigation checkbox must end with "
-            "'(OpenSpec tasks: <task ids>)'"
+            "'(Implementation tasks: <task ids>)'"
         )
     expected_by_id = {task_id(task): task[0] for task in expected_tasks}
     for match in mitigation_matches:
         checked = match.group(1).lower() == "x"
-        references = [value.strip() for value in match.group(3).split(",")]
+        kind = match.group(3)
+        references = [value.strip() for value in match.group(4).split(",")]
+        if kind != "Implementation":
+            failures.append(
+                f"mitigation {clean(match.group(2))!r} must use "
+                "'(Implementation tasks: ...)' for open mapped issues"
+            )
         if len(references) != len(set(references)):
             failures.append(
-                f"mitigation {clean(match.group(2))!r} repeats an OpenSpec task ID"
+                f"mitigation {clean(match.group(2))!r} repeats an implementation task ID"
             )
             continue
         unknown = [value for value in references if value not in expected_by_id]
         if unknown:
             failures.append(
                 f"mitigation {clean(match.group(2))!r} references unknown or foreign "
-                f"OpenSpec tasks: {', '.join(unknown)}"
+                f"implementation tasks: {', '.join(unknown)}"
             )
             continue
         should_be_checked = all(expected_by_id[value] for value in references)
@@ -632,16 +2014,48 @@ def issue_contract_failures(
             state = "checked" if should_be_checked else "unchecked"
             failures.append(
                 f"mitigation {clean(match.group(2))!r} must be {state} because of "
-                f"OpenSpec tasks {', '.join(references)}"
+                f"implementation tasks {', '.join(references)}"
             )
     return failures
 
 
-def local_tasks(root: Path, change: str) -> tuple[Path, list[tuple[bool, str]]]:
+def acceptance_task_failures(
+    acceptance: list[tuple[bool, str]], *, require_complete: bool
+) -> list[str]:
+    failures: list[str] = []
+    if len(acceptance) != len(ACCEPTANCE_REVIEW_TASKS):
+        failures.append(
+            "Acceptance and Review Tasks must contain exactly five checkboxes"
+        )
+        return failures
+    for index, ((_, actual), expected) in enumerate(
+        zip(acceptance, ACCEPTANCE_REVIEW_TASKS, strict=True), start=1
+    ):
+        if actual != expected:
+            failures.append(
+                f"acceptance and review task {index} must use the canonical text"
+            )
+    if require_complete and any(not checked for checked, _ in acceptance):
+        failures.append("closed or release-complete issue must have all acceptance tasks checked")
+    return failures
+
+
+def local_tasks(
+    root: Path,
+    change: str,
+    *,
+    candidate_tree_ref: str | None = None,
+) -> tuple[Path, list[tuple[bool, str]]]:
     path = root / "openspec" / "changes" / change / "tasks.md"
-    if not path.exists():
+    if candidate_tree_ref is None and not path.exists():
         raise SystemExit(f"OpenSpec tasks file missing for {change}: {path}")
-    tasks = parse_tasks(path.read_text(encoding="utf-8"))
+    if candidate_tree_ref is None:
+        text = path.read_text(encoding="utf-8")
+    else:
+        text = candidate_tree_file_text(
+            candidate_tree_ref, root, path, "mapped task file"
+        )
+    tasks = parse_tasks(text)
     if not tasks:
         raise SystemExit(f"OpenSpec tasks file has no checkbox tasks: {path}")
     ids = [task_id(task) for task in tasks]
@@ -686,15 +2100,502 @@ def first_task_difference(
     return f"task count differs: expected {len(expected)}, found {len(actual)}"
 
 
+def base_issue_map(
+    root: Path,
+    issue_map_path: str | Path,
+    base_ref: str,
+    *,
+    authority_label: str = "pull request",
+) -> dict[str, tuple[Owner, ...]]:
+    """Read mapped owners from an accepted base revision."""
+
+    base_label = "pull-request" if authority_label == "pull request" else authority_label
+    if not base_ref.strip():
+        raise SystemExit(f"{authority_label} accepted base is missing")
+    path = Path(issue_map_path)
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"configured issue-map path {path} is outside repository root {root}"
+        ) from error
+    try:
+        text = run(["git", "show", f"{base_ref}:{relative.as_posix()}"])
+        with tempfile.TemporaryDirectory(prefix="issue-map-base-") as temporary:
+            path = Path(temporary) / "issue-map.json"
+            path.write_text(text, encoding="utf-8")
+            return load_issue_map(path)
+    except (OSError, UnicodeError, ValueError, SystemExit) as error:
+        raise SystemExit(
+            f"accepted {base_label} base {base_ref!r} is unreadable for {relative}"
+        ) from error
+
+
+def base_local_tasks(
+    root: Path,
+    path: Path,
+    base_ref: str,
+    *,
+    authority_label: str = "pull request",
+) -> list[tuple[bool, str]]:
+    """Read one mapped task file from an accepted base revision."""
+
+    base_label = "pull-request" if authority_label == "pull request" else authority_label
+    if not base_ref.strip():
+        raise SystemExit(f"{authority_label} accepted base is missing")
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise SystemExit(
+            f"mapped OpenSpec task path {path} is outside repository root {root}"
+        ) from error
+    git_path = f"{base_ref}:{relative.as_posix()}"
+    try:
+        text = run(["git", "show", git_path])
+    except SystemExit as error:
+        raise SystemExit(
+            f"accepted {base_label} base {base_ref!r} is unreadable for {relative}"
+        ) from error
+    tasks = parse_tasks(text)
+    if not tasks:
+        raise SystemExit(
+            f"accepted {base_label} base {base_ref!r} has no checkbox tasks in {relative}"
+        )
+    ids = [task_id(task) for task in tasks]
+    if len(ids) != len(set(ids)):
+        raise SystemExit(
+            f"accepted {base_label} base {base_ref!r} has duplicate task identifiers in {relative}"
+        )
+    return tasks
+
+
+def release_owner_child_issues(repo: str, owner_issue: int) -> set[int]:
+    """Read the complete native child set before admitting new task authority."""
+
+    owner, name = repo_parts(repo)
+    payload = gh_api_json(
+        [
+            "graphql",
+            "-f",
+            (
+                "query=query($owner:String!,$name:String!,$number:Int!){"
+                "repository(owner:$owner,name:$name){issue(number:$number){"
+                "subIssues(first:100){totalCount nodes{number}}}}}"
+            ),
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={owner_issue}",
+        ]
+    )
+    data = payload.get("data") if isinstance(payload, dict) else None
+    repository = data.get("repository") if isinstance(data, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    children = issue.get("subIssues") if isinstance(issue, dict) else None
+    nodes = children.get("nodes") if isinstance(children, dict) else None
+    total = children.get("totalCount") if isinstance(children, dict) else None
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+        or not all(isinstance(node, dict) for node in nodes)
+    ):
+        raise SystemExit(f"GitHub release owner #{owner_issue} child set was incomplete")
+    return {
+        positive_issue(node.get("number"), "release child")
+        for node in nodes
+    }
+
+
+def candidate_release_owner_graph(
+    path: Path,
+    owner_issue: int,
+    mapped_issues: set[int],
+    *,
+    root: Path | None = None,
+    candidate_tree_ref: str | None = None,
+) -> "ReleaseGraph":
+    """Require one structurally valid candidate graph for new release-child authority."""
+
+    if candidate_tree_ref is not None:
+        if root is None:
+            raise SystemExit("candidate release graph root is missing")
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate_path = Path(temporary) / "issue-map.json"
+            candidate_path.write_text(
+                candidate_tree_file_text(candidate_tree_ref, root, path, "issue-map"),
+                encoding="utf-8",
+            )
+            return candidate_release_owner_graph(
+                candidate_path, owner_issue, mapped_issues
+            )
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
+    graphs = payload.get("release_graphs") if isinstance(payload, dict) else None
+    if not isinstance(graphs, dict):
+        raise SystemExit("candidate release graphs are missing or malformed")
+    matches = [
+        milestone
+        for milestone, graph in graphs.items()
+        if isinstance(graph, dict) and graph.get("release_issue") == owner_issue
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"candidate must declare exactly one release graph for owner #{owner_issue}"
+        )
+    try:
+        graph = publication_graph(path, matches[0], mapped_issues)
+    except (ValueError, SystemExit) as error:
+        raise SystemExit(f"candidate release graph for owner #{owner_issue} is invalid: {error}") from error
+    if graph is None or graph.release_issue != owner_issue:
+        raise SystemExit(f"candidate release graph for owner #{owner_issue} is invalid")
+    return graph
+
+
+def check_pull_request_tasks(
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    pull_request: int | None,
+    base_ref: str,
+    *,
+    issue_map_path: str | Path | None = None,
+    owner_issue: int | None = None,
+    owner_error: str | None = None,
+    mermaid_budget: MermaidValidationBudget | None = None,
+    scope_label: str = "pull request",
+    candidate_tree_ref: str | None = None,
+) -> list[str]:
+    """Check one owner against live state and unrelated slices against its base."""
+
+    if owner_error is not None:
+        return [f"{scope_label} ownership {owner_error}"]
+    if owner_issue is None:
+        if pull_request is None:
+            return [f"{scope_label} ownership is missing"]
+        try:
+            owner_issue = pull_request_owner_issue(
+                repo, pull_request_payload(repo, pull_request)
+            )
+        except SystemExit as error:
+            return [f"{scope_label} ownership {error}"]
+    mapped = [
+        (change, owner)
+        for change, owners in issue_map.items()
+        for owner in owners
+        if owner.issue == owner_issue
+    ]
+    if len(mapped) != 1:
+        return [
+            f"{scope_label} owner #{owner_issue} must have exactly one local OpenSpec mapping; "
+            f"found {len(mapped)}"
+        ]
+
+    failures: list[str] = []
+    try:
+        issue_states: dict[int, str] = {}
+        for issue in issue_state_payloads(repo):
+            number = positive_issue(issue.get("number"), "issue number")
+            state = str(issue.get("state", "")).upper()
+            if number in issue_states:
+                failures.append(f"mapped issue #{number} has duplicate native state")
+            else:
+                issue_states[number] = state
+    except SystemExit as error:
+        return [f"{scope_label} issue state {error}"]
+    for number in sorted(mapped_issue_numbers(issue_map)):
+        state = issue_states.get(number)
+        if state is None:
+            failures.append(
+                f"mapped issue #{number} is missing from the complete native issue state"
+            )
+        elif state not in {"OPEN", "CLOSED"}:
+            failures.append(
+                f"mapped issue #{number} has unknown native state "
+                f"{state or 'UNKNOWN'}"
+            )
+    if failures:
+        return failures
+    owner_state = issue_states[owner_issue]
+    if owner_state != "OPEN":
+        return [f"{scope_label} owner #{owner_issue} must be OPEN"]
+    configured_issue_map_path = (
+        issue_map_path
+        if issue_map_path is not None
+        else root / "openspec" / "issue-map.json"
+    )
+    base_label = "pull-request" if scope_label == "pull request" else scope_label
+    related_issues = {owner_issue}
+    release_children: set[int] | None = None
+    release_graph: ReleaseGraph | None = None
+    try:
+        accepted_issue_map = base_issue_map(
+            root,
+            configured_issue_map_path,
+            base_ref,
+            authority_label=scope_label,
+        )
+    except SystemExit as error:
+        return [str(error)]
+    for change in sorted(set(issue_map) | set(accepted_issue_map)):
+        candidate_owners = issue_map.get(change)
+        accepted_owners = accepted_issue_map.get(change)
+        if candidate_owners is None:
+            failures.append(
+                f"{change} removes mapped OpenSpec authority from accepted {base_label} base "
+                f"{base_ref}: owners {accepted_owners!r}"
+            )
+        elif accepted_owners is None:
+            if any(owner.issue not in related_issues for owner in candidate_owners):
+                if release_children is None:
+                    try:
+                        release_graph = candidate_release_owner_graph(
+                            Path(configured_issue_map_path),
+                            owner_issue,
+                            {owner.issue for owners in issue_map.values() for owner in owners},
+                            root=root,
+                            candidate_tree_ref=candidate_tree_ref,
+                        )
+                        release_children = (
+                            release_owner_child_issues(repo, owner_issue)
+                            & release_graph.issues
+                        )
+                    except SystemExit as error:
+                        return [f"{scope_label} release child authority {error}"]
+                if any(owner.issue not in release_children for owner in candidate_owners):
+                    failures.append(
+                        f"{change} adds unrelated mapped OpenSpec authority without an accepted "
+                        f"{base_label} base slice"
+                    )
+                else:
+                    related_issues.update(owner.issue for owner in candidate_owners)
+        elif candidate_owners != accepted_owners:
+            owner_only_range_change = (
+                tuple(owner.issue for owner in candidate_owners)
+                == tuple(owner.issue for owner in accepted_owners)
+                and all(
+                    candidate == accepted or candidate.issue == owner_issue
+                    for candidate, accepted in zip(
+                        candidate_owners, accepted_owners, strict=True
+                    )
+                )
+            )
+            if not owner_only_range_change:
+                failures.append(
+                    f"{change} changes mapped OpenSpec owners from accepted {base_label} base "
+                    f"{base_ref}: expected {accepted_owners!r}, found {candidate_owners!r}"
+                )
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
+    for change, owners in sorted(issue_map.items()):
+        all_owners_closed = all(
+            issue_states[owner.issue] != "OPEN" for owner in owners
+        )
+        if all_owners_closed and candidate_tree_ref is None:
+            continue
+        try:
+            path, candidate_tasks = local_tasks(
+                root, change, candidate_tree_ref=candidate_tree_ref
+            )
+        except SystemExit as error:
+            failures.append(str(error))
+            continue
+        if all_owners_closed:
+            continue
+        try:
+            candidate_slices = owner_slices(path, candidate_tasks, owners)
+        except SystemExit as error:
+            failures.append(str(error))
+            continue
+        unrelated_slices = [
+            (owner, expected)
+            for owner, expected in candidate_slices
+            if owner.issue not in related_issues and issue_states[owner.issue] == "OPEN"
+        ]
+        base_slices: dict[int, list[tuple[bool, str]]] = {}
+        if unrelated_slices:
+            try:
+                base_tasks = base_local_tasks(
+                    root,
+                    path,
+                    base_ref,
+                    authority_label=scope_label,
+                )
+                base_slices = dict(
+                    (owner.issue, expected)
+                    for owner, expected in owner_slices(
+                        path, base_tasks, accepted_issue_map.get(change, owners)
+                    )
+                )
+            except SystemExit as error:
+                failures.append(str(error))
+                continue
+        for owner, expected in candidate_slices:
+            if owner.issue not in related_issues:
+                if issue_states[owner.issue] != "OPEN":
+                    continue
+                accepted = base_slices.get(owner.issue)
+                if accepted is None:
+                    failures.append(
+                        f"#{owner.issue} {change} has no corresponding unrelated task slice "
+                        f"in accepted {base_label} base {base_ref}"
+                    )
+                elif expected != accepted:
+                    failures.append(
+                        f"#{owner.issue} {change} changes an unrelated task slice from "
+                        f"accepted {base_label} base {base_ref}: "
+                        f"{first_task_difference(accepted, expected)}"
+                    )
+                continue
+            try:
+                payload = issue_payload(repo, owner.issue)
+                if str(payload.get("state", "")).upper() != "OPEN":
+                    failures.append(f"#{owner.issue} issue contract must be OPEN")
+                    continue
+                remote = issue_checklist_tasks(payload)
+            except SystemExit as error:
+                failures.append(f"#{owner.issue} issue contract {error}")
+                continue
+            print(
+                f"#{owner.issue} {change}: candidate {len(expected)} / "
+                f"live {len(remote)} / checked "
+                f"{sum(1 for checked, _ in remote if checked)}"
+            )
+            if remote != expected:
+                failures.append(
+                    f"#{owner.issue} candidate does not mirror live issue state: "
+                    f"{first_task_difference(expected, remote)}"
+                )
+            for failure in issue_contract_failures(
+                payload,
+                expected,
+                repo,
+                root,
+                mermaid_budget,
+                candidate_tree_ref,
+            ):
+                failures.append(f"#{owner.issue} issue contract {failure}")
+    return failures
+
+
+def check_candidate_tasks(
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    owner_issue: int,
+    base_ref: str,
+    *,
+    issue_map_path: str | Path | None = None,
+    mermaid_budget: MermaidValidationBudget | None = None,
+    candidate_tree_ref: str | None = None,
+) -> list[str]:
+    """Check one local candidate owner against live state and its accepted base."""
+
+    return check_pull_request_tasks(
+        repo,
+        root,
+        issue_map,
+        None,
+        base_ref,
+        issue_map_path=issue_map_path,
+        owner_issue=owner_issue,
+        mermaid_budget=mermaid_budget,
+        scope_label="candidate branch",
+        candidate_tree_ref=candidate_tree_ref,
+    )
+
+
 def check_openspec_tasks(
-    repo: str, root: Path, issue_map: dict[str, tuple[Owner, ...]]
+    repo: str,
+    root: Path,
+    issue_map: dict[str, tuple[Owner, ...]],
+    planned_issue: int | None = None,
+    planned_issue_payload: dict[str, object] | None = None,
+    mermaid_budget: MermaidValidationBudget | None = None,
 ) -> list[str]:
     failures: list[str] = []
+    issue_states: dict[int, str] | None = None
+    if planned_issue is None:
+        try:
+            issue_states = {}
+            for issue in issue_state_payloads(repo):
+                number = positive_issue(issue.get("number"), "issue number")
+                state = str(issue.get("state", "")).upper()
+                if number in issue_states:
+                    failures.append(f"mapped issue #{number} has duplicate native state")
+                else:
+                    issue_states[number] = state
+        except SystemExit as error:
+            return [f"issue state {error}"]
+        for number in sorted(mapped_issue_numbers(issue_map)):
+            state = issue_states.get(number)
+            if state is None:
+                failures.append(
+                    f"mapped issue #{number} is missing from the complete native issue state"
+                )
+            elif state not in {"OPEN", "CLOSED"}:
+                failures.append(
+                    f"mapped issue #{number} has unknown native state "
+                    f"{state or 'UNKNOWN'}"
+                )
+        if failures:
+            return failures
+    elif planned_issue_payload is None:
+        try:
+            planned_issue_payload = issue_payload(
+                repo, planned_issue, include_body=False
+            )
+        except SystemExit as error:
+            return [f"planned issue state {error}"]
+
+    planned_payload: dict[str, object] | None = None
+    if planned_issue is not None:
+        assert planned_issue_payload is not None
+        planned_state = str(planned_issue_payload.get("state", "")).upper()
+        if planned_state == "CLOSED":
+            print(f"#{planned_issue}: closed issue body is inert")
+            return []
+        if planned_state != "OPEN":
+            return [
+                f"#{planned_issue} issue contract state must be OPEN or CLOSED; "
+                f"found {planned_state or 'UNKNOWN'}"
+            ]
+        try:
+            planned_payload = issue_payload(repo, planned_issue)
+        except SystemExit as error:
+            return [f"#{planned_issue} issue contract {error}"]
+        failures.extend(planned_issue_failures(planned_payload, issue_map, root))
+    mermaid_budget = mermaid_budget or MermaidValidationBudget()
     for change, owners in sorted(issue_map.items()):
-        path, tasks = local_tasks(root, change)
-        for owner, expected in owner_slices(path, tasks, owners):
-            issue = issue_payload(repo, owner.issue)
-            remote = issue_checklist_tasks(issue)
+        for owner in owners:
+            if planned_issue is not None and owner.issue != planned_issue:
+                continue
+            if issue_states is not None and issue_states[owner.issue] == "CLOSED":
+                print(f"#{owner.issue} {change}: closed issue body is inert")
+                continue
+            payload = (
+                planned_payload
+                if planned_issue is not None
+                else issue_payload(repo, owner.issue)
+            )
+            assert payload is not None
+            path, tasks = local_tasks(root, change)
+            try:
+                expected = next(
+                    expected
+                    for mapped_owner, expected in owner_slices(path, tasks, owners)
+                    if mapped_owner == owner
+                )
+            except (StopIteration, SystemExit) as error:
+                failures.append(str(error))
+                continue
+            try:
+                remote = issue_checklist_tasks(payload)
+            except SystemExit as error:
+                failures.append(f"#{owner.issue} issue contract {error}")
+                continue
             print(
                 f"#{owner.issue} {change}: local {len(expected)} / "
                 f"remote {len(remote)} / checked "
@@ -705,12 +2606,14 @@ def check_openspec_tasks(
                     f"#{owner.issue} does not exactly mirror {path}: "
                     f"{first_task_difference(expected, remote)}"
                 )
-            for failure in issue_contract_failures(issue, expected, repo, root):
-                failures.append(f"#{owner.issue} issue contract {failure}")
-            if issue.get("state") == "CLOSED" and any(
-                not checked for checked, _ in remote
+            for failure in issue_contract_failures(
+                payload,
+                expected,
+                repo,
+                root,
+                mermaid_budget,
             ):
-                failures.append(f"#{owner.issue} is closed but still has unchecked tasks")
+                failures.append(f"#{owner.issue} issue contract {failure}")
     return failures
 
 
@@ -801,33 +2704,284 @@ def milestone_issue_failures(
 
 
 def check_milestone_complete(
-    repo: str, milestone: str, mapped_issues: set[int]
+    repo: str,
+    milestone: str,
+    mapped_issues: set[int],
 ) -> list[str]:
     failures: list[str] = []
     issues = milestone_issues(repo, milestone)
     if not issues:
         return [f"milestone {milestone!r} has no issues"]
     failures.extend(milestone_issue_failures(milestone, issues, mapped_issues))
-    for item in issues:
-        number = positive_issue(item.get("number"), "issue number")
-        if number not in mapped_issues:
-            continue
-        issue = issue_payload(repo, number)
-        tasks = issue_checklist_tasks(issue)
-        checked = sum(1 for is_checked, _ in tasks if is_checked)
-        unchecked = len(tasks) - checked
-        print(
-            f"#{number} {issue.get('state')}: tasks {len(tasks)} / "
-            f"checked {checked} / open {unchecked}"
-        )
-        if not tasks:
-            failures.append(f"#{number} in milestone {milestone} has no visible checklist tasks")
-        if unchecked:
-            failures.append(f"#{number} in milestone {milestone} has {unchecked} unchecked tasks")
     return failures
 
 
+@dataclass(frozen=True)
+class ReleaseGraph:
+    release_issue: int
+    issues: frozenset[int]
+
+
+def unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def publication_graph(
+    path: Path, milestone: str, mapped_issues: set[int]
+) -> ReleaseGraph | None:
+    payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_json_object)
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+        raise ValueError("publication issue map must use schema_version 2")
+    graphs = payload.get("release_graphs", {})
+    if not isinstance(graphs, dict):
+        raise ValueError("release_graphs must be an object")
+    if milestone not in graphs:
+        return None
+    graph = graphs[milestone]
+    if not isinstance(graph, dict) or set(graph) != {"release_issue", "issues"}:
+        raise ValueError("release graph must declare release_issue and issues")
+    owner = positive_issue(graph["release_issue"], "release_issue")
+    members = graph["issues"]
+    if not isinstance(members, dict) or not members:
+        raise ValueError("release graph issues must be a non-empty object")
+    dependencies: dict[int, set[int]] = {}
+    for key, item in members.items():
+        if not isinstance(key, str) or re.fullmatch(r"[1-9][0-9]*", key) is None:
+            raise ValueError("release graph issue keys must be canonical positive numbers")
+        number = int(key)
+        if not isinstance(item, dict) or set(item) != {"blocked_by"}:
+            raise ValueError(f"#{number} must declare blocked_by")
+        blockers = item["blocked_by"]
+        if not isinstance(blockers, list):
+            raise ValueError(f"#{number} blocked_by must be a list")
+        parsed = [positive_issue(value, f"#{number} blocker") for value in blockers]
+        if len(parsed) != len(set(parsed)) or number in parsed:
+            raise ValueError(f"#{number} has duplicate or self dependencies")
+        dependencies[number] = set(parsed)
+    numbers = set(dependencies)
+    if owner not in numbers or not numbers <= mapped_issues:
+        raise ValueError("release graph root must be a member and every member must be mapped")
+    if any(not blockers <= numbers for blockers in dependencies.values()):
+        raise ValueError("release graph contains unknown dependencies")
+    if dependencies[owner] != numbers - {owner}:
+        raise ValueError("release owner must be blocked by every child")
+    try:
+        TopologicalSorter(dependencies).prepare()
+    except CycleError as error:
+        raise ValueError("release graph contains a dependency cycle") from error
+    return ReleaseGraph(owner, frozenset(numbers))
+
+
+def closed_owner_repair_matches(
+    release: object, version: ReleaseVersion, tag_commit: str, candidate_commit: str
+) -> bool:
+    return (
+        isinstance(release, dict)
+        and release.get("tag_name") == version.tag
+        and release.get("draft") is False
+        and release.get("prerelease") is version.is_prerelease
+        and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", tag_commit) is not None
+        and tag_commit == candidate_commit
+    )
+
+
+def check_publication_ready(
+    repo: str, root: Path, issue_map_path: Path, mapped_issues: set[int], tag: str
+) -> list[str]:
+    from release_version import parse_release_version
+
+    try:
+        version = parse_release_version(tag, source="release")
+        milestone = version.milestone
+        graph = None
+        if not version.is_prerelease:
+            stable_milestone = f"{version.stable_tag}-stable-00"
+            graph = publication_graph(issue_map_path, stable_milestone, mapped_issues)
+            if graph is not None:
+                milestone = stable_milestone
+        if graph is None:
+            graph = publication_graph(issue_map_path, milestone, mapped_issues)
+        if graph is None:
+            return check_milestone_complete(repo, milestone, mapped_issues)
+        issues = milestone_issues(repo, milestone)
+        numbers = [positive_issue(item.get("number"), "issue number") for item in issues]
+        if len(numbers) != len(set(numbers)) or set(numbers) != graph.issues:
+            return [f"{milestone} native membership differs from its release graph"]
+        failures = milestone_issue_failures(
+            milestone,
+            [item for item in issues if item["number"] != graph.release_issue],
+            mapped_issues,
+        )
+        owner = next(item for item in issues if item["number"] == graph.release_issue)
+        state = str(owner.get("state", "")).upper()
+        if state == "OPEN":
+            return failures
+        if state != "CLOSED":
+            return failures + ["release owner has unknown native state"]
+        release = gh_api_json([f"repos/{repo}/releases/tags/{version.tag}"])
+        candidate = run(["git", "-C", str(root), "rev-parse", "--verify", "HEAD^{commit}"]).strip()
+        commit = gh_api_json([f"repos/{repo}/commits/refs/tags/{version.tag}"])
+        tag_commit = commit.get("sha", "") if isinstance(commit, dict) else ""
+        if not isinstance(tag_commit, str):
+            tag_commit = ""
+        if not closed_owner_repair_matches(release, version, tag_commit, candidate):
+            failures.append("closed release owner requires an exact existing non-draft release repair")
+        return failures
+    except (OSError, ValueError, SystemExit, subprocess.SubprocessError) as error:
+        return [f"publication readiness: {error}"]
+
+
 def self_test() -> None:
+    from release_version import parse_release_version
+
+    with tempfile.TemporaryDirectory() as temporary:
+        publication_root = Path(temporary)
+        publication_map = publication_root / "issue-map.json"
+        declaration = {
+            "schema_version": 2,
+            "release_graphs": {"v1.2.3-00": {
+                "release_issue": 2,
+                "issues": {"1": {"blocked_by": []}, "2": {"blocked_by": [1]}},
+            }},
+        }
+        def write_publication_map(payload: object) -> None:
+            publication_map.write_text(json.dumps(payload), encoding="utf-8")
+
+        write_publication_map(declaration)
+        assert publication_graph(publication_map, "v1.2.3-00", {1, 2}) == ReleaseGraph(2, frozenset({1, 2}))
+        assert publication_graph(publication_map, "v1.2.4-00", {1, 2}) is None
+        malformed_graphs = [
+            None,
+            {"release_issue": True, "issues": {"1": {"blocked_by": []}}},
+            {"release_issue": 3, "issues": {"1": {"blocked_by": []}}},
+            {"release_issue": 2, "issues": {"01": {"blocked_by": []}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": []}, "2": {"blocked_by": []}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": [2]}, "2": {"blocked_by": [1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": [3]}, "2": {"blocked_by": [1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": [1]}, "2": {"blocked_by": [1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": []}, "2": {"blocked_by": [1, 1]}}},
+            {"release_issue": 2, "issues": {"1": {"blocked_by": None}, "2": {"blocked_by": [1]}}},
+        ]
+        for malformed in malformed_graphs:
+            write_publication_map({"schema_version": 2, "release_graphs": {"v1.2.3-00": malformed}})
+            try:
+                publication_graph(publication_map, "v1.2.3-00", {1, 2})
+            except (ValueError, SystemExit):
+                pass
+            else:
+                raise AssertionError(f"malformed graph admitted: {malformed}")
+        publication_map.write_text('{"schema_version":2,"release_graphs":{},"release_graphs":{}}', encoding="utf-8")
+        try:
+            publication_graph(publication_map, "v1.2.3-00", {1, 2})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("duplicate graph key admitted")
+        write_publication_map(declaration)
+        saved_publication_functions = {name: globals()[name] for name in ("milestone_issues", "gh_api_json", "run")}
+        try:
+            members = [{"number": 1, "state": "CLOSED"}, {"number": 2, "state": "OPEN"}]
+            globals()["milestone_issues"] = lambda *_args: members
+            def check_publication() -> list[str]:
+                return check_publication_ready("owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3-rc1")
+
+            assert check_publication() == []
+            stable_declaration = {
+                **declaration,
+                "release_graphs": {
+                    **declaration["release_graphs"],
+                    "v1.2.3-stable-00": {
+                        "release_issue": 3,
+                        "issues": {"3": {"blocked_by": []}},
+                    },
+                },
+            }
+            write_publication_map(stable_declaration)
+            selected_milestones: list[str] = []
+            def stable_milestone_issues(_repo: str, milestone: str) -> list[dict[str, object]]:
+                selected_milestones.append(milestone)
+                return [{"number": 3, "state": "OPEN"}] if milestone.endswith("-stable-00") else members
+            globals()["milestone_issues"] = stable_milestone_issues
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2, 3}, "v1.2.3"
+            ) == []
+            assert selected_milestones == ["v1.2.3-stable-00"]
+            selected_milestones.clear()
+            assert check_publication() == []
+            assert selected_milestones == ["v1.2.3-00"]
+            stable_declaration["release_graphs"]["v1.2.3-stable-00"]["issues"]["3"]["blocked_by"] = [1]
+            write_publication_map(stable_declaration)
+            selected_milestones.clear()
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2, 3}, "v1.2.3"
+            )
+            assert selected_milestones == []
+            write_publication_map(declaration)
+            globals()["milestone_issues"] = lambda *_args: members
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3"
+            ) == []
+            assert check_milestone_complete("owner/repo", "v1.2.3-00", {1, 2})
+            assert check_publication_ready("owner/repo", publication_root, publication_map, {2}, "v1.2.3-rc1")
+            for invalid_members in (
+                [members[0]], [members[1]], members + [{"number": 3, "state": "CLOSED"}],
+                members + [members[0]],
+                [{"number": 1, "state": "OPEN"}, members[1]],
+                [members[0], {"number": 2, "state": "UNKNOWN"}],
+            ):
+                globals()["milestone_issues"] = lambda *_args: invalid_members
+                assert check_publication()
+            globals()["milestone_issues"] = lambda *_args: members
+            members[1]["state"] = "CLOSED"
+            commit_sha = "a" * 40
+            release = {"tag_name": "v1.2.3-rc1", "draft": False, "prerelease": True}
+            globals()["run"] = lambda *_args, **_kwargs: commit_sha + "\n"
+            def exact_release_api(args: list[str]) -> object:
+                if "/releases/" in args[0]:
+                    return release
+                assert args == ["repos/owner/repo/commits/refs/tags/v1.2.3-rc1"]
+                return {"sha": commit_sha}
+            globals()["gh_api_json"] = exact_release_api
+            assert check_publication() == []
+            stable_release = {"tag_name": "v1.2.3", "draft": False, "prerelease": False}
+            globals()["gh_api_json"] = lambda args: stable_release if "/releases/" in args[0] else {"sha": commit_sha}
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3"
+            ) == []
+            globals()["gh_api_json"] = exact_release_api
+            for field, value in (("draft", True), ("prerelease", False), ("tag_name", "v1.2.3")):
+                invalid_release = dict(release, **{field: value})
+                globals()["gh_api_json"] = lambda args: invalid_release if "/releases/" in args[0] else {"sha": commit_sha}
+                assert check_publication()
+            globals()["gh_api_json"] = lambda args: release if "/releases/" in args[0] else {"sha": "b" * 40}
+            assert check_publication()
+            def missing_release(_args: list[str]) -> object:
+                raise SystemExit("release not found")
+            globals()["gh_api_json"] = missing_release
+            assert check_publication()
+            write_publication_map({"schema_version": 2})
+            assert check_publication() == []
+            members[1]["state"] = "OPEN"
+            assert check_publication()
+        finally:
+            globals().update(saved_publication_functions)
+        for tag in ("v1.2.3", "v1.2.3-rc1"):
+            version = parse_release_version(tag, source="release")
+            assert closed_owner_repair_matches(
+                {"tag_name": tag, "draft": False, "prerelease": version.is_prerelease},
+                version, "a" * 40, "a" * 40,
+            )
+        for conflicting in ("--milestone=v1.2.3-00", "--skip-openspec", "--planned-issue=2", "--self-test"):
+            refused = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--publication-version=v1.2.3-rc1", conflicting],
+                capture_output=True, text=True, timeout=30,
+            )
+            assert refused.returncode != 0 and "cannot be combined" in refused.stderr
     sample = """
 - [x] 1.1 Done task
   - [ ] Nested item
@@ -858,7 +3012,7 @@ def self_test() -> None:
 
 ## 2. Implementation
 
-- [ ] 2.1 Same-level task subsection
+- [ ] 2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 2. Acceptance Criteria
 
@@ -870,9 +3024,16 @@ def self_test() -> None:
 """
     expected = [
         (True, "1.1 Anchored task"),
-        (False, "2.1 Same-level task subsection"),
+        (
+            False,
+            "2.1 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.",
+        ),
     ]
     assert parse_section_tasks(issue_body, heading_matches_openspec_tasks) == expected
+    expected = [
+        (True, "1.1 Anchored task"),
+        (False, "2.1 Finish ordinary implementation."),
+    ]
     issue_contract = """
 ## Why
 Explain the need.
@@ -881,7 +3042,7 @@ Describe the change.
 ## Capabilities
 Name the capability.
 ## Architecture Diagrams
-- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)
+- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)
 ## Release Scope
 Target the release.
 ## Non-Goals
@@ -890,21 +3051,1067 @@ State exclusions.
 Likely failure modes:
 - The issue contract drifts.
 Mitigations:
-- [ ] Keep the contract synchronized. (OpenSpec tasks: 2.1)
-## OpenSpec Tasks
+- [ ] Keep the contract synchronized. (Implementation tasks: 2.1)
+## Implementation Tasks
 ## 1. Review
 - [x] 1.1 Anchored task
 ## 2. Implementation
-- [ ] 2.1 Same-level task subsection
+- [ ] 2.1 Finish ordinary implementation.
+## Acceptance and Review Tasks
+- [ ] Intent and outcome review: Confirm the delivered behavior solves the complete issue `Why` and `What Changes`, provides the declared capabilities and release scope, and respects the non-goals at the real user or agent boundary.
+- [ ] Implementation review: Review the complete implementation for correctness, architecture and ownership, applicable Rust and database pattern fit, security, resource bounds, compatibility, and unnecessary complexity; resolve every material finding.
+- [ ] Specification and architecture review: Reconcile the issue, OpenSpec requirements and tasks, source, documentation, and every required architecture diagram; add missing specifications or diagrams or record a reasoned N/A when no view is needed.
+- [ ] Test and proof review: Confirm the owning unit, integration, E2E, fault, concurrency, performance, and platform tests required by the issue are sound, causally exercise real behavior, and cover positive, negative, failure, and compatibility outcomes.
+- [ ] Final readiness review: Confirm every implementation task is complete, all human and automated review feedback is resolved or dispositioned, required local and hosted gates pass, and no behavior or proof boundary remains partial.
 """
     self_test_root = Path(__file__).resolve().parents[2]
+    saved_mermaid_runner = _run_mermaid_parser
+
+    def default_mermaid_runner(_diagram: str) -> MermaidValidationOutcome:
+        return MermaidValidationOutcome.VALID
+
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
+
+    rendered_issue_form = "\n".join(
+        [
+            "### OpenSpec plan and task checklist",
+            "OpenSpec change: _to be assigned_",
+            "",
+            "## Implementation Tasks",
+            "- [ ] 1.1 Placeholder implementation task.",
+            "## Acceptance and Review Tasks",
+            *[f"- [ ] {task}" for task in ACCEPTANCE_REVIEW_TASKS],
+            "### Privacy check",
+            "- [ ] I removed secrets and private paths.",
+        ]
+    )
+    assert parse_section_tasks(
+        rendered_issue_form, heading_matches_implementation_tasks
+    ) == [(False, "1.1 Placeholder implementation task.")]
+    assert acceptance_review_tasks({"state": "OPEN", "body": rendered_issue_form}) == [
+        (False, task) for task in ACCEPTANCE_REVIEW_TASKS
+    ]
+
+    form_created_backlog = "\n".join(
+        [
+            "### Why",
+            "A backlog request.",
+            "### OpenSpec plan and task checklist",
+            "",
+            "### Privacy check",
+            "- [x] I removed secrets and private paths.",
+        ]
+    )
+    backlog_issue = {
+        "state": "OPEN",
+        "number": 466,
+        "body": form_created_backlog,
+        "labels": [{"name": "complexity:medium"}],
+    }
+    assert complexity_label_failures(backlog_issue) == []
+    assert planned_issue_failures(backlog_issue, {}, self_test_root) == []
+    for template_name in (
+        "bug_report.yml",
+        "chore.yml",
+        "improvement_request.yml",
+    ):
+        template = (
+            self_test_root / ".github" / "ISSUE_TEMPLATE" / template_name
+        ).read_text(encoding="utf-8")
+        assert "id: acceptance_review_tasks" not in template
+        assert "label: Acceptance and Review Tasks" not in template
+        assert "## Implementation Tasks" not in template
 
     def contract_failures(
-        issue: dict[str, object], tasks: list[tuple[bool, str]]
+        issue: dict[str, object],
+        tasks: list[tuple[bool, str]],
     ) -> list[str]:
-        return issue_contract_failures(issue, tasks, "owner/repo", self_test_root)
+        return issue_contract_failures(
+            issue,
+            tasks,
+            "owner/repo",
+            self_test_root,
+        )
 
     assert contract_failures({"state": "OPEN", "body": issue_contract}, expected) == []
+    assert referenced_issue_numbers("owner/repo", "Work for #517", "") == [517]
+    assert referenced_issue_numbers("owner/repo", "Work for GH-517", "") == [517]
+    assert referenced_issue_numbers("owner/repo", "Work for owner/repo#517", "") == [517]
+    assert referenced_issue_numbers("owner/repo", "Work for other/repo#517", "") == []
+    try:
+        pull_request_owner_issue(
+            "owner/repo", {"title": "Work for other/repo#517", "body": ""}
+        )
+    except SystemExit as error:
+        assert "found 0 candidates" in str(error)
+    else:
+        raise AssertionError("foreign repository issue reference was accepted")
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Work for owner/repo#517", "body": ""}
+    ) == 517
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Work for OWNER/rePO#517", "body": ""}
+    ) == 517
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Work for #517", "body": None}
+    ) == 517
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Older PR", "body": "Related issue #517"}
+    ) == 517
+    bot_body = (
+        "<a href='https://github.com/upstream/tool/issues/17'>#17</a>\n"
+        "- Fixes #18\n"
+        "Inline Fixes #19\n"
+        "Fixes #517\r\n"
+    )
+    refs_body = (
+        "<a href='https://github.com/upstream/tool/issues/17'>#17</a>\n"
+        "refs #499\r\n"
+    )
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Update #20", "body": bot_body}
+    ) == 517
+    assert explicit_owner_numbers("owner/repo", refs_body) == [499]
+    assert explicit_owner_numbers("owner/repo", "Fixes #517\nCloses #517") == [517]
+    assert explicit_owner_numbers("owner/repo", "Refs #499\nrefs #499") == [499]
+    assert pull_request_owner_issue(
+        "owner/repo", {"title": "Update #20", "body": refs_body}
+    ) == 499
+    assert explicit_owner_numbers(
+        "owner/repo", "- Fixes #18\nInline Fixes #19\n"
+    ) == []
+    assert explicit_owner_numbers(
+        "owner/repo",
+        "- Refs #518\nInline Refs #519\n"
+        "```\nRefs #520\n```\n<!-- Refs #521 -->\n",
+    ) == []
+    assert explicit_owner_numbers(
+        "owner/repo",
+        "```\nCloses #518\nFixes other/repo#519\n```\n"
+        "<!-- Resolves #520 -->\nFixes #517\n",
+    ) == [517]
+    for body in (
+        "Fixes #517\nCloses #518",
+        "Fixes #517\nResolves #518",
+    ):
+        try:
+            pull_request_owner_issue("owner/repo", {"title": "Update", "body": body})
+        except SystemExit as error:
+            assert "found 2 candidates" in str(error)
+        else:
+            raise AssertionError("conflicting explicit PR owners were accepted")
+    for body in (
+        "Closes #517\nRefs #518",
+        "Refs #517\nFixes #518",
+        "Closes #499\nRefs #499",
+        "Refs #499\nFixes #499",
+    ):
+        try:
+            pull_request_owner_issue("owner/repo", {"title": "Update", "body": body})
+        except SystemExit as error:
+            assert "must not mix closing and non-closing owner references" in str(error)
+        else:
+            raise AssertionError("mixed closing and non-closing PR owners were accepted")
+    for body in (
+        "Fixes #517\nCloses other/repo#518",
+        "Refs other/repo#518",
+    ):
+        try:
+            pull_request_owner_issue(
+                "owner/repo", {"title": "Update #20", "body": body}
+            )
+        except SystemExit as error:
+            assert "must name this repository" in str(error)
+        else:
+            raise AssertionError("foreign qualified owner reference was accepted")
+    pr_head = "a" * 40
+    live_pull_request: dict[str, object] = {
+        "number": 600,
+        "state": "open",
+        "title": "Update #20",
+        "body": bot_body,
+        "base": {"ref": "main"},
+        "head": {"sha": pr_head},
+        "milestone": {"number": 1},
+    }
+    live_issue: dict[str, object] = {
+        "state": "open",
+        "milestone": {"number": 1},
+    }
+    saved_gh_api_json = globals()["gh_api_json"]
+
+    def owner_api_fixture(args: list[str]) -> object:
+        if args == ["repos/owner/repo/pulls/600"]:
+            return live_pull_request
+        if args in (
+            ["repos/owner/repo/issues/517"],
+            ["repos/owner/repo/issues/499"],
+        ):
+            return live_issue
+        raise AssertionError(f"unexpected PR-state API request: {args}")
+
+    try:
+        globals()["gh_api_json"] = owner_api_fixture
+        assert validate_pr_state_owner("owner/repo", 600, pr_head) == 517
+        live_pull_request["body"] = refs_body
+        assert validate_pr_state_owner("owner/repo", 600, pr_head) == 499
+        live_pull_request["body"] = "Closes #499\nRefs #499"
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "must not mix closing and non-closing owner references" in str(error)
+        else:
+            raise AssertionError("owner validation accepted conflicting closing and Refs owners")
+        live_pull_request["body"] = bot_body
+        live_pull_request["head"] = {"sha": "c" * 40}
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "no longer open at the trusted source head" in str(error)
+        else:
+            raise AssertionError("a stale pull-request head passed owner validation")
+        live_pull_request["head"] = {"sha": pr_head}
+        live_issue["milestone"] = {"number": 2}
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "must match" in str(error)
+        else:
+            raise AssertionError("a mismatched owner milestone was accepted")
+        live_issue["milestone"] = {"number": 1}
+        live_issue["state"] = "closed"
+        try:
+            validate_pr_state_owner("owner/repo", 600, pr_head)
+        except SystemExit as error:
+            assert "must be an open issue" in str(error)
+        else:
+            raise AssertionError("a closed owning issue was accepted")
+    finally:
+        globals()["gh_api_json"] = saved_gh_api_json
+    refresh_pr = {
+        "number": 600,
+        "title": "Update #20",
+        "body": bot_body,
+        "headRefOid": "a" * 40,
+        "baseRefName": "main",
+    }
+    unrelated_foreign_owner_pr = {
+        **refresh_pr,
+        "number": 601,
+        "headRefOid": "b" * 40,
+        "body": "Fixes other/repo#499",
+    }
+    unrelated_mixed_owner_pr = {
+        **refresh_pr,
+        "number": 602,
+        "headRefOid": "c" * 40,
+        "body": "Refs #518\nCloses #519",
+    }
+    malformed_affected_owner_pr = {
+        **refresh_pr,
+        "number": 603,
+        "headRefOid": "d" * 40,
+        "body": "Closes #499\nRefs #499",
+    }
+    assert pr_state_refreshes(
+        "owner/repo",
+        499,
+        [
+            {**refresh_pr, "body": refs_body},
+            unrelated_foreign_owner_pr,
+            unrelated_mixed_owner_pr,
+            malformed_affected_owner_pr,
+        ],
+    ) == [
+        {"number": 600, "head": "a" * 40},
+        {"number": 603, "head": "d" * 40},
+    ]
+    source_head = "b" * 40
+    source_workflow_sha = "c" * 40
+    trusted_refresh_run = {
+        "id": 77,
+        "name": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
+        "path": ".github/workflows/pr-state.yml",
+        "event": "pull_request_target",
+        "head_sha": source_head,
+        "display_title": f"pr-state|{source_workflow_sha}|600|{'a' * 40}",
+        "status": "completed",
+        "pull_requests": [],
+    }
+    assert trusted_refresh_run["head_sha"] != refresh_pr["headRefOid"]
+    refresh_run_pages: dict[int, list[object]] = {1: [trusted_refresh_run]}
+    observed_refresh_api: list[list[str]] = []
+    observed_reruns: list[list[str]] = []
+    saved_refresh_functions = {
+        name: globals()[name]
+        for name in ("gh_json", "gh_api_json", "run")
+    }
+    saved_sleep = time.sleep
+
+    def refresh_gh_json(args: list[str]) -> object:
+        assert args[:3] == ["pr", "list", "-R"]
+        return [refresh_pr]
+
+    def refresh_api_fixture(args: list[str]) -> object:
+        observed_refresh_api.append(args)
+        if args == ["repos/owner/repo"]:
+            return {"default_branch": "main"}
+        if args[0] == "--method" and args[2] == (
+            "repos/owner/repo/actions/workflows/pr-state.yml/runs"
+        ):
+            page = next(
+                int(item.removeprefix("page="))
+                for item in args
+                if item.startswith("page=")
+            )
+            return {"workflow_runs": refresh_run_pages.get(page, [])}
+        if args == ["repos/owner/repo/actions/runs/77"]:
+            return {**trusted_refresh_run, "status": "completed"}
+        raise AssertionError(f"unexpected issue-refresh API request: {args}")
+
+    def refresh_run(args: list[str], *, raw_output: bool = False) -> str:
+        assert not raw_output
+        observed_reruns.append(args)
+        return ""
+
+    try:
+        globals()["gh_json"] = refresh_gh_json
+        globals()["gh_api_json"] = refresh_api_fixture
+        globals()["run"] = refresh_run
+        time.sleep = lambda _seconds: None
+        refresh_pr_state_for_issue("owner/repo", 517)
+        assert observed_refresh_api[1][0:3] == ["--method", "GET", "repos/owner/repo/actions/workflows/pr-state.yml/runs"]
+        assert "event=pull_request_target" in observed_refresh_api[1]
+        assert "per_page=100" in observed_refresh_api[1]
+        assert "page=1" in observed_refresh_api[1]
+        assert not any(item.startswith("head_sha=") for item in observed_refresh_api[1])
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        trusted_refresh_run["status"] = "in_progress"
+        refresh_run_pages.clear()
+        refresh_run_pages[1] = [trusted_refresh_run]
+        refresh_pr_state_for_issue("owner/repo", 517)
+        assert observed_refresh_api[-1] == ["repos/owner/repo/actions/runs/77"]
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        trusted_refresh_run["status"] = "completed"
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        decoy_run = {
+            **trusted_refresh_run,
+            "id": 78,
+            "display_title": f"pr-state|{source_workflow_sha}|600|{'b' * 40}",
+        }
+        refresh_run_pages.clear()
+        refresh_run_pages.update(
+            {
+                1: [decoy_run] * PR_STATE_WORKFLOW_RUNS_PER_PAGE,
+                2: [trusted_refresh_run],
+            }
+        )
+        refresh_pr_state_for_issue("owner/repo", 517)
+        page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert page_requests == ["page=1", "page=2"]
+        assert observed_reruns == [
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/owner/repo/actions/runs/77/rerun",
+            ]
+        ]
+        observed_refresh_api.clear()
+        observed_reruns.clear()
+        trusted_refresh_run["display_title"] = f"pr-state|{source_workflow_sha}|600|{'b' * 40}"
+        refresh_run_pages.clear()
+        refresh_run_pages[1] = [trusted_refresh_run]
+        try:
+            refresh_pr_state_for_issue("owner/repo", 517)
+        except SystemExit as error:
+            assert "no PR-state workflow run found" in str(error)
+        else:
+            raise AssertionError("issue refresh reran a stale-head PR-state workflow")
+        assert observed_reruns == []
+        missing_page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert missing_page_requests == ["page=1"] * 30
+        observed_refresh_api.clear()
+        decoy_run["display_title"] = f"pr-state|{source_workflow_sha}|601|{'b' * 40}"
+        refresh_run_pages.clear()
+        refresh_run_pages.update(
+            {
+                page: [decoy_run] * PR_STATE_WORKFLOW_RUNS_PER_PAGE
+                for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1)
+            }
+        )
+        try:
+            refresh_pr_state_for_issue("owner/repo", 517)
+        except SystemExit as error:
+            assert f"{MAX_PR_STATE_WORKFLOW_RUN_PAGES}-page bound" in str(error)
+        else:
+            raise AssertionError("issue refresh did not refuse a truncated run search")
+        exhausted_page_requests = [
+            next(item for item in args if item.startswith("page="))
+            for args in observed_refresh_api
+            if args[0] == "--method"
+        ]
+        assert exhausted_page_requests == [
+            *(f"page={page}" for page in range(1, MAX_PR_STATE_WORKFLOW_RUN_PAGES + 1)),
+            *("page=1" for _ in range(29)),
+        ]
+        assert observed_reruns == []
+    finally:
+        for name, function in saved_refresh_functions.items():
+            globals()[name] = function
+        time.sleep = saved_sleep
+    assert candidate_owner_issue_from_subjects(
+        "Implement candidate (#517)\nFollow-up candidate (#517)"
+    ) == 517
+    for subjects in (
+        "",
+        " ",
+        "Implement candidate",
+        "Implement candidate (#517)\nFollow-up candidate",
+        "Implement candidate (#517)\n\nFollow-up candidate (#517)",
+        "Implement candidate (#517) (#517)",
+        "Implement candidate (#517) (#bad)",
+        "Implement candidate (#517) (#518",
+        "Implement candidate (#517)\nAlso candidate (#518)",
+    ):
+        try:
+            candidate_owner_issue_from_subjects(subjects)
+        except SystemExit as error:
+            assert "exactly one owning issue" in str(error)
+        else:
+            raise AssertionError("ambiguous candidate commit ownership was accepted")
+    assert complexity_label_failures(
+        {"state": "OPEN", "labels": [{"name": "complexity:medium"}]}
+    ) == []
+    assert any(
+        "exactly one complexity label" in failure
+        for failure in complexity_label_failures({"state": "OPEN", "labels": []})
+    )
+    assert any(
+        "exactly one complexity label" in failure
+        for failure in complexity_label_failures(
+            {
+                "state": "OPEN",
+                "labels": [
+                    {"name": "complexity:low"},
+                    {"name": "complexity:high"},
+                ],
+            }
+        )
+    )
+    assert any(
+        "unknown" in failure
+        for failure in complexity_label_failures(
+            {"state": "OPEN", "labels": [{"name": "complexity:unknown"}]}
+        )
+    )
+    assert complexity_label_failures(
+        {"state": "OPEN", "labels": [{"name": "type:chore"}]}
+    )
+    assert complexity_label_failures(
+        {
+            "state": "OPEN",
+            "number": 466,
+            "body": "Unmapped backlog issue without task fields.",
+            "labels": [{"name": "complexity:high"}],
+        }
+    ) == []
+    assert complexity_label_failures(
+        {"state": "CLOSED", "labels": [{"name": "complexity:unknown"}]}
+    ) == []
+    saved_complexity_dispatch_helpers = {
+        name: globals()[name]
+        for name in (
+            "issue_payload",
+            "pull_request_payload",
+            "issue_state_payloads",
+            "load_issue_map",
+            "candidate_tree_contains_regular_file",
+            "candidate_tree_change_names",
+            "candidate_tree_file_text",
+            "check_pull_request_tasks",
+            "check_candidate_tasks",
+            "check_openspec_tasks",
+            "planned_issue_failures",
+            "check_milestone_complete",
+        )
+    }
+    complexity_payloads = {
+        1: {"state": "OPEN", "labels": [{"name": "complexity:invalid"}]},
+        2: {"state": "OPEN", "labels": [{"name": "complexity:high"}]},
+    }
+    complexity_fetches: list[int] = []
+    pull_request_fetches: list[int] = []
+    pull_request_issue_map_paths: list[object] = []
+    candidate_dispatches: list[tuple[int, object]] = []
+    global_complexity_fetches: list[str] = []
+    try:
+        globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+            complexity_fetches.append(number) or complexity_payloads[number]
+        )
+        globals()["pull_request_payload"] = lambda _repo, number: (
+            pull_request_fetches.append(number)
+            or {"title": "Work for #2", "body": ""}
+        )
+        globals()["issue_state_payloads"] = lambda _repo: [
+            global_complexity_fetches.append("global")
+            or {"number": number, **payload}
+            for number, payload in complexity_payloads.items()
+        ]
+        globals()["load_issue_map"] = lambda _path, **_kwargs: {}
+        globals()["candidate_tree_contains_regular_file"] = lambda *_args: True
+        globals()["candidate_tree_change_names"] = lambda *_args: set()
+        globals()["candidate_tree_file_text"] = lambda *_args: (
+            '{"schema_version": 2, "changes": {}}'
+        )
+        globals()["check_pull_request_tasks"] = lambda *_args, **kwargs: (
+            pull_request_issue_map_paths.append(kwargs["issue_map_path"]) or []
+        )
+        globals()["check_candidate_tasks"] = lambda *args, **kwargs: (
+            candidate_dispatches.append((args[3], args[4])) or []
+        )
+        globals()["check_openspec_tasks"] = lambda *_args, **_kwargs: []
+        globals()["planned_issue_failures"] = lambda *_args, **_kwargs: []
+        globals()["check_milestone_complete"] = lambda *_args, **_kwargs: []
+        saved_argv = sys.argv[:]
+        sys.argv = [
+            "issue-checklists.py",
+            "--repo",
+            "owner/repo",
+            "--pull-request",
+            "7",
+            "--base",
+            "accepted-base",
+            "--issue-map",
+            "custom/issue-map.json",
+        ]
+        main()
+        assert complexity_fetches == [2]
+        assert pull_request_fetches == [7]
+        assert pull_request_issue_map_paths == ["custom/issue-map.json"]
+        complexity_fetches.clear()
+        sys.argv = [
+            "issue-checklists.py",
+            "--repo",
+            "owner/repo",
+            "--planned-issue",
+            "2",
+        ]
+        main()
+        assert complexity_fetches == [2]
+        complexity_fetches.clear()
+        sys.argv = [
+            "issue-checklists.py",
+            "--repo",
+            "owner/repo",
+            "--candidate-issue",
+            "2",
+            "--base",
+            "accepted-base",
+            "--candidate-local-oid",
+            "accepted-head",
+        ]
+        main()
+        assert complexity_fetches == [2]
+        assert candidate_dispatches == [(2, "accepted-base")]
+        sys.argv = ["issue-checklists.py", "--repo", "owner/repo"]
+        try:
+            main()
+        except SystemExit as error:
+            assert error.code == 1
+        else:
+            raise AssertionError("global complexity validation accepted invalid issue")
+        assert global_complexity_fetches == ["global"] * len(complexity_payloads)
+    finally:
+        sys.argv = saved_argv
+        for name, helper in saved_complexity_dispatch_helpers.items():
+            globals()[name] = helper
+    assert acceptance_review_tasks({"state": "OPEN", "body": issue_contract}) == [
+        (False, task) for task in ACCEPTANCE_REVIEW_TASKS
+    ]
+    missing_acceptance = issue_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[2]}\n", ""
+    )
+    assert any(
+        "exactly five checkboxes" in failure
+        for failure in contract_failures({"state": "OPEN", "body": missing_acceptance}, expected)
+    )
+    weakened_acceptance = issue_contract.replace(
+        "Intent and outcome review:", "Outcome review:"
+    )
+    assert any(
+        "canonical text" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": weakened_acceptance}, expected
+        )
+    )
+    extra_acceptance = issue_contract.replace(
+        "## Acceptance and Review Tasks\n",
+        "## Acceptance and Review Tasks\n- [ ] Extra review checkbox.\n",
+    )
+    assert any(
+        "exactly five checkboxes" in failure
+        for failure in contract_failures({"state": "OPEN", "body": extra_acceptance}, expected)
+    )
+    duplicate_implementation = issue_contract.replace(
+        "## Acceptance and Review Tasks",
+        "## Implementation Tasks\n- [ ] 9.9 Duplicate field.\n## Acceptance and Review Tasks",
+    )
+    assert any(
+        "exactly one visible non-empty 'implementation tasks'" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": duplicate_implementation}, expected
+        )
+    )
+    legacy_open = issue_contract.replace(
+        "(Implementation tasks: 2.1)", "(OpenSpec tasks: 2.1)"
+    ).replace("## Implementation Tasks", "## OpenSpec Tasks")
+    assert any(
+        "must use Implementation Tasks" in failure
+        for failure in contract_failures({"state": "OPEN", "body": legacy_open}, expected)
+    )
+    hidden_duplicate_fields = issue_contract.replace(
+        "## Implementation Tasks",
+        "<!--\n## Implementation Tasks\n- [ ] 9.9 Hidden implementation field.\n-->\n"
+        "## Implementation Tasks",
+    ).replace(
+        "## Acceptance and Review Tasks",
+        "<!--\n## Acceptance and Review Tasks\n- [ ] Hidden acceptance field.\n-->\n"
+        "## Acceptance and Review Tasks",
+    )
+    assert contract_failures(
+        {"state": "OPEN", "body": hidden_duplicate_fields}, expected
+    ) == []
+    hidden_implementation = issue_contract.replace(
+        "## Implementation Tasks\n", "<!--\n## Implementation Tasks\n", 1
+    ).replace(
+        "## Acceptance and Review Tasks\n",
+        "-->\n## Acceptance and Review Tasks\n",
+        1,
+    )
+    assert any(
+        "exactly one visible non-empty 'implementation tasks'" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": hidden_implementation}, expected
+        )
+    )
+    closed_legacy = {
+        "number": 448,
+        "state": "CLOSED",
+        "body": "## OpenSpec Tasks\n- [ ] 1.1 Historical task.\n",
+    }
+    assert issue_checklist_tasks(closed_legacy) == []
+    assert contract_failures(closed_legacy, expected) == []
+    assert any(
+        "state must be OPEN or CLOSED" in failure
+        for failure in contract_failures(
+            {"number": 448, "state": "UNKNOWN", "body": ""}, expected
+        )
+    )
+    reopened_legacy = {**closed_legacy, "state": "OPEN"}
+    assert any(
+        "Implementation Tasks" in failure
+        for failure in contract_failures(reopened_legacy, expected)
+    )
+    na_contract = issue_contract.replace(
+        "- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)",
+        "N/A: This change has no architecture impact.",
+    )
+    assert contract_failures({"state": "OPEN", "body": na_contract}, expected) == []
+    unexplained_na = na_contract.replace(
+        "N/A: This change has no architecture impact.", "N/A"
+    )
+    assert any(
+        "N/A decision" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": unexplained_na}, expected
+        )
+    )
+    invalid_na = na_contract.replace(
+        "N/A: This change has no architecture impact.",
+        "NA: This change has no architecture impact.",
+    )
+    assert any(
+        "N/A decision" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": invalid_na}, expected
+        )
+    )
+    invalid_na_delimiter = na_contract.replace(
+        "N/A: This change has no architecture impact.",
+        "N/A - This change has no architecture impact.",
+    )
+    assert any(
+        "N/A decision" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": invalid_na_delimiter}, expected
+        )
+    )
+
+    try:
+        def stub_mermaid_runner(outcomes: list[MermaidValidationOutcome]):
+            calls: list[str] = []
+            pending = iter(outcomes)
+
+            def run_stub(diagram: str) -> MermaidValidationOutcome:
+                calls.append(diagram)
+                return next(pending)
+
+            globals()["_run_mermaid_parser"] = run_stub
+            mermaid_syntax_is_valid.cache_clear()
+            return calls
+
+        timeout_then_success = """```mermaid
+flowchart LR
+Timeout --> Recovery
+```"""
+        calls = stub_mermaid_runner(
+            [MermaidValidationOutcome.TIMED_OUT, MermaidValidationOutcome.VALID]
+        )
+        assert contains_mermaid_diagram(
+            timeout_then_success, MermaidValidationBudget()
+        )
+        assert len(calls) == 2
+
+        for outcome in (
+            MermaidValidationOutcome.INVALID,
+            MermaidValidationOutcome.UNAVAILABLE,
+        ):
+            calls = stub_mermaid_runner([outcome])
+            diagram = f"```mermaid\nflowchart LR\nTerminal{outcome.name} --> End\n```"
+            assert mermaid_syntax_is_valid(diagram, MermaidValidationBudget()) is outcome
+            assert len(calls) == 1
+
+        calls = stub_mermaid_runner(
+            [MermaidValidationOutcome.INVALID, MermaidValidationOutcome.VALID]
+        )
+        assert contains_mermaid_diagram(
+            "\n".join(
+                [
+                    "```mermaid",
+                    "flowchart LR",
+                    "Invalid --> First",
+                    "```",
+                    "```mermaid",
+                    "flowchart LR",
+                    "Second --> Valid",
+                    "```",
+                ]
+            ),
+            MermaidValidationBudget(),
+        )
+        assert len(calls) == 2
+
+        budget = MermaidValidationBudget()
+        calls: list[str] = []
+
+        def exhaust_budget(diagram: str) -> MermaidValidationOutcome:
+            calls.append(diagram)
+            if len(calls) == 2:
+                budget.deadline = time.monotonic() - 1
+            return MermaidValidationOutcome.TIMED_OUT
+
+        globals()["_run_mermaid_parser"] = exhaust_budget
+        mermaid_syntax_is_valid.cache_clear()
+        outcomes = mermaid_diagram_outcomes(
+            "\n".join(
+                [
+                    "```mermaid",
+                    "flowchart LR",
+                    "Stalled --> First",
+                    "```",
+                    "```mermaid",
+                    "flowchart LR",
+                    "Never --> Spawned",
+                    "```",
+                ]
+            ),
+            budget,
+        )
+        assert outcomes == [
+            MermaidValidationOutcome.TIMED_OUT,
+            MermaidValidationOutcome.TIMED_OUT,
+        ]
+        assert len(calls) == 2
+
+        with tempfile.TemporaryDirectory() as temporary:
+            architecture_root = Path(temporary)
+            docs = architecture_root / "docs"
+            docs.mkdir()
+            architecture = docs / "target.md"
+            architecture.write_text(
+                "## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+                encoding="utf-8",
+            )
+            link = (
+                "[Target](https://github.com/owner/repo/blob/main/docs/"
+                "target.md#user-content-target-view)"
+            )
+            calls = stub_mermaid_runner(
+                [MermaidValidationOutcome.TIMED_OUT, MermaidValidationOutcome.TIMED_OUT]
+            )
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 2
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: timed out" in failures[0]
+
+            calls = stub_mermaid_runner([MermaidValidationOutcome.INVALID])
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 1
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: invalid syntax" in failures[0]
+
+            calls = stub_mermaid_runner([MermaidValidationOutcome.UNAVAILABLE])
+            failures = architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root, MermaidValidationBudget()
+            )
+            assert len(calls) == 1
+            assert link[link.index("https://") : -1] in failures[0]
+            assert "parser outcome: unavailable execution" in failures[0]
+
+    finally:
+        globals()["_run_mermaid_parser"] = default_mermaid_runner
+        mermaid_syntax_is_valid.cache_clear()
+
+    globals()["_run_mermaid_parser"] = saved_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
+    node = shutil.which("node")
+    validator = Path(__file__).resolve().parents[1] / "mermaid-parser" / "validate.mjs"
+    valid_outcome = mermaid_syntax_is_valid(
+        "flowchart LR\nA --> B\n", MermaidValidationBudget()
+    )
+    assert valid_outcome is MermaidValidationOutcome.VALID, valid_outcome.value
+    invalid_outcome = _run_mermaid_parser("this is not mermaid\n")
+    assert invalid_outcome is MermaidValidationOutcome.INVALID, invalid_outcome.value
+    with tempfile.TemporaryDirectory() as temporary:
+        loader = Path(temporary) / "fail-mermaid-loader.mjs"
+        loader.write_text(
+            "export async function resolve(specifier, context, nextResolve) {\n"
+            "  if (specifier === \"mermaid\") throw new Error(\"controlled bootstrap failure\");\n"
+            "  return nextResolve(specifier, context);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        assert node is not None
+        unavailable_outcome = _run_mermaid_process(
+            [node, "--experimental-loader", loader.as_uri(), str(validator)],
+            "flowchart LR\nA --> B\n",
+        )
+    assert (
+        unavailable_outcome is MermaidValidationOutcome.UNAVAILABLE
+    ), unavailable_outcome.value
+
+    saved_subprocess_run = subprocess.run
+    try:
+        def timeout_subprocess_run(*_args: object, **_kwargs: object) -> object:
+            raise subprocess.TimeoutExpired(
+                "mermaid", MERMAID_ATTEMPT_TIMEOUT_SECONDS
+            )
+
+        subprocess.run = timeout_subprocess_run
+        timeout_outcome = _run_mermaid_parser("flowchart LR\nA --> B\n")
+    finally:
+        subprocess.run = saved_subprocess_run
+    assert timeout_outcome is MermaidValidationOutcome.TIMED_OUT
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
+
+    assert contains_mermaid_diagram("```mermaid\nflowchart LR\nA --> B\n```")
+    assert contains_mermaid_diagram(
+        "```mermaid\n---\ntitle: Typed graph\n---\nerDiagram\nA ||--o{ B : owns\n```"
+    )
+    assert contains_mermaid_diagram(
+        "```mermaid\nkanban\n  column1[Backlog]\n    task1[Add feature]\n```"
+    )
+    calls = stub_mermaid_runner([MermaidValidationOutcome.INVALID])
+    assert not contains_mermaid_diagram(
+        "```mermaid\nflowchart LR\nthis is not valid mermaid ???\n```"
+    )
+    assert len(calls) == 1
+    globals()["_run_mermaid_parser"] = default_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
+    assert not contains_mermaid_diagram("```mermaid\nThis is only prose.\n```")
+    assert not contains_mermaid_diagram("```mermaid\nflowchart LR\n```")
+    assert not contains_mermaid_diagram("```mermaid\n---\ntitle: Missing close\nflowchart LR\n```")
+    assert not contains_mermaid_diagram("```python\nflowchart LR\n```")
+    assert not contains_mermaid_diagram("```mermaid\n```")
+    with tempfile.TemporaryDirectory() as temporary:
+        architecture_root = Path(temporary)
+        docs = architecture_root / "docs"
+        docs.mkdir()
+        architecture = docs / "architecture.md"
+        link = (
+            "[Target](https://github.com/owner/repo/blob/main/docs/"
+            "architecture.md#user-content-target-view)"
+        )
+        architecture.write_text(
+            "## Target View\n\n```mermaid\n%% comment\nflowchart LR\nA --> B\n```\n"
+            "\n## Later View\n\n```mermaid\nflowchart LR\nB --> C\n```\n",
+            encoding="utf-8",
+        )
+        assert architecture_diagram_link_failures(link, "owner/repo", architecture_root) == []
+        saved_run = globals()["run"]
+        tree_output: dict[str, bytes | None] = {
+            "value": (
+                b"100644 blob 0123456789012345678901234567890123456789\t"
+                b"docs/architecture.md\0"
+            )
+        }
+        tree_content = (
+            b"## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n"
+        )
+
+        def tree_run(args: list[str], *, raw_output: bool = False) -> str | bytes:
+            if len(args) > 1 and args[1] == "ls-tree":
+                output = tree_output["value"]
+                if output is None:
+                    raise SystemExit("synthetic git ls-tree failure")
+                return output
+            if len(args) > 1 and args[1] == "cat-file":
+                return tree_content
+            return saved_run(args)
+
+        globals()["run"] = tree_run
+        try:
+            assert (
+                architecture_diagram_link_failures(
+                    link,
+                    "owner/repo",
+                    architecture_root,
+                    candidate_tree_ref="candidate",
+                )
+                == []
+            )
+            unicode_link = (
+                "[Target](https://github.com/owner/repo/blob/main/docs/"
+                "caf%C3%A9.md#user-content-target-view)"
+            )
+            (docs / "café.md").write_text(
+                "## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n",
+                encoding="utf-8",
+            )
+            tree_output["value"] = (
+                b"100644 blob 0123456789012345678901234567890123456789\t"
+                b"docs/caf\xc3\xa9.md\0"
+            )
+            tree_content = (
+                b"## Target View\n\n```mermaid\nflowchart LR\nA --> B\n```\n"
+            )
+            assert (
+                architecture_diagram_link_failures(
+                    unicode_link,
+                    "owner/repo",
+                    architecture_root,
+                    candidate_tree_ref="candidate",
+                )
+                == []
+            )
+            tree_output["value"] = (
+                b"100644 blob 0123456789012345678901234567890123456789\t"
+                b"openspec/changes/active/tasks.md\0"
+            )
+            assert candidate_tree_change_names(
+                "candidate", architecture_root, "openspec/issue-map.json"
+            ) == {"active"}
+            tree_output["value"] = b"malformed tree entry\0"
+            try:
+                candidate_tree_change_names(
+                    "candidate", architecture_root, "openspec/issue-map.json"
+                )
+            except SystemExit as error:
+                assert "malformed tree data" in str(error)
+            else:
+                raise AssertionError("malformed candidate tree changes were accepted")
+            for output in (
+                (
+                    b"120000 blob 0123456789012345678901234567890123456789\t"
+                    b"docs/architecture.md\0"
+                ),
+                b"malformed tree entry\0",
+            ):
+                tree_output["value"] = output
+                assert any(
+                    "regular Markdown file" in failure
+                    for failure in architecture_diagram_link_failures(
+                        link,
+                        "owner/repo",
+                        architecture_root,
+                        candidate_tree_ref="candidate",
+                    )
+                )
+            tree_output["value"] = None
+            assert any(
+                "regular Markdown file" in failure
+                for failure in architecture_diagram_link_failures(
+                    link,
+                    "owner/repo",
+                    architecture_root,
+                    candidate_tree_ref="candidate",
+                )
+            )
+        finally:
+            globals()["run"] = saved_run
+        shortened_fragment = link.replace("#user-content-", "#")
+        assert any(
+            "browser-native #user-content-<heading> fragment" in failure
+            for failure in architecture_diagram_link_failures(
+                shortened_fragment, "owner/repo", architecture_root
+            )
+        )
+        architecture.write_text(
+            "## Target View\n\nArchitecture prose only.\n"
+            "\n## Later View\n\n```mermaid\nflowchart LR\nB --> C\n```\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "fenced Mermaid block" in failure
+            for failure in architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root
+            )
+        )
+        architecture.write_text(
+            "## Target View\n\n```mermaid\nflowchart LR\nA --> B\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "fenced Mermaid block" in failure
+            for failure in architecture_diagram_link_failures(
+                link, "owner/repo", architecture_root
+            )
+        )
     exact_head_contract = issue_contract.replace(
         "Explain the need.", "Require exact-head proof."
     )
@@ -1003,8 +4210,8 @@ Mitigations:
     )
     assert contract_failures({"state": "OPEN", "body": plus_marker_contract}, expected) == []
     unbound_plus_mitigation = issue_contract.replace(
-        "## OpenSpec Tasks",
-        "+ [ ] Unbound mitigation\n## OpenSpec Tasks",
+        "## Implementation Tasks",
+        "+ [ ] Unbound mitigation\n## Implementation Tasks",
     )
     assert any(
         "every pre-mortem mitigation checkbox" in failure
@@ -1020,16 +4227,76 @@ Mitigations:
         "must be unchecked" in failure
         for failure in contract_failures({"state": "OPEN", "body": premature}, expected)
     )
+    implemented_contract = issue_contract.replace(
+        "- [ ] 2.1 Finish ordinary implementation.",
+        "- [x] 2.1 Finish ordinary implementation.",
+    ).replace(
+        "- [ ] Keep the contract synchronized. (Implementation tasks: 2.1)",
+        "- [x] Keep the contract synchronized. (Implementation tasks: 2.1)",
+    )
+    prefix_contract = implemented_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[0]}",
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[0]}",
+    )
+    assert contract_failures(
+        {"state": "OPEN", "body": prefix_contract},
+        [(True, "1.1 Anchored task"), (True, "2.1 Finish ordinary implementation.")],
+    ) == []
+    partial_acceptance_contract = issue_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[0]}",
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[0]}",
+    )
+    assert any(
+        "acceptance and review tasks must be unchecked while implementation tasks are incomplete"
+        in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": partial_acceptance_contract}, expected
+        )
+    )
+    reopened_prefix_contract = prefix_contract.replace(
+        "- [x] 2.1 Finish ordinary implementation.",
+        "- [ ] 2.1 Finish ordinary implementation.",
+    )
+    assert any(
+        "acceptance and review tasks must be unchecked while implementation tasks are incomplete"
+        in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": reopened_prefix_contract},
+            [(True, "1.1 Anchored task"), (False, "2.1 Finish ordinary implementation.")],
+        )
+    )
+    non_prefix_contract = prefix_contract.replace(
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[1]}",
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[1]}",
+    ).replace(
+        f"- [x] {ACCEPTANCE_REVIEW_TASKS[0]}",
+        f"- [ ] {ACCEPTANCE_REVIEW_TASKS[0]}",
+    )
+    assert any(
+        "after an unchecked task" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": non_prefix_contract},
+            [(True, "1.1 Anchored task"), (True, "2.1 Finish ordinary implementation.")],
+        )
+    )
     completed_contract = issue_contract.replace(
         "- [ ] Keep the contract synchronized.",
         "- [x] Keep the contract synchronized.",
-    ).replace(
-        "- [ ] 2.1 Same-level task subsection",
-        "- [x] 2.1 Same-level task subsection",
     )
+    completed_contract = completed_contract.replace(
+        "- [ ] 2.1 Finish ordinary implementation.",
+        "- [x] 2.1 Finish ordinary implementation.",
+    )
+    for acceptance_task in ACCEPTANCE_REVIEW_TASKS:
+        completed_contract = completed_contract.replace(
+            f"- [ ] {acceptance_task}", f"- [x] {acceptance_task}"
+        )
     assert contract_failures(
         {"state": "OPEN", "body": completed_contract},
-        [(True, "1.1 Anchored task"), (True, "2.1 Same-level task subsection")],
+        [
+            (True, "1.1 Anchored task"),
+            (True, "2.1 Finish ordinary implementation."),
+        ],
     ) == []
     missing_scope = issue_contract.replace("## Release Scope", "## Delivery")
     assert any(
@@ -1037,15 +4304,23 @@ Mitigations:
         for failure in contract_failures({"state": "OPEN", "body": missing_scope}, expected)
     )
     unknown_task = issue_contract.replace(
-        "(OpenSpec tasks: 2.1)", "(OpenSpec tasks: 9.9)"
+        "(Implementation tasks: 2.1)", "(Implementation tasks: 9.9)"
     )
     assert any(
         "unknown or foreign" in failure
         for failure in contract_failures({"state": "OPEN", "body": unknown_task}, expected)
     )
-    assert contract_failures({"state": "CLOSED", "body": ""}, expected) == []
+    assert contract_failures(
+        {"state": "CLOSED", "body": ""},
+        [(True, task) for _, task in expected],
+    ) == []
+    wrong_final = [expected[0], (False, "2.1 Finish ordinary tests.")]
+    assert not any(
+        "final OpenSpec task must be the architecture acceptance task" in failure
+        for failure in contract_failures({"state": "OPEN", "body": issue_contract}, wrong_final)
+    )
     missing_architecture_link = issue_contract.replace(
-        "- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)",
+        "- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)",
         "Architecture will be documented later.",
     )
     assert any(
@@ -1057,7 +4332,7 @@ Mitigations:
     for invalid_link in (
         "[Relative architecture](../AGENTS.md)",
         '[Titled relative architecture](../AGENTS.md "local copy")',
-        "[Insecure architecture](http://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md)",
+        "[Insecure architecture](http://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md)",
         "[Mail architecture](mailto:architecture@example.com)",
         "[Nested [architecture]](../AGENTS.md)",
     ):
@@ -1077,11 +4352,18 @@ Mitigations:
             {"state": "OPEN", "body": foreign_architecture}, expected
         )
     )
+    legacy_dev_architecture = issue_contract.replace("/blob/main/", "/blob/dev/")
+    assert any(
+        "must use /blob/main/docs/" in failure
+        for failure in contract_failures(
+            {"state": "OPEN", "body": legacy_dev_architecture}, expected
+        )
+    )
     sha_architecture = issue_contract.replace(
-        "/blob/dev/", "/blob/0123456789abcdef0123456789abcdef01234567/"
+        "/blob/main/", "/blob/0123456789abcdef0123456789abcdef01234567/"
     )
     assert any(
-        "must use /blob/dev/docs/" in failure
+        "must use /blob/main/docs/" in failure
         for failure in contract_failures(
             {"state": "OPEN", "body": sha_architecture}, expected
         )
@@ -1124,7 +4406,7 @@ Mitigations:
         )
     )
     missing_architecture_fragment = issue_contract.replace(
-        "#architecture-views", "#missing-architecture-view"
+        "#user-content-architecture-views", "#user-content-missing-architecture-view"
     )
     assert any(
         "no matching GitHub-style heading fragment" in failure
@@ -1132,7 +4414,9 @@ Mitigations:
             {"state": "OPEN", "body": missing_architecture_fragment}, expected
         )
     )
-    fragmentless_architecture = issue_contract.replace("#architecture-views", "")
+    fragmentless_architecture = issue_contract.replace(
+        "#user-content-architecture-views", ""
+    )
     assert any(
         "must include a Markdown heading fragment" in failure
         for failure in contract_failures(
@@ -1141,7 +4425,7 @@ Mitigations:
     )
     duplicate_architecture = issue_contract.replace(
         "## Release Scope",
-        "## Architecture Diagrams\n- [Second view](https://github.com/owner/repo/blob/dev/docs/agent-navigation.md#initial-task-discovery)\n## Release Scope",
+        "## Architecture Diagrams\n- [Second view](https://github.com/owner/repo/blob/main/docs/agent-navigation.md#user-content-initial-task-discovery)\n## Release Scope",
     )
     assert any(
         "exactly one visible non-empty 'architecture diagrams' section" in failure
@@ -1150,7 +4434,7 @@ Mitigations:
         )
     )
     empty_architecture = issue_contract.replace(
-        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n",
+        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)\n",
         "## Architecture Diagrams\n",
     )
     assert any(
@@ -1160,8 +4444,8 @@ Mitigations:
         )
     )
     wrong_architecture_order = issue_contract.replace(
-        "## Capabilities\nName the capability.\n## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n",
-        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/dev/docs/projectatlas-3-architecture.md#architecture-views)\n## Capabilities\nName the capability.\n",
+        "## Capabilities\nName the capability.\n## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)\n",
+        "## Architecture Diagrams\n- [System architecture](https://github.com/owner/repo/blob/main/docs/projectatlas-3-architecture.md#user-content-architecture-views)\n## Capabilities\nName the capability.\n",
     )
     assert any(
         "required issue sections must follow the #305 order" in failure
@@ -1196,11 +4480,1035 @@ Mitigations:
     else:
         raise AssertionError("overlapping owner ranges were accepted")
     assert first_task_difference(expected, expected[:-1]) == "task count differs: expected 2, found 1"
+    assert "task 1 differs" in first_task_difference(expected, [(False, "Changed text"), expected[1]])
+    assert "task 1 differs" in first_task_difference(expected, list(reversed(expected)))
+    assert "task 1 differs" in first_task_difference(expected, [(False, expected[0][1]), expected[1]])
+    with tempfile.TemporaryDirectory() as temporary:
+        branch_root = Path(temporary)
+        branch_tasks = "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n"
+        issue_map = {
+            "change-a": (Owner(1),),
+            "change-b": (Owner(2),),
+        }
+        base_texts: dict[str, str] = {}
+        for change in issue_map:
+            path = branch_root / "openspec" / "changes" / change / "tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(branch_tasks, encoding="utf-8")
+            base_texts[path.relative_to(branch_root).as_posix()] = branch_tasks
+        base_texts.pop("openspec/changes/change-b/tasks.md")
+        base_issue_map_text = json.dumps(
+            {"schema_version": 2, "changes": {"change-a": 1}}
+        )
+        saved_branch_helpers = {
+            name: globals()[name]
+            for name in (
+                "run",
+                "pull_request_payload",
+                "issue_payload",
+                "issue_state_payloads",
+                "issue_contract_failures",
+                "issue_checklist_tasks",
+                "gh_api_json",
+            )
+        }
+        pull_request = {"title": "Incremental work for #2", "body": ""}
+        live_payloads = {
+            1: {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            },
+            2: {"state": "OPEN", "body": issue_contract},
+        }
+        live_checked: list[int] = []
+        base_reads: list[str] = []
+        base_map_reads: list[str] = []
+        configured_base_issue_map_text = json.dumps(
+            {
+                "schema_version": 2,
+                "changes": {"change-a": 1, "change-b": 2},
+            }
+        )
+        try:
+            def fake_run(args: list[str]) -> str:
+                if len(args) == 3 and args[:2] == ["git", "show"]:
+                    path = args[2].split(":", 1)[1]
+                    if path == "openspec/issue-map.json":
+                        base_map_reads.append(path)
+                        if args[2].startswith("unreadable-base:"):
+                            raise SystemExit("git show could not read accepted base")
+                        return base_issue_map_text
+                    if path == "custom/issue-map.json":
+                        base_map_reads.append(path)
+                        return configured_base_issue_map_text
+                    base_reads.append(path)
+                    if args[2].startswith("unreadable-base:"):
+                        raise SystemExit("git show could not read accepted base")
+                    return base_texts[path]
+                raise AssertionError(f"unexpected branch test command: {args!r}")
+
+            globals()["run"] = fake_run
+            globals()["pull_request_payload"] = lambda _repo, _number: pull_request
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+                live_checked.append(number) or live_payloads[number]
+            )
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in live_payloads.items()
+            ]
+            globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            globals()["gh_api_json"] = lambda _args: {
+                "data": {
+                    "repository": {
+                        "issue": {"subIssues": {"totalCount": 0, "nodes": []}}
+                    }
+                }
+            }
+            assert check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, "accepted-base"
+            ) == []
+            assert live_checked == [2], "unrelated live progress must not be fetched"
+            assert base_reads == ["openspec/changes/change-a/tasks.md"]
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": 1, "state": "OPEN"},
+                {"number": 1, "state": "OPEN"},
+                {"number": 2, "state": "OPEN"},
+            ]
+            live_checked.clear()
+            duplicate_pr_state_failures = check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, "accepted-base"
+            )
+            assert any(
+                "mapped issue #1 has duplicate native state" in failure
+                for failure in duplicate_pr_state_failures
+            )
+            assert live_checked == [], "duplicate state summaries must stop before body reads"
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in live_payloads.items()
+            ]
+            live_checked.clear()
+            live_payloads[1] = {
+                "number": 1,
+                "state": "CLOSED",
+                "body": "## OpenSpec Tasks\n" + branch_tasks,
+            }
+            live_checked.clear()
+            _closed_history_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert _closed_history_failures == []
+            assert live_checked == [2], "closed unrelated history must be skipped"
+            pull_request["title"] = "Incremental work for #1"
+            closed_owner_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert closed_owner_failures == ["pull request owner #1 must be OPEN"]
+            pull_request["title"] = "Incremental work for #2"
+            removed_live_payload = live_payloads.pop(1)
+            missing_pr_state_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "mapped issue #1 is missing from the complete native issue state"
+                in failure
+                for failure in missing_pr_state_failures
+            )
+            live_payloads[1] = {
+                **removed_live_payload,
+                "state": "UNKNOWN",
+            }
+            unknown_pr_state_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "mapped issue #1 has unknown native state UNKNOWN" in failure
+                for failure in unknown_pr_state_failures
+            )
+            live_payloads[1] = {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            }
+            live_checked.clear()
+
+            base_issue_map_text = json.dumps(
+                {
+                    "schema_version": 2,
+                    "changes": {"change-a": 1, "change-b": 3},
+                }
+            )
+            base_reads.clear()
+            base_map_reads.clear()
+            assert (
+                check_pull_request_tasks(
+                    "owner/repo",
+                    branch_root,
+                    issue_map,
+                    7,
+                    "accepted-base",
+                    issue_map_path=branch_root / "custom" / "issue-map.json",
+                )
+                == []
+            )
+            assert base_map_reads == ["custom/issue-map.json"]
+            assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            outside_map_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                7,
+                "accepted-base",
+                issue_map_path=branch_root.parent / "issue-map.json",
+            )
+            assert len(outside_map_failures) == 1
+            assert "outside repository root" in outside_map_failures[0]
+
+            shared_change = branch_root / "openspec" / "changes" / "shared-change"
+            shared_change.mkdir(parents=True)
+            shared_tasks = (
+                "- [x] 1.1 Anchored task\n"
+                "- [ ] 2.1 Finish ordinary implementation.\n"
+            )
+            extended_tasks = shared_tasks + "- [ ] 3.1 Extend the owner range.\n"
+            shared_task_path = shared_change / "tasks.md"
+            shared_task_path.write_text(extended_tasks, encoding="utf-8")
+            shared_relative_path = shared_task_path.relative_to(branch_root).as_posix()
+            base_texts[shared_relative_path] = shared_tasks
+            shared_base_map = json.dumps(
+                {
+                    "schema_version": 2,
+                    "changes": {
+                        "shared-change": {
+                            "contract": "checklist-v1",
+                            "primary_issue": 1,
+                            "owners": [
+                                {"issue": 1, "first_task": "1.1", "last_task": "1.1"},
+                                {"issue": 2, "first_task": "2.1", "last_task": "2.1"},
+                            ],
+                        }
+                    },
+                }
+            )
+            shared_issue_contract = issue_contract.replace(
+                "## Acceptance and Review Tasks",
+                "## 3. Extension\n"
+                "- [ ] 3.1 Extend the owner range.\n"
+                "## Acceptance and Review Tasks",
+            ).replace("## 1. Review\n", "").replace(
+                "- [x] 1.1 Anchored task\n", ""
+            )
+            base_issue_map_text = shared_base_map
+            live_payloads[2] = {
+                "state": "OPEN",
+                "body": shared_issue_contract,
+            }
+            shared_issue_map = {
+                "shared-change": (
+                    Owner(1, "1.1", "1.1"),
+                    Owner(2, "2.1", "3.1"),
+                )
+            }
+            base_reads.clear()
+            live_checked.clear()
+            assert (
+                check_pull_request_tasks(
+                    "owner/repo", branch_root, shared_issue_map, 7, "accepted-base"
+                )
+                == []
+            )
+            assert live_checked == [2], "only the changed owner may use live state"
+            assert base_reads == [shared_relative_path]
+
+            shared_task_path.write_text(shared_tasks, encoding="utf-8")
+            contracted_issue_contract = shared_issue_contract.replace(
+                "- [ ] 3.1 Extend the owner range.\n", ""
+            )
+            base_texts[shared_relative_path] = extended_tasks
+            base_issue_map_text = json.dumps(
+                {
+                    "schema_version": 2,
+                    "changes": {
+                        "shared-change": {
+                            "contract": "checklist-v1",
+                            "primary_issue": 1,
+                            "owners": [
+                                {"issue": 1, "first_task": "1.1", "last_task": "1.1"},
+                                {"issue": 2, "first_task": "2.1", "last_task": "3.1"},
+                            ],
+                        }
+                    },
+                }
+            )
+            live_payloads[2] = {
+                "state": "OPEN",
+                "body": contracted_issue_contract,
+            }
+            contracted_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(1, "1.1", "1.1"),
+                        Owner(2, "2.1", "2.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert contracted_failures == []
+
+            base_texts[shared_relative_path] = shared_tasks
+            base_issue_map_text = shared_base_map
+            shared_task_path.write_text(
+                "- [ ] 2.1 Finish ordinary implementation.\n"
+                "- [x] 1.1 Anchored task\n",
+                encoding="utf-8",
+            )
+            reversed_order_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(2, "2.1", "2.1"),
+                        Owner(1, "1.1", "1.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "changes mapped OpenSpec owners" in failure
+                for failure in reversed_order_failures
+            )
+
+            shared_task_path.write_text(extended_tasks, encoding="utf-8")
+            overlap_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(1, "1.1", "1.1"),
+                        Owner(2, "1.1", "3.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert any("ordered, disjoint, and gap-free" in failure for failure in overlap_failures)
+
+            unrelated_range_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {
+                    "shared-change": (
+                        Owner(1, "1.1", "2.1"),
+                        Owner(2, "3.1", "3.1"),
+                    )
+                },
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "changes mapped OpenSpec owners" in failure
+                for failure in unrelated_range_failures
+            )
+
+            base_issue_map_text = json.dumps(
+                {"schema_version": 2, "changes": {"change-a": 1}}
+            )
+            live_payloads[2] = {"state": "OPEN", "body": issue_contract}
+
+            deleted_change_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {"change-b": (Owner(2),)},
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "removes mapped OpenSpec authority" in failure
+                for failure in deleted_change_failures
+            )
+            live_payloads[3] = {"state": "OPEN", "body": issue_contract}
+            reassigned_change_failures = check_pull_request_tasks(
+                "owner/repo",
+                branch_root,
+                {"change-a": (Owner(3),), "change-b": (Owner(2),)},
+                7,
+                "accepted-base",
+            )
+            assert any(
+                "changes mapped OpenSpec owners" in failure
+                for failure in reassigned_change_failures
+            )
+
+            (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
+                "- [ ] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
+                encoding="utf-8",
+            )
+            assert any(
+                "unrelated task slice" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
+                branch_tasks, encoding="utf-8"
+            )
+
+            (branch_root / "openspec" / "changes" / "change-b" / "tasks.md").write_text(
+                "- [ ] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
+                encoding="utf-8",
+            )
+            assert any(
+                "candidate does not mirror live issue state" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "changes" / "change-b" / "tasks.md").write_text(
+                branch_tasks, encoding="utf-8"
+            )
+
+            pull_request["title"] = "Work for #1 and #2"
+            assert any(
+                "exactly one owning issue" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            pull_request["title"] = "Work without an issue"
+            assert any(
+                "exactly one owning issue" in failure
+                for failure in check_pull_request_tasks(
+                    "owner/repo", branch_root, issue_map, 7, "accepted-base"
+                )
+            )
+            pull_request["title"] = "Incremental work for #2"
+            missing_base_failures = check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, ""
+            )
+            assert missing_base_failures == [
+                "pull request accepted base is missing",
+            ]
+            unreadable_base_failures = check_pull_request_tasks(
+                "owner/repo", branch_root, issue_map, 7, "unreadable-base"
+            )
+            assert len(unreadable_base_failures) == 1
+            assert all(
+                "accepted pull-request base 'unreadable-base' is unreadable" in failure
+                for failure in unreadable_base_failures
+            )
+
+            checked_numbers: list[int] = []
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+                checked_numbers.append(number)
+                or {"state": "OPEN", "body": issue_contract}
+            )
+            globals()["issue_checklist_tasks"] = lambda _payload, *_args: expected
+            assert check_openspec_tasks("owner/repo", branch_root, issue_map) == []
+            assert checked_numbers == [1, 2]
+        finally:
+            for name, helper in saved_branch_helpers.items():
+                globals()[name] = helper
+    with tempfile.TemporaryDirectory() as temporary:
+        branch_root = Path(temporary)
+        candidate_tasks = "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n"
+        issue_map = {
+            "change-a": (Owner(1),),
+            "change-b": (Owner(2),),
+        }
+        for change in issue_map:
+            path = branch_root / "openspec" / "changes" / change / "tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(candidate_tasks, encoding="utf-8")
+        base_issue_map_text = json.dumps(
+            {"schema_version": 2, "changes": {"change-a": 1, "change-b": 2}}
+        )
+        saved_candidate_helpers = {
+            name: globals()[name]
+            for name in (
+                "run",
+                "issue_payload",
+                "issue_state_payloads",
+                "issue_contract_failures",
+                "candidate_tree_file_text",
+                "gh_api_json",
+            )
+        }
+        live_payloads = {
+            1: {"state": "OPEN", "body": issue_contract},
+            2: {"state": "OPEN", "body": issue_contract},
+        }
+        live_payloads[1]["body"] = issue_contract.replace("- [ ] 2.1", "- [x] 2.1")
+        live_reads: list[int] = []
+        base_reads: list[str] = []
+        native_children: set[int] = set()
+        try:
+            def fake_run(args: list[str]) -> str:
+                if len(args) == 3 and args[:2] == ["git", "show"]:
+                    path = args[2].split(":", 1)[1]
+                    if path == "openspec/issue-map.json":
+                        if args[2].startswith("unreadable-base:"):
+                            raise SystemExit("git show could not read accepted base")
+                        return base_issue_map_text
+                    base_reads.append(path)
+                    if args[2].startswith("unreadable-base:"):
+                        raise SystemExit("git show could not read accepted base")
+                    return candidate_tasks
+                raise AssertionError(f"unexpected candidate test command: {args!r}")
+
+            globals()["run"] = fake_run
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+                live_reads.append(number) or live_payloads[number]
+            )
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in live_payloads.items()
+            ]
+            globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            globals()["gh_api_json"] = lambda _args: {
+                "data": {
+                    "repository": {
+                        "issue": {
+                            "subIssues": {
+                                "totalCount": len(native_children),
+                                "nodes": [
+                                    {"number": number} for number in native_children
+                                ],
+                            }
+                        }
+                    }
+                }
+            }
+
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            ) == []
+            assert live_reads == [2], "candidate checks must read live state only for the owner"
+            assert base_reads == ["openspec/changes/change-a/tasks.md"]
+
+            release_map = {
+                "schema_version": 2,
+                "release_graphs": {
+                    "v1.2.3-00": {
+                        "release_issue": 2,
+                        "issues": {
+                            "2": {"blocked_by": [3]},
+                            "3": {"blocked_by": []},
+                        },
+                    }
+                },
+                "changes": {},
+            }
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            child_tasks = (
+                branch_root / "openspec" / "changes" / "change-child" / "tasks.md"
+            )
+            child_tasks.parent.mkdir(parents=True)
+            child_tasks.write_text(candidate_tasks, encoding="utf-8")
+            live_payloads[3] = {"state": "OPEN", "body": issue_contract}
+            release_issue_map = {**issue_map, "change-child": (Owner(3),)}
+            malformed_release_map = json.loads(json.dumps(release_map))
+            malformed_release_map["release_graphs"]["v1.2.3-00"]["issues"] = {
+                "2": {}
+            }
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(malformed_release_map), encoding="utf-8"
+            )
+            assert any(
+                "candidate release graph for owner #2 is invalid" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+                )
+            )
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            assert any(
+                "adds unrelated mapped OpenSpec authority" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+                )
+            )
+            native_children.add(3)
+            live_reads.clear()
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, release_issue_map, 2, "accepted-base"
+            ) == []
+            assert live_reads == [2, 3], "release owners must mirror direct child tasks"
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(malformed_release_map), encoding="utf-8"
+            )
+
+            def candidate_tree_release_graph(
+                _ref: str, _root: Path, path: str | Path, _label: str
+            ) -> str:
+                if Path(path).name == "issue-map.json":
+                    return json.dumps(release_map)
+                return candidate_tasks
+            globals()["candidate_tree_file_text"] = candidate_tree_release_graph
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, release_issue_map, 2, "accepted-base",
+                candidate_tree_ref="candidate-head",
+            ) == []
+            globals()["candidate_tree_file_text"] = saved_candidate_helpers[
+                "candidate_tree_file_text"
+            ]
+            (branch_root / "openspec" / "issue-map.json").write_text(
+                json.dumps(release_map), encoding="utf-8"
+            )
+            unrelated_issue_map = {
+                **release_issue_map,
+                "change-unrelated": (Owner(4),),
+            }
+            unrelated_tasks = (
+                branch_root / "openspec" / "changes" / "change-unrelated" / "tasks.md"
+            )
+            unrelated_tasks.parent.mkdir(parents=True)
+            unrelated_tasks.write_text(candidate_tasks, encoding="utf-8")
+            live_payloads[4] = {"state": "OPEN", "body": issue_contract}
+            native_children.add(4)
+            assert any(
+                "adds unrelated mapped OpenSpec authority" in failure
+                for failure in check_candidate_tasks(
+                    "owner/repo", branch_root, unrelated_issue_map, 2, "accepted-base"
+                )
+            )
+
+            live_payloads[1] = {"state": "CLOSED", "body": issue_contract}
+            change_a_tasks = (
+                branch_root / "openspec" / "changes" / "change-a" / "tasks.md"
+            )
+            change_a_tasks.unlink()
+            assert check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            ) == []
+            change_a_tasks.write_text(candidate_tasks, encoding="utf-8")
+
+            def fake_candidate_tree_file_text(
+                _ref: str, _root: Path, path: str | Path, _label: str
+            ) -> str:
+                if "change-a" in Path(path).parts:
+                    raise SystemExit("closed mapped candidate task blob rejected")
+                return candidate_tasks
+
+            globals()["candidate_tree_file_text"] = fake_candidate_tree_file_text
+            closed_blob_failures = check_candidate_tasks(
+                "owner/repo",
+                branch_root,
+                issue_map,
+                2,
+                "accepted-base",
+                candidate_tree_ref="candidate-head",
+            )
+            assert closed_blob_failures == ["closed mapped candidate task blob rejected"]
+            globals()["candidate_tree_file_text"] = saved_candidate_helpers[
+                "candidate_tree_file_text"
+            ]
+            live_payloads[1] = {"state": "OPEN", "body": issue_contract}
+
+            live_payloads[2] = {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            }
+            live_reads.clear()
+            owner_drift_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            )
+            assert any("candidate does not mirror live issue state" in failure for failure in owner_drift_failures)
+
+            (branch_root / "openspec" / "changes" / "change-a" / "tasks.md").write_text(
+                "- [ ] 1.1 Unrelated candidate edit.\n- [ ] 2.1 Finish ordinary implementation.\n",
+                encoding="utf-8",
+            )
+            live_payloads[1] = {
+                "state": "OPEN",
+                "body": issue_contract.replace("- [x] 1.1", "- [ ] 1.1"),
+            }
+            unrelated_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            )
+            assert any("unrelated task slice" in failure for failure in unrelated_failures)
+
+            live_payloads[2] = {"state": "CLOSED", "body": issue_contract}
+            closed_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "accepted-base"
+            )
+            assert closed_failures == ["candidate branch owner #2 must be OPEN"]
+
+            unmapped_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 99, "accepted-base"
+            )
+            assert any("candidate branch owner #99 must have exactly one local OpenSpec mapping" in failure for failure in unmapped_failures)
+
+            live_payloads[2] = {"state": "OPEN", "body": issue_contract}
+            missing_base_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, ""
+            )
+            assert missing_base_failures == ["candidate branch accepted base is missing"]
+            unreadable_base_failures = check_candidate_tasks(
+                "owner/repo", branch_root, issue_map, 2, "unreadable-base"
+            )
+            assert any("accepted candidate branch base 'unreadable-base' is unreadable" in failure for failure in unreadable_base_failures)
+        finally:
+            for name, helper in saved_candidate_helpers.items():
+                globals()[name] = helper
+    with tempfile.TemporaryDirectory() as temporary:
+        branch_root = Path(temporary)
+        legacy_path = branch_root / "openspec" / "changes" / "legacy-change" / "tasks.md"
+        current_path = branch_root / "openspec" / "changes" / "current-change" / "tasks.md"
+        legacy_path.parent.mkdir(parents=True)
+        current_path.parent.mkdir(parents=True)
+        legacy_tasks = "- [ ] 1.1 Historical implementation.\n"
+        legacy_path.write_text(legacy_tasks, encoding="utf-8")
+        current_path.write_text(
+            "- [x] 1.1 Anchored task\n- [ ] 2.1 Finish ordinary implementation.\n",
+            encoding="utf-8",
+        )
+        legacy_body = "## OpenSpec Tasks\n" + legacy_tasks
+        saved_active_helpers = {
+            name: globals()[name]
+            for name in (
+                "issue_payload",
+                "issue_state_payloads",
+                "issue_contract_failures",
+                "milestone_issues",
+            )
+        }
+        try:
+            globals()["issue_contract_failures"] = lambda *_args, **_kwargs: []
+            payloads = {
+                517: {"number": 517, "state": "CLOSED", "body": legacy_body},
+                448: {"number": 448, "state": "OPEN", "body": issue_contract},
+            }
+            fetches: list[tuple[int, bool]] = []
+            globals()["issue_payload"] = lambda _repo, number, **_kwargs: (
+                fetches.append((number, _kwargs.get("include_body", True)))
+                or payloads[number]
+            )
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in payloads.items()
+            ]
+            mapped = {"legacy-change": (Owner(517),)}
+            assert check_openspec_tasks("owner/repo", branch_root, mapped) == []
+            assert fetches == [], "closed issue bodies must remain inert"
+
+            payloads[517] = {"number": 517, "state": "OPEN", "body": legacy_body}
+            fetches.clear()
+            reopened_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "Implementation Tasks" in failure for failure in reopened_failures
+            )
+            assert fetches == [(517, True)]
+
+            mapped = {
+                "legacy-change": (Owner(517),),
+                "current-change": (Owner(448),),
+            }
+            payloads[517] = {"number": 517, "state": "CLOSED", "body": legacy_body}
+            fetches.clear()
+            assert check_openspec_tasks("owner/repo", branch_root, mapped) == []
+            assert fetches == [(448, True)], "global checks fetch only active issue bodies"
+            fetches.clear()
+            assert check_openspec_tasks(
+                "owner/repo", branch_root, mapped, planned_issue=517
+            ) == []
+            assert fetches == [(517, False)]
+            fetches.clear()
+            _planned_current_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped, planned_issue=448
+            )
+            assert _planned_current_failures == []
+            assert fetches == [(448, False), (448, True)], "planned checks must remain issue-scoped"
+
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": 448, "state": "OPEN"}
+            ]
+            missing_state_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "mapped issue #517 is missing from the complete native issue state"
+                in failure
+                for failure in missing_state_failures
+            )
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": 517, "state": "UNKNOWN"},
+                {"number": 448, "state": "OPEN"},
+            ]
+            unknown_state_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "mapped issue #517 has unknown native state UNKNOWN" in failure
+                for failure in unknown_state_failures
+            )
+            fetches.clear()
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": 517, "state": "CLOSED"},
+                {"number": 448, "state": "OPEN"},
+                {"number": 448, "state": "OPEN"},
+            ]
+            duplicate_state_failures = check_openspec_tasks(
+                "owner/repo", branch_root, mapped
+            )
+            assert any(
+                "mapped issue #448 has duplicate native state" in failure
+                for failure in duplicate_state_failures
+            )
+            assert fetches == [], "duplicate state summaries must stop before body reads"
+            globals()["issue_state_payloads"] = lambda _repo: [
+                {"number": number, "state": payload["state"]}
+                for number, payload in payloads.items()
+            ]
+
+            globals()["milestone_issues"] = lambda _repo, _milestone: [
+                {"number": 517, "state": "CLOSED"}
+            ]
+            fetches.clear()
+            assert check_milestone_complete("owner/repo", "v1.0.0-00", {517}) == []
+            assert fetches == [], "release state checks must not read closed bodies"
+            globals()["milestone_issues"] = lambda _repo, _milestone: [
+                {"number": 517, "state": "OPEN"}
+            ]
+            assert any(
+                "not CLOSED" in failure
+                for failure in check_milestone_complete(
+                    "owner/repo", "v1.0.0-00", {517}
+                )
+            )
+        finally:
+            for name, helper in saved_active_helpers.items():
+                globals()[name] = helper
     assert repo_parts("owner/repo") == ("owner", "repo")
     assert flatten_paginated_response([[{"number": 1}], [{"number": 2}]]) == [
         {"number": 1},
         {"number": 2},
     ]
+    saved_gh_api_json = gh_api_json
+    saved_issue_payload = issue_payload
+    saved_issue_checklist_tasks = issue_checklist_tasks
+    saved_pull_request_payload = pull_request_payload
+    paginated_issue_api_calls: list[list[str]] = []
+    first_page_issue = {
+        "number": 1,
+        "state": "OPEN",
+        "labels": {
+            "totalCount": 1,
+            "nodes": [{"name": "complexity:high"}],
+        },
+        "milestone": {"title": "v1.0.0-00"},
+    }
+    four_label_issue = {
+        "number": 2,
+        "state": "OPEN",
+        "labels": {
+            "totalCount": 4,
+            "nodes": [
+                {"name": "complexity:high"},
+                {"name": "status:ready"},
+                {"name": "type:feature"},
+                {"name": "priority:normal"},
+            ],
+        },
+        "milestone": None,
+    }
+    later_page_issue = {
+        "number": 517,
+        "state": "CLOSED",
+        "body": "## OpenSpec Tasks\n- [ ] Historical task.\n",
+        "labels": {"totalCount": 0, "nodes": []},
+        "milestone": None,
+    }
+    normal_graphql_pages = [
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [first_page_issue, four_label_issue],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor-1",
+                        },
+                    }
+                }
+            }
+        },
+        {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [later_page_issue],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": "cursor-2",
+                        },
+                    }
+                }
+            }
+        },
+    ]
+    graphql_pages = normal_graphql_pages
+    try:
+        globals()["gh_api_json"] = lambda args: (
+            paginated_issue_api_calls.append(args)
+            or graphql_pages
+        )
+        def unexpected_issue_payload(*_args, **_kwargs):
+            raise AssertionError("closed issue body was fetched")
+
+        globals()["issue_payload"] = unexpected_issue_payload
+        task_parsing_calls: list[dict[str, object]] = []
+        globals()["issue_checklist_tasks"] = lambda payload: (
+            task_parsing_calls.append(payload) or []
+        )
+        assert issue_state_payloads("owner/repo") == [
+            {
+                "number": 1,
+                "state": "OPEN",
+                "labels": [{"name": "complexity:high"}],
+                "milestone": {"title": "v1.0.0-00"},
+            },
+            {
+                "number": 2,
+                "state": "OPEN",
+                "labels": [
+                    {"name": "complexity:high"},
+                    {"name": "status:ready"},
+                    {"name": "type:feature"},
+                    {"name": "priority:normal"},
+                ],
+                "milestone": None,
+            },
+            {
+                "number": 517,
+                "state": "CLOSED",
+                "labels": [],
+                "milestone": None,
+            },
+        ]
+        assert all("body" not in issue for issue in issue_state_payloads("owner/repo"))
+        with tempfile.TemporaryDirectory() as temporary:
+            legacy_root = Path(temporary)
+            legacy_tasks = (
+                legacy_root
+                / "openspec"
+                / "changes"
+                / "legacy-change"
+                / "tasks.md"
+            )
+            legacy_tasks.parent.mkdir(parents=True)
+            legacy_tasks.write_text(
+                "- [ ] 1.1 Historical implementation.\n", encoding="utf-8"
+            )
+            assert check_openspec_tasks(
+                "owner/repo",
+                legacy_root,
+                {"legacy-change": (Owner(517),)},
+            ) == []
+        assert not task_parsing_calls
+        assert paginated_issue_api_calls == [
+            [
+                "graphql",
+                "--paginate",
+                "--slurp",
+                "-f",
+                f"query={ISSUE_STATE_QUERY}",
+                "-F",
+                "owner=owner",
+                "-F",
+                "name=repo",
+            ]
+        ] * 3
+        assert "issues(first: 100" in ISSUE_STATE_QUERY
+        assert "pageInfo" in ISSUE_STATE_QUERY
+        assert "$endCursor" in ISSUE_STATE_QUERY
+        assert "pullRequest" not in ISSUE_STATE_QUERY
+        assert "pullRequests" not in ISSUE_STATE_QUERY
+        assert "totalCount" in ISSUE_STATE_QUERY
+        assert "body" not in ISSUE_STATE_QUERY.lower()
+
+        incomplete_labels = [{"name": f"label-{index}"} for index in range(100)]
+        graphql_pages = [
+            {
+                "data": {
+                    "repository": {
+                        "issues": {
+                            "nodes": [
+                                {
+                                    "number": 517,
+                                    "state": "OPEN",
+                                    "labels": {
+                                        "totalCount": 101,
+                                        "nodes": incomplete_labels,
+                                    },
+                                    "milestone": None,
+                                }
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": "cursor-incomplete",
+                            },
+                        }
+                    }
+                }
+            }
+        ]
+        try:
+            issue_state_payloads("owner/repo")
+        except SystemExit as error:
+            assert str(error) == "GitHub GraphQL issue labels were incomplete"
+        else:
+            raise AssertionError("incomplete GraphQL labels were accepted")
+        globals()["pull_request_payload"] = lambda _repo, _number: {
+            "title": "Work for #517",
+            "body": "",
+        }
+        global_failures = check_openspec_tasks(
+            "owner/repo", self_test_root, {"legacy-change": (Owner(517),)}
+        )
+        assert global_failures == [
+            "issue state GitHub GraphQL issue labels were incomplete"
+        ]
+        pull_request_failures = check_pull_request_tasks(
+            "owner/repo",
+            self_test_root,
+            {"legacy-change": (Owner(517),)},
+            7,
+            "accepted-base",
+        )
+        assert pull_request_failures == [
+            "pull request issue state GitHub GraphQL issue labels were incomplete"
+        ]
+        assert not task_parsing_calls
+    finally:
+        globals()["gh_api_json"] = saved_gh_api_json
+        globals()["issue_payload"] = saved_issue_payload
+        globals()["issue_checklist_tasks"] = saved_issue_checklist_tasks
+        globals()["pull_request_payload"] = saved_pull_request_payload
     assert mapped_issue_numbers({"one": (Owner(1),), "two": (Owner(2),)}) == {
         1,
         2,
@@ -1231,7 +5539,174 @@ Mitigations:
         assert "owned by both one and one" in str(error)
     else:
         raise AssertionError("repeated issue ownership within one change was accepted")
+    ready_issue = {
+        "number": 448,
+        "state": "OPEN",
+        "milestone": {"title": "v6.7.8-00"},
+        "labels": [{"name": "status:ready"}],
+    }
+    backlog_issue = {**ready_issue, "labels": [{"name": "status:backlog"}]}
+    assert any(
+        "expected only status:ready" in failure
+        for failure in planned_issue_failures(
+            backlog_issue, {"missing-readiness-change": (Owner(448),)}, self_test_root
+        )
+    )
+    assert any(
+        "no local OpenSpec mapping" in failure
+        for failure in planned_issue_failures(ready_issue, {}, self_test_root)
+    )
+    assert any(
+        "missing readable proposal.md" in failure
+        for failure in openspec_readiness_failures(
+            self_test_root, "missing-readiness-change"
+        )
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        readiness_root = Path(temporary)
+        change = readiness_root / "openspec" / "changes" / "ready-change"
+        (change / "specs" / "capability").mkdir(parents=True)
+        (change / "proposal.md").write_text(
+            "## Why\nNeed it.\n## What Changes\nChange it.\n"
+            "## Capabilities\nOne.\n## Impact\nBounded.\n",
+            encoding="utf-8",
+        )
+        design = (
+            "## Goals / Non-Goals\nGoal.\n## Decisions\nDecide.\n"
+            "## Risks / Trade-offs\nRisk.\n## Migration Plan\nMigrate.\n"
+            "## Dependencies / Cross-Issue Impact\nIssue #123 owns the input.\n"
+            "## Open Questions\nNone.\n"
+        )
+        (change / "design.md").write_text(design, encoding="utf-8")
+        (change / "specs" / "capability" / "spec.md").write_text(
+            "## ADDED Requirements\n### Requirement: Ready contract\nIt SHALL work.\n"
+            "#### Scenario: Positive\n- **WHEN** ready\n- **THEN** proceed\n",
+            encoding="utf-8",
+        )
+        (change / "tasks.md").write_text(
+            "## 1. Contract\n- [x] 1.1 Specify the contract.\n"
+            "## 2. Acceptance\n- [ ] 2.1 Review the final implementation against the "
+            "architecture diagrams, update the diagrams or implementation until they "
+            "agree, or reconfirm the reasoned N/A.\n",
+            encoding="utf-8",
+        )
+        assert openspec_readiness_failures(readiness_root, "ready-change") == []
+        assert planned_issue_failures(
+            ready_issue, {"ready-change": (Owner(448),)}, readiness_root
+        ) == []
+        empty_proposal = (
+            "## Why\n\n## What Changes\nChange it.\n"
+            "## Capabilities\nOne.\n## Impact\nBounded.\n"
+        )
+        (change / "proposal.md").write_text(empty_proposal, encoding="utf-8")
+        assert any(
+            "proposal section 'why' must not be empty" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "proposal.md").write_text(
+            "## Why\nNeed it.\n## Why\nNeed it twice.\n"
+            "## What Changes\nChange it.\n## Capabilities\nOne.\n"
+            "## Impact\nBounded.\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "proposal section 'why' must appear exactly once" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "proposal.md").write_text(
+            "## Why\nNeed it.\n## What Changes\nChange it.\n"
+            "## Capabilities\nOne.\n## Impact\nBounded.\n",
+            encoding="utf-8",
+        )
+        (change / "design.md").write_text(
+            design.replace("None.", "Which owner is responsible?"), encoding="utf-8"
+        )
+        assert any(
+            "unresolved open questions" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "design.md").write_text(
+            design.replace(
+                "Issue #123 owns the input.", "Dependencies will be decided later."
+            ),
+            encoding="utf-8",
+        )
+        assert any(
+            "must name cross-issue dependencies" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+        (change / "design.md").write_text(design, encoding="utf-8")
+        (change / "tasks.md").write_text(
+            "## 1. Contract\n- [ ] 1.1 Specify the contract.\n",
+            encoding="utf-8",
+        )
+        assert any(
+            "contract/specification tasks" in failure
+            for failure in openspec_readiness_failures(
+                readiness_root, "ready-change"
+            )
+        )
+    globals()["_run_mermaid_parser"] = saved_mermaid_runner
+    mermaid_syntax_is_valid.cache_clear()
     print("issue checklist self-test passed")
+
+
+def pr_state_identity(number: str, head: str, command: str) -> tuple[int, str]:
+    if re.fullmatch(r"[1-9][0-9]*", number) is None:
+        raise SystemExit(f"{command} requires a positive pull-request number")
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise SystemExit(f"{command} requires a 40-character head SHA")
+    return int(number), head
+
+
+def dispatch_pr_state_command(args: argparse.Namespace) -> bool:
+    commands = (
+        ("--validate-pr-state-owner", args.validate_pr_state_owner),
+        ("--refresh-pr-state-for-issue", args.refresh_pr_state_for_issue),
+    )
+    selected = [(name, value) for name, value in commands if value is not None]
+    if not selected:
+        return False
+    if len(selected) != 1:
+        raise SystemExit("PR-state commands cannot be combined")
+    command, value = selected[0]
+    if (
+        not args.repo
+        or args.root != "."
+        or args.issue_map != "openspec/issue-map.json"
+        or args.milestone
+        or args.publication_version is not None
+        or args.skip_openspec
+        or args.owner_from_commits
+        or args.self_test
+        or args.base
+        or any(
+            item is not None
+            for item in (
+                args.planned_issue,
+                args.pull_request,
+                args.candidate_issue,
+                args.candidate_local_oid,
+            )
+        )
+    ):
+        raise SystemExit(f"{command} accepts only --repo and its PR-state arguments")
+
+    if command == "--validate-pr-state-owner":
+        number_text, head_text = value
+        number, head = pr_state_identity(number_text, head_text, command)
+        print(f"owner_issue={validate_pr_state_owner(args.repo, number, head)}")
+    else:
+        refresh_pr_state_for_issue(args.repo, value)
+    return True
 
 
 def main() -> None:
@@ -1240,10 +5715,47 @@ def main() -> None:
     parser.add_argument("--root", default=".")
     parser.add_argument("--issue-map", default="openspec/issue-map.json")
     parser.add_argument("--milestone", action="append", default=[])
+    parser.add_argument("--publication-version")
+    parser.add_argument("--planned-issue", type=int)
+    parser.add_argument("--pull-request", type=int)
+    parser.add_argument("--candidate-issue", type=int)
+    parser.add_argument("--candidate-local-oid")
+    parser.add_argument("--refresh-pr-state-for-issue", type=int)
+    parser.add_argument("--validate-pr-state-owner", nargs=2, metavar=("NUMBER", "HEAD"))
+    parser.add_argument("--base", default="")
     parser.add_argument("--skip-openspec", action="store_true")
+    parser.add_argument("--owner-from-commits", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
+    if dispatch_pr_state_command(args):
+        return
+
+    if args.publication_version is not None and (
+        args.milestone or args.skip_openspec or args.self_test or args.owner_from_commits
+        or args.planned_issue is not None
+        or args.pull_request is not None or args.candidate_issue is not None
+        or args.candidate_local_oid or args.base
+    ):
+        raise SystemExit("--publication-version cannot be combined with another validation mode")
+
+    if args.owner_from_commits:
+        if (
+            args.root != "."
+            or args.issue_map != "openspec/issue-map.json"
+            or args.skip_openspec
+            or args.self_test
+            or any(
+                value is not None
+                for value in (args.planned_issue, args.pull_request, args.candidate_issue)
+            )
+            or args.base
+            or args.milestone
+            or args.repo
+        ):
+            raise SystemExit("--owner-from-commits accepts only commit subjects on stdin")
+        print(candidate_owner_issue_from_subjects(sys.stdin.read()))
+        return
     if args.self_test:
         self_test()
         return
@@ -1251,13 +5763,120 @@ def main() -> None:
         raise SystemExit("--repo is required unless --self-test is used")
 
     root = Path(args.root)
+    scoped_dispatches = sum(
+        value is not None
+        for value in (args.pull_request, args.planned_issue, args.candidate_issue)
+    )
+    if scoped_dispatches > 1:
+        raise SystemExit(
+            "--pull-request, --planned-issue, and --candidate-issue are mutually exclusive"
+        )
+    if args.pull_request is not None and args.skip_openspec:
+        raise SystemExit("--pull-request cannot be combined with --skip-openspec")
+    if args.candidate_issue is not None and args.skip_openspec:
+        raise SystemExit("--candidate-issue cannot be combined with --skip-openspec")
+    if args.pull_request is not None and not args.base:
+        raise SystemExit("--base is required with --pull-request")
+    if args.candidate_issue is not None and not args.base:
+        raise SystemExit("--base is required with --candidate-issue")
+    if args.candidate_issue is not None and not args.candidate_local_oid:
+        raise SystemExit("--candidate-local-oid is required with --candidate-issue")
+    if args.candidate_local_oid and args.candidate_issue is None:
+        raise SystemExit("--candidate-local-oid requires --candidate-issue")
+    if args.pull_request is None and args.candidate_issue is None and args.base:
+        raise SystemExit("--base requires --pull-request or --candidate-issue")
     failures: list[str] = []
-    issue_map = load_issue_map(args.issue_map)
-    if not args.skip_openspec:
-        failures.extend(check_openspec_tasks(args.repo, root, issue_map))
+    if args.candidate_issue is not None:
+        os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
+        candidate_change_names = candidate_tree_change_names(
+            args.candidate_local_oid, root, args.issue_map
+        )
+        issue_map = parse_issue_map_text(
+            candidate_tree_file_text(
+                args.candidate_local_oid,
+                root,
+                args.issue_map,
+                "issue-map",
+            ),
+            args.issue_map,
+            candidate_change_names=candidate_change_names,
+        )
+    else:
+        issue_map = load_issue_map(args.issue_map)
+    pull_request_owner = None
+    pull_request_owner_error = None
+    planned_issue_payload = None
+    if args.pull_request is not None:
+        try:
+            pull_request_owner = pull_request_owner_issue(
+                args.repo,
+                pull_request_payload(args.repo, args.pull_request)
+            )
+        except SystemExit as error:
+            pull_request_owner_error = str(error)
+    elif args.planned_issue is not None:
+        planned_issue_payload = issue_payload(
+            args.repo, args.planned_issue, include_body=False
+        )
+    failures.extend(
+        check_complexity_for_dispatch(
+            args.repo,
+            pull_request=args.pull_request,
+            planned_issue=args.planned_issue,
+            candidate_issue=args.candidate_issue,
+            pull_request_owner=pull_request_owner,
+            pull_request_owner_error=pull_request_owner_error,
+            planned_issue_payload=planned_issue_payload,
+        )
+    )
+    if args.pull_request is not None:
+        failures.extend(
+            check_pull_request_tasks(
+                args.repo,
+                root,
+                issue_map,
+                args.pull_request,
+                args.base,
+                issue_map_path=args.issue_map,
+                owner_issue=pull_request_owner,
+                owner_error=pull_request_owner_error,
+            )
+        )
+    elif args.candidate_issue is not None:
+        failures.extend(
+            check_candidate_tasks(
+                args.repo,
+                root,
+                issue_map,
+                args.candidate_issue,
+                args.base,
+                issue_map_path=args.issue_map,
+                candidate_tree_ref=args.candidate_local_oid,
+            )
+        )
+    elif not args.skip_openspec:
+        failures.extend(
+            check_openspec_tasks(
+                args.repo,
+                root,
+                issue_map,
+                planned_issue=args.planned_issue,
+                planned_issue_payload=planned_issue_payload,
+            )
+        )
     mapped_issues = mapped_issue_numbers(issue_map)
+    if args.publication_version is not None:
+        failures.extend(check_publication_ready(
+            args.repo, root, Path(args.issue_map), mapped_issues, args.publication_version
+        ))
     for milestone in args.milestone:
-        failures.extend(check_milestone_complete(args.repo, milestone, mapped_issues))
+        failures.extend(
+            check_milestone_complete(
+                args.repo,
+                milestone,
+                mapped_issues,
+            )
+        )
 
     if failures:
         print("\nIssue checklist validation failed:", file=sys.stderr)

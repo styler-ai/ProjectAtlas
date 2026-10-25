@@ -29,6 +29,14 @@ pub const TOKEN_BASELINE_FULL_FILE: &str = "full_file";
 pub const TOKEN_BASELINE_SELECTED_CANDIDATES: &str = "selected_candidates";
 /// Baseline kind for broad directory-walk navigation savings.
 pub const TOKEN_BASELINE_DIRECTORY_WALK: &str = "directory_walk";
+/// Fixed average-policy share of a modeled directory-walk baseline.
+pub const TOKEN_AVERAGE_DIRECTORY_WALK_PERCENT: usize = 50;
+/// Evidence label distinguishing the fixed policy from measurement or benchmarking.
+pub const TOKEN_AVERAGE_POLICY_EVIDENCE: &str =
+    "fixed_policy_estimate_not_benchmark_or_provider_measurement";
+/// Evidence label used when predecessor overflow rows lost the folder discriminator.
+pub const TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE: &str =
+    "fixed_policy_estimate_unclassified_overflow_uses_maximum";
 /// Confidence label for observed source-compression comparisons.
 pub const TOKEN_CONFIDENCE_OBSERVED: &str = "observed";
 /// Confidence label for inferred navigation comparisons.
@@ -195,6 +203,8 @@ pub struct TokenAccountingTotals {
     pub gross_modeled_tokens_avoided: i128,
     /// Modeled avoided tokens after runtime-instance baseline deduplication.
     pub deduped_modeled_tokens_avoided: i128,
+    /// Average-policy modeled avoided tokens after baseline deduplication.
+    pub average_modeled_tokens_avoided: i128,
     /// Number of repeated modeled baseline calls collapsed by deduplication.
     pub repeated_baselines_deduped: u128,
     /// Observed calls that replaced a whole-file read.
@@ -576,6 +586,27 @@ impl Default for AgentEfficiencyComparison {
     }
 }
 
+/// Fixed policy metadata for the primary average token estimate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TokenAveragePolicy {
+    /// Share of each retained folder-scope baseline admitted to the average estimate.
+    pub directory_walk_baseline_percent: usize,
+    /// Share of the actual `ProjectAtlas` payload charged to the estimate.
+    pub atlas_payload_percent: usize,
+    /// Evidence classification for the estimate.
+    pub evidence: String,
+}
+
+impl Default for TokenAveragePolicy {
+    fn default() -> Self {
+        Self {
+            directory_walk_baseline_percent: TOKEN_AVERAGE_DIRECTORY_WALK_PERCENT,
+            atlas_payload_percent: 100,
+            evidence: TOKEN_AVERAGE_POLICY_EVIDENCE.to_string(),
+        }
+    }
+}
+
 /// Token savings overview.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TokenOverview {
@@ -603,7 +634,19 @@ pub struct TokenOverview {
     pub gross_modeled_tokens_avoided: isize,
     /// Deduped modeled avoided-token estimate.
     pub deduped_modeled_tokens_avoided: isize,
-    /// Conservative headline tokens avoided estimate.
+    /// Average-policy modeled avoided-token estimate.
+    #[serde(default)]
+    pub average_modeled_tokens_avoided: isize,
+    /// Explicit average-policy tokens avoided estimate.
+    #[serde(default)]
+    pub average_tokens_avoided: isize,
+    /// Explicit all-files maximum tokens avoided estimate.
+    #[serde(default)]
+    pub maximum_tokens_avoided: isize,
+    /// Fixed policy metadata shared by JSON, TOON, CLI, and MCP reports.
+    #[serde(default)]
+    pub average_policy: TokenAveragePolicy,
+    /// Primary compatibility alias for `average_tokens_avoided`.
     pub tokens_avoided: isize,
     /// Legacy all-bucket gross estimate retained for migration diagnostics.
     pub legacy_gross_estimated_saved: isize,
@@ -886,10 +929,21 @@ impl TokenOverview {
         } else {
             Some((without as f64 - with as f64) / without as f64)
         };
-        let measured_tokens_saved = measured_tokens_saved_from_buckets(&buckets);
-        let gross_modeled_tokens_avoided = modeled_tokens_saved_from_buckets(&buckets);
-        let tokens_avoided =
-            saturating_isize_add(measured_tokens_saved, gross_modeled_tokens_avoided);
+        let measured_tokens_saved_wide = measured_tokens_saved_from_buckets(&buckets);
+        let gross_modeled_tokens_avoided_wide = modeled_tokens_saved_from_buckets(&buckets);
+        let average_modeled_tokens_avoided_wide =
+            average_modeled_tokens_saved_from_buckets(&buckets);
+        let measured_tokens_saved = saturating_i128_to_isize(measured_tokens_saved_wide);
+        let gross_modeled_tokens_avoided =
+            saturating_i128_to_isize(gross_modeled_tokens_avoided_wide);
+        let average_modeled_tokens_avoided =
+            saturating_i128_to_isize(average_modeled_tokens_avoided_wide);
+        let average_tokens_avoided = saturating_i128_to_isize(
+            measured_tokens_saved_wide.saturating_add(average_modeled_tokens_avoided_wide),
+        );
+        let maximum_tokens_avoided = saturating_i128_to_isize(
+            measured_tokens_saved_wide.saturating_add(gross_modeled_tokens_avoided_wide),
+        );
         Self {
             estimate_kind: TOKEN_ESTIMATE_KIND.to_string(),
             estimator: TOKEN_ESTIMATOR.to_string(),
@@ -902,7 +956,11 @@ impl TokenOverview {
             measured_tokens_saved,
             gross_modeled_tokens_avoided,
             deduped_modeled_tokens_avoided: gross_modeled_tokens_avoided,
-            tokens_avoided,
+            average_modeled_tokens_avoided,
+            average_tokens_avoided,
+            maximum_tokens_avoided,
+            average_policy: TokenAveragePolicy::default(),
+            tokens_avoided: average_tokens_avoided,
             legacy_gross_estimated_saved: saved,
             repeated_baselines_deduped: 0,
             observed_file_read_replacements: 0,
@@ -934,10 +992,19 @@ impl TokenOverview {
             saturating_i128_to_isize(totals.gross_modeled_tokens_avoided);
         self.deduped_modeled_tokens_avoided =
             saturating_i128_to_isize(totals.deduped_modeled_tokens_avoided);
-        self.tokens_avoided = saturating_isize_add(
-            self.measured_tokens_saved,
-            self.deduped_modeled_tokens_avoided,
+        self.average_modeled_tokens_avoided =
+            saturating_i128_to_isize(totals.average_modeled_tokens_avoided);
+        self.average_tokens_avoided = saturating_i128_to_isize(
+            totals
+                .measured_tokens_saved
+                .saturating_add(totals.average_modeled_tokens_avoided),
         );
+        self.maximum_tokens_avoided = saturating_i128_to_isize(
+            totals
+                .measured_tokens_saved
+                .saturating_add(totals.deduped_modeled_tokens_avoided),
+        );
+        self.tokens_avoided = self.average_tokens_avoided;
         self.repeated_baselines_deduped =
             saturating_u128_to_usize(totals.repeated_baselines_deduped);
         self.observed_file_read_replacements =
@@ -965,7 +1032,10 @@ impl TokenOverview {
         self.measured_tokens_saved = summary.measured_tokens_saved;
         self.gross_modeled_tokens_avoided = summary.gross_modeled_tokens_avoided;
         self.deduped_modeled_tokens_avoided = summary.deduped_modeled_tokens_avoided;
-        self.tokens_avoided = summary.tokens_avoided;
+        self.average_modeled_tokens_avoided = summary.average_modeled_tokens_avoided;
+        self.average_tokens_avoided = summary.average_tokens_avoided;
+        self.maximum_tokens_avoided = summary.maximum_tokens_avoided;
+        self.tokens_avoided = summary.average_tokens_avoided;
         self.repeated_baselines_deduped = summary.repeated_baselines_deduped;
         self.observed_file_read_replacements = summary.observed_file_read_replacements;
         self.modeled_file_reads_avoided = summary.modeled_file_reads_avoided;
@@ -1163,8 +1233,12 @@ struct TokenAccountingSummary {
     gross_modeled_tokens_avoided: isize,
     /// Modeled avoided tokens after repeated baseline dedupe.
     deduped_modeled_tokens_avoided: isize,
-    /// Conservative headline tokens avoided.
-    tokens_avoided: isize,
+    /// Average-policy modeled avoided tokens after baseline dedupe.
+    average_modeled_tokens_avoided: isize,
+    /// Average-policy tokens avoided.
+    average_tokens_avoided: isize,
+    /// All-files maximum tokens avoided.
+    maximum_tokens_avoided: isize,
     /// Number of duplicate modeled baseline events collapsed by dedupe.
     repeated_baselines_deduped: usize,
     /// Observed `ProjectAtlas` calls compared with full-file reads.
@@ -1178,9 +1252,12 @@ struct TokenAccountingSummary {
 impl TokenAccountingSummary {
     /// Build separated accounting totals from raw usage events.
     fn from_events(events: &[UsageEvent]) -> Self {
-        let mut measured_tokens_saved = 0isize;
-        let mut gross_modeled_tokens_avoided = 0isize;
-        let mut event_scoped_modeled_tokens_avoided = 0isize;
+        let mut measured_tokens_saved = 0i128;
+        let mut gross_modeled_tokens_avoided = 0i128;
+        let mut event_scoped_modeled_tokens_avoided = 0i128;
+        let mut average_non_directory_tokens_avoided = 0i128;
+        let mut average_directory_without = 0u128;
+        let mut average_directory_with = 0u128;
         let mut observed_file_read_replacements = 0usize;
         let mut modeled_file_reads_avoided = 0usize;
         let mut modeled_baselines = BTreeMap::<ModeledBaselineKey, ModeledBaselineTotals>::new();
@@ -1192,9 +1269,9 @@ impl TokenAccountingSummary {
             ) else {
                 continue;
             };
-            let delta = token_delta(without, with);
+            let delta = aggregate_token_delta_wide(without as u128, with as u128);
             if is_observed_event(event) {
-                measured_tokens_saved = saturating_isize_add(measured_tokens_saved, delta);
+                measured_tokens_saved = measured_tokens_saved.saturating_add(delta);
                 if is_observed_read_replacement_event(event, without) {
                     observed_file_read_replacements =
                         observed_file_read_replacements.saturating_add(1);
@@ -1207,11 +1284,18 @@ impl TokenAccountingSummary {
             if is_modeled_read_avoidance_event(event, without) {
                 modeled_file_reads_avoided = modeled_file_reads_avoided.saturating_add(1);
             }
-            gross_modeled_tokens_avoided =
-                saturating_isize_add(gross_modeled_tokens_avoided, delta);
+            gross_modeled_tokens_avoided = gross_modeled_tokens_avoided.saturating_add(delta);
             if event.dedupe_scope == TOKEN_DEDUPE_SCOPE_EVENT {
                 event_scoped_modeled_tokens_avoided =
-                    saturating_isize_add(event_scoped_modeled_tokens_avoided, delta);
+                    event_scoped_modeled_tokens_avoided.saturating_add(delta);
+                if event.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+                    average_directory_without =
+                        average_directory_without.saturating_add(without as u128);
+                    average_directory_with = average_directory_with.saturating_add(with as u128);
+                } else {
+                    average_non_directory_tokens_avoided =
+                        average_non_directory_tokens_avoided.saturating_add(delta);
+                }
                 continue;
             }
             let entry = modeled_baselines
@@ -1225,27 +1309,52 @@ impl TokenAccountingSummary {
 
         let mut deduped_modeled_tokens_avoided = event_scoped_modeled_tokens_avoided;
         let mut repeated_baselines_deduped = 0usize;
-        for totals in modeled_baselines.values() {
+        for (key, totals) in &modeled_baselines {
             if totals.calls > 1 {
                 repeated_baselines_deduped =
                     repeated_baselines_deduped.saturating_add(totals.calls.saturating_sub(1));
             }
-            let delta = aggregate_token_delta(
+            let delta = aggregate_token_delta_wide(
                 totals.baseline_without_projectatlas as u128,
                 totals.emitted_with_projectatlas,
             );
-            deduped_modeled_tokens_avoided =
-                saturating_isize_add(deduped_modeled_tokens_avoided, delta);
+            deduped_modeled_tokens_avoided = deduped_modeled_tokens_avoided.saturating_add(delta);
+            if key.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+                average_directory_without = average_directory_without
+                    .saturating_add(totals.baseline_without_projectatlas as u128);
+                average_directory_with =
+                    average_directory_with.saturating_add(totals.emitted_with_projectatlas);
+            } else {
+                average_non_directory_tokens_avoided =
+                    average_non_directory_tokens_avoided.saturating_add(delta);
+            }
         }
-        let tokens_avoided =
-            saturating_isize_add(measured_tokens_saved, deduped_modeled_tokens_avoided);
+        let average_directory_tokens_avoided = aggregate_token_delta_wide(
+            average_modeled_baseline_tokens(
+                TOKEN_BASELINE_DIRECTORY_WALK,
+                average_directory_without,
+            ),
+            average_directory_with,
+        );
+        let average_modeled_tokens_avoided =
+            average_non_directory_tokens_avoided.saturating_add(average_directory_tokens_avoided);
+        let average_tokens_avoided =
+            measured_tokens_saved.saturating_add(average_modeled_tokens_avoided);
+        let maximum_tokens_avoided =
+            measured_tokens_saved.saturating_add(deduped_modeled_tokens_avoided);
         let likely_file_reads_avoided =
             observed_file_read_replacements.saturating_add(modeled_file_reads_avoided);
         Self {
-            measured_tokens_saved,
-            gross_modeled_tokens_avoided,
-            deduped_modeled_tokens_avoided,
-            tokens_avoided,
+            measured_tokens_saved: saturating_i128_to_isize(measured_tokens_saved),
+            gross_modeled_tokens_avoided: saturating_i128_to_isize(gross_modeled_tokens_avoided),
+            deduped_modeled_tokens_avoided: saturating_i128_to_isize(
+                deduped_modeled_tokens_avoided,
+            ),
+            average_modeled_tokens_avoided: saturating_i128_to_isize(
+                average_modeled_tokens_avoided,
+            ),
+            average_tokens_avoided: saturating_i128_to_isize(average_tokens_avoided),
+            maximum_tokens_avoided: saturating_i128_to_isize(maximum_tokens_avoided),
             repeated_baselines_deduped,
             observed_file_read_replacements,
             modeled_file_reads_avoided,
@@ -1581,20 +1690,35 @@ fn token_delta(without: usize, with: usize) -> isize {
 
 /// Return the signed aggregate token delta.
 fn aggregate_token_delta(without: u128, with: u128) -> isize {
+    saturating_i128_to_isize(aggregate_token_delta_wide(without, with))
+}
+
+/// Return a wide signed aggregate token delta and saturate only at the wide boundary.
+fn aggregate_token_delta_wide(without: u128, with: u128) -> i128 {
     if without >= with {
         let delta = without - with;
-        if delta > isize::MAX as u128 {
-            isize::MAX
+        if delta > i128::MAX as u128 {
+            i128::MAX
         } else {
-            delta as isize
+            delta as i128
         }
     } else {
         let delta = with - without;
-        if delta > isize::MAX as u128 {
-            isize::MIN
+        if delta > i128::MAX as u128 {
+            i128::MIN
         } else {
-            -(delta as isize)
+            -(delta as i128)
         }
+    }
+}
+
+/// Apply the fixed average policy to one modeled baseline.
+#[must_use]
+pub fn average_modeled_baseline_tokens(denominator_kind: &str, without: u128) -> u128 {
+    if denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+        without / 2
+    } else {
+        without
     }
 }
 
@@ -1618,29 +1742,47 @@ fn saturating_i128_to_isize(value: i128) -> isize {
     }
 }
 
-/// Add signed token totals without overflowing.
-fn saturating_isize_add(left: isize, right: isize) -> isize {
-    left.saturating_add(right)
-}
-
 /// Sum observed saved-token buckets.
-fn measured_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> isize {
+fn measured_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> i128 {
     buckets
         .iter()
         .filter(|bucket| is_observed_bucket(bucket))
-        .fold(0isize, |acc, bucket| {
-            saturating_isize_add(acc, bucket.estimated_saved)
+        .fold(0i128, |acc, bucket| {
+            acc.saturating_add(bucket.estimated_saved as i128)
         })
 }
 
 /// Sum modeled avoided-token buckets.
-fn modeled_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> isize {
+fn modeled_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> i128 {
     buckets
         .iter()
         .filter(|bucket| is_modeled_bucket(bucket))
-        .fold(0isize, |acc, bucket| {
-            saturating_isize_add(acc, bucket.estimated_saved)
+        .fold(0i128, |acc, bucket| {
+            acc.saturating_add(bucket.estimated_saved as i128)
         })
+}
+
+/// Sum modeled avoided-token buckets with the average directory-walk policy.
+fn average_modeled_tokens_saved_from_buckets(buckets: &[TokenBucketOverview]) -> i128 {
+    let mut non_directory_tokens_avoided = 0i128;
+    let mut directory_without = 0u128;
+    let mut directory_with = 0u128;
+    for bucket in buckets.iter().filter(|bucket| is_modeled_bucket(bucket)) {
+        if bucket.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+            directory_without =
+                directory_without.saturating_add(bucket.estimated_without_projectatlas as u128);
+            directory_with =
+                directory_with.saturating_add(bucket.estimated_with_projectatlas as u128);
+        } else {
+            non_directory_tokens_avoided =
+                non_directory_tokens_avoided.saturating_add(bucket.estimated_saved as i128);
+        }
+    }
+    let directory_tokens_avoided = aggregate_token_delta_wide(
+        average_modeled_baseline_tokens(TOKEN_BASELINE_DIRECTORY_WALK, directory_without),
+        directory_with,
+    );
+    non_directory_tokens_avoided.saturating_add(directory_tokens_avoided)
 }
 
 /// Whether an event represents observed before/after source compression.
@@ -1711,11 +1853,12 @@ mod tests {
     use super::{
         AgentEfficiencyEvidenceState, READ_AVOIDANCE_CONFIDENCE_MODELED,
         READ_AVOIDANCE_CONFIDENCE_NOT_RECORDED, READ_AVOIDANCE_CONFIDENCE_OBSERVED,
-        READ_AVOIDANCE_SCOPE, TOKEN_BUCKET_FULL_FILE_COMPRESSION,
-        TOKEN_BUCKET_NAVIGATION_AVOIDANCE, TOKEN_ESTIMATE_KIND, TOKEN_ESTIMATE_SCOPE,
-        TOKEN_ESTIMATOR, TelemetryContractError, TokenAccountingTotals, TokenOverview,
-        TokenTrendReport, TokenTrendWindow, UsageDetailAvailability, UsageInstanceId,
-        UsageInstanceOwner, usage_from_estimates, usage_from_text,
+        READ_AVOIDANCE_SCOPE, TOKEN_AVERAGE_DIRECTORY_WALK_PERCENT, TOKEN_BASELINE_DIRECTORY_WALK,
+        TOKEN_BUCKET_FULL_FILE_COMPRESSION, TOKEN_BUCKET_NAVIGATION_AVOIDANCE,
+        TOKEN_DEDUPE_SCOPE_EVENT, TOKEN_ESTIMATE_KIND, TOKEN_ESTIMATE_SCOPE, TOKEN_ESTIMATOR,
+        TelemetryContractError, TokenAccountingTotals, TokenOverview, TokenTrendReport,
+        TokenTrendWindow, UsageDetailAvailability, UsageInstanceId, UsageInstanceOwner,
+        usage_from_estimates, usage_from_text,
     };
     use std::io;
 
@@ -1803,6 +1946,10 @@ mod tests {
             .ok_or_else(|| io::Error::other("serialized token overview was not an object"))?;
         overview_object.remove("detail_availability");
         overview_object.remove("agent_efficiency");
+        overview_object.remove("average_modeled_tokens_avoided");
+        overview_object.remove("average_tokens_avoided");
+        overview_object.remove("maximum_tokens_avoided");
+        overview_object.remove("average_policy");
         let decoded_overview: TokenOverview = serde_json::from_value(overview_value)?;
         require_eq(
             &decoded_overview.detail_availability,
@@ -1818,6 +1965,23 @@ mod tests {
             &decoded_overview.agent_efficiency.baselines,
             &Vec::new(),
             "missing agent-efficiency baseline rows",
+        )?;
+        require_eq(
+            &decoded_overview.average_tokens_avoided,
+            &0,
+            "missing average tokens avoided",
+        )?;
+        require_eq(
+            &decoded_overview.maximum_tokens_avoided,
+            &0,
+            "missing maximum tokens avoided",
+        )?;
+        require_eq(
+            &decoded_overview
+                .average_policy
+                .directory_walk_baseline_percent,
+            &TOKEN_AVERAGE_DIRECTORY_WALK_PERCENT,
+            "missing average policy",
         )?;
         require_eq(
             &AgentEfficiencyEvidenceState::Partial.as_str(),
@@ -1892,6 +2056,7 @@ mod tests {
             measured_tokens_saved: 7,
             gross_modeled_tokens_avoided: 100,
             deduped_modeled_tokens_avoided: 30,
+            average_modeled_tokens_avoided: 10,
             repeated_baselines_deduped: 2,
             observed_file_read_replacements: 1,
             modeled_file_reads_avoided: 3,
@@ -1899,7 +2064,10 @@ mod tests {
         assert_eq!(overview.measured_tokens_saved, 7);
         assert_eq!(overview.gross_modeled_tokens_avoided, 100);
         assert_eq!(overview.deduped_modeled_tokens_avoided, 30);
-        assert_eq!(overview.tokens_avoided, 37);
+        assert_eq!(overview.average_modeled_tokens_avoided, 10);
+        assert_eq!(overview.average_tokens_avoided, 17);
+        assert_eq!(overview.maximum_tokens_avoided, 37);
+        assert_eq!(overview.tokens_avoided, overview.average_tokens_avoided);
         assert_eq!(overview.repeated_baselines_deduped, 2);
         assert_eq!(overview.observed_file_read_replacements, 1);
         assert_eq!(overview.modeled_file_reads_avoided, 3);
@@ -1913,6 +2081,7 @@ mod tests {
             measured_tokens_saved: i128::MAX,
             gross_modeled_tokens_avoided: i128::MIN,
             deduped_modeled_tokens_avoided: i128::MAX,
+            average_modeled_tokens_avoided: i128::MAX,
             repeated_baselines_deduped: u128::MAX,
             observed_file_read_replacements: u128::MAX,
             modeled_file_reads_avoided: u128::MAX,
@@ -1920,6 +2089,9 @@ mod tests {
         assert_eq!(overview.measured_tokens_saved, isize::MAX);
         assert_eq!(overview.gross_modeled_tokens_avoided, isize::MIN);
         assert_eq!(overview.deduped_modeled_tokens_avoided, isize::MAX);
+        assert_eq!(overview.average_modeled_tokens_avoided, isize::MAX);
+        assert_eq!(overview.average_tokens_avoided, isize::MAX);
+        assert_eq!(overview.maximum_tokens_avoided, isize::MAX);
         assert_eq!(overview.tokens_avoided, isize::MAX);
         assert_eq!(overview.repeated_baselines_deduped, usize::MAX);
         assert_eq!(overview.observed_file_read_replacements, usize::MAX);
@@ -2050,6 +2222,98 @@ mod tests {
         assert_eq!(overview.observed_file_read_replacements, 0);
         assert_eq!(overview.modeled_file_reads_avoided, 0);
         assert_eq!(overview.likely_file_reads_avoided, 0);
+    }
+
+    #[test]
+    fn average_policy_halves_only_deduped_directory_walk_baselines() {
+        let mut first_folder =
+            usage_from_estimates("s", "folders", Some("src".to_string()), None, 101, 20);
+        first_folder.denominator_kind = TOKEN_BASELINE_DIRECTORY_WALK.to_string();
+        first_folder.baseline_identity = "directory:src".to_string();
+        first_folder.baseline_fingerprint = "directory:src@1".to_string();
+        let mut second_folder = first_folder.clone();
+        second_folder.estimated_tokens_with_projectatlas = Some(10);
+        second_folder.estimated_tokens_saved = Some(91);
+
+        let overview = TokenOverview::from_events(&[
+            usage_from_text(
+                "s",
+                "summary",
+                Some("src/lib.rs".to_string()),
+                None,
+                "abcdabcd",
+                "ab",
+            ),
+            first_folder,
+            second_folder,
+            usage_from_estimates("s", "search", None, Some("token".to_string()), 80, 20),
+        ]);
+
+        assert_eq!(overview.measured_tokens_saved, 1);
+        assert_eq!(overview.gross_modeled_tokens_avoided, 232);
+        assert_eq!(overview.deduped_modeled_tokens_avoided, 131);
+        assert_eq!(overview.average_modeled_tokens_avoided, 80);
+        assert_eq!(overview.average_tokens_avoided, 81);
+        assert_eq!(overview.maximum_tokens_avoided, 132);
+        assert_eq!(overview.tokens_avoided, overview.average_tokens_avoided);
+        assert_eq!(overview.repeated_baselines_deduped, 1);
+    }
+
+    #[test]
+    fn average_directory_walk_policy_preserves_signed_payload_cost() {
+        let mut event = usage_from_estimates("s", "folders", Some("src".to_string()), None, 5, 4);
+        event.denominator_kind = TOKEN_BASELINE_DIRECTORY_WALK.to_string();
+        let overview = TokenOverview::from_events(&[event]);
+
+        assert_eq!(overview.average_modeled_tokens_avoided, -2);
+        assert_eq!(overview.average_tokens_avoided, -2);
+        assert_eq!(overview.maximum_tokens_avoided, 1);
+        assert_eq!(overview.tokens_avoided, -2);
+    }
+
+    #[test]
+    fn raw_accounting_narrows_once_after_wide_signed_aggregation() {
+        let bound = isize::MAX as usize;
+        let mut events = vec![
+            usage_from_estimates("s", "search", None, Some("a".to_string()), bound, 0),
+            usage_from_estimates("s", "search", None, Some("b".to_string()), bound, 0),
+            usage_from_estimates("s", "search", None, Some("c".to_string()), 0, bound),
+        ];
+        for event in &mut events {
+            event.dedupe_scope = TOKEN_DEDUPE_SCOPE_EVENT.to_string();
+        }
+
+        let overview = TokenOverview::from_events(&events);
+
+        assert_eq!(overview.gross_modeled_tokens_avoided, isize::MAX);
+        assert_eq!(overview.deduped_modeled_tokens_avoided, isize::MAX);
+        assert_eq!(overview.average_modeled_tokens_avoided, isize::MAX);
+        assert_eq!(overview.average_tokens_avoided, isize::MAX);
+        assert_eq!(overview.maximum_tokens_avoided, isize::MAX);
+    }
+
+    #[test]
+    fn bucket_accounting_narrows_once_after_wide_signed_aggregation() {
+        let modeled_bucket = |saved| {
+            let mut bucket = TokenOverview::from_estimated_totals(1, 1, 1)
+                .buckets
+                .remove(0);
+            bucket.estimated_saved = saved;
+            bucket
+        };
+        let expected = isize::MAX - 1;
+        for order in [
+            [isize::MAX, isize::MAX, isize::MIN],
+            [isize::MAX, isize::MIN, isize::MAX],
+        ] {
+            let overview = TokenOverview::from_buckets(
+                order.into_iter().map(&modeled_bucket).collect::<Vec<_>>(),
+            );
+            assert_eq!(overview.gross_modeled_tokens_avoided, expected);
+            assert_eq!(overview.average_modeled_tokens_avoided, expected);
+            assert_eq!(overview.average_tokens_avoided, expected);
+            assert_eq!(overview.maximum_tokens_avoided, expected);
+        }
     }
 
     #[test]

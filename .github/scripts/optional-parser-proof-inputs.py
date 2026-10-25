@@ -12,7 +12,6 @@ METADATA_ONLY_PATTERNS = (
     ".github/ISSUE_TEMPLATE/**",
     ".github/pull_request_template.md",
     ".github/scripts/issue-checklists.py",
-    "AGENTS.md",
     "README.md",
     "docs/**",
     "openspec/**",

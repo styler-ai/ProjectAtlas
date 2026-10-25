@@ -1,0 +1,121 @@
+## ADDED Requirements
+
+The npm adapter below is scheduled as #388 for v0.6.0 under the [accepted release scope](../../proposal.md#accepted-release-scope); RC acceptance covers the delivered native binary, plugin, and host routes without claiming npm delivery.
+
+### Requirement: npm is a verified adapter for the existing native runtime
+The npm package SHALL declare one package identity, supported npm/Node floor, supported OS/architecture tuples, exact package-to-release-asset/version/SHA-256 mapping, and installer/cache ownership. It SHALL stage, verify, and atomically activate the existing native runtime and SHALL preserve arguments, stdout, stderr, exit status, signals, formats, selected root/config/database, and MCP behavior. For deferred #388 delivery in v0.6.0, package install, update, repair, and uninstall SHALL manage only owned npm cache and registration state under the shared installer lifecycle contract.
+
+#### Scenario: Supported tuple
+- **WHEN** a supported tuple installs or explicitly materializes the package
+- **THEN** the matching asset is fetched or reused, version and digest are verified, activation is atomic, and CLI plus MCP smoke succeeds through the native runtime
+
+#### Scenario: Lifecycle scripts are disabled
+- **WHEN** the package manager does not run lifecycle scripts
+- **THEN** the package exposes the documented explicit materialization route or a typed actionable refusal and never launches or registers an unverified runtime
+
+#### Scenario: Unsupported or invalid artifact
+- **WHEN** the tuple, asset, version, digest, proxy/offline state, or cache cannot satisfy the contract
+- **THEN** installation/materialization fails deterministically without changing host registration or project state
+
+#### Scenario: Concurrent or interrupted materialization
+- **WHEN** two processes materialize the same version or one is interrupted
+- **THEN** process-safe locking and staged activation leave either the prior verified cache or one complete verified new cache, never a partial executable
+
+### Requirement: Generated host configuration is consumed by real readers
+The installer SHALL verify Claude Code and OpenCode configuration through each available actual host reader in an isolated home/config root and SHALL establish a real MCP session with exact source-evidence readback.
+
+#### Scenario: Available host
+- **WHEN** a supported host is installed
+- **THEN** its real reader accepts the generated native schema, absolute runtime/database/config paths, version guard, routing fields, and launches the verified runtime through MCP initialize/session/navigation
+
+#### Scenario: Missing host
+- **WHEN** the host executable is absent
+- **THEN** verification reports a typed skip and does not claim host consumption
+
+#### Scenario: Invalid or stale configuration
+- **WHEN** owned configuration is invalid, stale, or points to the wrong runtime
+- **THEN** the installer reports or repairs only its owned fields and re-runs the real reader without editing unrelated settings, credentials, authentication, or project data
+
+#### Scenario: Shared registry and explicit project routing
+- **WHEN** one host serves several projects
+- **THEN** the default registry route and explicit per-call project root remain isolated and return evidence from the selected database only
+
+### Requirement: One collision-safe atlas command exposes the complete CLI
+The installer SHALL provide one `atlas` forwarder on Windows, Linux, and macOS to the same verified `projectatlas` runtime. It SHALL accept every present/future argument vector without per-subcommand executables and SHALL preserve `projectatlas` compatibility.
+
+#### Scenario: Runtime path cannot fit ownership records
+- **WHEN** a supplied POSIX runtime path or its canonical target contains a carriage return or newline, including a terminal newline
+- **THEN** the installer refuses it before forwarder, provenance, private-state, or generated host-configuration publication and preserves the supplied runtime and existing project state
+
+#### Scenario: Canonical command or nested command
+- **WHEN** a user invokes any supported command, global flag, nested command, or format through `atlas`
+- **THEN** stdout/stderr bytes, exit status, signals, JSON/TOON, help, errors, root isolation, and behavior match `projectatlas`
+
+#### Scenario: Unmanaged collision
+- **WHEN** another executable already owns the intended `atlas` location or effective PATH
+- **THEN** installation reports the exact collision and does not shadow or overwrite it without explicit collision resolution
+
+#### Scenario: Provenance-bound ownership
+- **WHEN** a candidate forwarder has the public marker, exact generated body, and valid runtime target but its independent installer provenance or private random capability state is missing, mismatched, reparse-linked, or hard-linked
+- **THEN** installation and uninstall classify it as unmanaged and leave the forwarder, provenance, and unrelated state untouched
+
+#### Scenario: Malformed forwarder ownership artifacts
+- **WHEN** the forwarder, provenance, or private state has extra fields, an extra blank line, or otherwise differs from its complete installer-owned bytes
+- **THEN** install and uninstall both reject it without changing any artifact; active and quarantined ownership comparisons preserve every byte, and restoring the valid artifact restores the ordinary lifecycle
+
+#### Scenario: Staged no-clobber publication
+- **WHEN** an update stages a replacement, a foreign destination appears after the final collision check, or staging fails before publication
+- **THEN** publication never force-replaces the destination, and a prior owned forwarder plus provenance remains usable until a fully verified replacement is published; retirement quarantines and verifies each old artifact before deletion and preserves a concurrent foreign replacement
+
+#### Scenario: Concurrent migrations from isolated projects
+- **WHEN** installers for separate project roots migrate between the same two runtime directories in opposite directions
+- **THEN** their shared forwarder locks use one consistent order, both installations finish without deadlock, and each completed installation retains its own complete generated host configurations
+
+#### Scenario: Final runtime readiness fails
+- **WHEN** the destination runtime fails final verification after the complete forwarder pair is published
+- **THEN** installation reports failure and retains matching provenance and private state with the forwarder so repair and owned uninstall remain possible without an unmanaged orphan
+
+#### Scenario: Windows runtime path casing changes
+- **WHEN** the same Windows runtime identity is supplied with different path casing during update, repair, or uninstall
+- **THEN** the installer uses the authenticated record's original spelling for exact body, provenance, and state checks, preserving ownership without accepting malformed metadata
+
+#### Scenario: Owned POSIX forwarder loses execute permission
+- **WHEN** an authenticated POSIX forwarder has lost its execute bits
+- **THEN** repair restores executable permission while preserving its exact body, provenance, and private state; unauthenticated files remain untouched, and owned uninstall does not require the forwarder to execute
+
+#### Scenario: Literal percent sequences in Windows runtime paths
+- **WHEN** the verified Windows runtime path contains literal environment-variable syntax such as `%USERNAME%`
+- **THEN** install, forwarding, repair, update, and uninstall preserve the literal filesystem identity without expanding that syntax in generated ownership records or runtime targets
+
+### Requirement: Health reporting and administration remain unambiguous
+`atlas health [report flags]` SHALL run the read-only health report, `atlas health resolve ...` SHALL retain the existing administrative route, and `health-check` SHALL remain a compatibility alias.
+
+#### Scenario: Report flags versus resolve subcommand
+- **WHEN** the user supplies zero arguments, report flags, or the `resolve` subcommand
+- **THEN** parsing selects the documented read-only or administrative owner without ambiguity and help/completion describe the same split
+
+#### Scenario: Legacy automation
+- **WHEN** automation invokes `projectatlas health-check`
+- **THEN** the read-only report remains byte/schema/error compatible through the v0.5 contract
+
+### Requirement: Installer lifecycle removes only owned state
+Install, update, repair, and uninstall SHALL manage the verified runtime, `atlas` shim, completions, and generated host configuration without deleting unrelated executables, credentials, databases, caches, or configuration.
+
+#### Scenario: Update or repair
+- **WHEN** an owned runtime, shim, or generated host configuration is stale or missing
+- **THEN** it is repaired atomically to the exact verified runtime and revalidated through its real boundary
+
+#### Scenario: Uninstall
+- **WHEN** ProjectAtlas is removed
+- **THEN** only proven-owned artifacts are removed and selected project databases/configuration plus unrelated host state remain according to the documented retention contract
+- **AND** forwarder uninstall does not require an existing project root or valid project state directory; missing, linked, and non-directory project state remains untouched
+- **AND** uninstall without an explicit runtime path derives each discovered forwarder's runtime from its validated ownership record rather than assuming a runtime filename
+
+#### Scenario: Missing forwarder with malformed retained provenance
+- **WHEN** a forwarder is absent but its valid private state and malformed provenance remain
+- **THEN** repair refuses before rotating private state, preserving the retained ownership bytes and leaving the forwarder absent
+
+#### Scenario: Forwarder target is unavailable
+- **WHEN** an authenticated forwarder target is missing or cannot execute
+- **THEN** retirement derives ownership from its exact generated body, provenance, and private capability state without requiring that target to run; malformed or incomplete ownership remains a refusal, and publication still requires a verified destination runtime
+- **AND** lifecycle locking remains mandatory; macOS uses another discoverable verified runtime for its native lock helper or refuses without changing owned artifacts and asks the user to restore a runtime before retrying

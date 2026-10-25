@@ -6,16 +6,15 @@ use super::relations::{
     DetailedRelationReport, ExternalRelationIdentity, external_relation_identities,
     relation_request_control, serialized_equivalent_bytes,
 };
-use super::{ServiceError, ServiceResult, selected_project_binding};
+use super::{ServiceError, ServiceResult, canonical_root_digest, selected_project_binding};
 use projectatlas_core::graph::{
     ExtendedRelationKind, ExternalSelector, GraphLimitKind, GraphRelationKind, LogicalRelation,
     ProjectInstanceId, RelationResolution,
 };
+use projectatlas_core::language::ContentClassification;
 use projectatlas_core::symbols::RelationKind;
-use projectatlas_core::{
-    IndexGeneration, IndexWorkControl, IndexWorkStage, normalize_native_path_display,
-};
-use projectatlas_db::{AtlasStore, DbError, RepositoryGraphRelationQuery};
+use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
+use projectatlas_db::{AtlasStore, DbError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -125,6 +124,8 @@ pub struct FederatedStore {
     database_bytes: u64,
     /// Exact adapter-owned freshness work.
     input_work: FederatedInputWork,
+    /// Optional validated worktree alias supplied by the adapter.
+    worktree: Option<String>,
 }
 
 impl FederatedStore {
@@ -140,13 +141,29 @@ impl FederatedStore {
         root: PathBuf,
         input_work: FederatedInputWork,
     ) -> ServiceResult<Self> {
+        Self::new_with_worktree(store, database_path, root, input_work, None)
+    }
+
+    /// Admit one labelled root-bound read-only snapshot into a federated call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::new`]. Alias validation remains adapter-owned.
+    pub fn new_with_worktree(
+        store: AtlasStore,
+        database_path: PathBuf,
+        root: PathBuf,
+        input_work: FederatedInputWork,
+        worktree: Option<String>,
+    ) -> ServiceResult<Self> {
         if !store.is_read_only() || !store.has_active_read_snapshot() {
             return Err(ServiceError::InvalidInput(
                 "federation accepts only read-only stores with active snapshots".to_string(),
             ));
         }
-        let binding = selected_project_binding(&store)?;
-        if binding.project_root != normalize_native_path_display(&root) {
+        let explicit_root = CanonicalProjectRoot::from_path(&root)
+            .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
+        if !store.project_root_identity_matches(&explicit_root) {
             return Err(ServiceError::InvalidInput(
                 "federated store does not match its explicit root".to_string(),
             ));
@@ -166,6 +183,7 @@ impl FederatedStore {
             root,
             database_bytes: metadata.len(),
             input_work,
+            worktree,
         })
     }
 
@@ -190,6 +208,9 @@ impl FederatedStore {
 pub struct FederatedParticipant {
     /// Zero-based order supplied by the caller.
     pub order: u32,
+    /// Registered worktree alias when the adapter selected aliases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// Project-qualified identity captured by the read-only store.
     pub project: ProjectInstanceId,
     /// Complete graph generation captured for this root.
@@ -201,12 +222,17 @@ pub struct FederatedParticipant {
 /// One project-qualified relation supporting an exact typed external rendezvous.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FederatedRelationEvidence {
+    /// Registered worktree alias when the adapter selected aliases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     /// Participating project identity.
     pub project: ProjectInstanceId,
     /// Participating graph generation.
     pub generation: IndexGeneration,
     /// Exact local source entity that emitted the relation.
     pub source: projectatlas_core::graph::GraphEntity,
+    /// Registry-owned role of the source file, when the source is file-bearing.
+    pub classification: Option<ContentClassification>,
     /// Complete typed logical relation.
     pub relation: LogicalRelation,
 }
@@ -252,6 +278,12 @@ pub struct FederatedRelationWork {
 pub struct FederatedDetailedRelationReport {
     /// Ordered validated participants.
     pub participants: Vec<FederatedParticipant>,
+    /// Worktree alias of the first-root result when aliases selected federation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_worktree: Option<String>,
+    /// Ordered aliases required to resume the primary continuation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_worktrees: Option<Vec<String>>,
     /// Existing detailed relation result anchored in the first root.
     pub primary: DetailedRelationReport,
     /// Exact typed cross-root external rendezvous evidence.
@@ -269,6 +301,12 @@ pub struct FederatedDetailedRelationReport {
 pub struct FederatedAnalysisReport {
     /// Ordered validated participants.
     pub participants: Vec<FederatedParticipant>,
+    /// Worktree alias of the first-root result when aliases selected federation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_worktree: Option<String>,
+    /// Ordered aliases required to resume the primary continuation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_worktrees: Option<Vec<String>>,
     /// Existing analysis result anchored in the first root.
     pub primary: RelationAnalysisReport,
     /// Exact typed cross-root external rendezvous evidence.
@@ -400,6 +438,14 @@ impl FederatedContext {
         )?;
         Ok(FederatedDetailedRelationReport {
             participants: self.participants.clone(),
+            primary_worktree: self
+                .participants
+                .first()
+                .and_then(|participant| participant.worktree.clone()),
+            continuation_worktrees: federation_continuation_worktrees(
+                &self.participants,
+                primary.continuation.is_some(),
+            ),
             truncated: primary.truncated || !self.rendezvous_limits.is_empty(),
             primary,
             rendezvous: self.rendezvous.clone(),
@@ -440,6 +486,14 @@ impl FederatedContext {
         check_control(control)?;
         Ok(FederatedAnalysisReport {
             participants: self.participants.clone(),
+            primary_worktree: self
+                .participants
+                .first()
+                .and_then(|participant| participant.worktree.clone()),
+            continuation_worktrees: federation_continuation_worktrees(
+                &self.participants,
+                primary.continuation.is_some(),
+            ),
             truncated: primary.truncated || !self.rendezvous_limits.is_empty(),
             primary,
             rendezvous: self.rendezvous.clone(),
@@ -447,6 +501,21 @@ impl FederatedContext {
             work,
         })
     }
+}
+
+/// Return the complete ordered aliases only when a continuation and all labels exist.
+fn federation_continuation_worktrees(
+    participants: &[FederatedParticipant],
+    has_continuation: bool,
+) -> Option<Vec<String>> {
+    has_continuation
+        .then(|| {
+            participants
+                .iter()
+                .map(|participant| participant.worktree.clone())
+                .collect::<Option<Vec<_>>>()
+        })
+        .flatten()
 }
 
 /// Versioned outer continuation for an ordered participant set.
@@ -669,7 +738,7 @@ fn capture_federation(
             ));
         }
         let binding = selected_project_binding(&participant.store)?;
-        let root_digest = federated_root_digest(&binding.project_root);
+        let root_digest = federated_root_digest(&binding.project_root_identity)?;
         if !roots.insert(root_digest) || projects.contains(&binding.project_instance_id) {
             return Err(ServiceError::InvalidInput(
                 "federated roots or project identities must be unique".to_string(),
@@ -690,6 +759,7 @@ fn capture_federation(
         })?;
         participants.push(FederatedParticipant {
             order,
+            worktree: participant.worktree.clone(),
             project: binding.project_instance_id,
             generation,
             authored_purpose_revision,
@@ -791,11 +861,14 @@ fn load_rendezvous(
             let limit = u32::try_from(fair_share).map_err(|_overflow| {
                 ServiceError::InvalidInput("federated relation page limit overflowed".to_string())
             })?;
-            let page = participant.store.repository_graph_relation_rows(
-                RepositoryGraphRelationQuery::Family { relation: family },
-                limit,
-                control,
-            )?;
+            let page = participant
+                .store
+                .repository_graph_classified_relation_family_rows(
+                    family,
+                    query.content_selection,
+                    limit,
+                    control,
+                )?;
             queries_left = queries_left.saturating_sub(1);
             let decoded_rows = u64::try_from(page.rows.len()).map_err(|_overflow| {
                 ServiceError::InvalidInput("federated database row count overflowed".to_string())
@@ -813,7 +886,11 @@ fn load_rendezvous(
                 push_limit(&mut reached_limits, GraphLimitKind::Edges);
             }
             for row in page.rows {
-                let encoded_bytes = serialized_equivalent_bytes(&(&row.source, &row.relation))?;
+                let encoded_bytes = serialized_equivalent_bytes(&(
+                    &row.detail.source,
+                    &row.detail.relation,
+                    row.source_classification,
+                ))?;
                 if encoded_bytes > remaining_intermediate_bytes {
                     push_limit(&mut reached_limits, GraphLimitKind::IntermediateBytes);
                     break 'queries;
@@ -822,10 +899,11 @@ fn load_rendezvous(
                     remaining_intermediate_bytes.saturating_sub(encoded_bytes);
                 database_bytes =
                     checked_sum(database_bytes, encoded_bytes, "federated decoded bytes")?;
-                if !super::relations::relation_matches(&row.relation, query) {
+                if !super::relations::relation_matches(&row.detail.relation, query) {
                     continue;
                 }
-                let RelationResolution::External { external, .. } = row.relation.resolution()
+                let RelationResolution::External { external, .. } =
+                    row.detail.relation.resolution()
                 else {
                     continue;
                 };
@@ -837,18 +915,20 @@ fn load_rendezvous(
                 if !identities.contains(&key) {
                     continue;
                 }
-                let project = row.relation.key().project();
-                let generation = row.relation.generation();
+                let project = row.detail.relation.key().project();
+                let generation = row.detail.relation.generation();
                 let group = groups.entry(key).or_insert_with(|| FederatedRendezvous {
                     relation: family,
                     external: external.clone(),
                     evidence: Vec::new(),
                 });
                 group.evidence.push(FederatedRelationEvidence {
+                    worktree: participant.worktree.clone(),
                     project,
                     generation,
-                    source: row.source,
-                    relation: row.relation,
+                    source: row.detail.source,
+                    classification: row.source_classification,
+                    relation: row.detail.relation,
                 });
             }
         }
@@ -897,16 +977,20 @@ fn close_participants(
         drop(participant.store);
         match (binding, generation, purpose_revision) {
             (Ok(binding), Ok(Some(generation)), Ok(authored_purpose_revision)) => {
-                closed.push(ClosedParticipant {
-                    database_path: participant.database_path,
-                    root: participant.root,
-                    cursor: FederatedCursorParticipant {
-                        project: binding.project_instance_id,
-                        root_digest: federated_root_digest(&binding.project_root),
-                        generation,
-                        authored_purpose_revision,
-                    },
-                });
+                match federated_root_digest(&binding.project_root_identity) {
+                    Ok(root_digest) => closed.push(ClosedParticipant {
+                        database_path: participant.database_path,
+                        root: participant.root,
+                        cursor: FederatedCursorParticipant {
+                            project: binding.project_instance_id,
+                            root_digest,
+                            generation,
+                            authored_purpose_revision,
+                        },
+                    }),
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error))
                 if first_error.is_none() =>
@@ -949,7 +1033,7 @@ fn revalidate_participants(
         let purpose_revision = store.authored_purpose_revision()?;
         let current = FederatedCursorParticipant {
             project: binding.project_instance_id,
-            root_digest: federated_root_digest(&binding.project_root),
+            root_digest: federated_root_digest(&binding.project_root_identity)?,
             generation,
             authored_purpose_revision: purpose_revision,
         };
@@ -1119,12 +1203,8 @@ fn aggregate_row_limit(budget: DetailedRelationBudget) -> u64 {
 }
 
 /// Bind a root without returning its machine-local path.
-fn federated_root_digest(root: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(FEDERATED_ROOT_DIGEST_DOMAIN.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(root.as_bytes());
-    *hasher.finalize().as_bytes()
+fn federated_root_digest(root: &CanonicalProjectRoot) -> ServiceResult<[u8; 32]> {
+    canonical_root_digest(FEDERATED_ROOT_DIGEST_DOMAIN, root)
 }
 
 /// Observe request cancellation at a repository-traversal boundary.
@@ -1163,6 +1243,7 @@ mod tests {
         Completeness, EntitySelector, GraphEntity, GraphIdentityText, GraphLimits,
         RepositoryFilePath,
     };
+    use projectatlas_core::language::ContentSelection;
     use projectatlas_core::symbols::RelationKind;
     use projectatlas_core::{IndexCancellation, Node, NodeKind};
     use projectatlas_db::sqlite_progress_test_observer::{
@@ -1173,6 +1254,192 @@ mod tests {
     use std::io;
     use std::path::Path;
     use std::rc::Rc;
+
+    #[cfg(unix)]
+    #[test]
+    fn federation_root_digest_preserves_non_utf8_root_collisions() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let native = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'r', b'o', b'o', 0x80]));
+        let replacement = temp.path().join("roo�");
+        fs::create_dir(&native)?;
+        fs::create_dir(&replacement)?;
+        let native_root = CanonicalProjectRoot::from_path(&native)?;
+        let replacement_root = CanonicalProjectRoot::from_path(&replacement)?;
+        require(
+            federated_root_digest(&native_root)? != federated_root_digest(&replacement_root)?,
+            "federation identity collapsed non-UTF-8 and replacement roots",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn federation_recanonicalizes_case_only_root_and_rejects_case_sensitive_sibling()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let original_root = temp.path().join("FederatedCaseRoot");
+        let staging_root = temp.path().join("FederatedCaseRootStaging");
+        let renamed_root = temp.path().join("federatedcaseroot");
+        let original_database = original_root.join("projectatlas.db");
+        publish_fixture(
+            &original_root,
+            &original_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let duplicate_database = temp.path().join("federated-duplicate.db");
+        publish_fixture(
+            &original_root,
+            &duplicate_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let captured_root = CanonicalProjectRoot::from_path(&original_root)?;
+        fs::rename(&original_root, &staging_root)?;
+        fs::rename(&staging_root, &renamed_root)?;
+
+        let renamed_identity = CanonicalProjectRoot::from_path(&renamed_root)?;
+        let renamed_database = renamed_root.join("projectatlas.db");
+        let before_repair_store =
+            AtlasStore::open_read_only_for_project(&renamed_database, &renamed_root)?;
+        let before_repair = crate::relations::load_detailed_relations(
+            &before_repair_store,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        )?;
+        before_repair_store.finish_index_read_snapshot()?;
+        drop(before_repair_store);
+        let captured_digest = federated_root_digest(&captured_root)?;
+        require(
+            captured_digest == federated_root_digest(&renamed_identity)?,
+            "case-only root rename changed the service root digest",
+        )?;
+        let repair_store = AtlasStore::open_for_project(&renamed_database, &renamed_root)?;
+        drop(repair_store);
+        let after_repair_store =
+            AtlasStore::open_read_only_for_project(&renamed_database, &renamed_root)?;
+        let resumed = crate::relations::load_detailed_relations(
+            &after_repair_store,
+            &relation_query(
+                Some(
+                    before_repair
+                        .continuation
+                        .ok_or("case-only rename fixture omitted a relation continuation")?,
+                ),
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        );
+        after_repair_store.finish_index_read_snapshot()?;
+        drop(after_repair_store);
+        require(
+            resumed.is_ok(),
+            "case-only root rename invalidated a relation continuation",
+        )?;
+
+        let repaired_binding =
+            AtlasStore::open_read_only(&renamed_database)?.captured_project_binding()?;
+        let duplicate_binding =
+            AtlasStore::open_read_only(&duplicate_database)?.captured_project_binding()?;
+        require(
+            repaired_binding.project_instance_id != duplicate_binding.project_instance_id,
+            "duplicate federation fixture reused the repaired project identity",
+        )?;
+        require(
+            repaired_binding.project_root_identity.encode()?
+                != duplicate_binding.project_root_identity.encode()?,
+            "duplicate federation fixture did not retain old and fresh root spellings",
+        )?;
+
+        let secondary_root = temp.path().join("federated-secondary");
+        let secondary_database = secondary_root.join("projectatlas.db");
+        publish_fixture(
+            &secondary_root,
+            &secondary_database,
+            IndexGeneration::new(1),
+            1,
+        )?;
+        let participants = open_participants(&[
+            (renamed_root.clone(), renamed_database.clone()),
+            (secondary_root, secondary_database),
+        ])?;
+        let draft = load_federated_detailed_relations(
+            participants,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        )?;
+        let (report, _) = draft.fit_output(None, |report| {
+            serde_json::to_string(report).map_err(ServiceError::from)
+        })?;
+        require(
+            report.participants.len() == 2,
+            "federated query rejected a case-only root rename",
+        )?;
+
+        let duplicate = load_federated_detailed_relations(
+            open_participants(&[
+                (renamed_root.clone(), renamed_database),
+                (renamed_root, duplicate_database),
+            ])?,
+            &relation_query(
+                None,
+                RelationResolutionFilter::External,
+                RelationDirection::Outbound,
+            )?,
+            None,
+        );
+        require(
+            matches!(
+                duplicate,
+                Err(ServiceError::InvalidInput(message))
+                    if message == "federated roots or project identities must be unique"
+            ),
+            "federation admitted two databases for one case-renamed root",
+        )?;
+
+        let case_sensitive_parent = temp.path().join("federated-case-sensitive-parent");
+        fs::create_dir(&case_sensitive_parent)?;
+        let enabled = std::process::Command::new("fsutil")
+            .args(["file", "SetCaseSensitiveInfo"])
+            .arg(&case_sensitive_parent)
+            .arg("enable")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !enabled {
+            return Ok(());
+        }
+        let stored_root = case_sensitive_parent.join("Repo");
+        let selected_root = case_sensitive_parent.join("repo");
+        let stored_database = stored_root.join("projectatlas.db");
+        fs::create_dir(&stored_root)?;
+        fs::create_dir(&selected_root)?;
+        publish_fixture(&stored_root, &stored_database, IndexGeneration::new(1), 1)?;
+        let store = AtlasStore::open_read_only(&stored_database)?;
+        let result = FederatedStore::new(
+            store,
+            stored_database,
+            selected_root,
+            FederatedInputWork::default(),
+        );
+        require(
+            matches!(result, Err(ServiceError::InvalidInput(message)) if message == "federated store does not match its explicit root"),
+            "federated admission accepted a case-sensitive sibling",
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn federation_is_project_qualified_fresh_bounded_and_handle_free() -> Result<(), Box<dyn Error>>
@@ -1218,12 +1485,32 @@ mod tests {
                     .iter()
                     .flat_map(|row| &row.evidence)
                     .all(|evidence| {
-                        matches!(
-                            evidence.source.selector(),
-                            EntitySelector::File { path } if path.as_str() == "src/same.rs"
-                        )
+                        evidence.classification == Some(ContentClassification::Source)
+                            && matches!(
+                                evidence.source.selector(),
+                                EntitySelector::File { path } if path.as_str() == "src/same.rs"
+                            )
                     }),
             "same relative paths collapsed across project identities",
+        )?;
+        let classified_query = relation_query_with_selection(
+            None,
+            RelationResolutionFilter::External,
+            RelationDirection::Outbound,
+            ContentSelection::Source,
+        )?;
+        let classified = load_federated_detailed_relations(
+            open_participants(&participants)?,
+            &classified_query,
+            None,
+        )?;
+        let (classified, _) = classified.fit_output(None, |report| {
+            serde_json::to_string(report).map_err(ServiceError::from)
+        })?;
+        require(
+            classified.rendezvous == report.rendezvous
+                && classified.primary.content_selection == Some(ContentSelection::Source),
+            "classified federation changed eligible rendezvous evidence or lost selection",
         )?;
         require(
             encoded.len() <= query.budget.output_bytes() as usize
@@ -1257,6 +1544,7 @@ mod tests {
                 include_communities: false,
                 include_cycles: false,
                 include_dead_code: false,
+                entrypoint_profile: None,
             },
             None,
         )?;
@@ -1312,6 +1600,7 @@ mod tests {
                 include_communities: false,
                 include_cycles: false,
                 include_dead_code: false,
+                entrypoint_profile: None,
             },
             None,
         )?;
@@ -1581,6 +1870,16 @@ mod tests {
             fixture_file_node("src/same.rs"),
             fixture_file_node("src/unrelated.rs"),
         ])?;
+        publication.upsert_file_content_classification_batch(&[
+            projectatlas_db::FileContentClassification {
+                path: "src/same.rs".to_string(),
+                classification: ContentClassification::Source,
+            },
+            projectatlas_db::FileContentClassification {
+                path: "src/unrelated.rs".to_string(),
+                classification: ContentClassification::Documentation,
+            },
+        ])?;
         publication.finish_scan_replacement()?;
         publication.replace_repository_graph(project, &entities, &relations, &[], &[])?;
         publication.complete()?;
@@ -1610,6 +1909,21 @@ mod tests {
         resolution: RelationResolutionFilter,
         direction: RelationDirection,
     ) -> Result<DetailedRelationQuery, Box<dyn Error>> {
+        relation_query_with_selection(
+            cursor,
+            resolution,
+            direction,
+            ContentSelection::UnspecifiedLegacy,
+        )
+    }
+
+    /// Build one bounded anchored relation request with explicit content selection.
+    fn relation_query_with_selection(
+        cursor: Option<String>,
+        resolution: RelationResolutionFilter,
+        direction: RelationDirection,
+        content_selection: ContentSelection,
+    ) -> Result<DetailedRelationQuery, Box<dyn Error>> {
         Ok(DetailedRelationQuery {
             anchor: RelationAnchor::File {
                 file: RepositoryFilePath::new(Path::new("src/same.rs"))?,
@@ -1627,6 +1941,7 @@ mod tests {
             )?)
             .with_aggregate_limits(Some(100), None, None, None, None, None)?,
             cursor,
+            content_selection,
         })
     }
 

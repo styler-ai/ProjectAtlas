@@ -184,7 +184,7 @@ fn read_benchmark_bytes(
 ) -> ServiceResult<BenchmarkRead> {
     let key = validated_repo_file_key(requested)
         .map_err(|error| ServiceError::InvalidInput(error.to_string()))?;
-    let root = Path::new(&binding.project_root);
+    let root = binding.project_root_identity.as_path();
     let relative = repo_path_to_native(&key);
     let path = root.join(&relative);
     let mut current = root.to_path_buf();

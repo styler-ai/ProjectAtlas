@@ -1,0 +1,581 @@
+{
+  "schema": "projectatlas.worktree-continuity.v1",
+  "candidate": {
+    "checkout_head": "7f8ce515312bdddf359287ea1f34454fc369354a",
+    "runtime": "{REPO_ROOT}\\target\\release\\projectatlas.exe",
+    "runtime_sha256": "b4f5773b667b08f13aaa5d1a704bbc29842827149706658445859dc0436827bf",
+    "runtime_info": {
+      "project": "ProjectAtlas",
+      "major_version": 3,
+      "version": "0.4.5-rc1",
+      "executable": "{REPO_ROOT}/target/release/projectatlas.exe",
+      "repository": "https://github.com/styler-ai/ProjectAtlas",
+      "capabilities": [
+        "cli",
+        "mcp",
+        "sqlite",
+        "toon",
+        "symbol-index",
+        "text-search",
+        "watch",
+        "token-telemetry"
+      ],
+      "text_format": "TOON",
+      "output_formats": [
+        "toon",
+        "json"
+      ],
+      "mcp_tools": [
+        "atlas_set_project_path",
+        "atlas_worktree_list",
+        "atlas_worktree_add",
+        "atlas_worktree_remove",
+        "atlas_init",
+        "atlas_map",
+        "atlas_root",
+        "atlas_root_set",
+        "atlas_config",
+        "atlas_ignore_list",
+        "atlas_ignore_init_gitignore",
+        "atlas_ignore_add",
+        "atlas_ignore_remove",
+        "atlas_scan",
+        "atlas_overview",
+        "atlas_folders",
+        "atlas_files",
+        "atlas_next",
+        "atlas_outline",
+        "atlas_file_summary",
+        "atlas_search",
+        "atlas_slice",
+        "atlas_symbols_build",
+        "atlas_symbols",
+        "atlas_symbol_relations",
+        "atlas_health",
+        "atlas_health_resolve",
+        "atlas_lint",
+        "atlas_token_report",
+        "atlas_parity_report",
+        "atlas_settings",
+        "atlas_watch_status",
+        "atlas_watch_once",
+        "atlas_strip_legacy_purpose",
+        "atlas_reset_index",
+        "atlas_mcp_config",
+        "atlas_runtime_info",
+        "atlas_session_brief",
+        "atlas_task_status",
+        "atlas_task_cancel",
+        "atlas_purpose_queue",
+        "atlas_purpose_set",
+        "atlas_purpose_review"
+      ]
+    }
+  },
+  "host": {
+    "system": "Windows",
+    "release": "10",
+    "machine": "AMD64",
+    "logical_cpus": 16
+  },
+  "fixture": {
+    "source_files": 1024,
+    "linked_dirty_files": 3,
+    "control": "{REPO_ROOT}\\target\\benchmarks\\worktree-continuity\\current\\control",
+    "linked": "{REPO_ROOT}\\target\\benchmarks\\worktree-continuity\\current\\linked"
+  },
+  "control_scan": {
+    "pre_storage": {
+      "database_bytes": 524288,
+      "wal_bytes": 0,
+      "shm_bytes": 0,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 524288
+    },
+    "process": {
+      "sampler": "psutil-7.0.0",
+      "interval_seconds": 0.02,
+      "sampled_peak_metrics": [
+        "rss_bytes",
+        "processes",
+        "threads",
+        "storage"
+      ],
+      "peak_rss_bytes": 37892096,
+      "peak_processes": 1,
+      "peak_worker_processes": 0,
+      "peak_threads": 20,
+      "cpu_seconds": 2.21875,
+      "observed_pids": [
+        17436
+      ],
+      "peak_storage": {
+        "database_bytes": 17899520,
+        "wal_bytes": 17773712,
+        "shm_bytes": 65536,
+        "staging_bytes": 0,
+        "stage_directories": 0
+      },
+      "read_count": 35195,
+      "write_count": 217324,
+      "exact_total_processes": 1,
+      "exact_terminal_active_processes": 0,
+      "worker_process_bound": 0,
+      "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+      "terminal_io_complete": true,
+      "terminal_io_method": "windows-job-basic-and-io-accounting",
+      "process_io_metric": {
+        "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+        "kind": "exact-terminal-owned-process-tree-accounting",
+        "required_final_platform": "Windows",
+        "final_platform_eligible": true,
+        "ineligible_reason": null,
+        "terminal_counters_complete": true
+      },
+      "arguments": [
+        "--format",
+        "json",
+        "scan",
+        "."
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "wall_seconds": 1.879472,
+      "one_core_cpu_percent": 118.052,
+      "host_cpu_percent": 7.378,
+      "stdout_bytes": 924,
+      "stderr_bytes": 0,
+      "process_read_transfer_bytes": 102192816,
+      "process_write_transfer_bytes": 449001424,
+      "stderr": ""
+    },
+    "report": {
+      "overview": {
+        "files": 1028,
+        "folders": 2,
+        "missing_purposes": 3,
+        "stale_purposes": 0,
+        "approved_purposes": 0,
+        "suggested_purposes": 1027
+      },
+      "purpose_import": {
+        "imported": 0,
+        "skipped_stale": 0,
+        "skipped_existing": 0
+      },
+      "text_index": {
+        "candidates": 1028,
+        "indexed": 1028,
+        "binary_or_non_utf8": 0,
+        "too_large": 0,
+        "skipped": 0,
+        "max_bytes": 2000000,
+        "bytes": 101548
+      },
+      "structural_summaries": {
+        "candidates": 2,
+        "summarized": 0,
+        "cleared": 1,
+        "too_large": 0,
+        "binary_or_non_utf8": 0,
+        "purpose_suggestions": 0
+      },
+      "symbols": {
+        "candidates": 1027,
+        "parsed": 1027,
+        "unchanged": 0,
+        "too_large": 0,
+        "binary_or_non_utf8": 0,
+        "timed_out": 0,
+        "max_workers": 16,
+        "timeout_seconds": null,
+        "symbols": 3075,
+        "relations": 2048,
+        "summaries": 1027,
+        "purpose_suggestions": 1027
+      }
+    },
+    "post_storage": {
+      "database_bytes": 17899520,
+      "wal_bytes": 0,
+      "shm_bytes": 0,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 17899520
+    }
+  },
+  "mcp_worktree_sequence": {
+    "startup_ms": 39.425,
+    "process": {
+      "sampler": "psutil-7.0.0",
+      "interval_seconds": 0.02,
+      "sampled_peak_metrics": [
+        "rss_bytes",
+        "processes",
+        "threads",
+        "storage"
+      ],
+      "peak_rss_bytes": 49942528,
+      "peak_processes": 1,
+      "peak_worker_processes": 0,
+      "peak_threads": 38,
+      "cpu_seconds": 5.015625,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "observed_pids": [
+        11992
+      ],
+      "peak_storage": {
+        "database_bytes": 17899520,
+        "wal_bytes": 107152,
+        "shm_bytes": 32768,
+        "staging_bytes": 0,
+        "stage_directories": 0
+      },
+      "read_operations": 133303,
+      "write_operations": 420659,
+      "read_transfer_bytes": 492966345,
+      "write_transfer_bytes": 927030288,
+      "wall_seconds": 4.70016
+    },
+    "writer_availability": {
+      "control": {
+        "method": "timeout-zero-begin-immediate-sampled-bound",
+        "intrusive": true,
+        "interval_seconds": 0.005,
+        "attempts": 198,
+        "busy_observations": 0,
+        "maximum_probe_gap_seconds": 0.050424,
+        "maximum_busy_upper_bound_seconds": 0.050424
+      },
+      "target": {
+        "method": "timeout-zero-begin-immediate-sampled-bound",
+        "intrusive": true,
+        "interval_seconds": 0.005,
+        "attempts": 12,
+        "busy_observations": 0,
+        "maximum_probe_gap_seconds": 0.040596,
+        "maximum_busy_upper_bound_seconds": 0.040596
+      }
+    },
+    "calls": [
+      {
+        "tool": "atlas_worktree_list",
+        "arguments": {},
+        "elapsed_ms": 48.905,
+        "output_bytes": 1381,
+        "process": {
+          "cpu_seconds": 0.03125,
+          "read_operations": 70,
+          "write_operations": 1,
+          "read_transfer_bytes": 216882,
+          "write_transfer_bytes": 1497
+        }
+      },
+      {
+        "tool": "atlas_worktree_add",
+        "arguments": {
+          "worktree": "wt-a6be1e5df21944ec",
+          "alias": "worktree-scale"
+        },
+        "elapsed_ms": 45.58,
+        "output_bytes": 373,
+        "process": {
+          "cpu_seconds": 0.03125,
+          "read_operations": 68,
+          "write_operations": 14,
+          "read_transfer_bytes": 209216,
+          "write_transfer_bytes": 33377
+        }
+      },
+      {
+        "tool": "atlas_init",
+        "arguments": {
+          "worktree": "worktree-scale"
+        },
+        "elapsed_ms": 4328.454,
+        "output_bytes": 6908,
+        "process": {
+          "cpu_seconds": 4.609375,
+          "read_operations": 130160,
+          "write_operations": 420589,
+          "read_transfer_bytes": 490042829,
+          "write_transfer_bytes": 926885266
+        }
+      },
+      {
+        "tool": "atlas_overview",
+        "arguments": {
+          "worktree": "worktree-scale"
+        },
+        "elapsed_ms": 147.422,
+        "output_bytes": 129,
+        "process": {
+          "cpu_seconds": 0.28125,
+          "read_operations": 2730,
+          "write_operations": 54,
+          "read_transfer_bytes": 1472934,
+          "write_transfer_bytes": 107378
+        }
+      },
+      {
+        "tool": "atlas_token_report",
+        "arguments": {
+          "worktree": "main"
+        },
+        "elapsed_ms": 87.95,
+        "output_bytes": 2612,
+        "process": {
+          "cpu_seconds": 0.0625,
+          "read_operations": 275,
+          "write_operations": 1,
+          "read_transfer_bytes": 1024484,
+          "write_transfer_bytes": 2770
+        }
+      }
+    ],
+    "observations": {
+      "list_has_linked_candidate": true,
+      "registration_added": true,
+      "hydration_reported": true,
+      "init_scan_counts": {
+        "candidates": [
+          1029,
+          2,
+          1028
+        ],
+        "indexed": [
+          1029
+        ],
+        "parsed": [
+          3
+        ],
+        "unchanged": [
+          1025
+        ],
+        "symbols": [
+          1029
+        ],
+        "relations": [
+          2
+        ],
+        "summaries": [
+          3
+        ],
+        "baseline_generation": [
+          1
+        ],
+        "reconciled_generation": [
+          2
+        ]
+      },
+      "target_initialized": true,
+      "alias_overview_available": true,
+      "repository_tokens_available": true
+    },
+    "control_counts": {
+      "nodes": 1030,
+      "file_texts": 1028,
+      "symbols": 3075,
+      "graph_entities": 3082,
+      "graph_relations": 2048,
+      "worktree_registrations": 1,
+      "worktree_usage_aggregates": 2,
+      "usage_events": 1,
+      "usage_instances": 1
+    },
+    "target_counts": {
+      "nodes": 1031,
+      "file_texts": 1029,
+      "symbols": 3077,
+      "graph_entities": 3085,
+      "graph_relations": 2048,
+      "worktree_registrations": 0,
+      "worktree_usage_aggregates": 0,
+      "usage_events": 0,
+      "usage_instances": 0
+    },
+    "control_storage": {
+      "database_bytes": 17899520,
+      "wal_bytes": 0,
+      "shm_bytes": 0,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 17899520
+    },
+    "target_storage": {
+      "database_bytes": 18284544,
+      "wal_bytes": 0,
+      "shm_bytes": 0,
+      "staging_bytes": 0,
+      "stage_directories": 0,
+      "total_bytes": 18284544
+    },
+    "control_database_profile": {
+      "page_size": 4096,
+      "page_count": 4370,
+      "page_bytes": 17899520,
+      "freelist_pages": 0,
+      "freelist_ratio": 0.0,
+      "quick_check": "ok",
+      "sqlite_stat1_present": false,
+      "project_root": "{REPO_ROOT}/target/benchmarks/worktree-continuity/current/control"
+    },
+    "target_database_profile": {
+      "page_size": 4096,
+      "page_count": 4464,
+      "page_bytes": 18284544,
+      "freelist_pages": 33,
+      "freelist_ratio": 0.007392,
+      "quick_check": "ok",
+      "sqlite_stat1_present": false,
+      "project_root": "{REPO_ROOT}/target/benchmarks/worktree-continuity/current/linked"
+    },
+    "persistent_growth_bytes": 18284544,
+    "write_amplification": 50.700214,
+    "maximum_output_bytes": 6908
+  },
+  "high_registration_sqlite_probe": {
+    "registrations": 128,
+    "statements": 11151,
+    "changed_rows": 3203,
+    "process": {
+      "sampler": "psutil-7.0.0",
+      "interval_seconds": 0.02,
+      "sampled_peak_metrics": [
+        "rss_bytes",
+        "processes",
+        "threads",
+        "storage"
+      ],
+      "peak_rss_bytes": 25092096,
+      "peak_processes": 1,
+      "peak_worker_processes": 0,
+      "peak_threads": 5,
+      "cpu_seconds": 0.953125,
+      "observed_pids": [
+        15280
+      ],
+      "peak_storage": {
+        "database_bytes": 0,
+        "wal_bytes": 0,
+        "shm_bytes": 0,
+        "staging_bytes": 0,
+        "stage_directories": 0
+      },
+      "read_count": 322,
+      "write_count": 12150,
+      "exact_total_processes": 1,
+      "exact_terminal_active_processes": 0,
+      "worker_process_bound": 0,
+      "worker_process_bound_method": "cumulative-owned-processes-conservative-upper-bound",
+      "terminal_io_complete": true,
+      "terminal_io_method": "windows-job-basic-and-io-accounting",
+      "process_io_metric": {
+        "backend": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+        "kind": "exact-terminal-owned-process-tree-accounting",
+        "required_final_platform": "Windows",
+        "final_platform_eligible": true,
+        "ineligible_reason": null,
+        "terminal_counters_complete": true
+      },
+      "arguments": [
+        "telemetry::tests::worktree_continuity_high_registration_aggregate_has_bounded_sql_and_rows",
+        "--exact",
+        "--nocapture"
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "wall_seconds": 3.122656,
+      "one_core_cpu_percent": 30.523,
+      "host_cpu_percent": 1.908,
+      "stdout_bytes": 217,
+      "stderr_bytes": 0,
+      "process_read_transfer_bytes": 1302544,
+      "process_write_transfer_bytes": 25640084
+    },
+    "query_plan_command": "projectatlas_db-60660447051dd373.exe worktree_registry::tests::hot_registry_and_aggregate_lookups_use_owning_indexes --exact",
+    "query_plan_output_bytes": 206,
+    "query_plans_passed": true
+  },
+  "checks": [
+    {
+      "name": "control fixture indexed",
+      "actual": 1028,
+      "expected": "> 1024",
+      "passed": true
+    },
+    {
+      "name": "worktree registration added",
+      "actual": true,
+      "expected": true,
+      "passed": true
+    },
+    {
+      "name": "hydrated target published",
+      "actual": true,
+      "expected": true,
+      "passed": true
+    },
+    {
+      "name": "dirty target reconciled",
+      "actual": 1031,
+      "expected": "> 1030",
+      "passed": true
+    },
+    {
+      "name": "hydration parsed only changed source files",
+      "actual": [
+        3
+      ],
+      "expected": [
+        3
+      ],
+      "passed": true
+    },
+    {
+      "name": "alias telemetry aggregated",
+      "actual": 1,
+      "expected": 1,
+      "passed": true
+    },
+    {
+      "name": "high registration SQLite probe",
+      "actual": 128,
+      "expected": 128,
+      "passed": true
+    },
+    {
+      "name": "bounded MCP output",
+      "actual": 6908,
+      "expected": "<= 65536 bytes",
+      "passed": true
+    },
+    {
+      "name": "writer probes observed both databases",
+      "actual": [
+        198,
+        12
+      ],
+      "expected": "> 0 each",
+      "passed": true
+    },
+    {
+      "name": "WAL bounded",
+      "actual": [
+        0,
+        0
+      ],
+      "expected": "<= 1048576 bytes each",
+      "passed": true
+    },
+    {
+      "name": "ProjectAtlas left Git lifecycle unchanged",
+      "actual": true,
+      "expected": true,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

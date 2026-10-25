@@ -2,14 +2,15 @@
 //! Cargo-adjacent lint gate for `ProjectAtlas`-specific Rust contracts.
 
 use proc_macro2::{TokenStream, TokenTree};
-use std::collections::BTreeMap;
+use regex::Regex;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fmt::{self, Display};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
@@ -26,6 +27,18 @@ const EXIT_OK: u8 = 0;
 const EXIT_FAILURE: u8 = 1;
 /// Incorrect command usage process exit.
 const EXIT_USAGE: u8 = 2;
+
+/// Stable identifier for machine-specific absolute paths in public source.
+const PRIVATE_PATH_RULE_ID: &str = "private-absolute-path";
+/// One explicit escape hatch for intentional path-semantics examples.
+const PRIVATE_PATH_FIXTURE_MARKER: &str = "projectatlas: path-fixture";
+/// Small set of machine-specific path shapes that must use portable placeholders.
+const PRIVATE_PATH_PATTERNS: &[&str] = &[
+    r"(?i)[A-Z]:[\\/]{1,2}Users[\\/]{1,2}[^\r\n\\/<>{}]+(?:[\\/]{1,2}|$)",
+    r"(?i)[A-Z]:[\\/]{1,2}media[\\/]{1,2}projects(?:[\\/]{1,2}|$)",
+    r"(?i)(?:^|[^A-Za-z0-9_.])\\?/(?:mnt\\?/[A-Z]\\?/Users|(?:var\\?/)?home|Users)\\?/[^\\/\r\n<>{}]+(?:\\?/|$)",
+    r"(?:^|[^A-Za-z0-9_.])\\?/root(?:\\?/|$)",
+];
 
 /// MCP project-selection response strings owned by the MCP adapter contract.
 const MCP_PROJECT_SCHEMA_LITERALS: &[&str] =
@@ -156,6 +169,22 @@ const MCP_ALLOWED_INLINE_LITERALS: &[&str] = &[
     "{message}; {OUTSIDE_SELECTED_PROJECT_GUIDANCE}",
     "invalid health severity '{trimmed}'; expected {expected}",
     "unsupported token trend window {window:?}; {TOKEN_TREND_WINDOW_ERROR_SUFFIX}",
+    "invalid control-repository Git evidence at '{}': {:?}",
+    "selected control root '{}' is not one active worktree in its reciprocal Git inventory",
+    "selected worktree directory cannot be used as an alias; provide alias explicitly: {source}",
+    "worktree atlas '{}' has no exact project identity",
+    "worktree atlas '{}' telemetry identity does not match its project identity",
+    "Git registration target is missing at '{}'",
+    "invalid Git evidence at '{}': {:?}",
+    "current Unix epoch exceeds the supported worktree registry range: {source}",
+    "registered worktree '{}' belongs to a different Git common directory",
+    "registered worktree '{}' is no longer present in the bounded Git inventory",
+    "registered worktree '{}' is missing; restore it through Git or unregister it",
+    "registered worktree '{}' has invalid Git evidence at '{}': {:?}",
+    "selector {requested:?} did not identify exactly one active non-control worktree",
+    "registration committed without local telemetry import: {error}",
+    "registration committed; local telemetry remains pending: {error}",
+    "cannot retire worktree '{}' while its Git evidence is invalid at '{}': {:?}",
     "CARGO_PKG_VERSION",
 ];
 
@@ -187,7 +216,13 @@ const STRICT_STRING_RULES: &[StringLiteralRule] = &[
     StringLiteralRule {
         id: "e2e-fixture-path-inline-strings",
         description: "Repeated e2e fixture path segments must live in local constants instead of being repeated inline.",
-        paths: &["crates/projectatlas-cli/tests/e2e.rs"],
+        paths: &[
+            "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+            "crates/projectatlas-cli/tests/e2e_delivery.rs",
+            "crates/projectatlas-cli/tests/e2e_navigation.rs",
+            "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+            "crates/projectatlas-cli/tests/e2e_maintenance.rs",
+        ],
         ban_unlisted: false,
         literals: E2E_FIXTURE_PATH_LITERALS,
         allowed_literals: &[],
@@ -198,7 +233,13 @@ const STRICT_STRING_RULES: &[StringLiteralRule] = &[
 const REPEATED_PATH_JOIN_RULES: &[PathJoinLiteralRule] = &[PathJoinLiteralRule {
     id: "repeated-path-join-inline-strings",
     description: "Repeated path join string literals must be centralized as constants or reviewed into the fixture allowlist.",
-    paths: &["crates/projectatlas-cli/tests/e2e.rs"],
+    paths: &[
+        "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
+        "crates/projectatlas-cli/tests/e2e_delivery.rs",
+        "crates/projectatlas-cli/tests/e2e_navigation.rs",
+        "crates/projectatlas-cli/tests/e2e_worktrees.rs",
+        "crates/projectatlas-cli/tests/e2e_maintenance.rs",
+    ],
     allowed_repeated_literals: E2E_ALLOWED_REPEATED_PATH_JOIN_LITERALS,
 }];
 
@@ -266,7 +307,7 @@ fn help() -> Result<(), LintError> {
     let mut stdout = io::stdout().lock();
     writeln!(
         stdout,
-        "Usage: cargo projectatlas-lints {COMMAND_STRICT_STRINGS}\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Fail on inline Rust string literals protected by ProjectAtlas contract rules."
+        "Usage: cargo projectatlas-lints {COMMAND_STRICT_STRINGS}\n\nCommands:\n  {COMMAND_STRICT_STRINGS}  Enforce ProjectAtlas string contracts and reject machine-specific paths in the current tracked tree."
     )
     .map_err(LintError::Io)
 }
@@ -278,7 +319,7 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
         for relative_path in rule.paths {
             let path = root.join(relative_path);
             let source = fs::read_to_string(&path).map_err(|source| LintError::ReadFile {
-                path: path.clone(),
+                path: (*relative_path).to_string(),
                 source,
             })?;
             violations.extend(lint_source(relative_path, rule, &source)?);
@@ -288,7 +329,7 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
         for relative_path in rule.paths {
             let path = root.join(relative_path);
             let source = fs::read_to_string(&path).map_err(|source| LintError::ReadFile {
-                path: path.clone(),
+                path: (*relative_path).to_string(),
                 source,
             })?;
             violations.extend(lint_repeated_path_join_literals(
@@ -298,13 +339,145 @@ fn run_strict_strings(root: &Path) -> Result<(), LintError> {
             )?);
         }
     }
+    violations.extend(lint_repository_private_paths(root)?);
     if violations.is_empty() {
         let mut stdout = io::stdout().lock();
-        writeln!(stdout, "projectatlas-lints: strict string contracts passed")
-            .map_err(LintError::Io)
+        writeln!(stdout, "projectatlas-lints: source policy passed").map_err(LintError::Io)
     } else {
         Err(LintError::Violations(violations))
     }
+}
+
+/// Reject machine-specific paths from the tracked worktree and committed `HEAD`.
+fn lint_repository_private_paths(root: &Path) -> Result<Vec<StringLiteralViolation>, LintError> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .map_err(LintError::ListGitFiles)?;
+    if !output.status.success() {
+        return Err(LintError::GitFileListFailed(output.status.code()));
+    }
+    let rules = private_path_rules()?;
+    let mut violations = Vec::new();
+    let mut missing_worktree_paths = BTreeSet::new();
+    for raw_path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let relative_path = std::str::from_utf8(raw_path).map_err(LintError::NonUtf8GitPath)?;
+        let path = root.join(relative_path);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                lint_committed_private_path(root, relative_path, &rules, &mut violations)?;
+                missing_worktree_paths.insert(relative_path.to_string());
+                continue;
+            }
+            Err(source) => {
+                return Err(LintError::ReadFile {
+                    path: relative_path.to_string(),
+                    source,
+                });
+            }
+        };
+        let source = if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&path).map_err(|source| LintError::ReadFile {
+                path: relative_path.to_string(),
+                source,
+            })?;
+            let Ok(target) = target.into_os_string().into_string() else {
+                continue;
+            };
+            target
+        } else {
+            let bytes = fs::read(&path).map_err(|source| LintError::ReadFile {
+                path: relative_path.to_string(),
+                source,
+            })?;
+            let Ok(source) = String::from_utf8(bytes) else {
+                continue;
+            };
+            source
+        };
+        violations.extend(lint_private_path_source(relative_path, &source, &rules));
+    }
+
+    let dirty = Command::new("git")
+        .args(["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"])
+        .current_dir(root)
+        .output()
+        .map_err(LintError::ListGitFiles)?;
+    if !dirty.status.success() {
+        return Err(LintError::GitFileListFailed(dirty.status.code()));
+    }
+    for raw_path in dirty
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let relative_path = std::str::from_utf8(raw_path).map_err(LintError::NonUtf8GitPath)?;
+        if !missing_worktree_paths.contains(relative_path) {
+            lint_committed_private_path(root, relative_path, &rules, &mut violations)?;
+        }
+    }
+    Ok(violations)
+}
+
+/// Lint the committed `HEAD` source for a path unavailable in the worktree.
+fn lint_committed_private_path(
+    root: &Path,
+    relative_path: &str,
+    rules: &[Regex],
+    violations: &mut Vec<StringLiteralViolation>,
+) -> Result<(), LintError> {
+    let committed = Command::new("git")
+        .args(["cat-file", "blob"])
+        .arg(format!("HEAD:{relative_path}"))
+        .current_dir(root)
+        .output()
+        .map_err(LintError::ListGitFiles)?;
+    let Ok(source) = String::from_utf8(committed.stdout) else {
+        return Ok(());
+    };
+    if committed.status.success() {
+        violations.extend(lint_private_path_source(relative_path, &source, rules));
+    }
+    Ok(())
+}
+
+/// Compile the fixed repository-private path rules.
+fn private_path_rules() -> Result<Vec<Regex>, LintError> {
+    PRIVATE_PATH_PATTERNS
+        .iter()
+        .map(|pattern| Regex::new(pattern))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(LintError::InvalidPrivatePathRule)
+}
+
+/// Return redacted path findings without retaining matched source text.
+fn lint_private_path_source(
+    relative_path: &str,
+    source: &str,
+    rules: &[Regex],
+) -> Vec<StringLiteralViolation> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            !line.contains(PRIVATE_PATH_FIXTURE_MARKER)
+                && rules.iter().any(|rule| rule.is_match(line))
+        })
+        .map(|(line, _)| StringLiteralViolation {
+            path: relative_path.to_string(),
+            line: line + 1,
+            column: 1,
+            rule_id: PRIVATE_PATH_RULE_ID,
+            literal: "<redacted>".to_string(),
+            description: "Machine-specific paths must use a portable placeholder or derived path.",
+        })
+        .collect()
 }
 
 /// Parse one Rust source file and return strict string-contract violations.
@@ -672,8 +845,8 @@ enum LintError {
     Io(io::Error),
     /// File read failure.
     ReadFile {
-        /// File path that could not be read.
-        path: PathBuf,
+        /// Repository-relative file path that could not be read.
+        path: String,
         /// Source IO error.
         source: io::Error,
     },
@@ -684,6 +857,14 @@ enum LintError {
         /// Source parser error.
         source: syn::Error,
     },
+    /// Failed to start tracked-file discovery.
+    ListGitFiles(io::Error),
+    /// Tracked-file discovery returned an unsuccessful status.
+    GitFileListFailed(Option<i32>),
+    /// A tracked repository path was not UTF-8.
+    NonUtf8GitPath(std::str::Utf8Error),
+    /// A built-in private-path rule did not compile.
+    InvalidPrivatePathRule(regex::Error),
     /// Strict string-contract violations.
     Violations(Vec<StringLiteralViolation>),
 }
@@ -694,26 +875,53 @@ impl Display for LintError {
             Self::Usage(message) => write!(formatter, "{message}"),
             Self::Io(source) => write!(formatter, "io error: {source}"),
             Self::ReadFile { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
+                write!(formatter, "failed to read {path:?}: {source}")
             }
             Self::Parse { path, source } => write!(formatter, "failed to parse {path}: {source}"),
+            Self::ListGitFiles(_) => write!(formatter, "failed to list tracked repository files"),
+            Self::GitFileListFailed(code) => {
+                write!(
+                    formatter,
+                    "tracked repository file listing failed with status {code:?}"
+                )
+            }
+            Self::NonUtf8GitPath(_) => write!(formatter, "tracked repository path is not UTF-8"),
+            Self::InvalidPrivatePathRule(_) => {
+                write!(formatter, "built-in private-path rule is invalid")
+            }
             Self::Violations(violations) => {
-                write!(formatter, "{} strict string violations", violations.len())
+                write!(
+                    formatter,
+                    "{} repository source-policy violations",
+                    violations.len()
+                )
             }
         }
     }
 }
 
-impl std::error::Error for LintError {}
+impl std::error::Error for LintError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) | Self::ListGitFiles(source) | Self::ReadFile { source, .. } => {
+                Some(source)
+            }
+            Self::Parse { source, .. } => Some(source),
+            Self::NonUtf8GitPath(source) => Some(source),
+            Self::InvalidPrivatePathRule(source) => Some(source),
+            Self::Usage(_) | Self::GitFileListFailed(_) | Self::Violations(_) => None,
+        }
+    }
+}
 
-/// Write all strict string-contract diagnostics.
+/// Write all repository source-policy diagnostics.
 fn write_violations(
     writer: &mut impl Write,
     violations: &[StringLiteralViolation],
 ) -> io::Result<()> {
     writeln!(
         writer,
-        "projectatlas-lints: {} strict string contract violation(s)",
+        "projectatlas-lints: {} repository source-policy violation(s)",
         violations.len()
     )?;
     for violation in violations {
@@ -726,10 +934,14 @@ fn write_violations(
 mod tests {
     use super::{
         E2E_FIXTURE_PATH_LITERALS, MCP_PROJECT_SCHEMA_LITERALS, PathJoinLiteralRule,
-        StringLiteralRule, lint_repeated_path_join_literals, lint_source, run_strict_strings,
+        StringLiteralRule, lint_repeated_path_join_literals, lint_repository_private_paths,
+        lint_source, run_strict_strings,
     };
+    use std::fs;
     use std::io;
     use std::path::Path;
+    use std::process::{self, Command};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Rule used by parser-focused unit tests.
     const TEST_RULE: StringLiteralRule = StringLiteralRule {
@@ -788,6 +1000,118 @@ mod tests {
                 io::Error::other("lint crate must be nested below the workspace root")
             })?;
         run_strict_strings(workspace_root)?;
+        Ok(())
+    }
+
+    /// Dirty worktree state cannot hide committed paths, portable fixtures pass, and findings redact.
+    #[test]
+    fn private_path_lint_is_redacted_and_fixture_aware() -> Result<(), Box<dyn std::error::Error>> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                io::Error::other("lint crate must be nested below the workspace root")
+            })?;
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let repo = workspace_root
+            .join(".tmp")
+            .join(format!("private-path-lint-{}-{nonce}", process::id()));
+        fs::create_dir_all(&repo)?;
+
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            require(
+                Command::new("git")
+                    .args(["init", "--quiet"])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary Git repository initialization failed",
+            )?;
+            fs::write(repo.join("portable.txt"), "checkout = <project-root>\n")?;
+            fs::write(
+                repo.join("fixture.txt"),
+                "example = C:/Users/example/ProjectAtlas # projectatlas: path-fixture\n",
+            )?;
+            fs::write(
+                repo.join("private.txt"),
+                "escaped = C:\\\\Users\\\\private-owner\\\\ProjectAtlas\nspaces = C:/Users/Private Owner/ProjectAtlas\nwsl = /mnt/c/Users/private-owner/ProjectAtlas\nvar-home = /var/home/private-owner/ProjectAtlas\njson-home = \\/home\\/private-owner\\/ProjectAtlas\njson-wsl = \\/mnt\\/c\\/Users\\/private-owner\\/ProjectAtlas\njson-root = \\/root\\/ProjectAtlas\n", // projectatlas: path-fixture
+            )?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(
+                "/home/private-owner/ProjectAtlas", // projectatlas: path-fixture
+                repo.join("private-link"),
+            )?;
+            #[cfg(not(unix))]
+            fs::write(
+                repo.join("private-link"),
+                "checkout = C:/Users/private-owner/ProjectAtlas\n", // projectatlas: path-fixture
+            )?;
+            require(
+                Command::new("git")
+                    .args(["add", "."])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary Git repository staging failed",
+            )?;
+            require(
+                Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=ProjectAtlas Tests",
+                        "-c",
+                        "user.email=projectatlas-tests@example.invalid",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        "private path fixture",
+                    ])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary Git repository commit failed",
+            )?;
+            require(
+                Command::new("git")
+                    .args(["update-index", "--skip-worktree", "private.txt"])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary skip-worktree setup failed",
+            )?;
+            fs::remove_file(repo.join("private.txt"))?;
+            require(
+                Command::new("git")
+                    .args(["rm", "--cached", "--quiet", "private-link"])
+                    .current_dir(&repo)
+                    .status()?
+                    .success(),
+                "temporary dirty tracked state setup failed",
+            )?;
+
+            let violations = lint_repository_private_paths(&repo)?;
+            require(violations.len() == 8, "private paths were not rejected")?;
+            let diagnostic = violations
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            require(
+                diagnostic.contains("private-link:1:1")
+                    && diagnostic.contains("private.txt:")
+                    && diagnostic.contains("<redacted>"),
+                "diagnostic lost its repository-relative redacted location",
+            )?;
+            require(
+                !diagnostic.contains("private-owner")
+                    && !diagnostic.contains("Private Owner")
+                    && !diagnostic.contains("ProjectAtlas"),
+                "diagnostic exposed matched source",
+            )
+        })();
+        let cleanup = fs::remove_dir_all(&repo);
+        result?;
+        cleanup?;
         Ok(())
     }
 

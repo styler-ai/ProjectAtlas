@@ -1,7 +1,7 @@
 //! Process-wide admission and scheduling for the optional parser-pack worker.
 
 use super::{
-    SymbolBuildOptions, SymbolParseJob, SymbolParseOutcome, admit_symbol_job_source,
+    SymbolBuildOptions, SymbolParseJob, SymbolParseOutcome, admit_symbol_job_bytes,
     parse_admitted_symbol_job,
 };
 use crate::CliError;
@@ -252,11 +252,16 @@ pub(super) fn parse_symbol_jobs_controlled(
 
         for (language, job) in optional {
             control.check(IndexWorkStage::SymbolParsing)?;
-            let content = match admit_symbol_job_source(job, options, control) {
-                Ok(content) => content,
-                Err(outcome) if matches!(&*outcome, SymbolParseOutcome::BinaryOrNonUtf8 { .. }) => {
-                    outcomes.push(*outcome);
-                    continue;
+            let content = match admit_symbol_job_bytes(job, options, control) {
+                Ok(bytes) => {
+                    if let Ok(content) = String::from_utf8(bytes) {
+                        content
+                    } else {
+                        outcomes.push(SymbolParseOutcome::BinaryOrNonUtf8 {
+                            path: job.path.clone(),
+                        });
+                        continue;
+                    }
                 }
                 Err(outcome) => {
                     outcomes.push(*outcome);
@@ -356,6 +361,7 @@ fn terminal_parse_outcome(outcome: &SymbolParseOutcome) -> bool {
         outcome,
         SymbolParseOutcome::SourceChanged { .. }
             | SymbolParseOutcome::Io { .. }
+            | SymbolParseOutcome::InvalidInput { .. }
             | SymbolParseOutcome::IndexWork(_)
     )
 }

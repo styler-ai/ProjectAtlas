@@ -35,10 +35,10 @@ pub const OPTIONAL_GRAMMAR_CATALOG_RELEASE_TAG: &str = "v1.13.2";
 /// SHA-256 of the exactly pinned broad-grammar parser-source bundle.
 pub const OPTIONAL_GRAMMAR_CATALOG_SOURCE_BUNDLE_SHA256: &str =
     "d684799dc664553c9c746d5fe676a5b599f9efcec4cad5450bec7ec5a29574a9";
-/// Exact `ProjectAtlas` release line selected to consume the first pack.
-pub const OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION: &str = "0.4.2";
+/// Exact `ProjectAtlas` release selected to consume the pack.
+pub const OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION: &str = "0.5.0";
 /// Exact Tree-sitter runtime selected by the consuming parser worker.
-pub const OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION: &str = "0.26.9";
+pub const OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION: &str = "0.26.13";
 /// Oldest grammar ABI accepted by the selected Tree-sitter runtime.
 pub const OPTIONAL_PARSER_PACK_MINIMUM_ABI: u32 = 13;
 /// Newest grammar ABI accepted by the selected Tree-sitter runtime.
@@ -453,6 +453,56 @@ pub enum PackPlatform {
     /// Windows x86-64 MSVC target.
     #[serde(rename = "x86_64-pc-windows-msvc")]
     WindowsX86_64,
+}
+
+/// Closed runtime capability for the optional parser-pack boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum OptionalParserCapability {
+    /// The current tuple has an accepted pack and containment adapter.
+    Pack {
+        /// Accepted native target for the optional parser pack.
+        platform: PackPlatform,
+    },
+    /// The tuple has no optional pack, while built-in parsing remains available.
+    BuiltInOnly,
+}
+
+impl OptionalParserCapability {
+    /// Resolve one host tuple through the closed optional-parser authority.
+    #[must_use]
+    pub fn for_target(os: &str, architecture: &str) -> Self {
+        match (os, architecture) {
+            ("linux", "x86_64") => Self::Pack {
+                platform: PackPlatform::LinuxX86_64,
+            },
+            ("windows", "x86_64") => Self::Pack {
+                platform: PackPlatform::WindowsX86_64,
+            },
+            _ => Self::BuiltInOnly,
+        }
+    }
+
+    /// Resolve the capability for the process host tuple.
+    #[must_use]
+    pub fn current() -> Self {
+        Self::for_target(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    /// Return the accepted pack target, or `None` for built-in-only hosts.
+    #[must_use]
+    pub const fn pack_platform(self) -> Option<PackPlatform> {
+        match self {
+            Self::Pack { platform } => Some(platform),
+            Self::BuiltInOnly => None,
+        }
+    }
+
+    /// Return whether built-in parser coverage remains available.
+    #[must_use]
+    pub const fn built_in_parsing_available(self) -> bool {
+        true
+    }
 }
 
 impl PackPlatform {
@@ -2795,6 +2845,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn capability_authority_keeps_macos_arm64_builtin_only() -> Result<(), Box<dyn Error>> {
+        let macos_arm64 = OptionalParserCapability::for_target("macos", "aarch64");
+        require(
+            macos_arm64 == OptionalParserCapability::BuiltInOnly
+                && macos_arm64.pack_platform().is_none()
+                && macos_arm64.built_in_parsing_available(),
+            "macOS arm64 optional-parser capability drifted from built-in-only",
+        )?;
+        require(
+            OptionalParserCapability::for_target("linux", "x86_64")
+                == OptionalParserCapability::Pack {
+                    platform: PackPlatform::LinuxX86_64,
+                }
+                && OptionalParserCapability::for_target("windows", "x86_64")
+                    == OptionalParserCapability::Pack {
+                        platform: PackPlatform::WindowsX86_64,
+                    },
+            "supported optional-parser platform capability drifted",
+        )
+    }
+
     fn test_manifest() -> Result<OptionalParserPackManifest, Box<dyn Error>> {
         let revision = SourceRevision::new(RELEASE_REVISION)?;
         let licenses = vec![
@@ -2883,7 +2955,7 @@ mod tests {
             OptionalParserPackRuntime {
                 consumer: ParserPackConsumer::ProjectAtlasParserWorker,
                 projectatlas_version: OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION.to_string(),
-                tree_sitter_version: "0.26.9".to_string(),
+                tree_sitter_version: OPTIONAL_PARSER_PACK_TREE_SITTER_VERSION.to_string(),
                 minimum_abi: 13,
                 maximum_abi: 15,
             },

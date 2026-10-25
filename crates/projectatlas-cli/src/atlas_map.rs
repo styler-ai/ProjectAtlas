@@ -1,16 +1,18 @@
-//! Purpose: Generate and lint `ProjectAtlas` structure maps from Rust.
+//! Purpose: Render and lint `ProjectAtlas` structure maps from Rust.
 
 use blake3::Hasher;
 use projectatlas_core::{
-    Node, NodeKind,
+    CanonicalProjectRoot, Node, NodeKind,
     language::{BROAD_SOURCE_EXTENSIONS, canonical_language_id},
     validated_repo_file_key,
 };
 use projectatlas_db::AtlasStore;
-use projectatlas_fs::{ScanOptions, scan_repo};
+use projectatlas_fs::{ScanOptions, explicit_language_override, scan_repo};
+use projectatlas_symbols::document_format_for_path;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -18,8 +20,10 @@ use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 /// Legacy folder-purpose filename accepted only as migration input.
 const DEFAULT_LEGACY_PURPOSE_FILENAME: &str = ".purpose";
-/// Default generated map path.
+/// Default legacy map import path and adjacent JSON export location.
 const DEFAULT_MAP_PATH: &str = ".projectatlas/projectatlas.toon";
+/// Maximum bytes in a complete map response.
+pub(crate) const MAX_MAP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 /// Default non-source summary input path.
 const DEFAULT_NONSOURCE_PATH: &str = ".projectatlas/projectatlas-nonsource-files.toon";
 /// Durable `.projectatlas` inputs indexed by `SQLite` but ignored by legacy map/lint.
@@ -46,6 +50,9 @@ const OVERVIEW_KEYS: &[&str] = &[
 ];
 /// Source extensions scanned for Purpose metadata by default.
 const DEFAULT_SOURCE_EXTENSIONS: &[&str] = BROAD_SOURCE_EXTENSIONS;
+/// Document extensions admitted by the bounded document parser in addition to
+/// the frozen v0.3.26 broad-source compatibility set.
+const DOCUMENT_SOURCE_EXTENSIONS: &[&str] = &[".pdf", ".docx"];
 /// Directory names excluded from scans even when config is hand-edited.
 const REQUIRED_EXCLUDE_DIR_NAMES: &[&str] = &[".git", ".projectatlas"];
 /// Directory names excluded from scans by default.
@@ -82,6 +89,14 @@ const DEFAULT_LINE_COMMENT_PREFIXES: &[&str] = &["//", "#", "--", ";"];
 /// Atlas map operation errors.
 #[derive(Debug, Error)]
 pub(crate) enum AtlasMapError {
+    /// A complete map cannot fit in the supported response budget.
+    #[error("map response exceeds byte limit: observed {observed}, limit {limit}")]
+    ResponseLimitExceeded {
+        /// Encoded response size.
+        observed: usize,
+        /// Maximum supported response size.
+        limit: usize,
+    },
     /// Filesystem operation failed.
     #[error("io error for {path:?}: {source}")]
     Io {
@@ -160,7 +175,7 @@ struct RawConfig {
 struct RawProject {
     /// Repository root.
     root: Option<String>,
-    /// Generated map path.
+    /// Legacy map import path and adjacent JSON sidecar location.
     map_path: Option<String>,
     /// Non-source file summary path.
     nonsource_files_path: Option<String>,
@@ -233,7 +248,7 @@ struct RawUntracked {
 pub(crate) struct AtlasMapConfig {
     /// Repository root.
     pub(crate) root: PathBuf,
-    /// Generated TOON map path.
+    /// Lossless UTF-8 generated TOON map path, when one is available.
     pub(crate) map_path: PathBuf,
     /// Non-source file summary path.
     pub(crate) nonsource_files_path: PathBuf,
@@ -313,14 +328,14 @@ impl AtlasMapConfig {
 /// Serializable view of the effective `ProjectAtlas` configuration.
 #[derive(Debug, Serialize)]
 pub(crate) struct EffectiveConfigReport {
-    /// Repository root.
-    pub(crate) root: String,
-    /// Generated TOON map path.
-    pub(crate) map_path: String,
-    /// Non-source purpose registry path.
-    pub(crate) nonsource_files_path: String,
-    /// Durable `SQLite` index path.
-    pub(crate) db_path: String,
+    /// Lossless UTF-8 repository root, when one is available.
+    pub(crate) root: Option<String>,
+    /// Lossless UTF-8 generated TOON map path, when one is available.
+    pub(crate) map_path: Option<String>,
+    /// Lossless UTF-8 non-source purpose registry path, when one is available.
+    pub(crate) nonsource_files_path: Option<String>,
+    /// Lossless UTF-8 durable `SQLite` index path, when one is available.
+    pub(crate) db_path: Option<String>,
     /// Purpose metadata filename.
     pub(crate) purpose_filename: String,
     /// Source extensions treated as indexable project content.
@@ -352,7 +367,9 @@ pub(crate) struct EffectiveConfigReport {
 /// Build the effective configuration report used by agents and docs.
 pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfigReport {
     EffectiveConfigReport {
-        root: effective_config_path_display(&config.root),
+        root: CanonicalProjectRoot::from_path(&config.root)
+            .ok()
+            .and_then(|root| root.display_string().ok()),
         map_path: effective_config_path_display(&config.map_path),
         nonsource_files_path: effective_config_path_display(&config.nonsource_files_path),
         db_path: effective_config_path_display(&config.db_path),
@@ -372,16 +389,18 @@ pub(crate) fn effective_config_report(config: &AtlasMapConfig) -> EffectiveConfi
     }
 }
 
-/// Render canonical paths without leaking Windows extended-path prefixes.
+/// Render a native path without replacing non-UTF-8 units.
 #[cfg(windows)]
-fn effective_config_path_display(path: &Path) -> String {
-    projectatlas_core::normalize_native_path_display(path).replace('/', "\\")
+fn effective_config_path_display(path: &Path) -> Option<String> {
+    projectatlas_core::lossless_native_path_display(path)
+        .ok()
+        .map(|value| value.replace('/', "\\"))
 }
 
-/// Render native paths unchanged on hosts without Windows extended prefixes.
+/// Render a native path without replacing non-UTF-8 units.
 #[cfg(not(windows))]
-fn effective_config_path_display(path: &Path) -> String {
-    path.display().to_string()
+fn effective_config_path_display(path: &Path) -> Option<String> {
+    path.to_str().map(ToOwned::to_owned)
 }
 
 /// `ProjectAtlas` map record.
@@ -395,7 +414,7 @@ struct MapRecord {
     source: String,
 }
 
-/// Snapshot written to `ProjectAtlas` TOON.
+/// Snapshot rendered as a current `ProjectAtlas` map.
 #[derive(Debug)]
 struct AtlasSnapshot {
     /// Folder records.
@@ -455,6 +474,139 @@ pub(crate) struct LintOptions {
     pub(crate) strict_untracked: bool,
 }
 
+/// Typed map-owned portion of one lint result.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct MapLintReport {
+    /// Whether every map-owned check passed.
+    pub(crate) ok: bool,
+    /// Compatibility notices that do not fail lint.
+    pub(crate) notes: Vec<String>,
+    /// Validation state for the non-source purpose registry.
+    pub(crate) non_source: NonSourceLintReport,
+    /// Untracked-file inventory when requested.
+    pub(crate) untracked: Option<UntrackedLintReport>,
+}
+
+/// Typed non-source purpose-registry lint facts.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct NonSourceLintReport {
+    /// File-level parse or validation errors.
+    pub(crate) errors: Vec<String>,
+    /// Registry entries whose paths do not exist.
+    pub(crate) missing: Vec<String>,
+    /// Registry entries with invalid summaries, keyed by path.
+    pub(crate) invalid: BTreeMap<String, Vec<String>>,
+}
+
+/// Typed untracked-file lint inventory.
+#[derive(Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct UntrackedLintReport {
+    /// Total untracked non-source files found.
+    pub(crate) total: usize,
+    /// Files admitted by configured purpose or allow-list policy.
+    pub(crate) allowed: usize,
+    /// Files not admitted by configured purpose or allow-list policy.
+    pub(crate) disallowed: Vec<String>,
+    /// Disallowed file counts grouped by normalized extension.
+    pub(crate) disallowed_extension_counts: BTreeMap<String, usize>,
+    /// Allowed file counts grouped by normalized extension.
+    pub(crate) allowed_extension_counts: BTreeMap<String, usize>,
+    /// Configured asset roots that currently exist.
+    pub(crate) asset_roots_present: usize,
+    /// Asset files found outside configured asset roots.
+    pub(crate) assets_outside_roots: Vec<String>,
+    /// Existing paths excluded from source scanning.
+    pub(crate) excluded_paths_present: usize,
+    /// Whether disallowed untracked files fail lint.
+    pub(crate) strict: bool,
+}
+
+impl MapLintReport {
+    /// Return the CLI-compatible exit code for map-owned findings.
+    pub(crate) const fn exit_code(&self) -> i32 {
+        if self.ok { 0 } else { 1 }
+    }
+
+    /// Render the compatibility text from the same typed facts.
+    pub(crate) fn render_text(&self) -> String {
+        let mut report = self.notes.clone();
+        if let Some(untracked) = &self.untracked {
+            untracked.append_text(&mut report);
+        }
+        self.non_source.append_errors(&mut report);
+        if self
+            .untracked
+            .as_ref()
+            .is_some_and(|untracked| untracked.strict && !untracked.disallowed.is_empty())
+        {
+            report.push("Untracked files detected.".to_string());
+        }
+        join_report(&report)
+    }
+}
+
+impl NonSourceLintReport {
+    /// Return whether the non-source registry contains blocking findings.
+    fn is_empty(&self) -> bool {
+        self.errors.is_empty() && self.missing.is_empty() && self.invalid.is_empty()
+    }
+
+    /// Append compatibility text for blocking non-source findings.
+    fn append_errors(&self, report: &mut Vec<String>) {
+        if !self.errors.is_empty() {
+            report.push("Non-source file list errors:".to_string());
+            report.push(format_list(&self.errors));
+        }
+        if !self.missing.is_empty() {
+            report.push("Missing non-source file entries:".to_string());
+            report.push(format_list(&self.missing));
+        }
+        if !self.invalid.is_empty() {
+            report.push("Invalid non-source file summaries:".to_string());
+            report.extend(
+                self.invalid
+                    .iter()
+                    .map(|(path, issues)| format!(" - {path}: {}", issues.join(", "))),
+            );
+        }
+    }
+}
+
+impl UntrackedLintReport {
+    /// Append compatibility text for the typed untracked-file inventory.
+    fn append_text(&self, report: &mut Vec<String>) {
+        report.push(format!(
+            "Untracked files (non-source extensions): {} (allowed {}, disallowed {})",
+            self.total,
+            self.allowed,
+            self.disallowed.len()
+        ));
+        if self.disallowed.is_empty() {
+            report.push("Disallowed untracked files: 0".to_string());
+        } else {
+            report.push("Disallowed untracked files:".to_string());
+            report.push(format_list(&self.disallowed));
+            report.push("Disallowed extension counts:".to_string());
+            report.push(format_extension_counts(&self.disallowed_extension_counts));
+        }
+        report.push("Allowed untracked extension counts:".to_string());
+        report.push(if self.allowed_extension_counts.is_empty() {
+            " (none)".to_string()
+        } else {
+            format_extension_counts(&self.allowed_extension_counts)
+        });
+        report.push(format!("Asset roots present: {}", self.asset_roots_present));
+        if !self.assets_outside_roots.is_empty() {
+            report.push("Asset files outside allowed roots:".to_string());
+            report.push(format_list(&self.assets_outside_roots));
+        }
+        report.push(format!(
+            "Excluded paths present: {}",
+            self.excluded_paths_present
+        ));
+    }
+}
+
 /// Purpose record imported from legacy `ProjectAtlas` metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImportedPurposeRecord {
@@ -494,10 +646,10 @@ impl IgnoreEntryKind {
 /// Current `ProjectAtlas` ignore configuration report.
 #[derive(Debug, Serialize)]
 pub(crate) struct IgnoreListReport {
-    /// Config file used for the manual `ProjectAtlas` ignore layer.
-    pub(crate) config_path: String,
-    /// `.gitignore` file that the scanner will honor when it exists.
-    pub(crate) gitignore_path: String,
+    /// Lossless UTF-8 config path used for the manual `ProjectAtlas` ignore layer.
+    pub(crate) config_path: Option<String>,
+    /// Lossless UTF-8 `.gitignore` path that the scanner will honor when it exists.
+    pub(crate) gitignore_path: Option<String>,
     /// Whether a `.gitignore` file currently exists at the project root.
     pub(crate) gitignore_present: bool,
     /// Scanner behavior for `.gitignore`.
@@ -513,8 +665,8 @@ pub(crate) struct IgnoreListReport {
 /// Result of creating a project-root `.gitignore` when it is missing.
 #[derive(Debug, Serialize)]
 pub(crate) struct GitignoreInitReport {
-    /// `.gitignore` path that was checked.
-    pub(crate) gitignore_path: String,
+    /// Lossless UTF-8 `.gitignore` path that was checked, when one is available.
+    pub(crate) gitignore_path: Option<String>,
     /// Whether the file already existed before the command.
     pub(crate) existed: bool,
     /// Whether the command created the file.
@@ -526,10 +678,10 @@ pub(crate) struct GitignoreInitReport {
 /// Result of adding or removing a manual `ProjectAtlas` ignore entry.
 #[derive(Debug, Serialize)]
 pub(crate) struct IgnoreMutationReport {
-    /// Config file that was edited.
-    pub(crate) config_path: String,
-    /// `.gitignore` file that the scanner will honor when it exists.
-    pub(crate) gitignore_path: String,
+    /// Lossless UTF-8 config path that was edited, when one is available.
+    pub(crate) config_path: Option<String>,
+    /// Lossless UTF-8 `.gitignore` path that the scanner will honor when it exists.
+    pub(crate) gitignore_path: Option<String>,
     /// Whether a `.gitignore` file currently exists at the project root.
     pub(crate) gitignore_present: bool,
     /// Mutation action.
@@ -601,10 +753,6 @@ pub(crate) fn init_project_with_config(
     selected_config: Option<&Path>,
 ) -> AtlasMapResult<String> {
     let project_dir = root.join(".projectatlas");
-    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
-        path: project_dir.clone(),
-        source,
-    })?;
     let nested_config_path = project_dir.join("config.toml");
     let flat_config_path = root.join("projectatlas.toml");
     let config_path = selected_config.map_or_else(
@@ -619,7 +767,16 @@ pub(crate) fn init_project_with_config(
         },
         Path::to_path_buf,
     );
-    if !config_path.exists() {
+    let default_config = if config_path.exists() {
+        None
+    } else {
+        Some(default_config_text_for(root, &config_path)?)
+    };
+    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
+        path: project_dir.clone(),
+        source,
+    })?;
+    if let Some(default_config) = default_config {
         if let Some(parent) = config_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -629,11 +786,9 @@ pub(crate) fn init_project_with_config(
                 source,
             })?;
         }
-        fs::write(&config_path, default_config_text_for(root, &config_path)).map_err(|source| {
-            AtlasMapError::Io {
-                path: config_path.clone(),
-                source,
-            }
+        fs::write(&config_path, default_config).map_err(|source| AtlasMapError::Io {
+            path: config_path.clone(),
+            source,
         })?;
     }
     let nonsource_path = project_dir.join("projectatlas-nonsource-files.toon");
@@ -684,7 +839,7 @@ pub(crate) fn init_gitignore(
         })?;
     }
     Ok(GitignoreInitReport {
-        gitignore_path: gitignore_path.display().to_string(),
+        gitignore_path: effective_config_path_display(&gitignore_path),
         existed,
         created: !existed,
         gitignore_inherited: true,
@@ -767,12 +922,52 @@ pub(crate) fn remove_ignore_entry(
     ))
 }
 
-/// Generate and write the atlas map.
-pub(crate) fn write_map(config: &AtlasMapConfig, write_json: bool) -> AtlasMapResult<()> {
+/// Complete current map response and optional sidecar state.
+pub(crate) struct MapResponse {
+    /// Complete selected-format map content.
+    pub(crate) content: String,
+}
+
+/// Render a current map without writing a legacy TOON snapshot.
+pub(crate) fn render_map(
+    config: &AtlasMapConfig,
+    json_response: bool,
+    write_json: bool,
+) -> AtlasMapResult<MapResponse> {
+    render_map_with_limit(config, json_response, write_json, MAX_MAP_RESPONSE_BYTES)
+}
+
+/// Render under an explicit budget so refusal and no-write order are testable.
+fn render_map_with_limit(
+    config: &AtlasMapConfig,
+    json_response: bool,
+    write_json: bool,
+    response_limit: usize,
+) -> AtlasMapResult<MapResponse> {
     let snapshot = build_snapshot(config)?;
-    write_toon(&snapshot, config)?;
+    let content = if json_response {
+        render_json_map(&snapshot)?
+    } else {
+        render_toon(&snapshot, config)
+    };
+    enforce_map_response_limit(&content, response_limit)?;
     if write_json {
-        write_json_map(&snapshot, config)?;
+        if json_response {
+            write_json_map(&content, config)?;
+        } else {
+            write_json_map(&render_json_map(&snapshot)?, config)?;
+        }
+    }
+    Ok(MapResponse { content })
+}
+
+/// Refuse a partial response before any optional file mutation.
+pub(crate) fn enforce_map_response_limit(content: &str, limit: usize) -> AtlasMapResult<()> {
+    if content.len() > limit {
+        return Err(AtlasMapError::ResponseLimitExceeded {
+            observed: content.len(),
+            limit,
+        });
     }
     Ok(())
 }
@@ -918,31 +1113,40 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
         .collect())
 }
 
-/// Lint the atlas map and return a report plus exit code.
+/// Lint map-owned repository inputs and return typed facts.
 pub(crate) fn lint_map(
     config: &AtlasMapConfig,
     options: LintOptions,
-) -> AtlasMapResult<(String, i32)> {
+) -> AtlasMapResult<MapLintReport> {
     let paths = collect_repo_paths(config)?;
     let nonsource = read_nonsource_file_entries(config)?;
-    let mut report = Vec::new();
-    let mut errors = Vec::new();
-    if options.strict_folders {
-        report.push(
+    let notes = if options.strict_folders {
+        vec![
             "Note: --strict-folders is deprecated; database folder purpose linting uses --purpose-level."
                 .to_string(),
-        );
-    }
-
-    append_nonsource_errors(&mut errors, &nonsource);
-    if options.report_untracked {
-        append_untracked_report(&mut report, &mut errors, config, &paths, options)?;
-    }
-    if !errors.is_empty() {
-        report.extend(errors);
-        return Ok((join_report(&report), 1));
-    }
-    Ok((join_report(&report), 0))
+        ]
+    } else {
+        Vec::new()
+    };
+    let non_source = NonSourceLintReport {
+        errors: nonsource.errors,
+        missing: nonsource.missing,
+        invalid: nonsource.invalid,
+    };
+    let untracked = options
+        .report_untracked
+        .then(|| build_untracked_report(config, &paths, options))
+        .transpose()?;
+    let ok = non_source.is_empty()
+        && !untracked
+            .as_ref()
+            .is_some_and(|report| report.strict && !report.disallowed.is_empty());
+    Ok(MapLintReport {
+        ok,
+        notes,
+        non_source,
+        untracked,
+    })
 }
 
 /// Find a default config path under the current root.
@@ -1147,12 +1351,16 @@ fn normalize_config(
         purpose_filename: project
             .purpose_filename
             .unwrap_or_else(|| DEFAULT_LEGACY_PURPOSE_FILENAME.to_string()),
-        source_extensions: normalize_set(scan.source_extensions.unwrap_or_else(|| {
-            DEFAULT_SOURCE_EXTENSIONS
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })),
+        source_extensions: normalize_set(
+            scan.source_extensions
+                .filter(|extensions| {
+                    !extensions
+                        .iter()
+                        .map(String::as_str)
+                        .eq(DEFAULT_SOURCE_EXTENSIONS.iter().copied())
+                })
+                .unwrap_or_else(default_source_extensions),
+        ),
         exclude_dir_names: exclude_dir_name_set(scan.exclude_dir_names),
         exclude_dir_suffixes: string_set(scan.exclude_dir_suffixes, &[".egg-info"]),
         exclude_path_prefixes: normalize_prefix_set(scan.exclude_path_prefixes)?,
@@ -1326,8 +1534,8 @@ fn exclude_dir_name_set(values: Option<Vec<String>>) -> BTreeSet<String> {
 fn ignore_list_report(path: &Path, config: &AtlasMapConfig) -> IgnoreListReport {
     let gitignore_path = config.root.join(".gitignore");
     IgnoreListReport {
-        config_path: path.display().to_string(),
-        gitignore_path: gitignore_path.display().to_string(),
+        config_path: effective_config_path_display(path),
+        gitignore_path: effective_config_path_display(&gitignore_path),
         gitignore_present: gitignore_path.exists(),
         gitignore_mode: "inherited-when-present".to_string(),
         manual_layer_order: "after-gitignore".to_string(),
@@ -1347,8 +1555,8 @@ fn ignore_mutation_report(
 ) -> IgnoreMutationReport {
     let gitignore_path = config.root.join(".gitignore");
     IgnoreMutationReport {
-        config_path: path.display().to_string(),
-        gitignore_path: gitignore_path.display().to_string(),
+        config_path: effective_config_path_display(path),
+        gitignore_path: effective_config_path_display(&gitignore_path),
         gitignore_present: gitignore_path.exists(),
         action: action.to_string(),
         kind: kind.to_string(),
@@ -1531,25 +1739,11 @@ fn build_snapshot(config: &AtlasMapConfig) -> AtlasMapResult<AtlasSnapshot> {
         folder_tree,
         folder_duplicates,
         file_duplicates,
-        generated_at: stable_generated_at(config, &file_hash, &folder_hash),
+        generated_at: generated_at(),
         file_hash,
         folder_hash,
         overview,
     })
-}
-
-/// Preserve an existing timestamp when map contents are unchanged.
-fn stable_generated_at(config: &AtlasMapConfig, file_hash: &str, folder_hash: &str) -> String {
-    if let Ok(content) = fs::read_to_string(&config.map_path) {
-        let (existing_file_hash, existing_folder_hash) = read_hashes(&content);
-        if existing_file_hash.as_deref() == Some(file_hash)
-            && existing_folder_hash.as_deref() == Some(folder_hash)
-            && let Some(existing_generated_at) = read_generated_at(&content)
-        {
-            return existing_generated_at;
-        }
-    }
-    generated_at()
 }
 
 /// Return a simple UTC-ish generated timestamp.
@@ -1706,6 +1900,15 @@ fn extract_purpose_header_with_reader<E, F>(
 where
     F: FnMut(&Path) -> Result<String, E>,
 {
+    let extension = normalized_extension(rel_path);
+    let language =
+        explicit_language_override(rel_path, Some(&extension), &config.language_overrides);
+    if document_format_for_path(rel_path, language).is_some() {
+        return Ok((
+            None,
+            vec!["missing database purpose for document".to_owned()],
+        ));
+    }
     let content = read_text(path)?;
     let lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
     let style = resolve_purpose_style(rel_path, config);
@@ -2453,23 +2656,8 @@ fn format_overview(overview: &BTreeMap<String, usize>) -> String {
     format!("overview: {}", parts.join(" "))
 }
 
-/// Write TOON map to disk.
-fn write_toon(snapshot: &AtlasSnapshot, config: &AtlasMapConfig) -> AtlasMapResult<()> {
-    if let Some(parent) = config.map_path.parent() {
-        fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(&config.map_path, render_toon(snapshot, config)).map_err(|source| AtlasMapError::Io {
-        path: config.map_path.clone(),
-        source,
-    })
-}
-
-/// Write JSON map next to TOON map.
-fn write_json_map(snapshot: &AtlasSnapshot, config: &AtlasMapConfig) -> AtlasMapResult<()> {
-    let json_path = config.map_path.with_extension("json");
+/// Render the JSON map payload.
+fn render_json_map(snapshot: &AtlasSnapshot) -> AtlasMapResult<String> {
     let payload = serde_json::json!({
         "version": 1,
         "generated_at": snapshot.generated_at,
@@ -2483,12 +2671,107 @@ fn write_json_map(snapshot: &AtlasSnapshot, config: &AtlasMapConfig) -> AtlasMap
         "file_summary_duplicates": snapshot.file_duplicates,
         "folder_tree": snapshot.folder_tree,
     });
-    fs::write(&json_path, serde_json::to_string_pretty(&payload)? + "\n").map_err(|source| {
-        AtlasMapError::Io {
+    Ok(serde_json::to_string_pretty(&payload)? + "\n")
+}
+
+/// Write an explicitly requested JSON map next to the legacy import location.
+pub(crate) fn write_json_map(content: &str, config: &AtlasMapConfig) -> AtlasMapResult<()> {
+    let json_path = match config
+        .map_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some(extension) if extension.eq_ignore_ascii_case("json") => {
+            config.map_path.with_extension(format!("{extension}.json"))
+        }
+        _ => config.map_path.with_extension("json"),
+    };
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let legacy = match same_file::Handle::from_path(&config.map_path) {
+        Ok(handle) => Some(handle),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(&config.map_path) {
+                Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(AtlasMapError::Io {
+                        path: config.map_path.clone(),
+                        source: io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "legacy map is a dangling symlink",
+                        ),
+                    });
+                }
+                Ok(_) => {
+                    return Err(AtlasMapError::Io {
+                        path: config.map_path.clone(),
+                        source,
+                    });
+                }
+                Err(source) => {
+                    return Err(AtlasMapError::Io {
+                        path: config.map_path.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+        Err(source) => {
+            return Err(AtlasMapError::Io {
+                path: config.map_path.clone(),
+                source,
+            });
+        }
+    };
+    let mut output = match OpenOptions::new().write(true).open(&json_path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&json_path)
+            .map_err(|source| AtlasMapError::Io {
+                path: json_path.clone(),
+                source,
+            })?,
+        Err(source) => {
+            return Err(AtlasMapError::Io {
+                path: json_path,
+                source,
+            });
+        }
+    };
+    let identity =
+        same_file::Handle::from_file(output.try_clone().map_err(|source| AtlasMapError::Io {
+            path: json_path.clone(),
+            source,
+        })?)
+        .map_err(|source| AtlasMapError::Io {
+            path: json_path.clone(),
+            source,
+        })?;
+    if legacy.as_ref() == Some(&identity) {
+        return Err(AtlasMapError::Io {
+            path: json_path,
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSON sidecar aliases the legacy map",
+            ),
+        });
+    }
+    output.set_len(0).map_err(|source| AtlasMapError::Io {
+        path: json_path.clone(),
+        source,
+    })?;
+    output
+        .write_all(content.as_bytes())
+        .map_err(|source| AtlasMapError::Io {
             path: json_path,
             source,
-        }
-    })
+        })
 }
 
 /// Convert a map record to JSON.
@@ -2500,39 +2783,12 @@ fn record_json(record: &MapRecord) -> serde_json::Value {
     })
 }
 
-/// Append non-source validation errors.
-fn append_nonsource_errors(errors: &mut Vec<String>, nonsource: &NonsourceEntries) {
-    if !nonsource.errors.is_empty() {
-        errors.push("Non-source file list errors:".to_string());
-        errors.push(format_list(&nonsource.errors));
-    }
-    if !nonsource.missing.is_empty() {
-        errors.push("Missing non-source file entries:".to_string());
-        errors.push(format_list(&nonsource.missing));
-    }
-    if !nonsource.invalid.is_empty() {
-        errors.push("Invalid non-source file summaries:".to_string());
-        append_invalid_map(errors, &nonsource.invalid);
-    }
-}
-
-/// Append invalid path issue map.
-fn append_invalid_map(errors: &mut Vec<String>, invalid: &BTreeMap<String, Vec<String>>) {
-    errors.extend(
-        invalid
-            .iter()
-            .map(|(path, issues)| format!(" - {path}: {}", issues.join(", "))),
-    );
-}
-
-/// Append untracked-file report and optional errors.
-fn append_untracked_report(
-    report: &mut Vec<String>,
-    errors: &mut Vec<String>,
+/// Build the typed untracked-file inventory.
+fn build_untracked_report(
     config: &AtlasMapConfig,
     paths: &RepoPaths,
     options: LintOptions,
-) -> AtlasMapResult<()> {
+) -> AtlasMapResult<UntrackedLintReport> {
     let nonsource = read_nonsource_file_entries(config)?;
     let nonsource_paths = nonsource
         .records
@@ -2558,65 +2814,16 @@ fn append_untracked_report(
             disallowed.push(path.clone());
         }
     }
-    report.push(format!(
-        "Untracked files (non-source extensions): {} (allowed {}, disallowed {})",
-        paths.untracked_files.len(),
-        allowed.len(),
-        disallowed.len()
-    ));
-    if disallowed.is_empty() {
-        report.push("Disallowed untracked files: 0".to_string());
-    } else {
-        report.push("Disallowed untracked files:".to_string());
-        report.push(format_list(&disallowed));
-        report.push("Disallowed extension counts:".to_string());
-        report.push(format_list(&summarize_extensions(&disallowed)));
-    }
-    report.push("Allowed untracked extension counts:".to_string());
-    let allowed_summary = summarize_extensions(&allowed);
-    report.push(if allowed_summary.is_empty() {
-        " (none)".to_string()
-    } else {
-        format_list(&allowed_summary)
-    });
-    report.push(format!(
-        "Asset roots present: {}",
-        existing_asset_roots(config).len()
-    ));
-    if !asset_outside_roots.is_empty() {
-        report.push("Asset files outside allowed roots:".to_string());
-        report.push(format_list(&asset_outside_roots));
-    }
-    report.push(format!(
-        "Excluded paths present: {}",
-        paths.excluded_paths.len()
-    ));
-    if options.strict_untracked && !disallowed.is_empty() {
-        errors.push("Untracked files detected.".to_string());
-    }
-    Ok(())
-}
-
-/// Parse file and folder hashes from TOON.
-fn read_hashes(content: &str) -> (Option<String>, Option<String>) {
-    let mut file_hash = None;
-    let mut folder_hash = None;
-    for line in content.lines().map(str::trim) {
-        if let Some((_, value)) = line.split_once("file_hash:") {
-            file_hash = Some(value.trim().trim_matches('"').to_string());
-        }
-        if let Some((_, value)) = line.split_once("folder_hash:") {
-            folder_hash = Some(value.trim().trim_matches('"').to_string());
-        }
-    }
-    (file_hash, folder_hash)
-}
-
-/// Parse the generated timestamp from TOON.
-fn read_generated_at(content: &str) -> Option<String> {
-    content.lines().map(str::trim).find_map(|line| {
-        line.split_once("generated_at:")
-            .map(|(_, value)| value.trim().to_string())
+    Ok(UntrackedLintReport {
+        total: paths.untracked_files.len(),
+        allowed: allowed.len(),
+        disallowed_extension_counts: summarize_extensions(&disallowed),
+        allowed_extension_counts: summarize_extensions(&allowed),
+        asset_roots_present: existing_asset_roots(config).len(),
+        assets_outside_roots: asset_outside_roots,
+        excluded_paths_present: paths.excluded_paths.len(),
+        strict: options.strict_untracked,
+        disallowed,
     })
 }
 
@@ -2646,7 +2853,7 @@ fn existing_asset_roots(config: &AtlasMapConfig) -> Vec<String> {
 }
 
 /// Summarize extensions for reporting.
-fn summarize_extensions(paths: &[String]) -> Vec<String> {
+fn summarize_extensions(paths: &[String]) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for path in paths {
         let extension = normalized_extension(path);
@@ -2658,9 +2865,16 @@ fn summarize_extensions(paths: &[String]) -> Vec<String> {
         *counts.entry(key).or_default() += 1;
     }
     counts
-        .into_iter()
-        .map(|(extension, count)| format!("{extension}={count}"))
-        .collect()
+}
+
+/// Format deterministic extension counts as compatibility list items.
+fn format_extension_counts(counts: &BTreeMap<String, usize>) -> String {
+    format_list(
+        &counts
+            .iter()
+            .map(|(extension, count)| format!("{extension}={count}"))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Format report list items.
@@ -2730,24 +2944,25 @@ fn default_config_text() -> String {
 }
 
 /// Build default config text for a config file created by init.
-fn default_config_text_for(root: &Path, config_path: &Path) -> String {
-    default_config_text_with_root(&default_config_root_value(root, config_path))
+fn default_config_text_for(root: &Path, config_path: &Path) -> AtlasMapResult<String> {
+    Ok(default_config_text_with_root(&default_config_root_value(
+        root,
+        config_path,
+    )?))
 }
 
 /// Return the `[project].root` value that keeps an explicit init config bound to `root`.
-fn default_config_root_value(root: &Path, config_path: &Path) -> String {
+fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<String> {
     if config_path_is_projectatlas(Some(config_path)) {
-        return ".".to_string();
+        return Ok(".".to_string());
     }
     let Some(parent) = config_path.parent() else {
-        return ".".to_string();
+        return Ok(".".to_string());
     };
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let parent = parent
-        .canonicalize()
-        .unwrap_or_else(|_| parent.to_path_buf());
+    let parent = resolve_config_parent(parent);
     if parent == root {
-        return ".".to_string();
+        return Ok(".".to_string());
     }
     if let Ok(relative_parent) = parent.strip_prefix(&root) {
         let depth = relative_parent
@@ -2755,23 +2970,64 @@ fn default_config_root_value(root: &Path, config_path: &Path) -> String {
             .filter(|component| matches!(component, std::path::Component::Normal(_)))
             .count();
         if depth == 0 {
-            ".".to_string()
+            Ok(".".to_string())
         } else {
-            std::iter::repeat_n("..", depth)
+            Ok(std::iter::repeat_n("..", depth)
                 .collect::<Vec<_>>()
-                .join("/")
+                .join("/"))
         }
     } else {
-        root.to_string_lossy().replace('\\', "/")
+        projectatlas_core::lossless_native_path_display(&root).map_err(|_error| {
+            AtlasMapError::InvalidRepositoryPath {
+                path: "<native project root>".to_string(),
+                message: "cannot serialize a non-UTF-8 root into an external TOML config"
+                    .to_string(),
+            }
+        })
+    }
+}
+
+/// Resolve a config parent through existing symlinks while preserving missing native components.
+fn resolve_config_parent(parent: &Path) -> PathBuf {
+    let mut missing_components = Vec::new();
+    let mut candidate = parent;
+    loop {
+        match candidate.canonicalize() {
+            Ok(mut resolved) => {
+                for component in missing_components.iter().rev() {
+                    resolved.push(component);
+                }
+                return resolved;
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                let Some(component) = candidate.file_name() else {
+                    return parent.to_path_buf();
+                };
+                missing_components.push(component.to_os_string());
+                let Some(next) = candidate.parent() else {
+                    return parent.to_path_buf();
+                };
+                candidate = next;
+            }
+            Err(_) => return parent.to_path_buf(),
+        }
     }
 }
 
 /// Build default config text with the supplied project root value.
 fn default_config_text_with_root(root_value: &str) -> String {
-    let source_extensions = toml_array(DEFAULT_SOURCE_EXTENSIONS);
+    let default_source_extensions = default_source_extensions();
+    let source_extension_refs = default_source_extensions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let source_extensions = toml_array(&source_extension_refs);
     [
         "[project]",
-        &format!("root = \"{}\"", root_value.replace('"', "\\\"")),
+        &format!(
+            "root = \"{}\"",
+            root_value.replace('\\', "\\\\").replace('"', "\\\"")
+        ),
         "map_path = \".projectatlas/projectatlas.toon\"",
         "nonsource_files_path = \".projectatlas/projectatlas-nonsource-files.toon\"",
         "",
@@ -2807,6 +3063,15 @@ fn default_config_text_with_root(root_value: &str) -> String {
         "",
     ]
     .join("\n")
+}
+
+/// Return the normal source-extension defaults plus supported document files.
+fn default_source_extensions() -> Vec<String> {
+    DEFAULT_SOURCE_EXTENSIONS
+        .iter()
+        .chain(DOCUMENT_SOURCE_EXTENSIONS)
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Default `.gitignore` text created only by the explicit setup helper.
@@ -2851,16 +3116,20 @@ impl From<serde_json::Error> for AtlasMapError {
 mod tests {
     use super::{
         AtlasMapConfig, AtlasMapError, DEFAULT_TEXT_INDEX_MAX_BYTES, IgnoreEntryKind, MapRecord,
-        add_ignore_entry, append_existing_map_purpose_records, append_record_rows,
-        collect_repo_paths, default_config_root_value, exclude_dir_name_set,
-        extract_block_comment_purpose, extract_line_comment_purpose, load_atlas_config_from_text,
-        normalize_repo_string, project_root_for_projectatlas_config, remove_ignore_entry,
-        split_record_cells, stable_generated_at, toon_cell,
+        add_ignore_entry, append_existing_map_purpose_records, append_record_rows, build_snapshot,
+        collect_repo_paths, default_config_root_value, enforce_map_response_limit,
+        exclude_dir_name_set, extract_block_comment_purpose, extract_line_comment_purpose,
+        load_atlas_config_from_text, normalize_repo_string, project_root_for_projectatlas_config,
+        remove_ignore_entry, render_map_with_limit, split_record_cells, toon_cell, write_json_map,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink as symlink_file;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file;
     use std::path::Path;
 
     fn test_config(map_path: std::path::PathBuf) -> AtlasMapConfig {
@@ -2894,6 +3163,253 @@ mod tests {
             purpose_default_style: "line-comment".to_string(),
             line_comment_prefixes: vec!["//".to_string()],
         }
+    }
+
+    #[test]
+    fn json_sidecar_never_aliases_custom_legacy_json_path() -> Result<(), Box<dyn Error>> {
+        for (name, sidecar) in [
+            ("legacy.json", "legacy.json.json"),
+            ("legacy.JSON", "legacy.JSON.json"),
+            ("legacy.toon", "legacy.json"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let legacy = temp.path().join(name);
+            fs::write(&legacy, "legacy purpose input")?;
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone()))?;
+            if fs::read_to_string(&legacy)? != "legacy purpose input"
+                || fs::read_to_string(temp.path().join(sidecar))? != "{\"files\":[]}"
+            {
+                return Err(io::Error::other(format!(
+                    "JSON sidecar overwrote the legacy map for {name}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_sidecar_refuses_hard_link_without_changing_legacy_import() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let legacy = temp.path().join("legacy.toon");
+        let sidecar = temp.path().join("legacy.json");
+        fs::write(&legacy, "legacy purpose input")?;
+        fs::hard_link(&legacy, &sidecar)?;
+        if !matches!(
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone())),
+            Err(AtlasMapError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ) {
+            return Err(io::Error::other("JSON sidecar did not refuse a legacy hard link").into());
+        }
+        if fs::read_to_string(&legacy)? != "legacy purpose input"
+            || fs::read_to_string(&sidecar)? != "legacy purpose input"
+        {
+            return Err(io::Error::other("JSON sidecar changed the hard-linked legacy map").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn json_sidecar_refuses_symlink_without_changing_legacy_import() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let legacy = temp.path().join("legacy.toon");
+        let sidecar = temp.path().join("legacy.json");
+        fs::write(&legacy, "legacy purpose input")?;
+        let linked = symlink_file(&legacy, &sidecar);
+        #[cfg(windows)]
+        if matches!(&linked, Err(source) if source.raw_os_error() == Some(1314)) {
+            return Ok(());
+        }
+        linked?;
+        if !matches!(
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone())),
+            Err(AtlasMapError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ) {
+            return Err(io::Error::other("JSON sidecar did not refuse a legacy symlink").into());
+        }
+        if fs::read_to_string(&legacy)? != "legacy purpose input"
+            || !fs::symlink_metadata(&sidecar)?.file_type().is_symlink()
+        {
+            return Err(io::Error::other("JSON sidecar changed the symlinked legacy map").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn json_sidecar_refuses_dangling_legacy_symlink_before_creation() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let legacy = temp.path().join("legacy.toon");
+        let sidecar = temp.path().join("legacy.json");
+        let linked = symlink_file(&sidecar, &legacy);
+        #[cfg(windows)]
+        if matches!(&linked, Err(source) if source.raw_os_error() == Some(1314)) {
+            return Ok(());
+        }
+        linked?;
+        if !matches!(
+            write_json_map("{\"files\":[]}", &test_config(legacy.clone())),
+            Err(AtlasMapError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput
+        ) {
+            return Err(
+                io::Error::other("JSON sidecar did not refuse a dangling legacy symlink").into(),
+            );
+        }
+        if fs::symlink_metadata(&sidecar).is_ok() || fs::read_link(&legacy)? != sidecar {
+            return Err(io::Error::other("JSON sidecar mutated a dangling legacy symlink").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn json_sidecar_update_preserves_existing_file_identity() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let sidecar = temp.path().join("legacy.json");
+        fs::write(&sidecar, "old")?;
+        let identity = same_file::Handle::from_path(&sidecar)?;
+        write_json_map("new", &test_config(temp.path().join("legacy.toon")))?;
+        if same_file::Handle::from_path(&sidecar)? != identity
+            || fs::read_to_string(&sidecar)? != "new"
+        {
+            return Err(io::Error::other("JSON sidecar replacement changed file identity").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn map_response_limit_refuses_complete_oversize_content() -> Result<(), Box<dyn Error>> {
+        enforce_map_response_limit("abcd", 4)?;
+        if !matches!(
+            enforce_map_response_limit("abcde", 4),
+            Err(AtlasMapError::ResponseLimitExceeded {
+                observed: 5,
+                limit: 4
+            })
+        ) {
+            return Err(io::Error::other("map response limit did not report exact bytes").into());
+        }
+        let temp = tempfile::tempdir()?;
+        let map_path = temp.path().join("projectatlas.toon");
+        let config = test_config(map_path.clone());
+        fs::write(
+            temp.path().join("source.rs"),
+            "// Purpose: Map budget fixture.\n",
+        )?;
+        if !matches!(
+            render_map_with_limit(&config, false, true, 1),
+            Err(AtlasMapError::ResponseLimitExceeded { limit: 1, .. })
+        ) || map_path.exists()
+            || map_path.with_extension("json").exists()
+        {
+            return Err(io::Error::other(
+                "oversized map response wrote a file or lost its typed refusal",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn document_map_records_preserve_purposes_without_reading_binary_headers()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let config = test_config(temp.path().join("projectatlas.toon"));
+        for path in ["guide.pdf", "guide.DOCX", "approved.docx"] {
+            fs::write(temp.path().join(path), b"\xff\xfe binary document")?;
+        }
+        fs::write(
+            temp.path().join("lib.rs"),
+            "// Purpose: Explain source ownership.\n",
+        )?;
+        let files = ["guide.pdf", "guide.DOCX", "approved.docx", "lib.rs"].map(str::to_owned);
+        let purposes = BTreeMap::from([(
+            "approved.docx".to_owned(),
+            "Explain document ownership.".to_owned(),
+        )]);
+        let (records, missing, invalid) = super::build_file_records(&files, &config, &purposes)?;
+        let actual = records
+            .iter()
+            .map(|record| {
+                (
+                    record.path.as_str(),
+                    record.summary.as_str(),
+                    record.source.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if missing != ["guide.pdf", "guide.DOCX"]
+            || !invalid.is_empty()
+            || actual
+                != [
+                    ("guide.pdf", "MISSING", "missing"),
+                    ("guide.DOCX", "MISSING", "missing"),
+                    ("approved.docx", "Explain document ownership.", "database"),
+                    ("lib.rs", "Explain source ownership.", "header"),
+                ]
+        {
+            return Err(io::Error::other("map changed binary or text purpose ownership").into());
+        }
+        fs::write(temp.path().join("invalid.rs"), b"\xff")?;
+        if super::build_file_records(&["invalid.rs".to_owned()], &config, &purposes).is_ok() {
+            return Err(io::Error::other("map accepted invalid UTF-8 source headers").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn document_map_headers_follow_scanner_language_overrides() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        for (path, overrides, text_header) in [
+            ("guide.pdf", vec![(".pdf", "rust")], true),
+            ("guide.DOCX", vec![(".docx", "rust")], true),
+            ("guide.rs", vec![(".rs", "pdf")], false),
+            ("guide.rs", vec![("guide.rs", "docx")], false),
+            (
+                "guide.pdf",
+                vec![(".pdf", "pdf"), ("guide.pdf", "rust")],
+                true,
+            ),
+            (
+                "guide.text.pdf",
+                vec![(".pdf", "pdf"), (".text.pdf", "rust")],
+                true,
+            ),
+        ] {
+            let mut config = test_config(temp.path().join("projectatlas.toon"));
+            config.language_overrides = overrides
+                .into_iter()
+                .map(|(selector, language)| (selector.to_owned(), language.to_owned()))
+                .collect();
+            fs::write(
+                temp.path().join(path),
+                if text_header {
+                    b"// Purpose: Explain configured source ownership.\n".as_slice()
+                } else {
+                    b"\xff\xfe binary document"
+                },
+            )?;
+            let (records, missing, invalid) =
+                super::build_file_records(&[path.to_owned()], &config, &BTreeMap::new())?;
+            let expected = if text_header {
+                "Explain configured source ownership."
+            } else {
+                "MISSING"
+            };
+            if records.len() != 1
+                || records[0].summary != expected
+                || missing.is_empty() != text_header
+                || !invalid.is_empty()
+            {
+                return Err(io::Error::other(format!(
+                    "map ignored language override for {path}: {records:?}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -3012,6 +3528,43 @@ root = "."
     }
 
     #[test]
+    fn config_extends_only_the_exact_generated_source_extension_list() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join(".projectatlas").join("config.toml");
+        let legacy = super::DEFAULT_SOURCE_EXTENSIONS.to_vec();
+        let mut reordered = legacy.clone();
+        reordered.reverse();
+        for (extensions, documents) in [
+            (legacy, true),
+            (vec![".rs"], false),
+            (reordered, false),
+            (Vec::new(), false),
+        ] {
+            let text = format!(
+                "[project]\nroot = \".\"\n[scan]\nsource_extensions = {}\n",
+                serde_json::to_string(&extensions)?
+            );
+            let config = load_atlas_config_from_text(&path, &text)?;
+            if config.source_extensions.contains(".pdf") != documents
+                || config.source_extensions.contains(".docx") != documents
+                || (!documents
+                    && config.source_extensions
+                        != extensions
+                            .iter()
+                            .map(|value| value.to_ascii_lowercase())
+                            .collect())
+            {
+                return Err(io::Error::other(format!(
+                    "legacy defaults or custom extension policy changed incorrectly: documents={documents}, input={extensions:?}, actual={:?}", config.source_extensions,
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn config_root_uses_one_canonical_database_identity() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let nested = temp.path().join("nested");
@@ -3026,6 +3579,31 @@ root = "."
             return Err(io::Error::other(format!(
                 "config did not share one canonical database identity: {config:?}"
             ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_config_report_does_not_replace_native_root_bytes() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        fs::create_dir(&raw_root)?;
+        let config = super::load_atlas_config_for_root(&raw_root)?;
+        let report = super::effective_config_report(&config);
+        let value = serde_json::to_value(report)?;
+        if value.get("root") != Some(&serde_json::Value::Null)
+            || value.get("map_path") != Some(&serde_json::Value::Null)
+            || value.get("db_path") != Some(&serde_json::Value::Null)
+            || value.to_string().contains("repo-�")
+        {
+            return Err(io::Error::other(
+                "effective config report exposed a lossy native root projection",
+            )
             .into());
         }
         Ok(())
@@ -3232,7 +3810,7 @@ root = "."
             (config_dir.join("projectatlas.toml"), "../.."),
         ];
         for (config_path, expected_root) in cases {
-            let actual_root = default_config_root_value(root, &config_path);
+            let actual_root = default_config_root_value(root, &config_path)?;
             if actual_root != expected_root {
                 return Err(std::io::Error::other(format!(
                     "default config root mismatch for {config_path:?}: expected {expected_root}, got {actual_root}"
@@ -3243,26 +3821,236 @@ root = "."
         Ok(())
     }
 
+    #[cfg(windows)]
     #[test]
-    fn generated_at_is_stable_when_map_hashes_match() -> Result<(), Box<dyn std::error::Error>> {
+    fn external_config_preserves_absolute_volume_guid_root() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
-        let map_path = temp.path().join("projectatlas.toon");
-        std::fs::write(
-            &map_path,
-            "version: 1\ngenerated_at: unix:123\nfile_hash: \"files\"\nfolder_hash: \"folders\"\n",
-        )?;
-        let config = test_config(map_path);
+        let root = Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
 
-        let unchanged_generated_at = stable_generated_at(&config, "files", "folders");
-        if unchanged_generated_at != "unix:123" {
-            return Err(std::io::Error::other(format!(
-                "expected stable timestamp, got {unchanged_generated_at}"
+        let text = super::default_config_text_for(root, &config_path)?;
+        let expected = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("synthetic volume-GUID root was not UTF-8"))?;
+        let parsed = toml::from_str::<toml::Value>(&text)?;
+        let decoded = parsed
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("root"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("generated volume-GUID root was not a TOML string"))?;
+        if !Path::new(decoded).is_absolute() || decoded != expected {
+            return Err(io::Error::other(format!(
+                "generated volume-GUID root lost its absolute native spelling: {decoded:?}"
             ))
             .into());
         }
-        let changed_generated_at = stable_generated_at(&config, "changed", "folders");
-        if changed_generated_at == "unix:123" {
-            return Err(std::io::Error::other("stale timestamp survived hash change").into());
+        let escaped = expected.replace('\\', "\\\\");
+        if !text.contains(&format!("root = \"{escaped}\"")) {
+            return Err(io::Error::other("generated volume-GUID root was not TOML-escaped").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reports_preserve_absolute_volume_guid_paths() -> Result<(), Box<dyn Error>> {
+        let root = Path::new(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\repo");
+        let config_path = root.join(".projectatlas").join("config.toml");
+        let map_path = root.join(".projectatlas").join("projectatlas.toon");
+        let nonsource_path = root
+            .join(".projectatlas")
+            .join("projectatlas-nonsource-files.toon");
+        let database_path = root.join(".projectatlas").join("projectatlas.db");
+        let mut config = test_config(map_path.clone());
+        config.root = root.to_path_buf();
+        config.nonsource_files_path = nonsource_path;
+        config.db_path = database_path;
+        let expected = |path: &Path| path.to_str().map(ToOwned::to_owned);
+
+        let effective = super::effective_config_report(&config);
+        if effective.map_path != expected(&map_path)
+            || effective.nonsource_files_path != expected(&config.nonsource_files_path)
+            || effective.db_path != expected(&config.db_path)
+        {
+            return Err(io::Error::other(format!(
+                "effective config report changed the volume-GUID spelling: {effective:?}"
+            ))
+            .into());
+        }
+
+        let ignore = super::ignore_list_report(&config_path, &config);
+        if ignore.config_path != expected(&config_path)
+            || ignore.gitignore_path != expected(&root.join(".gitignore"))
+        {
+            return Err(io::Error::other(format!(
+                "ignore list report changed the volume-GUID spelling: {ignore:?}"
+            ))
+            .into());
+        }
+        let mutation =
+            super::ignore_mutation_report(&config_path, "add", "dir-name", "target", true, &config);
+        if mutation.config_path != expected(&config_path)
+            || mutation.gitignore_path != expected(&root.join(".gitignore"))
+        {
+            return Err(io::Error::other(format!(
+                "ignore mutation report changed the volume-GUID spelling: {mutation:?}"
+            ))
+            .into());
+        }
+
+        if super::effective_config_path_display(Path::new(r"\\?\C:\repo\file"))
+            != Some(r"C:\repo\file".to_string())
+            || super::effective_config_path_display(Path::new(r"\\?\UNC\server\share\repo\file"))
+                != Some(r"\\server\share\repo\file".to_string())
+        {
+            return Err(io::Error::other(
+                "ordinary extended drive or UNC display was not normalized",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_config_preserves_verbatim_drive_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = Path::new(r"\\?\C:\repo\folder.");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+        let text = super::default_config_text_for(root, &config_path)?;
+        let expected = root
+            .to_str()
+            .ok_or_else(|| io::Error::other("synthetic verbatim root was not UTF-8"))?;
+        let parsed = toml::from_str::<toml::Value>(&text)?;
+        let decoded = parsed
+            .get("project")
+            .and_then(toml::Value::as_table)
+            .and_then(|project| project.get("root"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| io::Error::other("generated verbatim root was not a TOML string"))?;
+        if !Path::new(decoded).is_absolute() || decoded != expected {
+            return Err(io::Error::other(format!(
+                "generated verbatim root changed its absolute spelling: {decoded:?}"
+            ))
+            .into());
+        }
+        let escaped = expected.replace('\\', "\\\\");
+        if !text.contains(&format!("root = \"{escaped}\"")) {
+            return Err(io::Error::other("generated verbatim root was not TOML-escaped").into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_through_symlink_preserves_canonical_project_root()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        symlink(&outside, root.join("link"))?;
+
+        let config_path = root.join("link").join("nested").join("projectatlas.toml");
+        super::init_project_with_config(&root, Some(&config_path))?;
+
+        let config = super::load_atlas_config(Some(&config_path))?;
+        let expected_root = root.canonicalize()?;
+        if config.root != expected_root {
+            return Err(io::Error::other(format!(
+                "symlinked external config selected {:?}, expected {expected_root:?}",
+                config.root
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_preserves_unix_backslash_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo\\name");
+        let config_path = temp.path().join("external").join("projectatlas.toml");
+        fs::create_dir(&root)?;
+
+        super::init_project_with_config(&root, Some(&config_path))?;
+
+        let config_text = fs::read_to_string(&config_path)?;
+        if !config_text.contains("repo\\\\name") {
+            return Err(io::Error::other(
+                "external config did not TOML-escape its literal Unix backslash",
+            )
+            .into());
+        }
+        let config = super::load_atlas_config(Some(&config_path))?;
+        let expected_root = root.canonicalize()?;
+        if config.root != expected_root {
+            return Err(io::Error::other(format!(
+                "external config selected {:?}, expected {expected_root:?}",
+                config.root
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_config_rejects_non_utf8_root_before_writes() -> Result<(), Box<dyn Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir()?;
+        let raw_root = temp.path().join(OsString::from_vec(b"repo-\x80".to_vec()));
+        let config_parent = temp.path().join("external-config").join("nested");
+        let config_path = config_parent.join("projectatlas.toml");
+        fs::create_dir(&raw_root)?;
+
+        let result = super::init_project_with_config(&raw_root, Some(&config_path));
+
+        if !matches!(result, Err(AtlasMapError::InvalidRepositoryPath { .. })) {
+            return Err(io::Error::other(format!(
+                "external config initialization returned an unexpected result: {result:?}"
+            ))
+            .into());
+        }
+        if raw_root.join(".projectatlas").exists() || config_parent.exists() || config_path.exists()
+        {
+            return Err(io::Error::other(
+                "external config refusal left project or config filesystem state",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_at_is_render_time_not_legacy_snapshot_time() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let map_path = temp.path().join("projectatlas.toon");
+        let config = test_config(map_path.clone());
+        let first = build_snapshot(&config)?;
+        fs::write(
+            &map_path,
+            format!(
+                "version: 1\ngenerated_at: unix:123\nfile_hash: \"{}\"\nfolder_hash: \"{}\"\n",
+                first.file_hash, first.folder_hash
+            ),
+        )?;
+        let second = build_snapshot(&config)?;
+        if second.generated_at == "unix:123"
+            || !second.generated_at.starts_with("unix:")
+            || first.file_hash != second.file_hash
+            || first.folder_hash != second.folder_hash
+        {
+            return Err(
+                io::Error::other("map render reused a legacy timestamp or changed hashes").into(),
+            );
         }
         Ok(())
     }

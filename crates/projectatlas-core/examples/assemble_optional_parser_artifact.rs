@@ -2368,9 +2368,9 @@ fn linux_loader_dependency_removal(
     let section_flags = dynamic_section.sh_flags(endian);
     if dynamic_section.sh_addr(endian) != dynamic_address
         || dynamic_section.sh_entsize(endian) != u64::try_from(ELF64_DYNAMIC_ENTRY_BYTES)?
-        || section_flags & u64::from(object::elf::SHF_ALLOC) == 0
-        || section_flags & u64::from(object::elf::SHF_WRITE) == 0
-        || section_flags & u64::from(object::elf::SHF_EXECINSTR) != 0
+        || !section_flags.contains(object::elf::SHF_ALLOC)
+        || !section_flags.contains(object::elf::SHF_WRITE)
+        || section_flags.contains(object::elf::SHF_EXECINSTR)
     {
         return Err(invalid(
             "parser worker ELF dynamic section has an unsupported load-image shape",
@@ -2401,9 +2401,9 @@ fn linux_loader_dependency_removal(
             || dynamic_file_end > load_file_end
             || dynamic_memory_end > load_memory_end
             || load_address.checked_add(dynamic_offset - load_offset) != Some(dynamic_address)
-            || flags & object::elf::PF_R == 0
-            || flags & object::elf::PF_W == 0
-            || flags & object::elf::PF_X != 0
+            || !flags.contains(object::elf::PF_R)
+            || !flags.contains(object::elf::PF_W)
+            || flags.contains(object::elf::PF_X)
         {
             continue;
         }
@@ -2694,13 +2694,19 @@ fn inspect_executable_exports(
     platform: PackPlatform,
     role: &str,
 ) -> ToolResult<Vec<String>> {
-    let exports = object.exports()?;
-    if exports.len() > MAX_EXPORTS_PER_WORKER {
-        return Err(invalid(format!("{role} exports exceed the audit bound")));
-    }
-    let mut normalized = Vec::with_capacity(exports.len());
-    for export in exports {
-        let symbol = normalize_export(std::str::from_utf8(export.name())?, platform).to_owned();
+    let mut normalized = Vec::new();
+    for export in object
+        .exports()?
+        .take(MAX_EXPORTS_PER_WORKER.saturating_add(1))
+    {
+        let export = export?;
+        let export_name = export.name();
+        let name = export_name
+            .name()
+            .ok_or_else(|| invalid(format!("{role} has an ordinal export")))?;
+        let name = std::str::from_utf8(name)?;
+        validate_native_audit_name(name, "executable export")?;
+        let symbol = normalize_export(name, platform).to_owned();
         validate_native_audit_name(&symbol, "executable export")?;
         if symbol.starts_with(TREE_SITTER_SYMBOL_PREFIX) {
             return Err(invalid(format!(
@@ -2708,6 +2714,9 @@ fn inspect_executable_exports(
             )));
         }
         normalized.push(symbol);
+        if normalized.len() > MAX_EXPORTS_PER_WORKER {
+            return Err(invalid(format!("{role} exports exceed the audit bound")));
+        }
     }
     normalized.sort_unstable();
     Ok(normalized)
@@ -2727,6 +2736,7 @@ fn inspect_worker_defined_symbols(
         if name.is_empty() {
             continue;
         }
+        validate_native_audit_name(name, "parser worker defined symbol")?;
         let normalized = normalize_export(name, platform).to_owned();
         validate_native_audit_name(&normalized, "parser worker defined symbol")?;
         if normalized.starts_with(TREE_SITTER_SYMBOL_PREFIX) {
@@ -2829,7 +2839,10 @@ fn inspect_clr_runtime_header(object: &NativeObject<'_>) -> ToolResult<(u32, u32
         .map_err(|()| invalid("runtime-containment broker CLR header is truncated"))?;
     let (metadata_rva, metadata_size) = header.meta_data.address_range();
     if header.cb.get(LE) != expected_size
-        || header.flags.get(LE) & object::pe::COMIMAGE_FLAGS_NATIVE_ENTRYPOINT != 0
+        || header
+            .flags
+            .get(LE)
+            .contains(object::pe::COMIMAGE_FLAGS_NATIVE_ENTRYPOINT)
         || header.entry_point_token_or_rva.get(LE) == 0
         || metadata_rva == 0
         || metadata_size == 0
@@ -2870,10 +2883,6 @@ fn validate_exports(
     expected: &str,
     platform: PackPlatform,
 ) -> ToolResult<()> {
-    let exports = object.exports()?;
-    if exports.len() > MAX_EXPORTS_PER_LIBRARY {
-        return Err(invalid("native library exports exceed the audit bound"));
-    }
     let allowed = std::iter::once(expected.to_owned())
         .chain(
             EXTERNAL_SCANNER_EXPORT_SUFFIXES
@@ -2882,8 +2891,23 @@ fn validate_exports(
         )
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
-    for export in exports {
-        let raw = std::str::from_utf8(export.name())?;
+    let mut export_count = 0;
+    for export in object
+        .exports()?
+        .take(MAX_EXPORTS_PER_LIBRARY.saturating_add(1))
+    {
+        let export = export?;
+        export_count += 1;
+        if export_count > MAX_EXPORTS_PER_LIBRARY {
+            return Err(invalid("native library exports exceed the audit bound"));
+        }
+        let export_name = export.name();
+        let raw = std::str::from_utf8(
+            export_name
+                .name()
+                .ok_or_else(|| invalid("native library has an ordinal export"))?,
+        )?;
+        validate_native_audit_name(raw, "native export")?;
         let normalized = normalize_export(raw, platform);
         validate_native_audit_name(normalized, "native export")?;
         if !normalized.starts_with("tree_sitter_") {
@@ -2913,13 +2937,22 @@ fn inspect_imports(
     object: &NativeObject<'_>,
     platform: PackPlatform,
 ) -> ToolResult<(BTreeSet<String>, BTreeSet<String>)> {
-    let imports = object.imports()?;
+    let imports = object
+        .imports()?
+        .take(MAX_IMPORTS_PER_LIBRARY.saturating_add(1))
+        .collect::<Result<Vec<_>, _>>()?;
     if imports.len() > MAX_IMPORTS_PER_LIBRARY {
         return Err(invalid("native imports exceed the audit bound"));
     }
     let mut symbols = BTreeSet::new();
     for import in &imports {
-        let symbol = std::str::from_utf8(import.name())?;
+        let import_name = import.name();
+        let symbol = std::str::from_utf8(
+            import_name
+                .name()
+                .ok_or_else(|| invalid("native import by ordinal cannot be policy-audited"))?,
+        )?;
+        validate_native_audit_name(symbol, "native import")?;
         let normalized = normalize_import_symbol(symbol);
         validate_native_audit_name(&normalized, "native import")?;
         symbols.insert(normalized);
@@ -2958,7 +2991,12 @@ where
     let mut libraries = BTreeSet::new();
     for dynamic in &table {
         if dynamic.tag == object::elf::DT_NEEDED {
-            libraries.insert(std::str::from_utf8(table.string(dynamic)?)?.to_owned());
+            let name = std::str::from_utf8(table.string(dynamic)?)?;
+            validate_native_audit_name(name, "native dependency")?;
+            libraries.insert(name.to_owned());
+            if libraries.len() > MAX_NATIVE_LIBRARIES_PER_LIBRARY {
+                return Err(invalid("native dependency count exceeds the audit bound"));
+            }
         }
     }
     Ok(libraries)
@@ -2975,7 +3013,12 @@ where
     while let Some(command) = commands.next()? {
         if let Some(dylib) = command.dylib()? {
             let name = command.string(endian, dylib.dylib.name)?;
-            libraries.insert(std::str::from_utf8(name)?.to_owned());
+            let name = std::str::from_utf8(name)?;
+            validate_native_audit_name(name, "native dependency")?;
+            libraries.insert(name.to_owned());
+            if libraries.len() > MAX_NATIVE_LIBRARIES_PER_LIBRARY {
+                return Err(invalid("native dependency count exceeds the audit bound"));
+            }
         }
     }
     Ok(libraries)
@@ -2992,26 +3035,51 @@ where
 {
     let mut libraries = normal_imports
         .iter()
-        .map(|import| std::str::from_utf8(import.library()).map(str::to_owned))
+        .map(|import| {
+            let library = std::str::from_utf8(import.library())?;
+            validate_native_audit_name(library, "native dependency")?;
+            Ok::<_, Box<dyn Error>>(library.to_owned())
+        })
         .collect::<Result<BTreeSet<_>, _>>()?;
     if let Some(table) = file
         .data_directories()
         .delay_load_import_table(file.data(), &file.section_table())?
     {
         let mut descriptors = table.descriptors()?;
+        let mut delay_descriptor_count = 0;
         while let Some(descriptor) = descriptors.next()? {
+            delay_descriptor_count += 1;
+            if delay_descriptor_count > MAX_NATIVE_LIBRARIES_PER_LIBRARY {
+                return Err(invalid(
+                    "native delay-import descriptor count exceeds the audit bound",
+                ));
+            }
             if descriptor.attributes.get(LE) != object::pe::IMAGE_DELAYLOAD_RVA_BASED {
                 return Err(invalid("unsupported non-RVA PE delay-import descriptor"));
             }
             let library = std::str::from_utf8(table.name(descriptor.dll_name_rva.get(LE))?)?;
+            validate_native_audit_name(library, "native dependency")?;
             libraries.insert(library.to_owned());
+            if libraries.len() > MAX_NATIVE_LIBRARIES_PER_LIBRARY {
+                return Err(invalid("native dependency count exceeds the audit bound"));
+            }
             let mut thunks = table.thunks(descriptor.import_name_table_rva.get(LE))?;
+            let mut delay_import_count = 0;
             while let Some(thunk) = thunks.next::<Pe>()? {
+                delay_import_count += 1;
+                if delay_import_count > MAX_IMPORTS_PER_LIBRARY {
+                    return Err(invalid("native delay-import count exceeds the audit bound"));
+                }
                 match table.import::<Pe>(thunk)? {
                     PeImport::Name(_, name) => {
-                        let normalized = normalize_import_symbol(std::str::from_utf8(name)?);
+                        let name = std::str::from_utf8(name)?;
+                        validate_native_audit_name(name, "native delay import")?;
+                        let normalized = normalize_import_symbol(name);
                         validate_native_audit_name(&normalized, "native delay import")?;
                         symbols.insert(normalized);
+                        if symbols.len() > MAX_IMPORTS_PER_LIBRARY {
+                            return Err(invalid("native imports exceed the audit bound"));
+                        }
                     }
                     PeImport::Ordinal(ordinal) => {
                         return Err(invalid(format!(
@@ -3298,54 +3366,361 @@ mod tests {
     const FIXTURE_STRINGS_ADDRESS: u64 = 0x0040_0000;
     const FIXTURE_FILE_BYTES: usize = 0x400;
 
-    /// Build the smallest parseable PE32+ executable needed to distinguish a raw entry RVA
-    /// from `Object::entry()`, which adds the image base for PE images.
-    fn synthetic_windows_pe64(entry_point_rva: u32) -> Vec<u8> {
-        const NT_HEADERS_OFFSET: usize = 0x40;
-        const FILE_HEADER_OFFSET: usize = NT_HEADERS_OFFSET + 4;
-        const OPTIONAL_HEADER_OFFSET: usize = FILE_HEADER_OFFSET + 20;
-        const OPTIONAL_HEADER_BYTES: u16 = 112;
+    const PE_AUDIT_NT_HEADERS_OFFSET: usize = 0x40;
+    const PE_AUDIT_FILE_HEADER_OFFSET: usize = PE_AUDIT_NT_HEADERS_OFFSET + 4;
+    const PE_AUDIT_OPTIONAL_HEADER_OFFSET: usize = PE_AUDIT_FILE_HEADER_OFFSET + 20;
+    const PE_AUDIT_OPTIONAL_HEADER_BYTES: usize = 240;
+    const PE_AUDIT_SECTION_HEADER_OFFSET: usize =
+        PE_AUDIT_OPTIONAL_HEADER_OFFSET + PE_AUDIT_OPTIONAL_HEADER_BYTES;
+    const PE_AUDIT_SECTION_RVA: u32 = 0x1000;
+    const PE_AUDIT_SECTION_RAW_OFFSET: usize = 0x200;
+    const PE_AUDIT_SECTION_BYTES: usize = 0x20_0000;
+    const PE_AUDIT_EXPORT_OFFSET: usize = 0x100;
+    const PE_AUDIT_NORMAL_IMPORT_OFFSET: usize = 0x20_000;
+    const PE_AUDIT_DELAY_IMPORT_OFFSET: usize = 0x40_000;
 
-        let mut bytes = vec![0; OPTIONAL_HEADER_OFFSET + usize::from(OPTIONAL_HEADER_BYTES)];
+    #[derive(Clone, Copy)]
+    enum SyntheticPeImportKind {
+        Named,
+        Ordinal,
+        Malformed,
+    }
+
+    #[derive(Clone, Copy)]
+    struct SyntheticPeImportSpec {
+        libraries: usize,
+        symbols_per_library: usize,
+        kind: SyntheticPeImportKind,
+    }
+
+    #[derive(Clone, Copy)]
+    struct SyntheticPeAuditFixture {
+        exports: usize,
+        named_exports: usize,
+        expected_export: Option<&'static str>,
+        malformed_export: bool,
+        duplicate_delay_descriptor_names: bool,
+        duplicate_delay_thunk_names: bool,
+        normal_imports: Option<SyntheticPeImportSpec>,
+        delay_imports: Option<SyntheticPeImportSpec>,
+    }
+
+    /// Build one PE64 image whose real object 0.40 export/import iterators expose the requested rows.
+    fn synthetic_windows_pe64_audit(fixture: SyntheticPeAuditFixture) -> Vec<u8> {
+        assert!(fixture.named_exports <= fixture.exports);
+        assert!(!fixture.malformed_export || fixture.named_exports > 0);
+
+        let mut bytes = synthetic_windows_pe64(0);
+
+        let section_rva = |offset: usize| {
+            PE_AUDIT_SECTION_RVA
+                .checked_add(u32::try_from(offset).expect("bounded PE section offset"))
+                .expect("bounded PE section RVA")
+        };
+        let section_offset = |offset: usize| {
+            PE_AUDIT_SECTION_RAW_OFFSET
+                .checked_add(offset)
+                .expect("bounded PE raw section offset")
+        };
+        let write_section_u16 = |bytes: &mut [u8], offset: usize, value: u16| {
+            write_fixture_u16(bytes, section_offset(offset), value);
+        };
+        let write_section_u32 = |bytes: &mut [u8], offset: usize, value: u32| {
+            write_fixture_u32(bytes, section_offset(offset), value);
+        };
+        let write_section_u64 = |bytes: &mut [u8], offset: usize, value: u64| {
+            write_fixture_u64(bytes, section_offset(offset), value);
+        };
+        let write_section_string = |bytes: &mut [u8], offset: usize, value: &str| {
+            let start = section_offset(offset);
+            bytes[start..start + value.len()].copy_from_slice(value.as_bytes());
+            bytes[start + value.len()] = 0;
+        };
+
+        let export_functions = PE_AUDIT_EXPORT_OFFSET + 40;
+        let export_names = export_functions + fixture.exports * 4;
+        let export_ordinals = export_names + fixture.named_exports * 4;
+        let mut export_strings = export_ordinals + fixture.named_exports * 2;
+        let export_module_name = export_strings;
+        export_strings += "fixture.dll".len() + 1;
+        for index in 0..fixture.exports {
+            write_section_u32(
+                &mut bytes,
+                export_functions + index * 4,
+                0x5000 + u32::try_from(index).expect("bounded export index"),
+            );
+        }
+        for index in 0..fixture.named_exports {
+            let name = if let Some(expected) = fixture.expected_export {
+                if index == 0 {
+                    expected.to_owned()
+                } else {
+                    format!("other_{index}")
+                }
+            } else {
+                format!("export_{index}")
+            };
+            let name_rva = if fixture.malformed_export && index == 0 {
+                section_rva(PE_AUDIT_SECTION_BYTES - 1)
+            } else {
+                section_rva(export_strings)
+            };
+            write_section_u32(&mut bytes, export_names + index * 4, name_rva);
+            write_section_u16(
+                &mut bytes,
+                export_ordinals + index * 2,
+                u16::try_from(index).expect("bounded export ordinal"),
+            );
+            if !(fixture.malformed_export && index == 0) {
+                write_section_string(&mut bytes, export_strings, &name);
+                export_strings += name.len() + 1;
+            }
+        }
+        write_section_string(&mut bytes, export_module_name, "fixture.dll");
+        write_section_u32(
+            &mut bytes,
+            PE_AUDIT_EXPORT_OFFSET + 12,
+            section_rva(export_module_name),
+        );
+        write_section_u32(&mut bytes, PE_AUDIT_EXPORT_OFFSET + 16, 1);
+        write_section_u32(
+            &mut bytes,
+            PE_AUDIT_EXPORT_OFFSET + 20,
+            u32::try_from(fixture.exports).expect("bounded export count"),
+        );
+        write_section_u32(
+            &mut bytes,
+            PE_AUDIT_EXPORT_OFFSET + 24,
+            u32::try_from(fixture.named_exports).expect("bounded named export count"),
+        );
+        write_section_u32(
+            &mut bytes,
+            PE_AUDIT_EXPORT_OFFSET + 28,
+            section_rva(export_functions),
+        );
+        write_section_u32(
+            &mut bytes,
+            PE_AUDIT_EXPORT_OFFSET + 32,
+            if fixture.named_exports == 0 {
+                0
+            } else {
+                section_rva(export_names)
+            },
+        );
+        write_section_u32(
+            &mut bytes,
+            PE_AUDIT_EXPORT_OFFSET + 36,
+            if fixture.named_exports == 0 {
+                0
+            } else {
+                section_rva(export_ordinals)
+            },
+        );
+        write_fixture_u32(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 112,
+            section_rva(PE_AUDIT_EXPORT_OFFSET),
+        );
+        write_fixture_u32(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 116,
+            u32::try_from(export_strings).expect("bounded export directory size"),
+        );
+
+        let write_imports = |mut bytes: &mut [u8],
+                             spec: SyntheticPeImportSpec,
+                             offset: usize,
+                             delay: bool| {
+            let descriptor_bytes = if delay { 32 } else { 20 };
+            let mut cursor = offset + descriptor_bytes * spec.libraries + descriptor_bytes;
+            for library in 0..spec.libraries {
+                let descriptor = offset + library * descriptor_bytes;
+                let thunk_offset = cursor;
+                cursor += (spec.symbols_per_library + 1) * 8;
+                let mut names = Vec::with_capacity(spec.symbols_per_library);
+                for symbol in 0..spec.symbols_per_library {
+                    let thunk = match spec.kind {
+                        SyntheticPeImportKind::Named => {
+                            let name_offset = cursor;
+                            cursor += 2 + 16;
+                            let name = if delay && fixture.duplicate_delay_thunk_names {
+                                "delay_duplicate_symbol".to_owned()
+                            } else if delay {
+                                format!("delay_{library}_{symbol}")
+                            } else {
+                                format!("normal_{library}_{symbol}")
+                            };
+                            write_section_u16(&mut bytes, name_offset, 0);
+                            write_section_string(&mut bytes, name_offset + 2, &name);
+                            section_rva(name_offset).into()
+                        }
+                        SyntheticPeImportKind::Ordinal => {
+                            object::pe::IMAGE_ORDINAL_FLAG64
+                                | u64::try_from(symbol + 1).expect("bounded import ordinal")
+                        }
+                        SyntheticPeImportKind::Malformed => {
+                            section_rva(PE_AUDIT_SECTION_BYTES - 1).into()
+                        }
+                    };
+                    names.push(thunk);
+                }
+                let library_name_offset = cursor;
+                cursor += 24;
+                let library_name = if delay && fixture.duplicate_delay_descriptor_names {
+                    "delay_duplicate.dll".to_owned()
+                } else if delay {
+                    format!("delay_{library}.dll")
+                } else {
+                    format!("normal_{library}.dll")
+                };
+                write_section_string(&mut bytes, library_name_offset, &library_name);
+                for (symbol, thunk) in names.into_iter().enumerate() {
+                    write_section_u64(&mut bytes, thunk_offset + symbol * 8, thunk);
+                }
+                if delay {
+                    write_section_u32(
+                        &mut bytes,
+                        descriptor,
+                        object::pe::IMAGE_DELAYLOAD_RVA_BASED,
+                    );
+                    write_section_u32(&mut bytes, descriptor + 4, section_rva(library_name_offset));
+                    write_section_u32(&mut bytes, descriptor + 16, section_rva(thunk_offset));
+                } else {
+                    write_section_u32(&mut bytes, descriptor, section_rva(thunk_offset));
+                    write_section_u32(
+                        &mut bytes,
+                        descriptor + 12,
+                        section_rva(library_name_offset),
+                    );
+                    write_section_u32(&mut bytes, descriptor + 16, section_rva(thunk_offset));
+                }
+            }
+            (offset, cursor - offset)
+        };
+
+        if let Some(spec) = fixture.normal_imports {
+            let (offset, size) =
+                write_imports(&mut bytes, spec, PE_AUDIT_NORMAL_IMPORT_OFFSET, false);
+            write_fixture_u32(
+                &mut bytes,
+                PE_AUDIT_OPTIONAL_HEADER_OFFSET + 112 + 8,
+                section_rva(offset),
+            );
+            write_fixture_u32(
+                &mut bytes,
+                PE_AUDIT_OPTIONAL_HEADER_OFFSET + 116 + 8,
+                u32::try_from(size).expect("bounded import directory size"),
+            );
+        }
+        if let Some(spec) = fixture.delay_imports {
+            let (offset, size) =
+                write_imports(&mut bytes, spec, PE_AUDIT_DELAY_IMPORT_OFFSET, true);
+            write_fixture_u32(
+                &mut bytes,
+                PE_AUDIT_OPTIONAL_HEADER_OFFSET + 112 + 13 * 8,
+                section_rva(offset),
+            );
+            write_fixture_u32(
+                &mut bytes,
+                PE_AUDIT_OPTIONAL_HEADER_OFFSET + 116 + 13 * 8,
+                u32::try_from(size).expect("bounded delay-import directory size"),
+            );
+        }
+        bytes
+    }
+
+    /// Build the parseable PE32+ fixture shared by entry-point and native-audit tests.
+    fn synthetic_windows_pe64(entry_point_rva: u32) -> Vec<u8> {
+        let mut bytes = vec![0; PE_AUDIT_SECTION_RAW_OFFSET + PE_AUDIT_SECTION_BYTES];
         write_fixture_u16(&mut bytes, 0, object::pe::IMAGE_DOS_SIGNATURE);
         write_fixture_u32(
             &mut bytes,
             0x3c,
-            u32::try_from(NT_HEADERS_OFFSET).expect("bounded fixture offset"),
+            u32::try_from(PE_AUDIT_NT_HEADERS_OFFSET).expect("bounded fixture offset"),
         );
         write_fixture_u32(
             &mut bytes,
-            NT_HEADERS_OFFSET,
+            PE_AUDIT_NT_HEADERS_OFFSET,
             object::pe::IMAGE_NT_SIGNATURE,
         );
         write_fixture_u16(
             &mut bytes,
-            FILE_HEADER_OFFSET,
-            object::pe::IMAGE_FILE_MACHINE_AMD64,
+            PE_AUDIT_FILE_HEADER_OFFSET,
+            object::pe::IMAGE_FILE_MACHINE_AMD64.0,
         );
-        write_fixture_u16(&mut bytes, FILE_HEADER_OFFSET + 16, OPTIONAL_HEADER_BYTES);
+        write_fixture_u16(&mut bytes, PE_AUDIT_FILE_HEADER_OFFSET + 2, 1);
         write_fixture_u16(
             &mut bytes,
-            FILE_HEADER_OFFSET + 18,
-            object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE,
+            PE_AUDIT_FILE_HEADER_OFFSET + 16,
+            u16::try_from(PE_AUDIT_OPTIONAL_HEADER_BYTES)
+                .expect("fixed fixture optional-header size"),
         );
         write_fixture_u16(
             &mut bytes,
-            OPTIONAL_HEADER_OFFSET,
+            PE_AUDIT_FILE_HEADER_OFFSET + 18,
+            (object::pe::IMAGE_FILE_EXECUTABLE_IMAGE | object::pe::IMAGE_FILE_LARGE_ADDRESS_AWARE)
+                .0,
+        );
+        write_fixture_u16(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET,
             object::pe::IMAGE_NT_OPTIONAL_HDR64_MAGIC,
         );
-        write_fixture_u32(&mut bytes, OPTIONAL_HEADER_OFFSET + 16, entry_point_rva);
+        write_fixture_u32(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 16,
+            entry_point_rva,
+        );
         write_fixture_u64(
             &mut bytes,
-            OPTIONAL_HEADER_OFFSET + 24,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 24,
             0x0000_0001_4000_0000,
         );
-        write_fixture_u32(&mut bytes, OPTIONAL_HEADER_OFFSET + 32, 0x1000);
-        write_fixture_u32(&mut bytes, OPTIONAL_HEADER_OFFSET + 36, 0x200);
+        write_fixture_u32(&mut bytes, PE_AUDIT_OPTIONAL_HEADER_OFFSET + 32, 0x1000);
+        write_fixture_u32(&mut bytes, PE_AUDIT_OPTIONAL_HEADER_OFFSET + 36, 0x200);
+        write_fixture_u32(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 56,
+            u32::try_from(PE_AUDIT_SECTION_RVA + PE_AUDIT_SECTION_BYTES as u32)
+                .expect("bounded fixture image size"),
+        );
+        write_fixture_u32(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 60,
+            u32::try_from(PE_AUDIT_SECTION_RAW_OFFSET).expect("bounded fixture header size"),
+        );
         write_fixture_u16(
             &mut bytes,
-            OPTIONAL_HEADER_OFFSET + 68,
-            object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 68,
+            object::pe::IMAGE_SUBSYSTEM_WINDOWS_CUI.0,
+        );
+        write_fixture_u32(
+            &mut bytes,
+            PE_AUDIT_OPTIONAL_HEADER_OFFSET + 108,
+            object::pe::IMAGE_NUMBEROF_DIRECTORY_ENTRIES as u32,
+        );
+        let section = PE_AUDIT_SECTION_HEADER_OFFSET;
+        bytes[section..section + 8].copy_from_slice(b".rdata\0\0");
+        write_fixture_u32(
+            &mut bytes,
+            section + 8,
+            u32::try_from(PE_AUDIT_SECTION_BYTES).expect("bounded fixture section size"),
+        );
+        write_fixture_u32(&mut bytes, section + 12, PE_AUDIT_SECTION_RVA);
+        write_fixture_u32(
+            &mut bytes,
+            section + 16,
+            u32::try_from(PE_AUDIT_SECTION_BYTES).expect("bounded fixture section size"),
+        );
+        write_fixture_u32(
+            &mut bytes,
+            section + 20,
+            u32::try_from(PE_AUDIT_SECTION_RAW_OFFSET).expect("bounded fixture raw offset"),
+        );
+        write_fixture_u32(
+            &mut bytes,
+            section + 36,
+            (object::pe::IMAGE_SCN_CNT_INITIALIZED_DATA | object::pe::IMAGE_SCN_MEM_READ).0,
         );
         bytes
     }
@@ -3373,12 +3748,12 @@ mod tests {
 
         let mut worker = vec![0; FIXTURE_FILE_BYTES];
         worker[..4].copy_from_slice(b"\x7fELF");
-        worker[4] = object::elf::ELFCLASS64;
-        worker[5] = object::elf::ELFDATA2LSB;
-        worker[6] = object::elf::EV_CURRENT;
-        write_fixture_u16(&mut worker, 16, object::elf::ET_DYN);
-        write_fixture_u16(&mut worker, 18, object::elf::EM_X86_64);
-        write_fixture_u32(&mut worker, 20, u32::from(object::elf::EV_CURRENT));
+        worker[4] = object::elf::ELFCLASS64.0;
+        worker[5] = object::elf::ELFDATA2LSB.0;
+        worker[6] = object::elf::EV_CURRENT.0;
+        write_fixture_u16(&mut worker, 16, object::elf::ET_DYN.0);
+        write_fixture_u16(&mut worker, 18, object::elf::EM_X86_64.0);
+        write_fixture_u32(&mut worker, 20, u32::from(object::elf::EV_CURRENT.0));
         write_fixture_u64(&mut worker, 24, 0x1000);
         write_fixture_u64(
             &mut worker,
@@ -3412,7 +3787,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             0,
-            object::elf::PT_LOAD,
+            object::elf::PT_LOAD.0,
             FIXTURE_STRINGS_OFFSET,
             FIXTURE_STRINGS_ADDRESS,
             strings.len(),
@@ -3420,7 +3795,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             1,
-            object::elf::PT_LOAD,
+            object::elf::PT_LOAD.0,
             FIXTURE_DYNAMIC_OFFSET,
             FIXTURE_DYNAMIC_ADDRESS,
             dynamic_bytes,
@@ -3428,7 +3803,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             2,
-            object::elf::PT_DYNAMIC,
+            object::elf::PT_DYNAMIC.0,
             FIXTURE_DYNAMIC_OFFSET,
             FIXTURE_DYNAMIC_ADDRESS,
             dynamic_bytes,
@@ -3436,7 +3811,7 @@ mod tests {
         write_fixture_program_header(
             &mut worker,
             3,
-            object::elf::PT_INTERP,
+            object::elf::PT_INTERP.0,
             FIXTURE_INTERPRETER_OFFSET,
             0x0060_0000,
             interpreter_bytes.len(),
@@ -3444,7 +3819,7 @@ mod tests {
         write_fixture_section_header(
             &mut worker,
             1,
-            object::elf::SHT_STRTAB,
+            object::elf::SHT_STRTAB.0,
             FIXTURE_STRINGS_OFFSET,
             FIXTURE_STRINGS_ADDRESS,
             strings.len(),
@@ -3454,7 +3829,7 @@ mod tests {
         write_fixture_section_header(
             &mut worker,
             2,
-            object::elf::SHT_DYNAMIC,
+            object::elf::SHT_DYNAMIC.0,
             FIXTURE_DYNAMIC_OFFSET,
             FIXTURE_DYNAMIC_ADDRESS,
             dynamic_bytes,
@@ -3465,27 +3840,27 @@ mod tests {
         write_fixture_dynamic_entry(
             &mut worker,
             FIXTURE_DYNAMIC_OFFSET,
-            object::elf::DT_STRTAB,
+            object::elf::DT_STRTAB.0,
             FIXTURE_STRINGS_ADDRESS,
         );
         write_fixture_dynamic_entry(
             &mut worker,
             FIXTURE_DYNAMIC_OFFSET + ELF64_DYNAMIC_ENTRY_BYTES,
-            object::elf::DT_STRSZ,
+            object::elf::DT_STRSZ.0,
             u64::try_from(strings.len()).expect("bounded fixture string size"),
         );
         for (index, string_offset) in dependencies.into_iter().enumerate() {
             write_fixture_dynamic_entry(
                 &mut worker,
                 FIXTURE_DYNAMIC_OFFSET + (index + 2) * ELF64_DYNAMIC_ENTRY_BYTES,
-                object::elf::DT_NEEDED,
+                object::elf::DT_NEEDED.0,
                 string_offset,
             );
         }
         write_fixture_dynamic_entry(
             &mut worker,
             FIXTURE_DYNAMIC_OFFSET + (dynamic_entries - 1) * ELF64_DYNAMIC_ENTRY_BYTES,
-            object::elf::DT_NULL,
+            object::elf::DT_NULL.0,
             0,
         );
         worker[FIXTURE_INTERPRETER_OFFSET..FIXTURE_INTERPRETER_OFFSET + interpreter_bytes.len()]
@@ -3506,12 +3881,12 @@ mod tests {
     ) {
         let offset = FIXTURE_PROGRAM_HEADERS_OFFSET + index * FIXTURE_PROGRAM_HEADER_BYTES;
         write_fixture_u32(bytes, offset, kind);
-        let flags = if kind == object::elf::PT_DYNAMIC
-            || (kind == object::elf::PT_LOAD && virtual_address == FIXTURE_DYNAMIC_ADDRESS)
+        let flags = if kind == object::elf::PT_DYNAMIC.0
+            || (kind == object::elf::PT_LOAD.0 && virtual_address == FIXTURE_DYNAMIC_ADDRESS)
         {
-            object::elf::PF_R | object::elf::PF_W
+            (object::elf::PF_R | object::elf::PF_W).0
         } else {
-            object::elf::PF_R
+            object::elf::PF_R.0
         };
         write_fixture_u32(bytes, offset + 4, flags);
         write_fixture_u64(
@@ -3548,8 +3923,8 @@ mod tests {
     ) {
         let offset = FIXTURE_SECTION_HEADERS_OFFSET + index * FIXTURE_SECTION_HEADER_BYTES;
         write_fixture_u32(bytes, offset + 4, kind);
-        let flags = if kind == object::elf::SHT_DYNAMIC {
-            u64::from(object::elf::SHF_ALLOC | object::elf::SHF_WRITE)
+        let flags = if kind == object::elf::SHT_DYNAMIC.0 {
+            (object::elf::SHF_ALLOC | object::elf::SHF_WRITE).0
         } else {
             0
         };
@@ -3603,6 +3978,294 @@ mod tests {
             "{role} was accepted"
         );
         assert_eq!(worker, before, "{role} was mutated before rejection");
+    }
+
+    /// Keep object 0.40 NameOrOrdinal rows typed at the native audit boundary.
+    #[test]
+    fn native_audit_accepts_named_and_rejects_ordinal_rows() -> ToolResult<()> {
+        let named = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 1,
+            named_exports: 1,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: Some(SyntheticPeImportSpec {
+                libraries: 1,
+                symbols_per_library: 1,
+                kind: SyntheticPeImportKind::Named,
+            }),
+            delay_imports: None,
+        });
+        let named_object = NativeObject::parse(named.as_slice())?;
+        assert_eq!(
+            inspect_executable_exports(&named_object, PackPlatform::WindowsX86_64, "named PE")?,
+            vec!["export_0"]
+        );
+        let (libraries, symbols) = inspect_imports(&named_object, PackPlatform::WindowsX86_64)?;
+        assert_eq!(libraries, BTreeSet::from(["normal_0.dll".to_owned()]));
+        assert_eq!(symbols, BTreeSet::from(["normal_0_0".to_owned()]));
+
+        let ordinal_export = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 1,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: None,
+            delay_imports: None,
+        });
+        let ordinal_export_object = NativeObject::parse(ordinal_export.as_slice())?;
+        assert!(
+            inspect_executable_exports(
+                &ordinal_export_object,
+                PackPlatform::WindowsX86_64,
+                "ordinal PE"
+            )
+            .expect_err("ordinal export was accepted")
+            .to_string()
+            .contains("ordinal export")
+        );
+
+        let ordinal_import = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 0,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: Some(SyntheticPeImportSpec {
+                libraries: 1,
+                symbols_per_library: 1,
+                kind: SyntheticPeImportKind::Ordinal,
+            }),
+            delay_imports: None,
+        });
+        let ordinal_import_object = NativeObject::parse(ordinal_import.as_slice())?;
+        assert!(
+            inspect_imports(&ordinal_import_object, PackPlatform::WindowsX86_64)
+                .expect_err("ordinal import was accepted")
+                .to_string()
+                .contains("ordinal")
+        );
+        Ok(())
+    }
+
+    /// Keep named PE delay imports accepted while rejecting their ordinal form.
+    #[test]
+    fn native_audit_handles_named_and_ordinal_delay_imports() -> ToolResult<()> {
+        for (kind, expected_error) in [
+            (SyntheticPeImportKind::Named, None),
+            (SyntheticPeImportKind::Ordinal, Some("ordinal")),
+        ] {
+            let fixture = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+                exports: 0,
+                named_exports: 0,
+                expected_export: None,
+                malformed_export: false,
+                duplicate_delay_descriptor_names: false,
+                duplicate_delay_thunk_names: false,
+                normal_imports: None,
+                delay_imports: Some(SyntheticPeImportSpec {
+                    libraries: 1,
+                    symbols_per_library: 1,
+                    kind,
+                }),
+            });
+            let object = NativeObject::parse(fixture.as_slice())?;
+            let result = inspect_imports(&object, PackPlatform::WindowsX86_64);
+            if let Some(expected_error) = expected_error {
+                assert!(
+                    result
+                        .expect_err("delay ordinal import was accepted")
+                        .to_string()
+                        .contains(expected_error)
+                );
+            } else {
+                let (libraries, symbols) = result?;
+                assert_eq!(libraries, BTreeSet::from(["delay_0.dll".to_owned()]));
+                assert_eq!(symbols, BTreeSet::from(["delay_0_0".to_owned()]));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ensure the lazy object iterators stop at every native audit cardinality ceiling.
+    #[test]
+    fn native_audit_lazy_iterators_reject_bound_plus_one_rows() -> ToolResult<()> {
+        let worker_exports = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: MAX_EXPORTS_PER_WORKER + 1,
+            named_exports: MAX_EXPORTS_PER_WORKER + 1,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: None,
+            delay_imports: None,
+        });
+        let worker_exports_object = NativeObject::parse(worker_exports.as_slice())?;
+        assert!(
+            inspect_executable_exports(
+                &worker_exports_object,
+                PackPlatform::WindowsX86_64,
+                "bounded worker"
+            )
+            .is_err()
+        );
+
+        let library_exports = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: MAX_EXPORTS_PER_LIBRARY + 1,
+            named_exports: MAX_EXPORTS_PER_LIBRARY + 1,
+            expected_export: Some("tree_sitter_test"),
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: None,
+            delay_imports: None,
+        });
+        let library_exports_object = NativeObject::parse(library_exports.as_slice())?;
+        assert!(
+            validate_exports(
+                &library_exports_object,
+                "tree_sitter_test",
+                PackPlatform::WindowsX86_64
+            )
+            .is_err()
+        );
+
+        let imports = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 0,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: Some(SyntheticPeImportSpec {
+                libraries: 1,
+                symbols_per_library: MAX_IMPORTS_PER_LIBRARY + 1,
+                kind: SyntheticPeImportKind::Named,
+            }),
+            delay_imports: None,
+        });
+        let imports_object = NativeObject::parse(imports.as_slice())?;
+        assert!(inspect_imports(&imports_object, PackPlatform::WindowsX86_64).is_err());
+
+        let libraries = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 0,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: Some(SyntheticPeImportSpec {
+                libraries: MAX_NATIVE_LIBRARIES_PER_LIBRARY + 1,
+                symbols_per_library: 1,
+                kind: SyntheticPeImportKind::Named,
+            }),
+            delay_imports: None,
+        });
+        let libraries_object = NativeObject::parse(libraries.as_slice())?;
+        assert!(inspect_imports(&libraries_object, PackPlatform::WindowsX86_64).is_err());
+
+        let duplicate_delay_descriptors = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 0,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: true,
+            duplicate_delay_thunk_names: false,
+            normal_imports: None,
+            delay_imports: Some(SyntheticPeImportSpec {
+                libraries: MAX_NATIVE_LIBRARIES_PER_LIBRARY + 1,
+                symbols_per_library: 1,
+                kind: SyntheticPeImportKind::Named,
+            }),
+        });
+        let duplicate_delay_descriptors_object =
+            NativeObject::parse(duplicate_delay_descriptors.as_slice())?;
+        let NativeObject::Pe64(duplicate_delay_descriptors_file) =
+            duplicate_delay_descriptors_object
+        else {
+            return Err(invalid("duplicate delay descriptor fixture is not PE64"));
+        };
+        let descriptor_error =
+            pe_import_libraries(&duplicate_delay_descriptors_file, &[], &mut BTreeSet::new())
+                .expect_err("duplicate delay descriptors exceeded the raw bound");
+        assert!(
+            descriptor_error
+                .to_string()
+                .contains("delay-import descriptor count")
+        );
+
+        let duplicate_delay_thunks = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 0,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: true,
+            normal_imports: None,
+            delay_imports: Some(SyntheticPeImportSpec {
+                libraries: 1,
+                symbols_per_library: MAX_IMPORTS_PER_LIBRARY + 1,
+                kind: SyntheticPeImportKind::Named,
+            }),
+        });
+        let duplicate_delay_thunks_object = NativeObject::parse(duplicate_delay_thunks.as_slice())?;
+        let NativeObject::Pe64(duplicate_delay_thunks_file) = duplicate_delay_thunks_object else {
+            return Err(invalid("duplicate delay thunk fixture is not PE64"));
+        };
+        let thunk_error =
+            pe_import_libraries(&duplicate_delay_thunks_file, &[], &mut BTreeSet::new())
+                .expect_err("duplicate delay thunks exceeded the raw bound");
+        assert!(
+            thunk_error.to_string().contains("delay-import count"),
+            "unexpected delay-thunk error: {thunk_error}"
+        );
+        Ok(())
+    }
+
+    /// Preserve object iterator errors instead of accepting malformed native rows.
+    #[test]
+    fn native_audit_propagates_malformed_iterator_rows() -> ToolResult<()> {
+        let malformed_export = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 1,
+            named_exports: 1,
+            expected_export: None,
+            malformed_export: true,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: None,
+            delay_imports: None,
+        });
+        let malformed_export_object = NativeObject::parse(malformed_export.as_slice())?;
+        assert!(
+            inspect_executable_exports(
+                &malformed_export_object,
+                PackPlatform::WindowsX86_64,
+                "malformed export"
+            )
+            .is_err()
+        );
+
+        let malformed_import = synthetic_windows_pe64_audit(SyntheticPeAuditFixture {
+            exports: 0,
+            named_exports: 0,
+            expected_export: None,
+            malformed_export: false,
+            duplicate_delay_descriptor_names: false,
+            duplicate_delay_thunk_names: false,
+            normal_imports: Some(SyntheticPeImportSpec {
+                libraries: 1,
+                symbols_per_library: 1,
+                kind: SyntheticPeImportKind::Malformed,
+            }),
+            delay_imports: None,
+        });
+        let malformed_import_object = NativeObject::parse(malformed_import.as_slice())?;
+        assert!(inspect_imports(&malformed_import_object, PackPlatform::WindowsX86_64).is_err());
+        Ok(())
     }
 
     /// Swap two complete dynamic entries in a synthetic worker.
@@ -3681,7 +4344,7 @@ mod tests {
         write_fixture_u32(
             &mut missing_segment,
             FIXTURE_PROGRAM_HEADERS_OFFSET + 2 * FIXTURE_PROGRAM_HEADER_BYTES,
-            object::elf::PT_NULL,
+            object::elf::PT_NULL.0,
         );
         assert_linux_normalization_rejected("missing dynamic segment", missing_segment);
 
@@ -3689,7 +4352,7 @@ mod tests {
         write_fixture_u32(
             &mut duplicate_segment,
             FIXTURE_PROGRAM_HEADERS_OFFSET,
-            object::elf::PT_DYNAMIC,
+            object::elf::PT_DYNAMIC.0,
         );
         assert_linux_normalization_rejected("duplicate dynamic segment", duplicate_segment);
 
@@ -3697,7 +4360,7 @@ mod tests {
         write_fixture_u32(
             &mut missing_section,
             FIXTURE_SECTION_HEADERS_OFFSET + 2 * FIXTURE_SECTION_HEADER_BYTES + 4,
-            object::elf::SHT_NULL,
+            object::elf::SHT_NULL.0,
         );
         assert_linux_normalization_rejected("missing dynamic section", missing_section);
 
@@ -3705,7 +4368,7 @@ mod tests {
         write_fixture_u32(
             &mut duplicate_section,
             FIXTURE_SECTION_HEADERS_OFFSET + FIXTURE_SECTION_HEADER_BYTES + 4,
-            object::elf::SHT_DYNAMIC,
+            object::elf::SHT_DYNAMIC.0,
         );
         assert_linux_normalization_rejected("duplicate dynamic section", duplicate_section);
 
@@ -3742,14 +4405,18 @@ mod tests {
         );
 
         let mut missing_load_owner = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
-        write_fixture_u32(&mut missing_load_owner, dynamic_load, object::elf::PT_NULL);
+        write_fixture_u32(
+            &mut missing_load_owner,
+            dynamic_load,
+            object::elf::PT_NULL.0,
+        );
         assert_linux_normalization_rejected("missing dynamic load owner", missing_load_owner);
 
         let mut invalid_section_flags = synthetic_linux_worker(1, "/lib64/ld-linux-x86-64.so.2");
         write_fixture_u64(
             &mut invalid_section_flags,
             dynamic_section + 8,
-            u64::from(object::elf::SHF_ALLOC),
+            object::elf::SHF_ALLOC.0,
         );
         assert_linux_normalization_rejected("invalid dynamic section flags", invalid_section_flags);
 
@@ -3757,7 +4424,7 @@ mod tests {
         write_fixture_dynamic_entry(
             &mut missing_terminator,
             FIXTURE_DYNAMIC_OFFSET + 7 * ELF64_DYNAMIC_ENTRY_BYTES,
-            object::elf::DT_DEBUG,
+            object::elf::DT_DEBUG.0,
             0,
         );
         assert_linux_normalization_rejected("missing dynamic terminator", missing_terminator);

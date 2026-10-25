@@ -323,6 +323,62 @@ Dependency direction remains acyclic. The lint crate is a workspace quality
 tool, not a runtime dependency. No eighth crate is justified unless a durable
 independently consumed ownership boundary appears.
 
+### Windows Locked-Runtime Convergence
+
+The Windows installer owns only the compatibility mirror and the narrow update
+orchestration around it. A running host owns its Codex parent and MCP children.
+The installer therefore crosses the process-termination boundary only after the
+replacement runtime and every managed Codex integration are exact, and only for
+one handle-bound obsolete MCP identity. Mutation skip flags never substitute for
+observed readiness.
+
+```mermaid
+flowchart TD
+    Target[Verify target runtime;<br/>validate and digest each config byte snapshot] --> Snapshot[Take one 5s Windows process snapshot]
+    Snapshot --> Owner{One obsolete stable-path MCP<br/>with an authentic Codex parent?}
+    Owner -->|no| OwnerPartial[Typed partial: preserve every process]
+    Owner -->|yes| Managed{Plugin and registry JSON<br/>have exact types and cardinality?}
+    Managed -->|no| ReadinessPartial[Typed partial: preserve every process]
+    Managed -->|yes| Version{Obsolete version and digest<br/>still match the observation?}
+    Version -->|no| ObsoletePartial[identity_changed_version or identity_changed_file:<br/>preserve every process]
+    Version -->|yes| Late{Parent signature and digest, target runtime,<br/>three configs, plugin, and registry unchanged?}
+    Late -->|no| ReplacementPartial[replacement_readiness_changed:<br/>preserve every process]
+    Late -->|yes| Handle[Hold child and Codex-parent handles;<br/>revalidate identity and image digests]
+    Handle --> Outcome{Exact child retired<br/>or actually exited?}
+    Outcome -->|no| IdentityPartial[Typed partial: preserve every process]
+    Outcome -->|yes| Retry[Retry stable-mirror synchronization once]
+    Retry --> Verify{Target mirror verifies?}
+    Verify -->|yes| Complete[Complete handoff]
+    Verify -->|no| RetryPartial[Partial: retry_failed;<br/>versioned runtime and configs remain ready]
+```
+
+Selection uses one five-second Windows process snapshot. It records the child's
+creation time, parsed complete command, observed obsolete version, and SHA-256
+image identity together with its parent's process ID, creation time, absolute
+`codex.exe` path, complete command, and digest. The parent is eligible only when
+its observed creation time is no later than the child's and
+Windows resolves the module-qualified
+`Microsoft.PowerShell.Security\Get-AuthenticodeSignature` cmdlet from the trusted
+`$PSHOME\Modules\Microsoft.PowerShell.Security` tree, rejects session command
+shadowing, and receives `Valid`, `SignatureType = Authenticode`, and signer simple
+name `OpenAI OpCo, LLC`. Each generated config's semantics and SHA-256 come from
+one captured byte snapshot. Immediately before retirement, the installer rechecks
+the parent signature and digest, target runtime digest, all three captured config
+digests, and structured plugin/registry readiness; drift is the typed
+`replacement_readiness_changed` partial state. Final reporting re-probes the
+target and rechecks all three config snapshots; uncertainty in that bundle reports
+`runtime_mcp_configs_ready=false` and suppresses integration-verified claims.
+Bounded JSON probes expose a payload only after owned process and temporary-file
+cleanup succeeds. The native helper then keeps both
+handles open while revalidating both identities and image digests. Only an actual
+missing or exited child can take the `exited` retry path. No fallback
+widens selection to an unsigned or non-Codex parent, executable name, another
+host, or another project; every incomplete or ambiguous snapshot preserves all
+processes, and the Codex parent is never terminated. Real installed-Codex proof
+of parent survival, target-child replacement, exact version, and successful MCP
+initialization remains a hosted release gate rather than an inference from local
+fixtures.
+
 ### Database Authority And Responsibility
 
 ```mermaid
@@ -423,7 +479,7 @@ that revision; a memory update cannot bless or advance structural data.
 
 ```mermaid
 ---
-title: Current graph tables inside the same single projectatlas.db
+title: Current schema-22 graph tables inside the same single projectatlas.db
 ---
 erDiagram
     PROJECT_IDENTITY {
@@ -480,6 +536,20 @@ erDiagram
         TEXT relation_kind
         TEXT state
     }
+    GRAPH_IDENTITY_REJECTION {
+        INTEGER id PK
+        BLOB project_instance_id FK
+        INTEGER generation
+        TEXT file_path FK
+        INTEGER start_line
+        INTEGER start_column
+        INTEGER end_line
+        INTEGER end_column
+        TEXT parser
+        TEXT field
+        TEXT reason
+        INTEGER fact_index
+    }
     RESOLUTION_KEY {
         BLOB project_instance_id PK,FK
         TEXT resolution_domain PK
@@ -504,10 +574,12 @@ erDiagram
     PROJECT_IDENTITY ||--o{ GRAPH_ENTITY : scopes
     PROJECT_IDENTITY ||--o{ GRAPH_RELATION : scopes
     PROJECT_IDENTITY ||--o{ GRAPH_COVERAGE : reports
+    PROJECT_IDENTITY ||--o{ GRAPH_IDENTITY_REJECTION : reports
     PROJECT_IDENTITY ||--o{ RESOLUTION_KEY : scopes
     NODE ||--o| PURPOSE : owns
     NODE o|--o{ GRAPH_ENTITY : anchors
     NODE ||--o{ GRAPH_OCCURRENCE : locates
+    NODE ||--o{ GRAPH_IDENTITY_REJECTION : locates
     GRAPH_ENTITY ||--o{ GRAPH_RELATION : source
     GRAPH_ENTITY o|--o{ GRAPH_RELATION : target
     GRAPH_ENTITY ||--o{ ENTITY_EXPORT : exports
@@ -517,8 +589,8 @@ erDiagram
     RESOLUTION_KEY ||--o{ RELATION_DEPENDENCY : identifies
 ```
 
-The diagram shows the current schema-16 normalized hot relationship model, not
-every compatibility or telemetry table. Schema 16 retains one
+The diagram shows the current schema-22 normalized hot relationship model, not
+every compatibility or telemetry table. Schema 22 retains the
 `graph_resolution_keys` authority plus `graph_entity_exports` and
 `graph_relation_dependencies` owner bindings. The registry permits only one
 canonical collision witness for a project/domain/digest identity, even when the
@@ -531,7 +603,12 @@ identities. Stable fixed-width entity, relation, and resolution-key digests stay
 independent of display labels and line movement. A logical relation is traversed
 once while every exact supporting span remains available through occurrence
 rows. Ambiguous and unresolved references retain typed dependency facts without
-a fabricated target.
+a fabricated target. Generation-owned `graph_identity_rejections` rows retain
+only typed parser, field, path, reason, and exact span data; they never retain
+the rejected identity value. The private non-negative `fact_index` is the
+deterministic parser-fact identity that completes the durable rejection
+uniqueness key and follows the span in the path index ordering. It is an
+internal storage key and is omitted from JSON, TOON, and MCP wire shapes.
 
 Index ownership follows accepted queries rather than columns in isolation:
 
@@ -812,22 +889,67 @@ are added.
 
 | CLI route | MCP route | Physical database and source access | Freshness and generation contract | Transaction, bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate authoritative product database. Introduced in schema 11 and preserved by schema 16, bounded telemetry, passive checkpoint state, reusable-page state, and ownership-validated private graph staging remain part of the current contract. |
+| `init` | `atlas_init` | Create/validate project-local config and the one project database; unless `no_scan`, scan current local source, import controlled purpose inputs, and derive text, summaries, symbols, and graph projections. | The selected source tree and effective ignore/config policy are authoritative. Initialization binds project identity and publishes one active complete generation when scanning runs. | Discovery/extraction is admitted under existing entry, byte, parser-output, worker, deadline, and cancellation limits; prepared mutations publish in one short parent-owned transaction. It writes no separate authoritative product database. Introduced in schema 11 and preserved in schema 22, bounded telemetry, passive checkpoint state, reusable-page state, and ownership-validated private graph staging remain part of the current contract. |
 | `scan` | `atlas_scan` | Read/hash/parse current included source off-writer, stage bounded typed batches, and replace the complete derived projection in the same database. | Revalidate source, configuration, purpose inputs, and base generation before publication. Readers keep the last complete generation until commit. | One short `BEGIN IMMEDIATE` publication owns all prepared mutations and one generation advance; failure/cancellation rolls back. Background MCP execution changes task delivery, not database ownership. No navigation telemetry is appended. |
 | `symbols build` | `atlas_symbols_build` | Read selected indexed source off-writer and rebuild compatible symbol plus normalized graph projections in the same database. | Revalidate the source and publication contract; preserve the last complete generation on failure. | Bounded parser workers, source bytes, retained parser output, deadline, and cancellation feed one publication transaction. No navigation telemetry is appended. |
 | `watch` and `watch --once` | `atlas_watch_once` | Observe or poll current local source, derive one changed-path batch off-writer, and publish affected text/symbol/graph rows in the same database; a correctness-required event may request a full scan. | Each successful batch revalidates source/policy/base generation and advances exactly once. Failed batches remain eligible for retry and expose no partial generation. | Each batch has bounded path/source/parser/worker/deadline/cancellation controls and one short publication transaction. The long-lived verified observation epoch is current. Database maintenance is bounded, content-free, and never introduces an abandoned spill authority. |
-| `map` | `atlas_map` | Explicitly walk the selected source tree and read all approved purposes from the project database to write a compatibility TOON/optional JSON export. | This is not a normal index-backed navigation response and does not claim a generation-bound compact page. Current local source drives the export while reviewed purposes remain SQLite-authored. | Deliberately source-wide maintenance; current purpose loading/export can materialize the admitted project set and writes no telemetry. It must not be cited as proof that normal navigation is bounded. |
+| `map` | `atlas_map` | Explicitly walk the selected source tree and read approved purposes from the project database to return a bounded current TOON/JSON map; write an adjacent JSON sidecar only when requested. Never write a legacy TOON file. | This is not a normal index-backed navigation response and does not claim a generation-bound compact page. Current local source drives the response while reviewed purposes remain SQLite-authored. | Deliberately source-wide maintenance; current purpose loading can materialize the admitted project set and writes no telemetry. A complete response is capped at 4 MiB. It must not be cited as proof that normal navigation is bounded. |
 | `strip-legacy-purpose` | `atlas_strip_legacy_purpose` | Scan filesystem paths and optionally delete legacy `.purpose` files; the command does not create another database or make legacy files a second purpose authority. | This is an explicit migration/file-maintenance operation, not a normal fresh database read. Durable reviewed purpose remains owned by the project database. | Dry-run by default; apply mutates source-side files, not SQLite. Its source walk is explicit and source-wide. |
 
 #### Authored mutations and database/file lifecycle
 
 | CLI route | MCP route | Physical access and authority | Transaction and generation contract | Bounds, telemetry, and target owner |
 | --- | --- | --- | --- | --- |
-| `purpose set` | `atlas_purpose_set` | Validate the current schema/root through bounded metadata and schema-contract reads, validate one indexed path, and write its reviewed purpose into `purposes` in the same project database. Ordinary current-schema opens do not run a whole-database integrity scan; migration and explicit verification retain that work. | The authored write is atomic for that item and does not rewrite graph rows or advance the derived generation; later reads project the new authoritative purpose. | One item and no telemetry. Purpose projection into enriched folder/file/relation results is current. |
-| `purpose review` preview/apply | `atlas_purpose_review` | Admit at most 200 rows, 4 KiB per path, 64 KiB per other string field, and 512 KiB of aggregate request strings before project/database selection; CLI file input is metadata-preflighted and `limit + 1` read under a 2 MiB ceiling. Then read each requested indexed node and preview or apply agent-reviewed purpose rows in the same database. | Preview uses a fresh read snapshot. Conditional apply keeps one SQLite transaction. Explicit correction remains item-oriented for semantic row outcomes, but every admitted row plus the exact supported JSON-with-newline and TOON report is preflighted before the first write, so a later oversized stored value or output cannot partially apply an earlier item. Purpose writes do not advance graph generation. | Retained report strings and each exact supported encoding are capped at 4 MiB. CLI and MCP propagate count, field, and aggregate admission failures without mutation; small JSON, TOON, UTF-8, preview, explicit-apply, and conditional-apply compatibility remains current. No telemetry. |
+| `purpose set` | `atlas_purpose_set` | Force exact saved-source admission through the existing selected-root freshness boundary, retain that witness, then validate one indexed path and write its reviewed purpose into `purposes` in the same project database. Ordinary current-schema opens do not run a whole-database integrity scan; migration and explicit verification retain that work. | Freshness publication, when needed, completes before the purpose transaction. Immediately before commit, the adapter synchronizes cancellation and performs an exact detect-only saved-source verification. A failed witness explicitly rolls back and preserves both the initiating and rollback errors. The authored write is atomic for that item and does not rewrite graph rows or advance the derived generation. | One exact admission, one final exact witness, and one item, with no telemetry. Purpose projection into enriched folder/file/relation results is current. |
+| `purpose review` preview/apply | `atlas_purpose_review` | Admit at most 200 rows, 4 KiB per path, 64 KiB per other string field, and 512 KiB of aggregate request strings before project/database selection; CLI file input is metadata-preflighted and `limit + 1` read under a 2 MiB ceiling. Preview uses a fresh read. Apply retains one exact saved-source witness for the complete batch through the writer transaction. | Conditional apply keeps one SQLite transaction. A source publication advances the generation first, so old queue work is stale and changes neither purpose rows nor authored revision. The final exact detect-only witness and synchronous cancellation fence linearize the mutation before explicit commit; a later source, policy, continuity, or cancellation change explicitly rolls every write back. Explicit correction remains item-oriented for semantic row outcomes, and every admitted row plus the exact supported JSON-with-newline and TOON report is preflighted before the first write. | Retained report strings and each exact supported encoding are capped at 4 MiB. CLI and MCP propagate source freshness, count, field, aggregate, cancellation, conditional conflicts, and rollback failures without partial mutation; small JSON, TOON, UTF-8, preview, explicit-apply, and conditional-apply compatibility remains current. No telemetry. |
 | `health resolve` | `atlas_health_resolve` | Validate one currently active deterministic finding and write one authored `health_resolutions` row in the same database. | The resolution write is item-atomic and does not mutate derived graph rows or advance generation. | One item, no telemetry. Resolution lookup and later health pages remain subject to the bounded-read contract above. |
 | `root set` with bind/move/detach | `atlas_root_set` | Validate destination identity, mutate project/root identity in the same database, and regenerate project-local MCP config files. Detach assigns an independent identity to a copied destination database without merging authorities. | One explicit root-transition transaction owns identity changes and rollback. A copied worktree database becomes the authority only for that different selected source tree. | Bounded metadata operation, no telemetry, no cross-project graph write. |
-| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | File lifecycle, not a SQLite transaction. It removes the one selected project index; it never creates a replacement or second authority implicitly. | Explicit apply only, fixed owned target inventory, no telemetry. |
+| `reset-index` | `atlas_reset_index` | Preview or explicitly delete the selected database and owned WAL/SHM/journal sidecars, plus optional generated MCP config. | Applied reset for a registered alias holds the control catalog's active-registration `BEGIN IMMEDIATE`, reloads the exact row as still unbound, revalidates the current Git lifecycle, stages only the fixed owned inventory in a unique target-local recovery directory, and revalidates before deleting only staged paths. A changed lifecycle restores staged entries without clobbering replacement files or retains an explicit recovery directory if restoration cannot complete. Every production binder uses the same guard, so bind-wins refuses reset and reset-wins cannot be recreated or bound by a late caller. | Explicit apply only, five fixed target paths, no telemetry; staging uses same-filesystem no-clobber moves and never scans recursively. |
+
+### Purpose Mutation Freshness Admission
+
+```mermaid
+sequenceDiagram
+    actor Curator
+    participant Adapter as CLI or MCP adapter
+    participant Freshness as Source freshness
+    participant Publication as Derived publication
+    participant Purpose as Purpose transaction
+
+    Curator->>Adapter: set or applied review
+    Adapter->>Freshness: force exact admission for selected root and batch once
+    alt saved source changed
+        Freshness->>Publication: reconcile and publish current generation G2
+        Publication-->>Freshness: complete G2
+        Freshness-->>Adapter: retained witness W for generation G2
+    else source and policy unchanged
+        Freshness-->>Adapter: retained witness W for generation G1
+    end
+    Adapter->>Purpose: begin transaction and evaluate the complete batch
+    Purpose-->>Adapter: current update, accepted replay, or zero-write stale result
+    Adapter->>Adapter: synchronize request cancellation
+    Adapter->>Freshness: exact detect-only verification at final witness
+    alt source, policy, continuity, or cancellation changed
+        Freshness-->>Adapter: typed refresh or failure
+        Adapter->>Purpose: explicit rollback of the complete transaction
+    else W remains current
+        Freshness-->>Adapter: commit admitted
+        Adapter->>Purpose: explicit commit
+    end
+    Adapter-->>Curator: bounded typed result
+```
+
+Persistent MCP uses its existing verified observation path; a one-shot CLI owns
+one process-local observer for the same contract. An empty observer queue is not
+mutation authority: exact admission and the final exact saved-source witness are
+batch operations, never per-purpose-row filesystem scans. SQLite and arbitrary
+filesystem writers cannot share one transaction, so the final witness is the
+declared mutation linearization point; observer ingress remains an additional
+fail-closed signal. This change does not add a watcher acknowledgement or routing
+mechanism: under one unchanged root/database binding, the existing queue,
+zero-candidate watch, and queue sequence is protected by regression coverage.
+An observer or routing repair requires a separate reproducible failure with the
+captured binding and typed recovery evidence.
 
 #### Diagnostics, administration, and non-database routes
 
@@ -846,7 +968,7 @@ are added.
 | `folders`, `files`, `next`, `atlas_session_brief` | Batch graph roles and only the crisp relevant connections for returned candidates, while projecting current accepted purpose plus approval/provenance state from `purposes`; never rank graph popularity above exact path/name and strong purpose evidence. | Current; final release acceptance remains part of #308. |
 | `summary`, `outline`, `symbols` | Hydrate a bounded selected-file coverage digest and route deeper related-identity inspection through the detailed relation surface without per-symbol or whole-graph query loops. | Current; final release acceptance remains part of #308. |
 | `symbol relations` extended with direction/depth and closed architecture/impact/trace modes | Resolve stable selectors, use separately indexed source/target adjacency and dependency keys, page retained occurrences, batch endpoint plus nearest owning-purpose and exact-path symbol projection, and return generation, trust, resolution, coverage, exact spans, candidate-labeled findings, reusable next calls, cursors, work, and explicit truncation. No generic graph query language or separate jump tool is introduced. | Current; final release acceptance remains part of #308. |
-| Explicit federated relation/analysis request | Validate the complete ordered root list, open each root's independent existing project database read-only/query-only under aggregate root/connection/database/row/edge/intermediate/time/output/cancellation budgets, bind results to every captured generation, close every handle, and retain nothing. | Current. Federation is call-only composition, never product sharding or a shared database. |
+| Explicit federated relation/analysis request | Validate either the complete ordered registered-worktree alias list or the legacy ordered root list, resolve every participant before opening data, then open each independent existing project database read-only/query-only under aggregate participant/connection/database/row/edge/intermediate/time/output/cancellation budgets. Bind results and labels to every captured generation, close every handle, and retain nothing. | Current. Federation is call-only composition, never product sharding or a shared database. |
 
 These mappings are verified through production query, service, and adapter
 paths. In-memory SQLite is sufficient only for
@@ -860,22 +982,30 @@ claim.
 ### Explicit Federation Communication Sequence
 
 Federation is an additive request shape on the existing detailed relation and
-analysis routes. The first supplied root is the selected anchor project; later
-roots contribute only exact typed external-identity rendezvous evidence.
-Similar unresolved text never joins projects.
+analysis routes. The preferred MCP request supplies two to eight registered
+`worktrees`; the legacy CLI/compatibility request may supply exact `roots`, but
+the two forms are mutually exclusive. The first participant is the selected
+anchor project; later participants contribute only exact typed
+external-identity rendezvous evidence. Similar unresolved text never joins
+projects.
 
 ```mermaid
 sequenceDiagram
     actor Agent
     participant Adapter as Existing CLI or MCP relation adapter
+    participant Registry as Control worktree registry
     participant Runtime as Runtime freshness boundary
     participant FS as Exact source verifier
     participant DB as Independent project SQLite databases
     participant Service as Relation and analysis service
 
-    Agent->>Adapter: detailed or analysis request plus complete ordered roots
-    Adapter->>Runtime: selected root, roots, aggregate deadline, cancellation
-    loop Each explicit root, maximum eight
+    Agent->>Adapter: detailed or analysis request plus worktrees or roots
+    opt Registered worktree aliases
+        Adapter->>Registry: resolve complete ordered aliases
+        Registry-->>Adapter: exact labelled roots and registration identities
+    end
+    Adapter->>Runtime: captured participants, aggregate deadline, cancellation
+    loop Each explicit participant, maximum eight
         Runtime->>DB: open existing root-bound query-only snapshot
         Runtime->>FS: verify current source and policy without repair
         Runtime->>DB: verify project, publication, schema, and generation
@@ -894,14 +1024,16 @@ sequenceDiagram
         Service-->>Adapter: stale result and no rows
     else All participants remain current
         Service-->>Adapter: project-qualified bounded report
-        Adapter-->>Agent: one fitted JSON or TOON envelope
+        Adapter-->>Agent: one labelled fitted JSON or TOON envelope
     end
 ```
 
 No participant list, relation, cache, telemetry, setting, active-project
 selection, or connection survives the call. A cursor binds the ordered project
-identities, root digests, complete graph generations, and authored-purpose
-revisions before wrapping the existing relation or analysis continuation.
+identities, worktree labels, root digests, complete graph generations, and
+authored-purpose revisions before wrapping the existing relation or analysis
+continuation. A stale or invalid participant returns an alias-labelled blocker
+and no partial rows; federation never repairs a sibling database.
 
 ### MCP Read Communication Sequence
 
@@ -1111,7 +1243,7 @@ distributed filesystems remain typed `unsupported`; ProjectAtlas never falls
 back to a weaker journal or synchronous mode.
 
 SQLite auto-checkpoint remains the engine baseline for structural publication.
-Introduced in schema 11 and preserved by schema 16, the telemetry lifecycle
+Introduced in schema 11 and preserved by schema 22, the telemetry lifecycle
 additionally counts committed telemetry writes and, after 1,024
 writes by default, attempts one `PASSIVE` checkpoint only after the event
 transaction has committed. Busy or failed checkpoint state is recorded for
@@ -1290,7 +1422,7 @@ flowchart TB
 ```
 
 ```mermaid
-flowchart LR
+flowchart TB
     Delete[Exact required detail expiry<br/>inside a fixed work bound] --> Reuse[SQLite freelist pages remain reusable]
     Reuse --> State[Content-free page and statistics state]
     Policy[Planner-statistics maintenance policy] --> NotConfigured[Not configured]
@@ -1322,7 +1454,7 @@ flowchart TB
     Lookalike[Foreign, linked, or lookalike state] --> Retain
 ```
 
-The current schema 16 implements this bounded lifecycle in the one authoritative database.
+The current schema 22 implements this bounded lifecycle in the one authoritative database.
 The normal read path never performs an unbounded purge, blocking truncate
 checkpoint, blind `VACUUM`, or destructive rebuild. Telemetry compaction
 preserves supported all-time totals and declared trend windows; retained,
@@ -1337,7 +1469,7 @@ resolutions, or future separately capped Memory Atlas records.
 #### Derived Graph Snapshot Export And Import
 
 ```mermaid
-flowchart LR
+flowchart TB
     Export[CLI snapshot export] --> Source[(Source projectatlas.db)]
     Source --> Capture[(Private SQLite backup)]
     Capture --> Validate[quick_check and bounded<br/>typed derived-row decode]
@@ -1419,21 +1551,33 @@ and usage telemetry. Interfaces call the same core APIs.
 
 Recommended layers:
 
-```text
-projectatlas-core
-  owns domain models and service traits
+```mermaid
+flowchart TB
+    Core[projectatlas-core<br/>domain models and service traits]
+    subgraph Engines[Responsibility-owned engines]
+        DB[projectatlas-db<br/>storage and publication]
+        FS[projectatlas-fs<br/>ignore-aware scanning]
+        Service[projectatlas-service<br/>shared query services]
+        Symbols[projectatlas-symbols<br/>language and relation parsing]
+    end
+    Runtime[projectatlas-cli runtime<br/>shared orchestration]
+    CLI[CLI adapter<br/>humans and CI]
+    MCP[MCP adapter<br/>agents and harnesses]
+    Future[Future adapters<br/>only when separately justified]
 
-projectatlas-db/projectatlas-fs/projectatlas-service/projectatlas-symbols
-  implement storage, scanning, shared query services, and parsing
-
-projectatlas-cli
-  human and CI command adapter plus shared runtime orchestration module
-
-projectatlas-cli::mcp
-  current agent/harness adapter over the same runtime module
-
-future adapters
-  language server, daemon, or editor extensions only when separately justified
+    CLI --> Runtime
+    MCP --> Runtime
+    Future -.-> Runtime
+    Runtime --> DB
+    Runtime --> FS
+    Runtime --> Service
+    Runtime --> Symbols
+    DB --> Core
+    FS --> Core
+    Service --> DB
+    Service --> Symbols
+    Service --> Core
+    Symbols --> Core
 ```
 
 CLI is the best first implementation target because it is deterministic, easy
@@ -1486,13 +1630,14 @@ The durable responsibilities and access paths are:
 
 | Responsibility | Principal physical state | Authority and primary access | Current/target state |
 | --- | --- | --- | --- |
-| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 16 is current and retains one append-only migration owner. |
-| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, and independently persisted fact-graph parser provenance. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 16; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
-| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 16 preserves accepted purposes without hash-driven invalidation and normalizes legacy stale rows; bounded projection and cursor revision binding are current. |
-| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbol and relation calls. | Current; co-published from the same typed extraction result as normalized graph facts. |
-| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, and dependency-key closure. | Schema 16 recreates disposable graph projections with compact stable-key ordering while preserving project identity and authored state, then invalidates derived publication for a clean rebuild. Bounded hydration, traversal, cursors, and aggregate budgets are current. |
+| Compatibility and publication | `metadata`, `project_identity` | Durable schema/root/contract identity; read-only preflight, migration, root transition, and active-generation lookup. | Schema 22 is current and retains one append-only migration owner. |
+| Local structure | `nodes`, `summaries`, `file_texts`, `file_text_fts`, `source_parse_metadata`, `file_content_classifications` | Rebuildable exact path/parent/kind, authoritative persisted text, a trigger-free rebuildable FTS5 trigram candidate projection keyed by `file_texts.rowid`, summary, hash, source-parse provenance, independently persisted fact-graph parser provenance, and one closed classification per current file. | Parser-provenance separation introduced in schema 13 remains authoritative in schema 22; parser/provider discovery uses `(source_parser, path)` and `(fact_parser, path)` indexes without duplicating provenance into coverage rows. Schema 17 added indexed classification/path ownership. FTS mutation, revision publication, and backfill share the authoritative text transaction; revision drift disables acceleration and never replaces exact fallback semantics. |
+| Purpose | `purposes` joined to `nodes` plus an authored-purpose revision | Generated/suggested versus agent/approved lifecycle; accepted path-owned responsibility remains authored across derived changes and is projected by exact owning path or nearest applicable folder. | Schema 22 preserves the schema-17 accepted-purpose contract without hash-driven invalidation; bounded projection and cursor revision binding are current. |
+| Compatible code facts | `symbols`, `symbol_relations` | Rebuildable file-level symbols, exact current-source selectors, and relation calls. | Schema 17 introduced optional heading byte/column selectors; schema 22 preserves those rows and their co-publication with normalized graph facts. |
+| Normalized graph | `graph_entities`, `graph_relations`, `graph_relation_occurrences`, `graph_coverage`, `graph_identity_rejections`, `graph_resolution_keys`, `graph_entity_exports`, `graph_relation_dependencies`, `document_unresolved_reason` | Rebuildable stable identity, source/target adjacency, occurrences, coverage, generation-owned bounded identity rejection details (typed reason, field, parser, path, and span), dependency-key closure, and one coarse compatible coverage reason. | Schema 22 preserves the schema-20 graph model and schema-21 rejection table while adding the private non-negative `fact_index` to durable rejection uniqueness and path-index ordering. The 20→21 migration creates generation-atomic typed rejection provenance; 21→22 atomically rebuilds that table, drops unreconstructable schema-21 rejection rows, recreates its constraints/index, and conditionally invalidates the derived publication when such rows existed. Authored/native state survives, and a schema-21 publication with no rejection rows remains current. Neither migration stores rejected raw identity values; rollback retains the complete predecessor for deterministic retry. |
 | Health resolution | `health_resolutions` | Authored exact finding disposition. | Current and preserved across derived publication. |
-| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 16; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
+| Usage measurement | `usage_instances`, `usage_bucket_dimensions`, `usage_instance_baselines`, `usage_labels`, exact global/instance/day aggregate tables, bounded `usage_events`, retention state, and label/instance tombstones | Internal runtime lifecycle, active modeled-baseline witnesses, exact durable totals/trends, recent optional detail, and content-free maintenance truth. Source rows are project-scoped; indexes own label/state/age and raw instance/time access. | Introduced by schema 11 and preserved by schema 22; every detail dimension is bounded independently, supported totals remain exact after pruning, and retained/partial/expired/unavailable detail is reported without a second database. |
+| Worktree coordination | `usage_aggregate_revisions`, `worktree_registrations`, `worktree_usage_aggregates`, `usage_instance_worktree_origins` | Bounded active/retired alias identity, exact routed origins, monotonic synchronized lifetime/daily aggregates, and repository-total attribution in the explicitly selected control atlas. | Schema 18 adds the indexed local-control model and schema 22 preserves it; each worktree graph remains private and independently writable. |
 | Future Memory Atlas | #314-owned tables | Separately capped authored context and independent context revision. | Conceptual boundary only; #308 does not prebuild its schema. |
 
 Legacy symbol rows and normalized graph rows are compatible co-published
@@ -1503,8 +1648,8 @@ The validated SQLite operating profile is explicit:
 
 | Concern | Current live state | Accepted target and owner |
 | --- | --- | --- |
-| Schema | Version 16 with append-only 8 through 16 migration ownership; 10 to 11 streams telemetry into normalized instances, dimensions, aggregates, raw detail, and retention state, 11 to 12 adds dependency-resolution keys and normalizes the accepted-purpose lifecycle, 12 to 13 records parser provenance and parser-failure state in one migration transaction, 13 to 14 adds four bounded coverage-discovery indexes, 14 to 15 adds and transactionally rebuilds the trigger-free FTS5 candidate projection plus its source/projection revision metadata, and 15 to 16 preserves project identity and authored state while recreating disposable graph projections with compact stable-key ordering, resetting the active graph generation, and invalidating derived publication for a clean rebuild. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
-| Rust/SQLite build | Workspace `rusqlite` 0.32.1, `libsqlite3-sys` 0.30.1, bundled SQLite 3.46.0. | Settings reports the actual linked runtime version and a bounded compile-option identity; source package versions alone are not runtime proof. |
+| Schema | Version 22 with append-only 8 through 22 migration ownership; 10 to 11 streams telemetry into normalized instances, dimensions, aggregates, raw detail, and retention state, 11 to 12 adds dependency-resolution keys and normalizes the accepted-purpose lifecycle, 12 to 13 records parser provenance and parser-failure state, 13 to 14 adds bounded coverage-discovery indexes, 14 to 15 adds the trigger-free FTS5 candidate projection, 15 to 16 compacts stable graph-key storage, 16 to 17 adds constrained file classifications, exact symbol selectors, and typed unresolved-document evidence, 17 to 18 adds local worktree registrations and normalized synchronized aggregates, 18 to 19 widens only the graph coverage limit domain through the existing disposable graph rebuild, 19 to 20 adds the lossless native project-root identity, 20 to 21 adds generation-owned bounded graph identity rejection provenance, and 21 to 22 atomically rebuilds that table, drops unreconstructable schema-21 rejection rows, restores its durable uniqueness and path-index ordering, and conditionally invalidates derived publication only when those rows existed; a schema-21 publication with no rejection rows remains current after reopen. Authored/native state survives. | Keep one append-only owner; migration rollback preserves the complete predecessor for deterministic retry, and incompatible future state is refused without mutation. |
+| Rust/SQLite build | Workspace `rusqlite` 0.40.2, `libsqlite3-sys` 0.38.2, bundled SQLite 3.53.2. | Settings reports the actual linked runtime version and a bounded compile-option identity; source package versions alone are not runtime proof. |
 | Filesystem | One project-local database on a filesystem with supported SQLite locking/shared-memory behavior; writable preflight returns typed supported, unsupported, or uncertain state before mutation. | Keep rejecting unsupported or uncertain live network filesystems without a silent durability downgrade. |
 | Writable connections | `foreign_keys=ON`, WAL, `synchronous=FULL`, five-second ordinary busy timeout with bounded WAL-establishment retry for concurrent validated openers; publication acquisition remains fail-fast and ancillary telemetry remains 25 ms. | The accepted mixed authored/derived durability profile is enforced and verified on production writable paths, including concurrent MCP requests with short authored and telemetry writes. |
 | Read connections | Read-only open, verified `query_only=ON`, verified five-second ordinary busy timeout, validated WAL, deferred read snapshot. | Complete-generation snapshots and bounded busy/corruption propagation are enforced through production read paths. |
@@ -1723,6 +1868,106 @@ flowchart TB
 Detection and parsing do not imply semantic certainty. Parser and fact-provider
 provenance remain separate, resolution retains uncertainty, and the existing MCP
 summary, relation, and slice routes expose the smallest trustworthy next step.
+
+### Canonical Documentation Relation Projection
+
+```mermaid
+flowchart TB
+    Markdown[Admitted Markdown file] --> File[Owning document file entity]
+    File --> Extract[Bounded heading and explicit-reference extraction]
+    Extract --> Candidates{Supported static targets found?}
+    Extract --> Headings[Exact heading entities]
+    Candidates -- No --> Empty[Trusted file coverage: no_candidates]
+    Candidates -- Yes: file is source --> Occurrences[Exact link occurrence spans]
+    Occurrences --> Relations[Deduplicated documents relations]
+    Relations --> Resolution{Repository target resolution}
+    Resolution -->|one exact target| Resolved[Resolved source file or symbol]
+    Resolution -->|several exact candidates| Ambiguous[Typed ambiguous evidence]
+    Resolution -->|missing, ignored, outside root, case conflict, unsupported| Unresolved[Typed unresolved reason]
+    Empty --> Normalize[Documents complete-zero row]
+    Normalize --> Generation[(Complete graph generation)]
+    Headings --> Generation
+    Resolved --> Generation
+    Ambiguous --> Generation
+    Unresolved --> Generation
+    Contract[Projection contract fingerprint v3] --> Generation
+    Generation --> Outbound[File-outbound documents traversal]
+    Generation --> Inbound[Target-inbound documented_by view]
+    Generation --> Coverage[Coverage discovery<br/>SQLite progress cancellation and 2s ceiling]
+```
+
+The document file is the canonical graph source, so a user can start from the
+known file without guessing which heading owns a link. Headings remain exact
+slice and occurrence evidence; repeated references to one target deduplicate to
+one logical edge while preserving every retained span. Only explicit supported
+references become relations. Ordinary prose, similarity, topic overlap, and
+unproven implementation claims create no edges. Complete extraction with no
+supported candidates remains graph-visible as trusted `no_candidates` coverage;
+an admitted candidate that cannot resolve remains a typed relation with its
+exact unresolved reason. Schema 22 stores the trusted zero state through its
+existing constrained complete-zero row. RC1's older projection fingerprint
+forces one typed full refresh before stale heading-owned rows can be served;
+authored purpose and project identity remain intact.
+
+### Classified Documentation And Worktree Navigation
+
+```mermaid
+flowchart TB
+    Agent[Agent in explicitly selected control checkout] -->|worktree alias per call| Resolver[Immutable MCP target resolver]
+    Git[Bounded reciprocal Git metadata] --> Revalidate[Selection plus prewrite root, lifecycle, and local atlas identity revalidation]
+    Revalidate --> Registry[Worktree list and lifecycle-bound registration]
+    Resolver -->|active-row CAS for a moved root| Registry
+    Registry --> Control
+    Resolver -->|read registry or select main| Control[(Control schema-22 atlas and registry)]
+    Resolver -->|issue alias| DbB[(Private ignored schema-22 target atlas)]
+    Control -->|safe reusable baseline| Candidate[Private hydration candidate]
+    Candidate --> Reconcile[Reconcile exact branch and dirty bytes]
+    Reconcile --> DbB
+    SavedA[Current and dirty control bytes] --> BuildA[Classify, parse, resolve, and refresh control]
+    BuildA --> Control
+    SavedB[Current and dirty target bytes] --> BuildB[Classify, parse, resolve, and refresh target]
+    BuildB --> DbB
+    Control --> NavigateA[Classified navigation in control]
+    DbB --> NavigateB[Classified navigation in B]
+    NavigateA --> SliceA[Exact source or heading slice in control]
+    NavigateB --> SliceB[Exact source or heading slice B]
+    Control -. never one shared writable graph .- DbB
+```
+
+The selected worktree's active schema-22 generation owns classifications,
+headings, exact selectors, canonical document relations, completeness,
+provenance, purposes, and typed unresolved evidence. A valid released database
+migrates in place. An absent registered target may hydrate reusable graph,
+source, summary, and purpose state from a compatible complete control atlas,
+but initialization clears control identity, telemetry, tasks, and transient
+runtime state before reconciling and publishing the target's exact bytes. An
+unsuitable source falls back visibly to ordinary local initialization.
+
+Each scan or watcher refresh republishes current saved bytes into that exact
+worktree's private atlas. Requests capture the exact root, database, and
+project identity, registration identity, alias, and generation for their
+lifetime. Classification, heading, relation, purpose, unresolved evidence, and
+next-call state therefore cannot leak between sibling worktrees, even when one
+MCP process interleaves short-alias calls. Explicit `worktrees` federation is
+bounded, read-only, fully labelled, and call-local; it never persists or merges
+sibling generations.
+
+Registration also captures an opaque identity for the current Git
+administrative-directory filesystem object. Add revalidates the selected root
+and lifecycle immediately before the catalog transaction. When the initial
+selection captured an existing local atlas, add also reopens it at that boundary
+and requires the same project identity before binding the alias or importing its
+snapshot. Moved-root resolution conditionally updates only the captured active
+registration, so a concurrent removal cannot reactivate its alias. Git-authorized
+checkout moves keep that object and its alias; deleting and recreating the
+directory at the same path fails closed so a replacement checkout cannot inherit
+the earlier alias.
+Unix requires device, inode, and creation time; Windows requires creation time
+plus retained-handle volume and 128-bit file identity. Filesystems without the
+complete non-reusable evidence reject alias registration and routing instead of
+falling back to a reusable path, timestamp, or inode. `core.worktree`, enabled
+`config.worktree` overrides, and unresolved config includes also prevent
+manager-parent inference.
 
 A modernization tag highlights source families where exact dependency and
 source-evidence navigation is especially valuable for high-risk transformation
@@ -2046,6 +2291,54 @@ workflows. Those paths retain focused harness unit tests and artifact-integrity
 checks, but an input-incompatible campaign publication becomes historical or
 unavailable instead of triggering a run. Only an explicit user request starts a
 full campaign.
+
+Release promotion has one version-derived path for stable and candidate tags.
+Both use the same stable milestone and cumulative notes baseline, but GitHub
+publication keeps candidates explicitly outside Latest. The release adapter may
+consume a clean-main Atlas seed archive and manifest created by the separately
+owned seed producer; it validates their exact tag-bound names and checksums both,
+without creating or opening the immutable seed.
+
+```mermaid
+flowchart TB
+    subgraph Admission[Version-derived release admission]
+        Main[Exact origin/main candidate head] --> Serial[One in-flight workflow per requested tag]
+        Serial --> Classify{Classify workspace version}
+        Classify -->|development| Stop[No release dispatch]
+        Classify -->|malformed| Fail[Fail closed]
+        Classify -->|stable or rcN| Handoff[Verify clean parser handoff compatibility]
+        Handoff --> Milestone[Gate shared stable milestone]
+        Milestone --> Kind{Derived release kind}
+        Kind -->|rcN| RCGuard[Refuse when stable tag exists]
+        Kind -->|stable| PriorRC[Require highest published rcN<br/>as an ancestor of final head]
+    end
+    RCGuard --> Stage[Validate assets and checksum every file]
+    PriorRC --> Stage
+    Stage --> Existing{Existing release?}
+    Existing -->|yes| Repair[Validate exact metadata and tag head;<br/>repair replaceable assets;<br/>preserve immutable seed and captured Latest]
+    Existing -->|no| Create{Create requested release kind}
+    Seed[Optional clean-main seed producer] -. exact-tag archive and manifest .-> Stage
+    Prior[Greatest preceding stable tag] --> Notes[Cumulative notes for new releases]
+    Notes -. new releases only .-> Create
+    Repair --> VerifyRepair[Verify repaired metadata, tag head,<br/>and unchanged Latest]
+    Create -->|rcN| RC[Create non-draft prerelease<br/>Latest disabled]
+    Create -->|stable| Stable[Create non-draft stable release]
+    RC --> VerifyRC[Verify prerelease metadata and tag head;<br/>previous stable remains Latest]
+    Stable --> VerifyStable[Verify stable metadata and tag head;<br/>promoted stable becomes Latest]
+    VerifyRepair --> PlatformSmokes[Start hosted installer smoke lanes]
+    VerifyRC --> PlatformSmokes
+    VerifyStable --> PlatformSmokes
+    PlatformSmokes --> Linux[Install exact hosted release on Linux]
+    PlatformSmokes --> MacOS[Install exact hosted release on<br/>macOS x64 and arm64]
+    PlatformSmokes --> Windows[Install exact hosted release on Windows]
+    Linux --> Candidate{Release candidate?}
+    Candidate -->|no| LinuxReady[Linux lane succeeds]
+    Candidate -->|yes| AgentE2E[Index a real project and verify<br/>fresh brief and source through stdio MCP]
+    AgentE2E --> LinuxReady
+    LinuxReady --> Complete[All hosted lanes succeed;<br/>release workflow succeeds]
+    MacOS --> Complete
+    Windows --> Complete
+```
 
 The optional-pack workflow may reuse only sanitized Cargo dependency build state.
 An exact key binds the target, Rust and native toolchains, Cargo lockfile and
@@ -2477,6 +2770,127 @@ funnel usage. The goal is not perfect accounting; the goal is a useful,
 consistent local metric that shows whether ProjectAtlas is reducing context
 load.
 
+### Token Dashboard Viewport Selection
+
+```mermaid
+flowchart TB
+    Request[Explicit token TUI request] --> Capture[Capture one columns-by-rows viewport]
+    Capture -->|live terminal| Live[Use stdout terminal dimensions]
+    Capture -->|otherwise| Environment[Use valid environment dimensions or defaults]
+    Live --> Fit{Full layout fits?}
+    Environment --> Fit
+    Fit -->|overview 80x50 or trend 80x30| Full[Existing full Ratatui snapshot]
+    Fit -->|smaller| Compact[Priority-ordered compact snapshot]
+    Full --> Atlas{Overview at least 190 columns?}
+    Atlas -->|yes| Load[Load bounded Atlas preview]
+    Atlas -->|no| Skip[Skip Atlas read]
+    Load --> ANSI[CellWidth ANSI serializer<br/>skips wide-symbol continuation cells]
+    Skip --> ANSI
+    Compact --> ANSI
+    ANSI --> Output[Propagate render or output failure]
+```
+
+Loading, layout selection, and serialization share the same captured viewport.
+Compact mode renders only the highest-priority facts that fit; it does not
+change telemetry calculations, persistence, or structured CLI/MCP reports.
+Full overview and trend layouts retain their established dimensions when they
+fit, while wide-but-short terminals skip the optional graph read. The serializer
+emits CJK, combining, emoji, and ASCII graphemes once and bounds rows by terminal
+display cells rather than Unicode scalar count.
+
+### Token trend palette test viewport ownership
+
+```mermaid
+sequenceDiagram
+    actor Runtime as Production request
+    actor Test as Palette regression
+    participant Adapter as Token TUI viewport adapter
+    participant Renderer as Trend renderer
+
+    Runtime->>Adapter: Render token trend
+    Adapter->>Adapter: Capture live terminal viewport
+    alt viewport is at least 80 x 30
+        Adapter->>Renderer: Render full layout
+    else viewport is smaller
+        Adapter->>Renderer: Render compact layout
+    end
+    Renderer-->>Adapter: ANSI snapshot
+    Adapter-->>Runtime: Bounded terminal output
+
+    Test->>Adapter: Render light theme with test_viewport(140, 30)
+    Adapter->>Renderer: Render full layout
+    Renderer-->>Adapter: Full-layout ANSI snapshot
+    Adapter-->>Test: Deterministic snapshot
+    Test->>Test: Assert light semantic palette
+```
+
+For registered worktrees, the explicitly selected control atlas is the durable
+repository-total authority while each worktree remains the authority for its
+own raw local events and exact per-session detail. Alias-routed MCP events
+already cross the control process, so they commit once in control with a stable
+registration origin. Independent worktree CLI events remain local and export
+only bounded normalized lifetime/daily aggregates with a monotonic revision.
+
+```mermaid
+sequenceDiagram
+    actor Caller
+    participant Runtime as Control CLI or MCP runtime
+    participant Structure as Bounded Git structure
+    participant Target as Exact worktree atlas
+    participant Control as Control telemetry and registry
+    participant Report as Existing token report and TUI
+
+    Caller->>Runtime: Accepted read with worktree alias
+    Runtime->>Target: Verify and read exact target generation
+    Target-->>Runtime: Bounded result
+    Runtime->>Control: Commit one routed event under registration origin
+    Runtime-->>Caller: Result
+    Caller->>Target: Independent local CLI operation
+    Target->>Target: Commit raw local event
+    Caller->>Runtime: Token report with worktree main
+    Runtime->>Control: Capture control identity and registrations read-only
+    Runtime->>Structure: Resolve exact registered lifecycles
+    Structure-->>Runtime: Active roots or typed missing and invalid state
+    Runtime->>Control: BEGIN IMMEDIATE, require captured control identity, and reload active origin
+    Control-->>Runtime: Transaction-owned guard or typed failure before target read
+    Runtime->>Structure: Revalidate the registered lifecycle under the guard
+    Structure-->>Runtime: Same lifecycle or typed failure
+    Runtime->>Target: Read revision, dimensions, and rows in one SQLite snapshot
+    Target-->>Runtime: Newer revision or unchanged revision
+    Runtime->>Structure: Revalidate an unbound origin immediately before binding
+    Structure-->>Runtime: Same lifecycle or typed failure before catalog write
+    Runtime->>Control: Bind if needed and COMMIT the active-registration guard
+    Runtime->>Control: Atomically synchronize the origin snapshot
+    Control->>Report: Native main plus routed plus active and retired snapshots
+    Report-->>Caller: Combined existing report or unchanged TUI layout
+```
+
+Hydration excludes every telemetry event, usage instance, aggregate, tombstone,
+and synchronization row so copied main history cannot be counted again.
+Synchronization transfers no raw source event, per-session query, or path;
+repeated/stale revisions are no-ops, and a newer revision must preserve every
+accepted lifetime dimension plus every daily day/dimension still inside the
+trend-retention window. A recent backup rollback or invalid/overflowing snapshot
+preserves the last-valid aggregate. Before capacity admission, synchronization
+prunes expired synchronized daily rows across active and retired origins inside
+the same write transaction; any later failure rolls that reclamation back with
+the attempted update. The read-only catalog snapshot also captures the control
+project identity, which the later writer must retain. An origin without a bound
+project identity acquires the control active-registration guard, revalidates its
+exact Git administrative lifecycle before and after the local snapshot, and
+binds before releasing writer exclusion, so neither control-atlas replacement,
+worktree replacement, nor a concurrent applied reset can import an aggregate
+into stale authority. Snapshot synchronization then owns its existing separate
+atomic origin-replacement transaction.
+Removal uses the same control-first lock order, then holds one short local SQLite
+writer-exclusion scope while the transaction-owned guard atomically binds,
+synchronizes, and retires the origin. A local usage commit cannot land in an
+export-to-retirement gap. Any local open, identity, or export error is followed
+by a fresh lifecycle check; a replacement is retired without binding, importing,
+or modifying its atlas. Retired origins
+continue contributing to repository totals. An exact worktree report remains
+local and never presents sibling detail as its own.
+
 ### Read-Only Agent-Efficiency Benchmark
 
 The optional agent-efficiency comparison is immutable publication evidence, not
@@ -2598,7 +3012,7 @@ The live navigation section uses the same reconciled source rows as the source
 ledger below it. File reads retain their exact observed summary/slice and
 search-modeled split. Broad folder walks skipped and candidate files not opened
 each show an activity bar against all persisted source steps and a separate
-token-impact bar against reconciled `tokens_avoided`; therefore a rare but
+token-impact bar against reconciled `average_tokens_avoided`; therefore a rare but
 high-impact source can appear small in activity and dominant in avoided tokens
 without any bar being normalized to an uninformative 100%.
 
@@ -2619,8 +3033,14 @@ Token accounting model:
   estimated_tokens_with_projectatlas` from the stored raw estimates instead of
   trusting historical per-row saved values. Keep this as the legacy gross
   compatibility number.
-- Compute headline `tokens_avoided` as `measured_tokens_saved +
-  deduped_modeled_tokens_avoided`. `measured_tokens_saved` is observed
+- Compute primary `average_tokens_avoided` as `measured_tokens_saved +
+  average_modeled_tokens_avoided`; keep `tokens_avoided` as its compatibility
+  alias. `average_modeled_tokens_avoided` applies 50% once to the deduped
+  aggregate `directory_walk` baseline, rounds down, subtracts the complete
+  Atlas payload, and leaves every non-folder category unchanged. Compute
+  `maximum_tokens_avoided` as `measured_tokens_saved +
+  deduped_modeled_tokens_avoided`, retaining the all-files folder scope.
+  `measured_tokens_saved` is observed
   before/after source-compression evidence. `gross_modeled_tokens_avoided` is
   counterfactual navigation avoidance before dedupe. `deduped_modeled_tokens_avoided`
   counts repeated modeled baselines once per internal runtime/invocation
@@ -2630,6 +3050,10 @@ Token accounting model:
   state. Modeled rows with `dedupe_scope = "event"` remain individual events.
   `repeated_baselines_deduped` counts duplicate instance-scoped modeled events
   collapsed, not unique baseline groups.
+- Preserve `directory_walk` in one reserved overflow dimension after ordinary
+  dimension capacity is reached. Existing generic overflow rows cannot recover
+  their old denominator; keep their modeled contribution at maximum and label
+  `average_policy.evidence` as an unclassified overflow fallback.
 - Compute `savings_rate = saved / estimated_tokens_without_projectatlas` only
   when the baseline is greater than zero. A zero baseline yields an unknown rate
   instead of a fake percentage.
@@ -2852,6 +3276,81 @@ augmentation layer into private modules, replace Objective-C duplicate
 normalization with keyed lookups, and use persisted import/call relations for
 deterministic import-alias `called_by` summaries while preserving ambiguity
 rejection.
+
+### Affected CI proof routing and release backstop
+
+Normal pull requests route only the proof contracts that can detect defects in
+the exact change. One closed planner combines the Cargo reverse-dependency graph
+with declared CLI, MCP, integration, and platform ownership; ambiguity selects
+the complete normal-PR proof. Live review-thread state is owned by GitHub's
+native required-conversation-resolution rule. Pull-request metadata reruns a
+lightweight workflow, while an isolated `pr-state` issue-event job reruns the
+existing workflow on the exact current PR head after an owning issue
+close/reopen/milestone event, without running source proof. Selected jobs run
+concurrently, and one fail-closed aggregate is the stable source-proof context.
+`main` branch-protection readiness is the explicit AND of current `pr-state`,
+current `verify`, and resolved review conversations. `dev` remains strictly
+gated by current `verify` plus the four legacy platform contexts until its
+required-context migration. Final merge acceptance rereads the live owning issue
+and milestone, so an issue-refresh API failure stays visibly red and requires
+manual recovery rather than trusting an older green check.
+The accepted pull-request or merge-group tree reaches the protected branch
+without launching duplicate source CI. Automatic cancellation applies only
+when a newer pull-request source run supersedes an older source
+run for the same pull-request number; all other event, governance, and delivery
+owners use isolated namespaces with cancellation disabled. The complete
+installed-product matrix remains an integrated release-candidate boundary on
+all four supported runner targets. Ordinary OS-sensitive proof uses Linux,
+Windows, and one macOS runner; both macOS architectures run only when parser,
+toolchain, or package behavior is architecture-sensitive.
+
+```mermaid
+flowchart TB
+    subgraph PR[Pull request and protected merge]
+        direction LR
+        Change[Source change] --> Plan[Closed proof-contract planner]
+        PRMetadata[PR issue reference or milestone change] --> State[Required PR-state gate]
+        IssueMetadata[Owning issue close, reopen,<br/>or milestone change] --> Refresh[PR-state issue event reruns<br/>exact current-head workflow]
+        Refresh --> State
+        Review[Review conversation state] --> Conversation[Native required<br/>conversation resolution]
+        Plan --> Known{Narrow plan proven?}
+        Known -->|No| Full[Complete normal-PR proof]
+        Known -->|Yes| Selected[Selected quality, test-domain,<br/>and platform jobs]
+        Full --> Verify[Required verify aggregate]
+        Selected --> Verify
+        State --> Gate{{main AND: current PR-state,<br/>current verify, and<br/>resolved conversations}}
+        Verify --> Gate
+        Conversation --> Gate
+        Gate -->|All satisfied| ProtectedReady[main protection ready]
+        Gate -->|Otherwise| Blocked[PR blocked]
+        DevGate[Current dev compatibility gate:<br/>verify + four legacy platform contexts] --> FinalRead
+        ProtectedReady --> FinalRead[Final live issue and<br/>milestone read]
+        FinalRead -->|Valid| Ready[PR ready]
+        FinalRead -->|Invalid or refresh failed| Blocked
+        Ready --> Main[Merge to protected branch;<br/>no duplicate source CI]
+    end
+
+    Main --> Candidate[Integrated release candidate]
+
+    subgraph Cancellation[Cancellation isolation]
+        direction LR
+        Newer[Newer pull-request source run] -->|Same PR number; cancels only| Older[Older pull-request source run]
+        Others[Merge group, dispatch, schedule,<br/>PR-state, IssueOps, release, publish, deploy] --> Isolated[Separate namespaces;<br/>automatic cancellation disabled]
+    end
+
+    subgraph Release[Release acceptance]
+        direction LR
+        Candidate --> Matrix[Complete installed-product proof:<br/>Linux, Windows, macOS Intel, macOS ARM]
+        Matrix -->|Defect| Fix[Owning issue fix]
+        Fix --> Candidate
+        Matrix -->|Green| Accept[Candidate accepted]
+    end
+```
+
+The planner reports why each proof contract was selected or omitted, but the
+report is diagnostic rather than an evidence ledger. Internal event identity
+prevents stale-result reuse; behavior tests, measured latency and runner cost,
+review, and green required contexts are the public acceptance boundary.
 
 ## Quality Gates
 

@@ -1,0 +1,652 @@
+{
+  "schema_version": 1,
+  "issue": 358,
+  "input": "docs/benchmarks/v050-358-resource-measurement-input.json",
+  "harness": "docs/benchmarks/harness/system_scale.py",
+  "required_version": "0.4.5",
+  "measurement_scope": "Historical measured separate-stage runtime versus retained shared-pool candidate; baseline source binding unavailable",
+  "source_revisions": {
+    "baseline": null,
+    "candidate": "9be59dcab14073e971cc723f2308f0d741d6eb24"
+  },
+  "environment": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.3",
+    "psutil": "7.0.0",
+    "logical_cpus": 16,
+    "telemetry": "disabled",
+    "sampler": "windows-job-basic-and-io-accounting-plus-psutil-peaks",
+    "sampling_interval_seconds": 0.02
+  },
+  "runtimes": {
+    "baseline": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "sha256": "e86a47dfb4468f79261b98a9a70e1ba98c1650f7f3412852cce12458aa3f82f9",
+      "bytes": 76443648,
+      "build_command": null
+    },
+    "candidate": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/.tmp/issue-358-shared-pool/target/benchmarks/issue-358-shared-build/debug/projectatlas.exe",
+      "sha256": "bbd6f5ff2603711305efb3b0c0999c77f361da770c8aacbbb0916ec9ed02895b",
+      "bytes": 76453376,
+      "build_command": "cargo build --locked -p projectatlas-cli"
+    }
+  },
+  "threshold": {
+    "cold_wall_reduction_fraction": 0.1,
+    "cold_cpu_reduction_fraction": 0.1,
+    "maximum_resource_regression_fraction": 0.05,
+    "decision": "retain-current-separate-stage-pools"
+  },
+  "shapes": {
+    "small-clean": {
+      "corpus": {
+        "files": 7,
+        "bytes": 1503,
+        "source": "docs/benchmarks/fixtures/mcp-composition/clean",
+        "tree_sha256": "ab5fc4021855ad75667519cb905d7542536cf7bc4104a33a8e2d8994ca60d050"
+      },
+      "baseline": {
+        "cold": {
+          "wall_seconds": 0.671189,
+          "cpu_seconds": 0.1875,
+          "rss_bytes": 27377664,
+          "read_bytes": 671219,
+          "write_bytes": 3620736
+        },
+        "unchanged_watch": {
+          "wall_seconds": 0.329231,
+          "cpu_seconds": 0.171875
+        },
+        "persistent": {
+          "database_bytes": 651264,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "graph": {
+          "sha256": "c43e83ea82ce07e8a2af7aaa0b5896db14ffc051c612f0bf2eb098db06ec612d",
+          "record_count": 245,
+          "table_rows": {
+            "entities": 29,
+            "relations": 19,
+            "occurrences": 19,
+            "resolution_keys": 80,
+            "exports": 79,
+            "dependencies": 13,
+            "coverage": 6,
+            "identity_rejections": 0
+          }
+        },
+        "retained_raw_result": "target/benchmarks/system-scale/issue-358-current-baseline-small.json",
+        "historically_emitted_graph": {
+          "sha256": "bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3",
+          "record_count": 245,
+          "table_rows": {
+            "entities": 29,
+            "relations": 19,
+            "occurrences": 19,
+            "resolution_keys": 80,
+            "exports": 79,
+            "dependencies": 13,
+            "coverage": 6,
+            "identity_rejections": 0
+          }
+        },
+        "graph_recomputation": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields; read-only retained database recomputation, not a measurement rerun"
+      },
+      "candidate": {
+        "cold": {
+          "wall_seconds": 0.490724,
+          "cpu_seconds": 0.203125,
+          "rss_bytes": 26402816,
+          "read_bytes": 671426,
+          "write_bytes": 3637136
+        },
+        "unchanged_watch": {
+          "wall_seconds": 0.30067,
+          "cpu_seconds": 0.15625
+        },
+        "persistent": {
+          "database_bytes": 651264,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "graph": {
+          "sha256": "c43e83ea82ce07e8a2af7aaa0b5896db14ffc051c612f0bf2eb098db06ec612d",
+          "record_count": 245,
+          "table_rows": {
+            "entities": 29,
+            "relations": 19,
+            "occurrences": 19,
+            "resolution_keys": 80,
+            "exports": 79,
+            "dependencies": 13,
+            "coverage": 6,
+            "identity_rejections": 0
+          }
+        },
+        "retained_raw_result": "target/benchmarks/system-scale/issue-358-exact-candidate-small.json",
+        "historically_emitted_graph": {
+          "sha256": "bec258fbb18c32d8868d3fe78ae4aff84f5bbc066be4ef149563d2662731cda3",
+          "record_count": 245,
+          "table_rows": {
+            "entities": 29,
+            "relations": 19,
+            "occurrences": 19,
+            "resolution_keys": 80,
+            "exports": 79,
+            "dependencies": 13,
+            "coverage": 6,
+            "identity_rejections": 0
+          }
+        },
+        "graph_recomputation": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields; read-only retained database recomputation, not a measurement rerun"
+      },
+      "threshold_evaluation": {
+        "cold_wall_reduction_fraction": 0.268874,
+        "cold_cpu_reduction_fraction": -0.083333,
+        "passed": false,
+        "failed_cells": [
+          "cold_cpu_reduction_below_10_percent"
+        ]
+      }
+    },
+    "synthetic-high-degree-1024": {
+      "corpus": {
+        "caller_files": 1024,
+        "files": 1028,
+        "bytes": 101548,
+        "generator": "prepare_medium",
+        "source_shape": "one hub plus one direct caller module per generated caller",
+        "tree_sha256": "30ff7d8f9a4bd3aedce5d47bf5c340bf97d4500c8c9b45e499bdc34b85ad5e43"
+      },
+      "baseline": {
+        "cold": {
+          "wall_seconds": 4.309553,
+          "cpu_seconds": 4.0625,
+          "rss_bytes": 59396096,
+          "read_bytes": 101830670,
+          "write_bytes": 451197848
+        },
+        "unchanged_watch": {
+          "wall_seconds": 0.372607,
+          "cpu_seconds": 0.40625
+        },
+        "narrow_watch": {
+          "wall_seconds": 1.230014,
+          "cpu_seconds": 0.359375
+        },
+        "explicit_rebuild": {
+          "wall_seconds": 4.421013,
+          "cpu_seconds": 4.859375,
+          "read_bytes": 149323652,
+          "write_bytes": 531983108
+        },
+        "persistent": {
+          "database_bytes": 19140608,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "graph": {
+          "sha256": "d9a51ff16f9cdca80e971ab8fc9f15b012ff65ae3089cddb7cfa5093991a0624",
+          "record_count": 30772,
+          "table_rows": {
+            "entities": 3082,
+            "relations": 2048,
+            "occurrences": 2048,
+            "resolution_keys": 10260,
+            "exports": 10259,
+            "dependencies": 2048,
+            "coverage": 1027,
+            "identity_rejections": 0
+          }
+        },
+        "retained_raw_result": "target/benchmarks/system-scale/issue-358-current-baseline-medium.json",
+        "historically_emitted_graph": {
+          "sha256": "42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719",
+          "record_count": 30772,
+          "table_rows": {
+            "entities": 3082,
+            "relations": 2048,
+            "occurrences": 2048,
+            "resolution_keys": 10260,
+            "exports": 10259,
+            "dependencies": 2048,
+            "coverage": 1027,
+            "identity_rejections": 0
+          }
+        },
+        "graph_recomputation": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields; read-only retained database recomputation, not a measurement rerun"
+      },
+      "candidate": {
+        "cold": {
+          "wall_seconds": 5.47402,
+          "cpu_seconds": 4.875,
+          "rss_bytes": 59535360,
+          "read_bytes": 103485574,
+          "write_bytes": 450574864
+        },
+        "unchanged_watch": {
+          "wall_seconds": 0.720197,
+          "cpu_seconds": 0.390625
+        },
+        "narrow_watch": {
+          "wall_seconds": 1.462383,
+          "cpu_seconds": 0.453125
+        },
+        "explicit_rebuild": {
+          "wall_seconds": 7.41506,
+          "cpu_seconds": 6.390625,
+          "read_bytes": 148916441,
+          "write_bytes": 531310660
+        },
+        "persistent": {
+          "database_bytes": 19156992,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "graph": {
+          "sha256": "d9a51ff16f9cdca80e971ab8fc9f15b012ff65ae3089cddb7cfa5093991a0624",
+          "record_count": 30772,
+          "table_rows": {
+            "entities": 3082,
+            "relations": 2048,
+            "occurrences": 2048,
+            "resolution_keys": 10260,
+            "exports": 10259,
+            "dependencies": 2048,
+            "coverage": 1027,
+            "identity_rejections": 0
+          }
+        },
+        "retained_raw_result": "target/benchmarks/system-scale/issue-358-exact-candidate-medium.json",
+        "historically_emitted_graph": {
+          "sha256": "42eb33c7ae271906c3203f834c15c8077ab8cec296d0999ed78c3677dc515719",
+          "record_count": 30772,
+          "table_rows": {
+            "entities": 3082,
+            "relations": 2048,
+            "occurrences": 2048,
+            "resolution_keys": 10260,
+            "exports": 10259,
+            "dependencies": 2048,
+            "coverage": 1027,
+            "identity_rejections": 0
+          }
+        },
+        "graph_recomputation": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields; read-only retained database recomputation, not a measurement rerun"
+      },
+      "threshold_evaluation": {
+        "cold_wall_reduction_fraction": -0.270206,
+        "cold_cpu_reduction_fraction": -0.2,
+        "passed": false,
+        "failed_cells": [
+          "cold_wall_regression",
+          "cold_cpu_regression"
+        ]
+      }
+    },
+    "synthetic-high-edge-4096": {
+      "corpus": {
+        "caller_files": 4096,
+        "files": 4100,
+        "bytes": 405676,
+        "generator": "prepare_medium",
+        "source_shape": "one hub plus one direct caller module per generated caller",
+        "tree_sha256": "321c30c0b647f02dcf0164fa90d41cbb242430d1de687418a6c04b66ac30467e"
+      },
+      "baseline": {
+        "cold": {
+          "wall_seconds": 19.481111,
+          "cpu_seconds": 18.953125,
+          "rss_bytes": 147451904,
+          "read_bytes": 901150599,
+          "write_bytes": 2182955980
+        },
+        "unchanged_watch": {
+          "wall_seconds": 0.527223,
+          "cpu_seconds": 0.984375
+        },
+        "narrow_watch": {
+          "wall_seconds": 1.698872,
+          "cpu_seconds": 1.5625
+        },
+        "explicit_rebuild": {
+          "wall_seconds": 21.011708,
+          "cpu_seconds": 23.515625,
+          "read_bytes": 1338830844,
+          "write_bytes": 2654408024
+        },
+        "persistent": {
+          "database_bytes": 72482816,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "graph": {
+          "sha256": "c6d74d40c87b09b76bc55fb435fdf83daf605d34ee73248f2b8d3a222984fd9e",
+          "record_count": 122253,
+          "table_rows": {
+            "entities": 12201,
+            "relations": 8192,
+            "occurrences": 8192,
+            "resolution_keys": 40689,
+            "exports": 40688,
+            "dependencies": 8192,
+            "coverage": 4099,
+            "identity_rejections": 0
+          }
+        },
+        "retained_raw_result": "target/benchmarks/system-scale/issue-358-current-baseline-high-edge.json",
+        "historically_emitted_graph": {
+          "sha256": "c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880",
+          "record_count": 122253,
+          "table_rows": {
+            "entities": 12201,
+            "relations": 8192,
+            "occurrences": 8192,
+            "resolution_keys": 40689,
+            "exports": 40688,
+            "dependencies": 8192,
+            "coverage": 4099,
+            "identity_rejections": 0
+          }
+        },
+        "graph_recomputation": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields; read-only retained database recomputation, not a measurement rerun"
+      },
+      "candidate": {
+        "cold": {
+          "wall_seconds": 34.076379,
+          "cpu_seconds": 27.625,
+          "rss_bytes": 144781312,
+          "read_bytes": 902420659,
+          "write_bytes": 2185186056
+        },
+        "unchanged_watch": {
+          "wall_seconds": 0.969778,
+          "cpu_seconds": 1.234375
+        },
+        "narrow_watch": {
+          "wall_seconds": 1.972959,
+          "cpu_seconds": 1.609375
+        },
+        "explicit_rebuild": {
+          "wall_seconds": 26.531929,
+          "cpu_seconds": 28.75,
+          "read_bytes": 1339148529,
+          "write_bytes": 2660089812
+        },
+        "persistent": {
+          "database_bytes": 72519680,
+          "wal_bytes": 0,
+          "shm_bytes": 0,
+          "staging_bytes": 0,
+          "stage_directories": 0
+        },
+        "graph": {
+          "sha256": "c6d74d40c87b09b76bc55fb435fdf83daf605d34ee73248f2b8d3a222984fd9e",
+          "record_count": 122253,
+          "table_rows": {
+            "entities": 12201,
+            "relations": 8192,
+            "occurrences": 8192,
+            "resolution_keys": 40689,
+            "exports": 40688,
+            "dependencies": 8192,
+            "coverage": 4099,
+            "identity_rejections": 0
+          }
+        },
+        "retained_raw_result": "target/benchmarks/system-scale/issue-358-exact-candidate-high-edge.json",
+        "historically_emitted_graph": {
+          "sha256": "c72f6d5f82a6a84cc81fde3032df312ec5a7534b7b497bfa00d631d2072f5880",
+          "record_count": 122253,
+          "table_rows": {
+            "entities": 12201,
+            "relations": 8192,
+            "occurrences": 8192,
+            "resolution_keys": 40689,
+            "exports": 40688,
+            "dependencies": 8192,
+            "coverage": 4099,
+            "identity_rejections": 0
+          }
+        },
+        "graph_recomputation": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields; read-only retained database recomputation, not a measurement rerun"
+      },
+      "threshold_evaluation": {
+        "cold_wall_reduction_fraction": -0.749201,
+        "cold_cpu_reduction_fraction": -0.457543,
+        "passed": false,
+        "failed_cells": [
+          "cold_wall_regression",
+          "cold_cpu_regression"
+        ]
+      }
+    }
+  },
+  "concurrency": {
+    "logical_cpus": 16,
+    "worker_budget": 16,
+    "workers_per_process": 8,
+    "two_root": {
+      "baseline": {
+        "peak_rss_bytes": 117329920,
+        "cpu_seconds": 10.5625,
+        "read_bytes": 291914812,
+        "write_bytes": 848033472,
+        "passed": true
+      },
+      "candidate": {
+        "peak_rss_bytes": 118550528,
+        "cpu_seconds": 8.3125,
+        "read_bytes": 291353444,
+        "write_bytes": 846995952,
+        "passed": true
+      }
+    },
+    "same_root": {
+      "baseline": {
+        "peak_rss_bytes": 119140352,
+        "cpu_seconds": 7.78125,
+        "read_bytes": 147366318,
+        "write_bytes": 424354216,
+        "passed": true
+      },
+      "candidate": {
+        "peak_rss_bytes": 116932608,
+        "cpu_seconds": 5.34375,
+        "read_bytes": 148050446,
+        "write_bytes": 425600736,
+        "passed": true
+      }
+    },
+    "budget_checks": {
+      "baseline": true,
+      "candidate": true
+    }
+  },
+  "contention": {
+    "baseline": {
+      "blocked_wall_seconds": 1.263722,
+      "blocked_error": "database is locked",
+      "generation_unchanged": true,
+      "retry_generation_increment": 1,
+      "passed": false,
+      "failed_cell": "maximum_contention_failure_seconds"
+    },
+    "candidate": {
+      "blocked_wall_seconds": 1.264615,
+      "blocked_error": "database is locked",
+      "generation_unchanged": true,
+      "retry_generation_increment": 1,
+      "passed": false,
+      "failed_cell": "maximum_contention_failure_seconds"
+    }
+  },
+  "remediation_replay": {
+    "scope": "exact-head contention-only replay after fail-fast writer-availability probe",
+    "source_revision": "32f0297b487a74dc07da50f4a37f842125452204",
+    "runtime": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "sha256": "9755f0c7b14e0b2de7b92dbc8d275d7b45bd0cf87cf9d8caa0cb42465c61734d",
+      "bytes": 76446208
+    },
+    "blocked_wall_seconds": 0.799257,
+    "maximum_contention_failure_seconds": 1,
+    "blocked_error": "database is locked",
+    "typed_writer_refusal": true,
+    "generation_unchanged": true,
+    "complete_snapshot_unchanged": true,
+    "retry_generation_increment": 1,
+    "retry_successful": true,
+    "stage_directories": 0,
+    "passed": true,
+    "publication_eligible": false,
+    "matrix_complete": false,
+    "notes": "This causal replay does not replace the historical baseline/candidate matrix or check OpenSpec tasks 5.1-5.4."
+  },
+  "external_huge_replay": {
+    "status": "attempted_failed",
+    "repository": "https://github.com/microsoft/vscode.git",
+    "tag": "1.130.0",
+    "commit": "1b6a188127eeaf9194f945eb6eb89a657e93c54c",
+    "target_file": "src/vs/platform/instantiation/common/instantiation.ts",
+    "corpus": {
+      "tracked_files": 16646,
+      "tracked_bytes": 235792515,
+      "manifest_sha256": "16eef7c9e5612568fb2def78f3fde1827ee0faa228862f26ec92da19fdc03a9a",
+      "git_tree": "f796245e1336739091b65fe9f3353c9e615c8022"
+    },
+    "source_revision": "32f0297b487a74dc07da50f4a37f842125452204",
+    "runtime": {
+      "version": "projectatlas 0.4.5",
+      "path": "{REPO_ROOT}/target/debug/projectatlas.exe",
+      "sha256": "9755f0c7b14e0b2de7b92dbc8d275d7b45bd0cf87cf9d8caa0cb42465c61734d",
+      "bytes": 76446208
+    },
+    "command": "python docs/benchmarks/harness/system_scale.py --runtime target/debug/projectatlas.exe --preregistration docs/benchmarks/v0.4-system-scale-preregistration.json --required-version 0.4.5 --only huge",
+    "failure_phase": "scan",
+    "failure": "invalid input: compiler configuration 'extensions/copilot/test/simulation/fixtures/tests/simple-ts-proj-with-test-file-1/tsconfig.json' must contain a JSON object",
+    "measurement_available": false,
+    "publication_eligible": false
+  },
+  "failed_cells": {
+    "medium_explicit_rebuild_read_transfer_cap": {
+      "threshold_bytes": 134217728,
+      "baseline_bytes": 149323652,
+      "candidate_bytes": 148916441,
+      "passed": false,
+      "disposition": "retained_red_cell"
+    }
+  },
+  "cancellation": {
+    "baseline": {
+      "seconds": 0.104863,
+      "active_work_observed": true,
+      "terminal_state": "canceled",
+      "generation_unchanged": true,
+      "writer_released": true,
+      "survivors": [],
+      "passed": true
+    },
+    "candidate": {
+      "seconds": 0.114796,
+      "active_work_observed": true,
+      "terminal_state": "canceled",
+      "generation_unchanged": true,
+      "writer_released": true,
+      "survivors": [],
+      "passed": true
+    }
+  },
+  "sqlite_proof": {
+    "final_profile": {
+      "journal_mode": "wal",
+      "synchronous": "full",
+      "wal_autocheckpoint": 1000,
+      "quick_check": "ok",
+      "final_wal_bytes": 0,
+      "final_shm_bytes": 0,
+      "final_stage_directories": 0
+    },
+    "representative_query_plans": {
+      "entity_path_lookup": "SEARCH graph_entities USING INDEX idx_graph_entities_path (repository_path=?)",
+      "outbound_relation_lookup": "SEARCH graph_relations USING COVERING INDEX idx_graph_relations_source_kind (source_entity_key=?)",
+      "relation_occurrence_lookup": "SEARCH graph_relation_occurrences USING COVERING INDEX sqlite_autoindex_graph_relation_occurrences_1 (relation_key=?)"
+    },
+    "query_plan_checks": {
+      "all_use_owning_index": true,
+      "temporary_btree": false
+    },
+    "publication_atomicity": {
+      "real_e2e": "resource_measurement_baseline_pipeline_preserves_atomic_graph_publication",
+      "generation_and_snapshot_rollback": true,
+      "transaction_duration_seconds": "unavailable"
+    }
+  },
+  "full_path_proof": {
+    "stages": [
+      "scan",
+      "text and symbol parsing",
+      "graph derivation and identity admission",
+      "structural summaries",
+      "bounded staging",
+      "one-generation SQLite publication",
+      "cleanup"
+    ],
+    "graph_digest_equal_for_every_shape": true,
+    "cancellation_rollback_and_retry": true,
+    "same_root_writer_contention": "historical baseline/candidate timing failed at 1.263722s/1.264615s; exact-head contention-only replay passed at 0.799257s",
+    "process_worker_budget": "one 16-worker host envelope, eight configured workers per concurrent process"
+  },
+  "unavailable": {
+    "allocations": {
+      "status": "unavailable",
+      "reason": "existing harness exposes no allocator-event sampler on this host"
+    },
+    "external_huge_corpus": {
+      "status": "unavailable",
+      "reason": "exact-head attempt reached the preregistered VS Code commit (16,646 tracked files; 235,792,515 tracked bytes) but the full scan failed on a malformed tsconfig fixture before a valid measurement result was produced"
+    },
+    "linux_macos": {
+      "status": "unavailable",
+      "reason": "only Windows was exercised"
+    },
+    "transaction_duration": {
+      "status": "unavailable",
+      "reason": "the runtime does not emit transaction duration; atomicity is covered by the real E2E and final generation/WAL checks"
+    },
+    "checkpoint_trace": {
+      "status": "unavailable",
+      "reason": "the harness records final WAL/SHM and configured autocheckpoint state, not checkpoint frame timing"
+    }
+  },
+  "historical_provenance_correction": {
+    "previous_baseline_claim": {
+      "sha256": "5ab5154851538a1291d43d444824c0c8b3865dd1ca128aaf88321eeab751269f",
+      "bytes": 76348416,
+      "source_revision": "dcf778f7640c0235f82e0a23e4e8a7a5d1b6ded4"
+    },
+    "status": "baseline-source-binding-unavailable",
+    "reason": "Retained raw observations record e86a47df, not the previously declared 5ab51548 binary. The measured baseline executable is no longer retained. No source revision is inferred from a checkout path.",
+    "scope": "Unadopted historical observation, not verified exact-source performance or release acceptance. Current optimized profile has an independent build witness."
+  },
+  "graph_digest_recomputation": {
+    "scope": "Read-only recomputation from retained SQLite databases; measurement observations and frozen inputs unchanged",
+    "harness_sha256": "d1c5ff41b917d1e181fb4f486383a1b9ea8f8380c7fb908dd2c54a30325446eb",
+    "normalization": "Retain relation canonical identities and export/dependency resolution-key associations; require matching nested project ownership and normalize only typed project fields"
+  }
+}

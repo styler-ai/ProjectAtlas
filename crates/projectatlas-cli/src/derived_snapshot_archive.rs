@@ -1,6 +1,6 @@
 //! Bounded archive adapter for portable derived graph snapshots.
 
-use super::CliError;
+use super::{CliError, runtime::lossless_native_path_display};
 use projectatlas_db::{
     AtlasStore, DerivedGraphSnapshot, DerivedGraphSnapshotImport, DerivedSnapshotContent,
     MAX_DERIVED_SNAPSHOT_JSON_BYTES,
@@ -41,8 +41,8 @@ const SIGNATURE_DOMAIN: &[u8] = b"projectatlas.derived-snapshot.archive-signatur
 /// Successful portable archive export.
 #[derive(Debug, Serialize)]
 pub(super) struct SnapshotExportReport {
-    /// Written archive path.
-    pub(super) archive: String,
+    /// Lossless UTF-8 written archive path, when one is available.
+    pub(super) archive: Option<String>,
     /// Portable snapshot digest.
     pub(super) snapshot_digest: String,
     /// Uncompressed payload bytes.
@@ -58,8 +58,8 @@ pub(super) struct SnapshotExportReport {
 /// Successful portable archive import.
 #[derive(Debug, Serialize)]
 pub(super) struct SnapshotImportReport {
-    /// Read archive path.
-    pub(super) archive: String,
+    /// Lossless UTF-8 read archive path, when one is available.
+    pub(super) archive: Option<String>,
     /// Signature handling result.
     pub(super) signature: SnapshotSignatureState,
     #[serde(flatten)]
@@ -198,7 +198,7 @@ pub(super) fn export_snapshot_archive(
         })?;
 
     Ok(SnapshotExportReport {
-        archive: output.display().to_string(),
+        archive: lossless_native_path_display(output),
         snapshot_digest: snapshot.digest().to_string(),
         payload_bytes: usize_to_u64(payload.len())?,
         compressed_bytes,
@@ -241,7 +241,7 @@ pub(super) fn import_snapshot_archive(
     )?;
     let publication = store.import_derived_graph_snapshot(&snapshot)?;
     Ok(SnapshotImportReport {
-        archive: archive_path.display().to_string(),
+        archive: lossless_native_path_display(archive_path),
         signature,
         publication,
     })
@@ -553,7 +553,7 @@ fn decode_hex_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N],
         )));
     }
     let mut decoded = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = decode_nibble(pair[0])
             .and_then(|high| decode_nibble(pair[1]).map(|low| (high << 4) | low))
             .ok_or_else(|| CliError::InvalidInput(format!("{label} is not hexadecimal")))?;

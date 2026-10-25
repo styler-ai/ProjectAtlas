@@ -7,8 +7,9 @@ use projectatlas_core::optional_parser_pack::{
     OPTIONAL_PARSER_PACK_ID, OPTIONAL_PARSER_PACK_MANIFEST_MAX_BYTES,
     OPTIONAL_PARSER_PACK_MAX_ARCHIVE_BYTES, OPTIONAL_PARSER_PACK_MAX_EXPANDED_BYTES,
     OPTIONAL_PARSER_PACK_MAX_FILE_BYTES, OPTIONAL_PARSER_PACK_MAX_FILE_ENTRIES,
-    OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION, OptionalParserPackArtifactManifest,
-    OptionalParserPackManifest, OptionalParserPackManifestError, PackPlatform, PackRelativePath,
+    OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION, OptionalParserCapability,
+    OptionalParserPackArtifactManifest, OptionalParserPackManifest,
+    OptionalParserPackManifestError, PackPlatform, PackRelativePath,
 };
 use projectatlas_core::optional_parser_protocol::{ParserArtifactIdentity, ParserContentDigest};
 use serde::{Deserialize, Serialize};
@@ -135,10 +136,10 @@ pub enum OptionalParserPackLifecycleError {
     /// Strict JSON decoding or encoding failed.
     #[error("optional parser-pack JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
-    /// One or more exact slot cleanup attempts failed after all slots were attempted.
+    /// One or more artifact-scoped cleanup operations failed.
     #[error("optional parser-pack cleanup was incomplete: {message}")]
     CleanupIncomplete {
-        /// Bounded aggregate of artifact-scoped cleanup failures.
+        /// Bounded artifact-scoped cleanup failure details.
         message: String,
     },
     /// A lifecycle operation failed and mandatory child cleanup also failed.
@@ -237,6 +238,8 @@ pub struct OptionalParserPackLifecycleReport {
     pub pack_id: &'static str,
     /// Whether the current host has an accepted containment adapter.
     pub supported: bool,
+    /// Closed host capability, including built-in-only fallback on unsupported tuples.
+    pub capability: OptionalParserCapability,
     /// Accepted target triple for this host, when supported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<&'static str>,
@@ -257,6 +260,12 @@ pub struct OptionalParserPackLifecycleReport {
     pub changed: bool,
 }
 
+/// Injectable artifact cleanup retained only by unit-test guards.
+#[cfg(test)]
+type ProfileCleanupOverride = dyn FnMut(&Path, &ParserArtifactIdentity) -> Result<(), OptionalParserPackLifecycleError>
+    + Send
+    + Sync;
+
 /// Owns cleanup of an artifact profile created from a temporary pack root.
 ///
 /// Callers must either hold the parser-pack lifecycle's exclusive lease or run
@@ -269,8 +278,11 @@ pub struct TemporaryParserArtifactProfile {
     pack_root: PathBuf,
     /// Identity of the exact artifact manifest that owns the profile.
     artifact: ParserArtifactIdentity,
-    /// Whether cleanup ownership has not been completed or transferred.
+    /// Whether this temporary guard still owns its one cleanup attempt.
     cleanup_pending: bool,
+    /// Per-instance cleanup override that keeps unit tests away from host profiles.
+    #[cfg(test)]
+    cleanup_override: Option<Box<ProfileCleanupOverride>>,
 }
 
 impl TemporaryParserArtifactProfile {
@@ -283,6 +295,8 @@ impl TemporaryParserArtifactProfile {
             pack_root: supervisor.pack_root().to_path_buf(),
             artifact: supervisor.artifact_identity().clone(),
             cleanup_pending: true,
+            #[cfg(test)]
+            cleanup_override: None,
         }
     }
 
@@ -293,10 +307,13 @@ impl TemporaryParserArtifactProfile {
             pack_root: pack_root.into(),
             artifact,
             cleanup_pending: true,
+            cleanup_override: None,
         }
     }
 
-    /// Perform the one explicit fallible artifact-profile cleanup attempt.
+    /// Consume the one explicit fallible artifact-profile cleanup attempt.
+    ///
+    /// A failure reaches the caller without another destructor attempt.
     ///
     /// # Errors
     ///
@@ -313,12 +330,14 @@ impl TemporaryParserArtifactProfile {
 
     /// Run cleanup at most once while the temporary pack root still exists.
     fn cleanup_pending_profile(&mut self) -> Result<(), OptionalParserPackLifecycleError> {
-        if !self.cleanup_pending {
+        if !std::mem::take(&mut self.cleanup_pending) {
             return Ok(());
         }
-        cleanup_platform_profile(&self.pack_root, &self.artifact)?;
-        self.cleanup_pending = false;
-        Ok(())
+        #[cfg(test)]
+        if let Some(cleanup) = self.cleanup_override.as_mut() {
+            return cleanup(&self.pack_root, &self.artifact);
+        }
+        cleanup_platform_profile(&self.pack_root, &self.artifact)
     }
 }
 
@@ -335,8 +354,8 @@ pub struct OptionalParserPackLifecycle {
     project_root: PathBuf,
     /// User-owned root containing versioned immutable slots.
     storage_root: OnceLock<Option<PathBuf>>,
-    /// Accepted containment target for the current host.
-    platform: Option<PackPlatform>,
+    /// Closed host capability retained for every lifecycle report.
+    capability: OptionalParserCapability,
     /// Test-only failure seam proving admission precedes lifecycle mutation.
     #[cfg(test)]
     admission_failure: Option<fn(&Path) -> ParserSupervisorError>,
@@ -489,10 +508,11 @@ impl OptionalParserPackLifecycle {
         {
             return Err(OptionalParserPackLifecycleError::StorageRootUnavailable);
         }
+        let capability = OptionalParserCapability::current();
         Ok(Self {
             project_root: project_root.into(),
             storage_root: deferred_storage_root,
-            platform: host_pack_platform(),
+            capability,
             #[cfg(test)]
             admission_failure: None,
             #[cfg(test)]
@@ -651,7 +671,7 @@ impl OptionalParserPackLifecycle {
     pub fn remove(
         &self,
     ) -> Result<OptionalParserPackLifecycleReport, OptionalParserPackLifecycleError> {
-        let acquire_pack_lease = if self.platform.is_none() {
+        let acquire_pack_lease = if self.capability.pack_platform().is_none() {
             let storage_root = self.storage_root()?;
             match direct_directory_state(storage_root)? {
                 DirectDirectoryState::Missing => false,
@@ -755,11 +775,15 @@ impl OptionalParserPackLifecycle {
 
     /// Refuse unsupported hosts before callers access archives, state, or storage.
     fn require_supported(&self) -> Result<PackPlatform, OptionalParserPackLifecycleError> {
-        self.platform
-            .ok_or(OptionalParserPackLifecycleError::UnsupportedContainment {
-                os: env::consts::OS,
-                architecture: env::consts::ARCH,
-            })
+        match self.capability {
+            OptionalParserCapability::Pack { platform } => Ok(platform),
+            OptionalParserCapability::BuiltInOnly => {
+                Err(OptionalParserPackLifecycleError::UnsupportedContainment {
+                    os: env::consts::OS,
+                    architecture: env::consts::ARCH,
+                })
+            }
+        }
     }
 
     /// Install after the unsupported-host guard has already passed.
@@ -863,7 +887,7 @@ impl OptionalParserPackLifecycle {
                 platform.as_str()
             )));
         }
-        require_archive_name(archive, platform)?;
+        require_archive_name(archive, &artifact.projectatlas_version, platform)?;
         validate_observed_inventory(&extracted.observed, &artifact)?;
         let projectatlas_version = artifact.projectatlas_version;
         let supervisor = OptionalParserSupervisor::open(&extracted.pack_root)?;
@@ -974,7 +998,7 @@ impl OptionalParserPackLifecycle {
         &self,
         slot: &InstalledSlotPath,
     ) -> Result<bool, OptionalParserPackLifecycleError> {
-        if self.platform == Some(PackPlatform::WindowsX86_64) {
+        if self.capability.pack_platform() == Some(PackPlatform::WindowsX86_64) {
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             {
                 return Self::remove_windows_slot(slot);
@@ -1071,7 +1095,7 @@ impl OptionalParserPackLifecycle {
             OptionalParserPackState::Enabled
         } else if installed_slots > 0 {
             OptionalParserPackState::InstalledDisabled
-        } else if self.platform.is_none() {
+        } else if self.capability.pack_platform().is_none() {
             OptionalParserPackState::UnsupportedContainment
         } else {
             OptionalParserPackState::Absent
@@ -1080,8 +1104,9 @@ impl OptionalParserPackLifecycle {
             operation,
             state,
             pack_id: OPTIONAL_PARSER_PACK_ID,
-            supported: self.platform.is_some(),
-            platform: self.platform.map(PackPlatform::as_str),
+            supported: self.capability.pack_platform().is_some(),
+            capability: self.capability,
+            platform: self.capability.pack_platform().map(PackPlatform::as_str),
             installed_slots,
             installed_slots_truncated,
             selected,
@@ -1346,10 +1371,13 @@ impl OptionalParserPackLifecycle {
         storage_root: PathBuf,
         platform: Option<PackPlatform>,
     ) -> Self {
+        let capability = platform.map_or(OptionalParserCapability::BuiltInOnly, |platform| {
+            OptionalParserCapability::Pack { platform }
+        });
         Self {
             project_root,
             storage_root: OnceLock::from(Some(storage_root)),
-            platform,
+            capability,
             admission_failure: None,
             selection_publication_failure: false,
         }
@@ -1849,12 +1877,16 @@ fn validate_observed_inventory(
     Ok(())
 }
 
-/// Require the canonical archive basename for the current platform.
+/// Require the published release archive basename for the current platform.
 fn require_archive_name(
     path: &Path,
+    projectatlas_version: &str,
     platform: PackPlatform,
 ) -> Result<(), OptionalParserPackLifecycleError> {
-    let expected = format!("{ARCHIVE_ROOT}-{}.tar.zst", platform.as_str());
+    let expected = format!(
+        "projectatlas-v{projectatlas_version}-broad-parser-{}.tar.zst",
+        platform.as_str()
+    );
     if path.file_name().and_then(std::ffi::OsStr::to_str) != Some(expected.as_str()) {
         return Err(invalid_data(format!(
             "archive basename must be {expected:?} for {}",
@@ -2108,10 +2140,9 @@ fn parse_windows_tombstone_name(name: &str) -> Option<(InstalledSlotCleanupState
     let (state, remainder) =
         if let Some(remainder) = name.strip_prefix(WINDOWS_REMOVING_TOMBSTONE_PREFIX) {
             (InstalledSlotCleanupState::ProfilePending, remainder)
-        } else if let Some(remainder) = name.strip_prefix(WINDOWS_CLEANED_TOMBSTONE_PREFIX) {
-            (InstalledSlotCleanupState::ProfileCleaned, remainder)
         } else {
-            return None;
+            let remainder = name.strip_prefix(WINDOWS_CLEANED_TOMBSTONE_PREFIX)?;
+            (InstalledSlotCleanupState::ProfileCleaned, remainder)
         };
     if remainder.len() <= WINDOWS_TOMBSTONE_ARTIFACT_PREFIX_HEX_CHARS {
         return None;
@@ -2491,9 +2522,9 @@ fn supervise_cleanup_broker(
             }
         }
         if status.is_none() && Instant::now() >= operation_deadline {
-            operation_failure = Some(invalid_data(format!(
-                "profile {profile_name} cleanup exceeded its deadline"
-            )));
+            operation_failure = Some(OptionalParserPackLifecycleError::CleanupIncomplete {
+                message: format!("profile {profile_name} cleanup exceeded its deadline"),
+            });
         }
         if operation_failure.is_none() && status.is_none() {
             thread::sleep(Duration::from_millis(10));
@@ -3222,7 +3253,7 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
     }
     #[cfg(target_os = "macos")]
     {
-        return env::var_os("HOME")
+        env::var_os("HOME")
             .map(PathBuf::from)
             .map(|root| {
                 root.join("Library")
@@ -3230,7 +3261,7 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
                     .join("ProjectAtlas")
                     .join("parser-packs")
             })
-            .ok_or(OptionalParserPackLifecycleError::StorageRootUnavailable);
+            .ok_or(OptionalParserPackLifecycleError::StorageRootUnavailable)
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -3249,12 +3280,9 @@ fn default_storage_root() -> Result<PathBuf, OptionalParserPackLifecycleError> {
 }
 
 /// Current accepted optional-pack target, if any.
+#[cfg(test)]
 fn host_pack_platform() -> Option<PackPlatform> {
-    match (env::consts::OS, env::consts::ARCH) {
-        ("linux", "x86_64") => Some(PackPlatform::LinuxX86_64),
-        ("windows", "x86_64") => Some(PackPlatform::WindowsX86_64),
-        _ => None,
-    }
+    OptionalParserCapability::current().pack_platform()
 }
 
 /// Canonical lowercase hexadecimal without another dependency.
@@ -3292,6 +3320,10 @@ fn io_error(
 mod tests {
     use super::*;
     use std::error::Error;
+    use std::sync::Arc;
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Child-only storage root used to prove lease release without running destructors.
     const ABRUPT_LEASE_STORAGE_ENV: &str = "PROJECTATLAS_TEST_ABRUPT_LEASE_STORAGE";
@@ -3359,20 +3391,77 @@ mod tests {
         )
     }
 
+    /// Count actual guard cleanup calls without invoking platform profiles.
+    fn counted_temporary_profile(
+        root: &Path,
+        fail: bool,
+    ) -> (TemporaryParserArtifactProfile, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&attempts);
+        let mut profile = TemporaryParserArtifactProfile::new(
+            root,
+            ParserArtifactIdentity::for_bytes(b"artifact-manifest"),
+        );
+        profile.cleanup_override = Some(Box::new(move |_, _| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            if fail {
+                Err(invalid_data("injected profile cleanup failure"))
+            } else {
+                Ok(())
+            }
+        }));
+        (profile, attempts)
+    }
+
+    #[test]
+    fn explicit_temporary_profile_cleanup_failure_runs_once() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let (profile, attempts) = counted_temporary_profile(directory.path(), true);
+        let error = require_lifecycle_error(profile.cleanup(), "injected cleanup was accepted")?;
+        require(
+            matches!(error, OptionalParserPackLifecycleError::InvalidData { reason }
+                if reason == "injected profile cleanup failure"),
+            "explicit cleanup lost its original typed failure",
+        )?;
+        let observed = attempts.load(Ordering::Relaxed);
+        require(
+            observed == 1,
+            &format!("explicit cleanup plus Drop made {observed} attempts instead of one"),
+        )
+    }
+
+    #[test]
+    fn temporary_profile_success_and_forgotten_cleanup_run_once() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        for explicit in [true, false] {
+            let (profile, attempts) = counted_temporary_profile(directory.path(), false);
+            if explicit {
+                profile.cleanup()?;
+            } else {
+                drop(profile);
+            }
+            require(
+                attempts.load(Ordering::Relaxed) == 1,
+                "successful or forgotten cleanup did not use exactly one attempt",
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn installed_slot_transfer_disarms_temporary_profile_cleanup() -> TestResult {
         let directory = tempfile::tempdir()?;
-        let mut profile = TemporaryParserArtifactProfile::new(
-            directory.path(),
-            ParserArtifactIdentity::for_bytes(b"artifact-manifest"),
-        );
+        let (mut profile, attempts) = counted_temporary_profile(directory.path(), false);
         profile.transfer_to_installed_slot();
         require(
             !profile.cleanup_pending,
             "installed-slot transfer retained temporary cleanup ownership",
         )?;
         profile.cleanup()?;
-        Ok(())
+        require(
+            attempts.load(Ordering::Relaxed) == 0,
+            "installed-slot transfer still invoked temporary profile cleanup",
+        )
     }
 
     #[test]
@@ -3380,12 +3469,24 @@ mod tests {
         let error = require_lifecycle_error(
             finish_with_cleanup::<()>(
                 Err(invalid_data("operation failed")),
-                Err(invalid_data("cleanup failed")),
+                Err(OptionalParserPackLifecycleError::CleanupIncomplete {
+                    message: "cleanup failed".to_owned(),
+                }),
             ),
             "dual lifecycle failure was accepted",
         )?;
         match error {
             OptionalParserPackLifecycleError::OperationAndCleanup { operation, cleanup } => {
+                require(
+                    matches!(
+                        &*operation,
+                        OptionalParserPackLifecycleError::InvalidData { .. }
+                    ) && matches!(
+                        &*cleanup,
+                        OptionalParserPackLifecycleError::CleanupIncomplete { .. }
+                    ),
+                    "dual lifecycle failure changed the validation or cleanup error kind",
+                )?;
                 require(
                     operation.to_string().contains("operation failed")
                         && cleanup.to_string().contains("cleanup failed"),
@@ -3709,7 +3810,7 @@ mod tests {
             lifecycle.storage_root.get().is_none(),
             "public constructor eagerly resolved the user storage root",
         )?;
-        lifecycle.platform = None;
+        lifecycle.capability = OptionalParserCapability::BuiltInOnly;
         let archive = root.path().join("missing.tar.zst");
         let error = require_lifecycle_error(
             lifecycle.verify(&archive),
@@ -4212,23 +4313,57 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()?;
         let broker = PathBuf::from("cleanup-timeout-test");
-        let error = require_lifecycle_error(
-            supervise_cleanup_broker(
+        let operation_timeout = Duration::from_millis(50);
+        let cleanup_timeout = Duration::from_secs(2);
+        let directory = tempfile::tempdir()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&attempts);
+        let reaped = Arc::new(AtomicBool::new(false));
+        let observed_reaped = Arc::clone(&reaped);
+        let mut profile = TemporaryParserArtifactProfile::new(
+            directory.path(),
+            ParserArtifactIdentity::for_bytes(b"cleanup-timeout-artifact"),
+        );
+        profile.cleanup_override = Some(Box::new(move |_, _| {
+            observed_attempts.fetch_add(1, Ordering::Relaxed);
+            let result = supervise_cleanup_broker(
                 &mut child,
                 &broker,
                 "test-profile",
-                Duration::from_millis(50),
-                Duration::from_secs(2),
-            ),
+                operation_timeout,
+                cleanup_timeout,
+            );
+            observed_reaped.store(
+                child
+                    .try_wait()
+                    .map_err(|source| io_error("observe test cleanup broker", &broker, source))?
+                    .is_some(),
+                Ordering::Relaxed,
+            );
+            result
+        }));
+        let started = Instant::now();
+        let error = require_lifecycle_error(
+            profile.cleanup(),
             "hung cleanup broker unexpectedly succeeded",
         )?;
+        let elapsed = started.elapsed();
         require(
-            matches!(error, OptionalParserPackLifecycleError::InvalidData { .. }),
-            "timeout operation was misclassified as a cleanup failure",
+            matches!(&error, OptionalParserPackLifecycleError::CleanupIncomplete { message }
+                if message.contains("test-profile") && message.contains("deadline")),
+            &format!("timeout was not an operational cleanup failure: {error}"),
         )?;
         require(
-            child.try_wait()?.is_some(),
+            attempts.load(Ordering::Relaxed) == 1,
+            "timed-out explicit cleanup was repeated by Drop",
+        )?;
+        require(
+            reaped.load(Ordering::Relaxed),
             "hung cleanup broker was not reaped",
+        )?;
+        require(
+            elapsed <= operation_timeout + cleanup_timeout + Duration::from_secs(1),
+            "cleanup and destructor exceeded one timeout and reap/drain allowance",
         )
     }
 
@@ -4598,6 +4733,38 @@ mod tests {
                 && fs::read(retry.selection_path())? == selection_after_retry,
             "identical retry rewrote or changed the selected candidate",
         )
+    }
+
+    #[test]
+    fn archive_name_requires_the_versioned_release_asset() -> TestResult {
+        let version = OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
+        let platform = PackPlatform::LinuxX86_64;
+        let expected = format!(
+            "projectatlas-v{version}-broad-parser-{}.tar.zst",
+            platform.as_str()
+        );
+        require(
+            require_archive_name(Path::new(&expected), version, platform).is_ok(),
+            "published versioned parser-pack archive was rejected",
+        )?;
+        for name in [
+            format!("{ARCHIVE_ROOT}-{}.tar.zst", platform.as_str()),
+            format!(
+                "projectatlas-v0.0.0-broad-parser-{}.tar.zst",
+                platform.as_str()
+            ),
+            format!(
+                "projectatlas-v{version}-broad-parser-{}.tar.zst",
+                PackPlatform::WindowsX86_64.as_str()
+            ),
+            "renamed-parser-pack.tar.zst".to_owned(),
+        ] {
+            require(
+                require_archive_name(Path::new(&name), version, platform).is_err(),
+                "non-canonical parser-pack archive name was accepted: {name}",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

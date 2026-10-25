@@ -68,6 +68,21 @@ Memory Atlas rows SHALL be classified as authored state preserved across full sc
 - **WHEN** a copied supported database is opened by the new runtime
 - **THEN** migration creates complete constrained Memory Atlas state atomically and older runtimes reject the newer schema instead of downgrading it
 
+### Requirement: Hot Memory Atlas queries are bounded and plan-protected
+The storage owner SHALL identify recovery, list, update, retained-size, and cleanup hot queries; bind caller values through prepared or cached statements; batch state-changing work inside the caller-owned conditional transaction; and add only indexes justified by those query shapes. Recovery and list queries SHALL push kind, key, lifecycle, task, ordering, and row bounds into SQLite rather than loading the complete atlas for Rust-side filtering. Representative tests SHALL assert result bounds and stable `EXPLAIN QUERY PLAN` invariants for these hot paths.
+
+#### Scenario: Bounded recovery reads a large retained atlas
+- **WHEN** recovery requests a small ordered projection from representative retained state
+- **THEN** SQLite applies the required filters, deterministic order, and row bound before materialization, and the owning plan assertion uses the intended index without a full-table scan
+
+#### Scenario: Conditional update reconciles bytes and cleanup
+- **WHEN** one valid revision-conditional batch replaces rows and deterministic cleanup is required
+- **THEN** prepared statements perform validation-owned writes, byte accounting, eligible cleanup, and the single revision advance inside one transaction without per-row autocommit or unbounded query fan-out
+
+#### Scenario: A schema change degrades a hot query plan
+- **WHEN** migration or index changes make a representative recovery, list, retained-size, or cleanup query lose its bounded access path
+- **THEN** the query-plan regression test fails before release even if functional row assertions still pass
+
 ### Requirement: Memory Atlas operations are offline and root-bound
 Every Memory Atlas read and write SHALL use the same canonical and physical selected-root plus per-call `project_path` isolation as other ProjectAtlas tools. Missing, incompatible, wrong-root, busy, or refresh-required state SHALL fail explicitly without initializing, scanning, migrating another project, changing the active default root, reading host-private data, or attempting network access.
 

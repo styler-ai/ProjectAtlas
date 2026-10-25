@@ -3,12 +3,14 @@
 use crate::{DbError, DbResult};
 use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::telemetry::{
-    TokenAccountingTotals, TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport,
-    TokenTrendWindow, UsageDetailAvailability, UsageEvent, UsageInstanceId, UsageInstanceOwner,
+    TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE, TOKEN_BASELINE_DIRECTORY_WALK, TokenAccountingTotals,
+    TokenBucketOverview, TokenOverview, TokenTrendPeriod, TokenTrendReport, TokenTrendWindow,
+    UsageDetailAvailability, UsageEvent, UsageInstanceId, UsageInstanceOwner,
+    average_modeled_baseline_tokens,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Version of the persisted telemetry retention contract.
@@ -31,6 +33,12 @@ const SECONDS_PER_DAY: i64 = 86_400;
 const AGGREGATE_COUNTER_FIELD: &str = "aggregate_counter";
 /// Domain separator for bounded representations of predecessor telemetry text.
 const LEGACY_TEXT_HASH_DOMAIN: &[u8] = b"projectatlas:legacy-telemetry-text:v1\0";
+/// Aggregate rows written directly by alias-routed MCP telemetry.
+const WORKTREE_USAGE_ROUTED: &str = "routed";
+/// Aggregate rows replaced by monotonic local-database synchronization.
+const WORKTREE_USAGE_SYNCHRONIZED: &str = "synchronized";
+/// Maximum encoded in-memory size of one local aggregate transfer.
+const MAX_WORKTREE_USAGE_SNAPSHOT_BYTES: usize = 32 * 1_024 * 1_024;
 
 /// Capacity policy used while a modeled baseline is active.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +114,30 @@ macro_rules! daily_aggregate_params {
     };
 }
 
+/// Bind one worktree aggregate value to its explicit source and time scope.
+macro_rules! worktree_aggregate_params {
+    ($registration:expr, $source:expr, $day:expr, $dimension:expr, $value:expr) => {
+        params![
+            $registration,
+            $source,
+            $day,
+            $dimension,
+            $value.calls,
+            $value.estimated_without,
+            $value.estimated_with,
+            $value.observed_without,
+            $value.observed_with,
+            $value.modeled_without,
+            $value.modeled_with,
+            $value.deduped_modeled_without,
+            $value.deduped_modeled_with,
+            $value.repeated_baselines,
+            $value.observed_file_read_replacements,
+            $value.modeled_file_reads_avoided,
+        ]
+    };
+}
+
 /// Generate one opaque compatibility identity without panicking on entropy failure.
 pub(crate) fn generate_usage_instance_id() -> DbResult<UsageInstanceId> {
     let mut bytes = [0_u8; 16];
@@ -122,7 +154,10 @@ pub struct TelemetryRetentionPolicy {
     pub max_raw_logical_bytes: usize,
     /// Maximum raw-event age in seconds.
     pub max_raw_age_seconds: u64,
-    /// Maximum normalized reporting dimensions, including overflow.
+    /// Maximum normalized reporting dimensions, including generic overflow.
+    ///
+    /// One additional reserved directory-walk overflow row may retain the average-policy
+    /// discriminator after this bound is reached.
     pub max_dimensions: usize,
     /// Maximum active runtime instances.
     pub max_active_instances: usize,
@@ -485,8 +520,8 @@ impl DimensionValues {
         }
     }
 
-    /// Construct the unique reserved overflow dimension.
-    fn overflow() -> Self {
+    /// Construct a reserved overflow dimension while retaining the average-policy discriminator.
+    fn overflow(denominator_kind: &str) -> Self {
         Self {
             token_savings_bucket: OVERFLOW_DIMENSION.to_string(),
             provider: OVERFLOW_DIMENSION.to_string(),
@@ -497,7 +532,11 @@ impl DimensionValues {
             confidence: OVERFLOW_DIMENSION.to_string(),
             accounting_layer: OVERFLOW_DIMENSION.to_string(),
             estimate_method: OVERFLOW_DIMENSION.to_string(),
-            denominator_kind: OVERFLOW_DIMENSION.to_string(),
+            denominator_kind: if denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+                TOKEN_BASELINE_DIRECTORY_WALK.to_string()
+            } else {
+                OVERFLOW_DIMENSION.to_string()
+            },
             dedupe_scope: OVERFLOW_DIMENSION.to_string(),
             overflow: true,
         }
@@ -505,7 +544,7 @@ impl DimensionValues {
 }
 
 /// Exact nonnegative aggregate components stored in `SQLite` integers.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct AggregateCounters {
     /// Number of represented events.
     calls: i64,
@@ -531,6 +570,68 @@ struct AggregateCounters {
     observed_file_read_replacements: i64,
     /// Modeled file reads avoided by narrowing.
     modeled_file_reads_avoided: i64,
+}
+
+/// One bounded normalized aggregate row carried between local atlas databases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorktreeUsageSnapshotRow {
+    /// `-1` for lifetime totals, otherwise the UTC day epoch.
+    day_epoch: i64,
+    /// Source-database normalized dimension identity.
+    dimension_id: i64,
+    /// Exact nonnegative counters.
+    counters: AggregateCounters,
+}
+
+/// Opaque bounded aggregate transfer from one exact worktree atlas.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorktreeUsageSnapshot {
+    /// Exact source atlas identity.
+    project_instance_id: ProjectInstanceId,
+    /// Monotonic aggregate revision captured with the rows.
+    revision: u64,
+    /// Referenced normalized dimensions keyed by source identifier.
+    dimensions: BTreeMap<i64, DimensionValues>,
+    /// Lifetime and retained daily aggregate rows.
+    rows: Vec<WorktreeUsageSnapshotRow>,
+    /// Deterministic bounded logical transfer size.
+    logical_bytes: usize,
+}
+
+impl WorktreeUsageSnapshot {
+    /// Return the exact source atlas identity.
+    #[must_use]
+    pub const fn project_instance_id(&self) -> ProjectInstanceId {
+        self.project_instance_id
+    }
+
+    /// Return the monotonic source aggregate revision.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Return the bounded aggregate row count.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Return deterministic logical transfer bytes.
+    #[must_use]
+    pub const fn logical_bytes(&self) -> usize {
+        self.logical_bytes
+    }
+}
+
+/// Result of one monotonic worktree aggregate synchronization attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeUsageSyncState {
+    /// A strictly newer snapshot replaced only the selected origin.
+    Synchronized,
+    /// The same or an older snapshot left the accepted origin unchanged.
+    Current,
 }
 
 /// Persisted singleton counter selected for a bounded exact update.
@@ -641,6 +742,35 @@ impl RetentionCounter {
 }
 
 impl AggregateCounters {
+    /// Reject corrupt or caller-forged negative components.
+    fn validate_nonnegative(self) -> DbResult<()> {
+        for (field, value) in [
+            ("calls", self.calls),
+            ("estimated_without", self.estimated_without),
+            ("estimated_with", self.estimated_with),
+            ("observed_without", self.observed_without),
+            ("observed_with", self.observed_with),
+            ("modeled_without", self.modeled_without),
+            ("modeled_with", self.modeled_with),
+            ("deduped_modeled_without", self.deduped_modeled_without),
+            ("deduped_modeled_with", self.deduped_modeled_with),
+            ("repeated_baselines", self.repeated_baselines),
+            (
+                "observed_file_read_replacements",
+                self.observed_file_read_replacements,
+            ),
+            (
+                "modeled_file_reads_avoided",
+                self.modeled_file_reads_avoided,
+            ),
+        ] {
+            if value < 0 {
+                return Err(DbError::TelemetryIntegerOverflow { field });
+            }
+        }
+        Ok(())
+    }
+
     /// Add every component while rejecting integer overflow.
     fn checked_add(self, other: Self) -> DbResult<Self> {
         macro_rules! add {
@@ -667,20 +797,89 @@ impl AggregateCounters {
             modeled_file_reads_avoided: add!(modeled_file_reads_avoided),
         })
     }
+
+    /// Return whether every aggregate component preserves an accepted lower bound.
+    fn contains(self, accepted: Self) -> bool {
+        [
+            (self.calls, accepted.calls),
+            (self.estimated_without, accepted.estimated_without),
+            (self.estimated_with, accepted.estimated_with),
+            (self.observed_without, accepted.observed_without),
+            (self.observed_with, accepted.observed_with),
+            (self.modeled_without, accepted.modeled_without),
+            (self.modeled_with, accepted.modeled_with),
+            (
+                self.deduped_modeled_without,
+                accepted.deduped_modeled_without,
+            ),
+            (self.deduped_modeled_with, accepted.deduped_modeled_with),
+            (self.repeated_baselines, accepted.repeated_baselines),
+            (
+                self.observed_file_read_replacements,
+                accepted.observed_file_read_replacements,
+            ),
+            (
+                self.modeled_file_reads_avoided,
+                accepted.modeled_file_reads_avoided,
+            ),
+        ]
+        .into_iter()
+        .all(|(incoming, accepted)| incoming >= accepted)
+    }
 }
 
 /// Seed telemetry state after fresh-schema creation.
 pub(crate) fn initialize_empty_storage(connection: &Connection) -> DbResult<()> {
     let policy = TelemetryRetentionPolicy::default().validate()?;
-    ensure_overflow_dimension(connection)?;
+    ensure_overflow_dimension(connection, OVERFLOW_DIMENSION)?;
     refresh_retention_state(connection, policy, now_epoch_seconds()?, 0, 0, 0, 0)
+}
+
+/// Reset copied source telemetry to the exact empty-storage contract during hydration.
+pub(crate) fn reset_usage_storage_for_hydration(connection: &Connection) -> DbResult<()> {
+    connection.execute_batch(
+        "DELETE FROM usage_events;
+         DELETE FROM usage_instances;
+         DELETE FROM usage_global_aggregates;
+         DELETE FROM usage_daily_aggregates;
+         DELETE FROM usage_labels;
+         DELETE FROM usage_label_tombstones;
+         DELETE FROM usage_instance_tombstones;
+         DELETE FROM usage_bucket_dimensions;
+         UPDATE usage_retention_state SET
+             raw_rows = 0,
+             raw_logical_bytes = 0,
+             baseline_rows = 0,
+             baseline_logical_bytes = 0,
+             dimension_rows = 0,
+             instance_rows = 0,
+             label_rows = 0,
+             daily_rows = 0,
+             label_tombstone_rows = 0,
+             instance_tombstone_rows = 0,
+             pruned_raw_rows = 0,
+             pruned_instance_rows = 0,
+             evicted_tombstones = 0,
+             writes_since_checkpoint = 0,
+             last_maintenance_epoch = 0,
+             last_checkpoint_epoch = 0,
+             oldest_retained_epoch = NULL,
+             raw_detail_complete = 1,
+             dimension_detail_complete = 1,
+             label_history_complete = 1,
+             maintenance_pending = 0,
+             clock_anomaly = 0,
+             spill_state = 'not_applicable',
+             checkpoint_state = 'not_due';",
+    )?;
+    initialize_empty_storage(connection)
 }
 
 /// Convert schema-10 raw usage inside the outer schema transaction.
 pub(crate) fn migrate_legacy_usage(connection: &Connection) -> DbResult<()> {
     let policy = TelemetryRetentionPolicy::default().validate()?;
     let (project, _) = crate::project_identity::ensure_project_identity(connection)?;
-    ensure_overflow_dimension(connection)?;
+    ensure_overflow_dimension(connection, OVERFLOW_DIMENSION)?;
     let mut statement = connection.prepare(
         "SELECT session_id, command, path, query,
                 estimated_tokens_without_projectatlas,
@@ -709,8 +908,14 @@ pub(crate) fn migrate_legacy_usage(connection: &Connection) -> DbResult<()> {
             command: row.get(1)?,
             path: row.get(2)?,
             query: row.get(3)?,
-            estimated_tokens_without_projectatlas: row.get(4)?,
-            estimated_tokens_with_projectatlas: row.get(5)?,
+            estimated_tokens_without_projectatlas: row
+                .get::<_, Option<i64>>(4)?
+                .map(|value| count_usize("estimated_tokens_without_projectatlas", value))
+                .transpose()?,
+            estimated_tokens_with_projectatlas: row
+                .get::<_, Option<i64>>(5)?
+                .map(|value| count_usize("estimated_tokens_with_projectatlas", value))
+                .transpose()?,
             estimated_tokens_saved: row.get(6)?,
             token_savings_bucket: row.get(7)?,
             provider: row.get(8)?,
@@ -741,6 +946,8 @@ pub(crate) fn migrate_legacy_usage(connection: &Connection) -> DbResult<()> {
             project,
             instance,
             UsageInstanceOwner::MigratedLegacy,
+            None,
+            false,
             &event,
             policy,
             created_at,
@@ -769,6 +976,7 @@ pub(crate) fn record_usage_for_project(
     project: ProjectInstanceId,
     instance_id: UsageInstanceId,
     owner: UsageInstanceOwner,
+    worktree_registration_id: Option<i64>,
     event: &UsageEvent,
     policy: TelemetryRetentionPolicy,
     seal_after_record: bool,
@@ -781,6 +989,8 @@ pub(crate) fn record_usage_for_project(
         project,
         instance_id,
         owner,
+        worktree_registration_id,
+        true,
         event,
         policy,
         now_epoch_seconds()?,
@@ -797,6 +1007,8 @@ fn record_usage_at(
     project: ProjectInstanceId,
     instance_id: UsageInstanceId,
     owner: UsageInstanceOwner,
+    worktree_registration_id: Option<i64>,
+    track_aggregate_revision: bool,
     event: &UsageEvent,
     policy: TelemetryRetentionPolicy,
     now: i64,
@@ -828,10 +1040,13 @@ fn record_usage_at(
         policy,
         now,
     )?;
+    if track_aggregate_revision || worktree_registration_id.is_some() {
+        bind_worktree_origin(connection, instance_row_id, worktree_registration_id)?;
+    }
     ensure_label(connection, project, event_label(event), policy, now)?;
     let dimension = match dimension_admission {
         DimensionAdmission::Event => DimensionValues::from_event(event),
-        DimensionAdmission::Overflow => DimensionValues::overflow(),
+        DimensionAdmission::Overflow => DimensionValues::overflow(event.report_denominator_kind()),
     };
     let dimension_id = ensure_dimension(connection, &dimension, policy)?;
     let logical_bytes = logical_event_bytes(event, event_label(event))?;
@@ -860,6 +1075,19 @@ fn record_usage_at(
         delta,
         policy,
     )?;
+    if let Some(registration_id) = worktree_registration_id {
+        upsert_routed_worktree_aggregates(
+            connection,
+            registration_id,
+            dimension_id,
+            now,
+            delta,
+            policy,
+        )?;
+    }
+    if track_aggregate_revision {
+        increment_aggregate_revision(connection, project, delta.calls)?;
+    }
     touch_instance(connection, instance_row_id, now, policy)?;
     if seal_after_record {
         seal_usage_instance_for_project(connection, project, instance_id, now)?;
@@ -979,22 +1207,179 @@ pub(crate) fn seal_project_usage_instances(
         .map_err(Into::into)
 }
 
+/// Root binding accepted by post-commit maintenance.
+#[derive(Clone, Copy)]
+enum MaintenanceRoot<'a> {
+    /// Legacy display metadata supplied by existing maintenance fixtures.
+    #[cfg(test)]
+    Display(Option<&'a str>),
+    /// Native identity captured by a live store.
+    Native(Option<&'a projectatlas_core::CanonicalProjectRoot>),
+}
+
 /// Run due post-commit maintenance only for the adapter's captured project identity.
+#[cfg(test)]
 pub(crate) fn maintain_after_commit_for_project(
     connection: &Connection,
+    expected_root: Option<&str>,
     project: ProjectInstanceId,
     policy: TelemetryRetentionPolicy,
 ) -> DbResult<()> {
+    maintain_after_commit_for_project_with_checkpoint_binding(
+        connection,
+        MaintenanceRoot::Display(expected_root),
+        project,
+        policy,
+        |connection| Ok(passive_checkpoint_state(connection)),
+    )
+}
+
+/// Run post-commit maintenance through a captured native root identity.
+pub(crate) fn maintain_after_commit_for_native_project(
+    connection: &Connection,
+    expected_root: Option<&projectatlas_core::CanonicalProjectRoot>,
+    project: ProjectInstanceId,
+    policy: TelemetryRetentionPolicy,
+) -> DbResult<()> {
+    maintain_after_commit_for_project_with_checkpoint_binding(
+        connection,
+        MaintenanceRoot::Native(expected_root),
+        project,
+        policy,
+        |connection| Ok(passive_checkpoint_state(connection)),
+    )
+}
+
+/// Run due maintenance with an explicit passive-checkpoint boundary.
+#[cfg(test)]
+fn maintain_after_commit_for_project_with_checkpoint(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    project: ProjectInstanceId,
+    policy: TelemetryRetentionPolicy,
+    checkpoint: impl FnOnce(&Connection) -> DbResult<TelemetryCheckpointState>,
+) -> DbResult<()> {
+    maintain_after_commit_for_project_with_checkpoint_binding(
+        connection,
+        MaintenanceRoot::Display(expected_root),
+        project,
+        policy,
+        checkpoint,
+    )
+}
+
+/// Run maintenance with the caller's selected root representation.
+fn maintain_after_commit_for_project_with_checkpoint_binding(
+    connection: &Connection,
+    expected_root: MaintenanceRoot<'_>,
+    project: ProjectInstanceId,
+    policy: TelemetryRetentionPolicy,
+    checkpoint: impl FnOnce(&Connection) -> DbResult<TelemetryCheckpointState>,
+) -> DbResult<()> {
     crate::project_identity::require_bound_project_identity(connection, project)?;
     let policy = policy.validate()?;
-    let writes = connection.query_row(
-        "SELECT writes_since_checkpoint FROM usage_retention_state WHERE singleton = 1",
-        [],
-        |row| row.get::<_, i64>(0),
+    let checkpoint_start_writes = count_usize(
+        "writes_since_checkpoint",
+        connection.query_row(
+            "SELECT writes_since_checkpoint FROM usage_retention_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
     )?;
-    if count_usize("writes_since_checkpoint", writes)? < policy.checkpoint_write_interval {
+    if checkpoint_start_writes < policy.checkpoint_write_interval {
         return Ok(());
     }
+    match expected_root {
+        #[cfg(test)]
+        MaintenanceRoot::Display(root) => {
+            crate::schema::validate_active_binding(connection, root, Some(project))?;
+        }
+        MaintenanceRoot::Native(root) => {
+            crate::schema::validate_active_native_binding(connection, root, Some(project))?;
+        }
+    }
+    let checkpoint_data_version =
+        connection.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+    let state = checkpoint(connection)?;
+    with_maintenance_write_transaction(connection, expected_root, project, |transaction| {
+        let current_data_version =
+            transaction.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?;
+        let current_writes = count_usize(
+            "writes_since_checkpoint",
+            transaction.query_row(
+                "SELECT writes_since_checkpoint
+                     FROM usage_retention_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+        )?;
+        let retained_writes = writes_after_checkpoint_attempt(
+            state,
+            checkpoint_start_writes,
+            current_writes,
+            current_data_version == checkpoint_data_version,
+        );
+        let now = now_epoch_seconds()?;
+        let (raw_rows, raw_bytes, old_raw) = raw_pressure(transaction, policy, now)?;
+        let retention_pending = raw_rows > policy.max_raw_rows
+            || raw_bytes > policy.max_raw_logical_bytes
+            || old_raw > 0
+            || retention_counter(transaction, RetentionCounter::InstanceRows)?
+                > policy.max_retained_instances
+            || retention_counter(transaction, RetentionCounter::LabelRows)?
+                > policy.max_retained_labels
+            || retention_counter(transaction, RetentionCounter::DailyRows)? > policy.max_daily_rows
+            || retention_counter(transaction, RetentionCounter::LabelTombstoneRows)?
+                > policy.max_label_tombstones
+            || retention_counter(transaction, RetentionCounter::InstanceTombstoneRows)?
+                > policy.max_instance_tombstones
+            || aged_maintenance_pending(transaction, policy, now)?;
+        let completed = state == TelemetryCheckpointState::Completed;
+        transaction.execute(
+            "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1,
+                     last_checkpoint_epoch = ?2,
+                     checkpoint_state = ?3,
+                     maintenance_pending = ?4
+                 WHERE singleton = 1",
+            params![
+                to_i64("writes_since_checkpoint", retained_writes)?,
+                now,
+                state.as_str(),
+                i64::from(
+                    !completed
+                        || retention_pending
+                        || retained_writes >= policy.checkpoint_write_interval
+                ),
+            ],
+        )?;
+        Ok(())
+    })
+}
+
+/// Validate and commit one maintenance transaction using its selected root representation.
+fn with_maintenance_write_transaction<T>(
+    connection: &Connection,
+    expected_root: MaintenanceRoot<'_>,
+    project: ProjectInstanceId,
+    operation: impl FnOnce(&Connection) -> DbResult<T>,
+) -> DbResult<T> {
+    match expected_root {
+        #[cfg(test)]
+        MaintenanceRoot::Display(root) => {
+            crate::with_validated_write_transaction(connection, root, Some(project), operation)
+        }
+        MaintenanceRoot::Native(root) => crate::with_validated_native_write_transaction(
+            connection,
+            root,
+            Some(project),
+            operation,
+        ),
+    }
+}
+
+/// Run one passive checkpoint and classify its bounded `SQLite` result.
+fn passive_checkpoint_state(connection: &Connection) -> TelemetryCheckpointState {
     let result = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
         Ok((
             row.get::<_, i64>(0)?,
@@ -1002,44 +1387,27 @@ pub(crate) fn maintain_after_commit_for_project(
             row.get::<_, i64>(2)?,
         ))
     });
-    let state = match result {
+    match result {
         Ok((0, log_frames, checkpointed_frames)) if checkpointed_frames == log_frames => {
             TelemetryCheckpointState::Completed
         }
         Ok(_) => TelemetryCheckpointState::Busy,
         Err(_) => TelemetryCheckpointState::Error,
-    };
-    crate::project_identity::require_bound_project_identity(connection, project)?;
-    let now = now_epoch_seconds()?;
-    let (raw_rows, raw_bytes, old_raw) = raw_pressure(connection, policy, now)?;
-    let retention_pending = raw_rows > policy.max_raw_rows
-        || raw_bytes > policy.max_raw_logical_bytes
-        || old_raw > 0
-        || retention_counter(connection, RetentionCounter::InstanceRows)?
-            > policy.max_retained_instances
-        || retention_counter(connection, RetentionCounter::LabelRows)? > policy.max_retained_labels
-        || retention_counter(connection, RetentionCounter::DailyRows)? > policy.max_daily_rows
-        || retention_counter(connection, RetentionCounter::LabelTombstoneRows)?
-            > policy.max_label_tombstones
-        || retention_counter(connection, RetentionCounter::InstanceTombstoneRows)?
-            > policy.max_instance_tombstones
-        || aged_maintenance_pending(connection, policy, now)?;
-    let completed = state == TelemetryCheckpointState::Completed;
-    connection.execute(
-        "UPDATE usage_retention_state
-         SET writes_since_checkpoint = ?1,
-             last_checkpoint_epoch = ?2,
-             checkpoint_state = ?3,
-             maintenance_pending = ?4
-         WHERE singleton = 1",
-        params![
-            if completed { 0 } else { writes },
-            now,
-            state.as_str(),
-            i64::from(!completed || retention_pending),
-        ],
-    )?;
-    Ok(())
+    }
+}
+
+/// Preserve writes that committed after a checkpoint attempt began.
+const fn writes_after_checkpoint_attempt(
+    state: TelemetryCheckpointState,
+    checkpoint_start_writes: usize,
+    current_writes: usize,
+    data_version_unchanged: bool,
+) -> usize {
+    if matches!(state, TelemetryCheckpointState::Completed) && data_version_unchanged {
+        current_writes.saturating_sub(checkpoint_start_writes)
+    } else {
+        current_writes
+    }
 }
 
 /// Return content-free bounded telemetry state.
@@ -1230,6 +1598,431 @@ fn usage_events_for_project(
     Ok(events)
 }
 
+/// Export one bounded normalized aggregate snapshot from the exact local atlas.
+pub(crate) fn export_worktree_usage_snapshot(
+    connection: &Connection,
+) -> DbResult<WorktreeUsageSnapshot> {
+    let owned_snapshot = connection
+        .is_autocommit()
+        .then(|| {
+            rusqlite::Transaction::new_unchecked(
+                connection,
+                rusqlite::TransactionBehavior::Deferred,
+            )
+        })
+        .transpose()?;
+    let connection = owned_snapshot.as_deref().unwrap_or(connection);
+    let project = current_project(connection)?;
+    crate::project_identity::require_bound_project_identity(connection, project)?;
+    let policy = TelemetryRetentionPolicy::default().validate()?;
+    let revision = connection
+        .query_row(
+            "SELECT revision FROM usage_aggregate_revisions
+             WHERE project_instance_id = ?1",
+            [project.as_bytes().as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let revision =
+        u64::try_from(revision).map_err(|_source| DbError::TelemetryIntegerOverflow {
+            field: "usage_aggregate_revisions.revision",
+        })?;
+    let maximum_rows = policy
+        .max_daily_rows
+        .checked_add(policy.max_dimensions)
+        .and_then(|value| value.checked_add(2))
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "worktree_snapshot_rows",
+        })?;
+    let query_limit = to_i64("worktree_snapshot_rows", maximum_rows.saturating_add(1))?;
+    let mut statement = connection.prepare(
+        "SELECT -1 AS day_epoch, dimension_id,
+                calls, estimated_without, estimated_with, observed_without,
+                observed_with, modeled_without, modeled_with,
+                deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+                observed_file_read_replacements, modeled_file_reads_avoided
+         FROM usage_global_aggregates
+         WHERE project_instance_id = ?1
+         UNION ALL
+         SELECT day_epoch, dimension_id,
+                calls, estimated_without, estimated_with, observed_without,
+                observed_with, modeled_without, modeled_with,
+                deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+                observed_file_read_replacements, modeled_file_reads_avoided
+         FROM usage_daily_aggregates
+         WHERE project_instance_id = ?1
+         ORDER BY day_epoch, dimension_id
+         LIMIT ?2",
+    )?;
+    let rows = statement
+        .query_map(params![project.as_bytes().as_slice(), query_limit], |row| {
+            Ok(WorktreeUsageSnapshotRow {
+                day_epoch: row.get(0)?,
+                dimension_id: row.get(1)?,
+                counters: read_counters_offset(row, 2).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.len() > maximum_rows {
+        return Err(DbError::WorktreeTelemetrySnapshotLimit {
+            resource: "rows",
+            limit: maximum_rows,
+            observed: rows.len(),
+        });
+    }
+    let referenced_dimensions = rows
+        .iter()
+        .map(|row| row.dimension_id)
+        .collect::<BTreeSet<_>>();
+    let mut dimensions = BTreeMap::new();
+    let mut dimension_statement = connection.prepare(
+        "SELECT dimension_id,
+                token_savings_bucket, provider, model, tokenizer_backend,
+                accuracy, baseline_kind, confidence, accounting_layer,
+                estimate_method, denominator_kind, dedupe_scope, overflow
+         FROM usage_bucket_dimensions
+         ORDER BY dimension_id",
+    )?;
+    let mut dimension_rows = dimension_statement.query([])?;
+    while let Some(row) = dimension_rows.next()? {
+        let dimension_id = row.get::<_, i64>(0)?;
+        if referenced_dimensions.contains(&dimension_id) {
+            dimensions.insert(dimension_id, read_dimension(row, 1)?);
+        }
+    }
+    drop(dimension_rows);
+    drop(dimension_statement);
+    drop(statement);
+    if dimensions.len() != referenced_dimensions.len() {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot references a missing dimension",
+        });
+    }
+    let logical_bytes = validate_worktree_usage_snapshot(&dimensions, &rows, policy)?;
+    let snapshot = WorktreeUsageSnapshot {
+        project_instance_id: project,
+        revision,
+        dimensions,
+        rows,
+        logical_bytes,
+    };
+    if let Some(snapshot) = owned_snapshot {
+        snapshot.commit()?;
+    }
+    Ok(snapshot)
+}
+
+/// Replace one registration's synchronized aggregate rows when the revision advances.
+pub(crate) fn synchronize_worktree_usage_snapshot(
+    connection: &Connection,
+    registration_id: i64,
+    snapshot: &WorktreeUsageSnapshot,
+) -> DbResult<WorktreeUsageSyncState> {
+    let policy = TelemetryRetentionPolicy::default().validate()?;
+    let (project_bytes, accepted_revision) = connection.query_row(
+        "SELECT project_instance_id, accepted_telemetry_revision
+         FROM worktree_registrations
+         WHERE registration_id = ?1 AND state = 'active'",
+        [registration_id],
+        |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let Some(project_bytes) = project_bytes else {
+        return Err(DbError::WorktreeTelemetryProjectMismatch { registration_id });
+    };
+    let project_bytes: [u8; 16] =
+        project_bytes
+            .try_into()
+            .map_err(|value: Vec<u8>| DbError::InvalidBlobLength {
+                field: "worktree_registrations.project_instance_id",
+                expected: 16,
+                found: value.len(),
+            })?;
+    let project = ProjectInstanceId::from_bytes(project_bytes).map_err(DbError::from)?;
+    if project != snapshot.project_instance_id {
+        return Err(DbError::WorktreeTelemetryProjectMismatch { registration_id });
+    }
+    let accepted_revision =
+        u64::try_from(accepted_revision).map_err(|_source| DbError::WorktreeRegistrationRow {
+            reason: "negative accepted telemetry revision",
+        })?;
+    if snapshot.revision <= accepted_revision {
+        return Ok(WorktreeUsageSyncState::Current);
+    }
+    let logical_bytes =
+        validate_worktree_usage_snapshot(&snapshot.dimensions, &snapshot.rows, policy)?;
+    if logical_bytes != snapshot.logical_bytes {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot logical-byte contract changed",
+        });
+    }
+    let retained_trend_seconds = policy
+        .retained_trend_days
+        .checked_mul(SECONDS_PER_DAY as u64)
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "retained_trend_seconds",
+        })?;
+    let retained_daily_cutoff = epoch_cutoff(
+        now_epoch_seconds()?,
+        retained_trend_seconds,
+        "retained_trend_seconds",
+    )?;
+    connection.execute(
+        "DELETE FROM worktree_usage_aggregates
+         WHERE day_epoch >= 0 AND day_epoch < ?1 AND source_kind = ?2",
+        params![retained_daily_cutoff, WORKTREE_USAGE_SYNCHRONIZED],
+    )?;
+    let mut target_dimensions = BTreeMap::new();
+    for (source_id, dimension) in &snapshot.dimensions {
+        target_dimensions.insert(*source_id, ensure_dimension(connection, dimension, policy)?);
+    }
+    let mut incoming = BTreeMap::<(i64, i64), AggregateCounters>::new();
+    for row in snapshot
+        .rows
+        .iter()
+        .filter(|row| row.day_epoch == -1 || row.day_epoch >= retained_daily_cutoff)
+    {
+        let dimension_id =
+            *target_dimensions
+                .get(&row.dimension_id)
+                .ok_or(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot dimension mapping is incomplete",
+                })?;
+        let total = incoming.entry((row.day_epoch, dimension_id)).or_default();
+        *total = total.checked_add(row.counters)?;
+    }
+    let accepted_lifetime = {
+        let mut statement = connection.prepare_cached(
+            "SELECT a.dimension_id,
+                    a.calls, a.estimated_without, a.estimated_with, a.observed_without,
+                    a.observed_with, a.modeled_without, a.modeled_with,
+                    a.deduped_modeled_without, a.deduped_modeled_with, a.repeated_baselines,
+                    a.observed_file_read_replacements, a.modeled_file_reads_avoided
+             FROM worktree_usage_aggregates AS a
+                   INDEXED BY idx_worktree_usage_aggregates_day_registration
+             WHERE a.registration_id = ?1 AND a.source_kind = ?2 AND a.day_epoch = -1
+             ORDER BY a.dimension_id",
+        )?;
+        let mut rows = statement.query(params![registration_id, WORKTREE_USAGE_SYNCHRONIZED])?;
+        let mut totals = BTreeMap::<i64, AggregateCounters>::new();
+        while let Some(row) = rows.next()? {
+            let total = totals.entry(row.get(0)?).or_default();
+            *total = total.checked_add(read_counters_offset(row, 1)?)?;
+        }
+        totals
+    };
+    if accepted_lifetime.iter().any(|(dimension_id, accepted)| {
+        !incoming
+            .get(&(-1, *dimension_id))
+            .is_some_and(|incoming| incoming.contains(*accepted))
+    }) {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot reduces accepted lifetime totals",
+        });
+    }
+    let accepted_daily = {
+        let mut statement = connection.prepare_cached(
+            "SELECT a.day_epoch, a.dimension_id,
+                    a.calls, a.estimated_without, a.estimated_with, a.observed_without,
+                    a.observed_with, a.modeled_without, a.modeled_with,
+                    a.deduped_modeled_without, a.deduped_modeled_with,
+                    a.repeated_baselines, a.observed_file_read_replacements,
+                    a.modeled_file_reads_avoided
+             FROM worktree_usage_aggregates AS a
+             WHERE a.registration_id = ?1 AND a.source_kind = ?2
+               AND a.day_epoch >= ?3
+             ORDER BY a.day_epoch, a.dimension_id",
+        )?;
+        let mut rows = statement.query(params![
+            registration_id,
+            WORKTREE_USAGE_SYNCHRONIZED,
+            retained_daily_cutoff
+        ])?;
+        let mut totals = BTreeMap::<(i64, i64), AggregateCounters>::new();
+        while let Some(row) = rows.next()? {
+            let key = (row.get(0)?, row.get(1)?);
+            let total = totals.entry(key).or_default();
+            *total = total.checked_add(read_counters_offset(row, 2)?)?;
+        }
+        totals
+    };
+    if accepted_daily.iter().any(|(key, accepted)| {
+        !incoming
+            .get(key)
+            .is_some_and(|incoming| incoming.contains(*accepted))
+    }) {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot reduces accepted retained daily totals",
+        });
+    }
+    let incoming_daily_rows = incoming
+        .keys()
+        .filter(|(day_epoch, _dimension_id)| *day_epoch >= 0)
+        .count();
+    let other_daily_rows = connection.query_row(
+        "SELECT COUNT(*) FROM worktree_usage_aggregates
+         WHERE day_epoch >= 0
+           AND NOT (registration_id = ?1 AND source_kind = ?2)",
+        params![registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let projected_daily_rows = count_usize("worktree_daily_rows", other_daily_rows)?
+        .checked_add(incoming_daily_rows)
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "worktree_daily_rows",
+        })?;
+    if projected_daily_rows > policy.max_daily_rows {
+        return Err(DbError::WorktreeTelemetrySnapshotLimit {
+            resource: "daily_rows",
+            limit: policy.max_daily_rows,
+            observed: projected_daily_rows,
+        });
+    }
+    connection.execute(
+        "DELETE FROM worktree_usage_aggregates
+         WHERE registration_id = ?1 AND source_kind = ?2",
+        params![registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+    )?;
+    let mut insert = connection.prepare_cached(
+        "INSERT INTO worktree_usage_aggregates(
+            registration_id, source_kind, day_epoch, dimension_id,
+            calls, estimated_without, estimated_with, observed_without,
+            observed_with, modeled_without, modeled_with,
+            deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+            observed_file_read_replacements, modeled_file_reads_avoided
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+    )?;
+    for ((day_epoch, dimension_id), counters) in incoming {
+        insert.execute(worktree_aggregate_params!(
+            registration_id,
+            WORKTREE_USAGE_SYNCHRONIZED,
+            day_epoch,
+            dimension_id,
+            counters
+        ))?;
+    }
+    let revision =
+        i64::try_from(snapshot.revision).map_err(|_source| DbError::TelemetryIntegerOverflow {
+            field: "usage_aggregate_revisions.revision",
+        })?;
+    let updated = connection.execute(
+        "UPDATE worktree_registrations
+         SET accepted_telemetry_revision = ?2
+         WHERE registration_id = ?1 AND state = 'active'
+           AND accepted_telemetry_revision < ?2",
+        params![registration_id, revision],
+    )?;
+    if updated != 1 {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "aggregate snapshot revision changed during synchronization",
+        });
+    }
+    Ok(WorktreeUsageSyncState::Synchronized)
+}
+
+/// Validate snapshot counters, dimensions, days, row bounds, and logical size.
+fn validate_worktree_usage_snapshot(
+    dimensions: &BTreeMap<i64, DimensionValues>,
+    rows: &[WorktreeUsageSnapshotRow],
+    policy: TelemetryRetentionPolicy,
+) -> DbResult<usize> {
+    let maximum_rows = policy
+        .max_daily_rows
+        .checked_add(policy.max_dimensions)
+        .and_then(|value| value.checked_add(2))
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "worktree_snapshot_rows",
+        })?;
+    if rows.len() > maximum_rows {
+        return Err(DbError::WorktreeTelemetrySnapshotLimit {
+            resource: "rows",
+            limit: maximum_rows,
+            observed: rows.len(),
+        });
+    }
+    let mut logical_bytes = 24usize;
+    for dimension in dimensions.values() {
+        validate_dimension_values(dimension, policy.max_dimension_bytes)?;
+        logical_bytes = logical_bytes
+            .checked_add(9)
+            .and_then(|value| value.checked_add(dimension_logical_bytes(dimension)))
+            .ok_or(DbError::TelemetryIntegerOverflow {
+                field: "worktree_snapshot_bytes",
+            })?;
+    }
+    for row in rows {
+        if row.day_epoch < -1 || !dimensions.contains_key(&row.dimension_id) {
+            return Err(DbError::WorktreeRegistrationRow {
+                reason: "aggregate snapshot row has an invalid day or dimension",
+            });
+        }
+        row.counters.validate_nonnegative()?;
+        logical_bytes =
+            logical_bytes
+                .checked_add(112)
+                .ok_or(DbError::TelemetryIntegerOverflow {
+                    field: "worktree_snapshot_bytes",
+                })?;
+    }
+    if logical_bytes > MAX_WORKTREE_USAGE_SNAPSHOT_BYTES {
+        return Err(DbError::WorktreeTelemetrySnapshotLimit {
+            resource: "logical_bytes",
+            limit: MAX_WORKTREE_USAGE_SNAPSHOT_BYTES,
+            observed: logical_bytes,
+        });
+    }
+    Ok(logical_bytes)
+}
+
+/// Validate one normalized dimension at the transfer trust boundary.
+fn validate_dimension_values(dimension: &DimensionValues, maximum_bytes: usize) -> DbResult<()> {
+    for (field, value) in [
+        (
+            "token_savings_bucket",
+            dimension.token_savings_bucket.as_str(),
+        ),
+        ("provider", dimension.provider.as_str()),
+        ("model", dimension.model.as_str()),
+        ("tokenizer_backend", dimension.tokenizer_backend.as_str()),
+        ("accuracy", dimension.accuracy.as_str()),
+        ("baseline_kind", dimension.baseline_kind.as_str()),
+        ("confidence", dimension.confidence.as_str()),
+        ("accounting_layer", dimension.accounting_layer.as_str()),
+        ("estimate_method", dimension.estimate_method.as_str()),
+        ("denominator_kind", dimension.denominator_kind.as_str()),
+        ("dedupe_scope", dimension.dedupe_scope.as_str()),
+    ] {
+        validate_required_text(field, value, maximum_bytes)?;
+    }
+    Ok(())
+}
+
+/// Count normalized dimension text bytes without serializing the snapshot.
+fn dimension_logical_bytes(dimension: &DimensionValues) -> usize {
+    [
+        &dimension.token_savings_bucket,
+        &dimension.provider,
+        &dimension.model,
+        &dimension.tokenizer_backend,
+        &dimension.accuracy,
+        &dimension.baseline_kind,
+        &dimension.confidence,
+        &dimension.accounting_layer,
+        &dimension.estimate_method,
+        &dimension.denominator_kind,
+        &dimension.dedupe_scope,
+    ]
+    .iter()
+    .map(|value| value.len())
+    .sum()
+}
+
 /// Build an exact all-time overview from bounded component aggregates.
 pub(crate) fn token_overview(
     connection: &Connection,
@@ -1237,6 +2030,45 @@ pub(crate) fn token_overview(
 ) -> DbResult<TokenOverview> {
     let project = current_project(connection)?;
     token_overview_for_project(connection, project, caller_label)
+}
+
+/// Build the control atlas's combined native-main and synchronized-worktree overview.
+pub(crate) fn repository_token_overview(connection: &Connection) -> DbResult<TokenOverview> {
+    let project = current_project(connection)?;
+    crate::project_identity::require_bound_project_identity(connection, project)?;
+    let mut aggregates = load_overview_aggregates(connection, project, None)?;
+    let worktree_aggregates = load_worktree_overview_aggregates(connection, None, true)?;
+    let has_worktree_aggregates = worktree_aggregates_exist(connection)?;
+    aggregates.extend(worktree_aggregates);
+    let (buckets, totals, average_policy_complete) = aggregate_report_rows(aggregates)?;
+    let mut overview = TokenOverview::from_buckets(buckets);
+    overview.apply_accounting_totals(totals);
+    if !average_policy_complete {
+        overview.average_policy.evidence = TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE.to_string();
+    }
+    let native_detail = detail_availability(connection, project, None)?;
+    overview.set_detail_availability(if has_worktree_aggregates {
+        UsageDetailAvailability::Partial
+    } else {
+        native_detail
+    });
+    Ok(overview)
+}
+
+/// Build exact retained routed plus synchronized totals for one worktree origin.
+pub(crate) fn worktree_token_overview(
+    connection: &Connection,
+    registration_id: i64,
+) -> DbResult<TokenOverview> {
+    let aggregates = load_worktree_overview_aggregates(connection, Some(registration_id), false)?;
+    let (buckets, totals, average_policy_complete) = aggregate_report_rows(aggregates)?;
+    let mut overview = TokenOverview::from_buckets(buckets);
+    overview.apply_accounting_totals(totals);
+    if !average_policy_complete {
+        overview.average_policy.evidence = TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE.to_string();
+    }
+    overview.set_detail_availability(UsageDetailAvailability::Partial);
+    Ok(overview)
 }
 
 /// Aggregate all-time token totals for one project and optional label.
@@ -1247,9 +2079,12 @@ fn token_overview_for_project(
 ) -> DbResult<TokenOverview> {
     crate::project_identity::require_bound_project_identity(connection, project)?;
     let aggregates = load_overview_aggregates(connection, project, caller_label)?;
-    let (buckets, totals) = aggregate_report_rows(aggregates)?;
+    let (buckets, totals, average_policy_complete) = aggregate_report_rows(aggregates)?;
     let mut overview = TokenOverview::from_buckets(buckets);
     overview.apply_accounting_totals(totals);
+    if !average_policy_complete {
+        overview.average_policy.evidence = TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE.to_string();
+    }
     overview.set_detail_availability(detail_availability(connection, project, caller_label)?);
     Ok(overview)
 }
@@ -1264,6 +2099,39 @@ pub(crate) fn token_trends(
     token_trends_for_project(connection, project, caller_label, window)
 }
 
+/// Build combined native-main and synchronized-worktree trends for the control atlas.
+pub(crate) fn repository_token_trends(
+    connection: &Connection,
+    window: TokenTrendWindow,
+) -> DbResult<TokenTrendReport> {
+    let project = current_project(connection)?;
+    crate::project_identity::require_bound_project_identity(connection, project)?;
+    let mut rows = load_daily_aggregates(connection, project, None, window)?;
+    let worktree_rows = load_worktree_daily_aggregates(connection, None, true, window)?;
+    let has_worktree_rows = worktree_aggregates_exist(connection)?;
+    rows.extend(worktree_rows);
+    token_trend_report(
+        rows,
+        None,
+        window,
+        if has_worktree_rows {
+            UsageDetailAvailability::Partial
+        } else {
+            detail_availability(connection, project, None)?
+        },
+    )
+}
+
+/// Build exact retained routed plus synchronized trends for one worktree origin.
+pub(crate) fn worktree_token_trends(
+    connection: &Connection,
+    registration_id: i64,
+    window: TokenTrendWindow,
+) -> DbResult<TokenTrendReport> {
+    let rows = load_worktree_daily_aggregates(connection, Some(registration_id), false, window)?;
+    token_trend_report(rows, None, window, UsageDetailAvailability::Partial)
+}
+
 /// Aggregate bounded daily token trends for one project and optional label.
 fn token_trends_for_project(
     connection: &Connection,
@@ -1273,6 +2141,21 @@ fn token_trends_for_project(
 ) -> DbResult<TokenTrendReport> {
     crate::project_identity::require_bound_project_identity(connection, project)?;
     let rows = load_daily_aggregates(connection, project, caller_label, window)?;
+    token_trend_report(
+        rows,
+        caller_label.map(str::to_owned),
+        window,
+        detail_availability(connection, project, caller_label)?,
+    )
+}
+
+/// Convert normalized daily rows into one public trend report.
+fn token_trend_report(
+    rows: Vec<(String, DimensionValues, AggregateCounters)>,
+    caller_label: Option<String>,
+    window: TokenTrendWindow,
+    detail: UsageDetailAvailability,
+) -> DbResult<TokenTrendReport> {
     let mut by_period = BTreeMap::<String, BTreeMap<DimensionValues, AggregateCounters>>::new();
     for (period, dimension, counters) in rows {
         let entry = by_period
@@ -1292,8 +2175,8 @@ fn token_trends_for_project(
             Ok(TokenTrendPeriod::from_buckets(period, buckets))
         })
         .collect::<DbResult<Vec<_>>>()?;
-    let mut report = TokenTrendReport::new(caller_label.map(str::to_owned), window, periods);
-    report.set_detail_availability(detail_availability(connection, project, caller_label)?);
+    let mut report = TokenTrendReport::new(caller_label, window, periods);
+    report.set_detail_availability(detail);
     Ok(report)
 }
 
@@ -1551,8 +2434,8 @@ fn validate_optional_text(field: &'static str, value: Option<&str>, limit: usize
 }
 
 /// Return the identifier of the reserved overflow dimension, inserting it once.
-fn ensure_overflow_dimension(connection: &Connection) -> DbResult<i64> {
-    ensure_dimension_unbounded(connection, &DimensionValues::overflow())
+fn ensure_overflow_dimension(connection: &Connection, denominator_kind: &str) -> DbResult<i64> {
+    ensure_dimension_unbounded(connection, &DimensionValues::overflow(denominator_kind))
 }
 
 /// Resolve a normalized dimension or route it to bounded overflow.
@@ -1569,7 +2452,7 @@ fn ensure_dimension(
             "UPDATE usage_retention_state SET dimension_detail_complete = 0 WHERE singleton = 1",
             [],
         )?;
-        return ensure_overflow_dimension(connection);
+        return ensure_overflow_dimension(connection, &dimension.denominator_kind);
     }
     ensure_dimension_unbounded(connection, dimension)
 }
@@ -2121,6 +3004,219 @@ fn insert_raw_event(
     )?;
     increment_retention_counter(connection, RetentionCounter::RawRows, 1)?;
     increment_retention_counter(connection, RetentionCounter::RawLogicalBytes, logical_bytes)?;
+    Ok(())
+}
+
+/// Bind one retained runtime instance to exactly one routed worktree origin.
+fn bind_worktree_origin(
+    connection: &Connection,
+    instance_row_id: i64,
+    registration_id: Option<i64>,
+) -> DbResult<()> {
+    let existing = connection
+        .query_row(
+            "SELECT registration_id FROM usage_instance_worktree_origins
+             WHERE instance_row_id = ?1",
+            [instance_row_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(registration_id) = registration_id else {
+        return if existing.is_some() {
+            Err(DbError::WorktreeTelemetryOriginConflict)
+        } else {
+            Ok(())
+        };
+    };
+    let registration_exists = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM worktree_registrations WHERE registration_id = ?1
+         )",
+        [registration_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !registration_exists {
+        return Err(DbError::WorktreeTelemetryProjectMismatch { registration_id });
+    }
+    match existing {
+        Some(existing_id) if existing_id != registration_id => {
+            Err(DbError::WorktreeTelemetryOriginConflict)
+        }
+        Some(_) => Ok(()),
+        None => {
+            connection.execute(
+                "INSERT INTO usage_instance_worktree_origins(instance_row_id, registration_id)
+                 VALUES(?1, ?2)",
+                params![instance_row_id, registration_id],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Advance the local aggregate revision inside the accepted-event transaction.
+fn increment_aggregate_revision(
+    connection: &Connection,
+    project: ProjectInstanceId,
+    calls: i64,
+) -> DbResult<()> {
+    if calls == 0 {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "INSERT INTO usage_aggregate_revisions(project_instance_id, revision)
+             VALUES(?1, 1)
+             ON CONFLICT(project_instance_id) DO UPDATE SET
+                 revision = usage_aggregate_revisions.revision + 1",
+            [project.as_bytes().as_slice()],
+        )
+        .map_err(aggregate_write_error)?;
+    Ok(())
+}
+
+/// Retain exact routed worktree totals separately from replaceable local snapshots.
+fn upsert_routed_worktree_aggregates(
+    connection: &Connection,
+    registration_id: i64,
+    dimension_id: i64,
+    created_at: i64,
+    delta: AggregateCounters,
+    policy: TelemetryRetentionPolicy,
+) -> DbResult<()> {
+    if delta.calls == 0 {
+        return Ok(());
+    }
+    upsert_worktree_aggregate(
+        connection,
+        registration_id,
+        WORKTREE_USAGE_ROUTED,
+        -1,
+        dimension_id,
+        delta,
+    )?;
+    let day = created_at - created_at.rem_euclid(SECONDS_PER_DAY);
+    reserve_routed_worktree_daily_row(
+        connection,
+        registration_id,
+        day,
+        dimension_id,
+        policy.max_daily_rows,
+    )?;
+    upsert_worktree_aggregate(
+        connection,
+        registration_id,
+        WORKTREE_USAGE_ROUTED,
+        day,
+        dimension_id,
+        delta,
+    )
+}
+
+/// Upsert one routed or synchronized worktree aggregate row.
+fn upsert_worktree_aggregate(
+    connection: &Connection,
+    registration_id: i64,
+    source_kind: &str,
+    day_epoch: i64,
+    dimension_id: i64,
+    delta: AggregateCounters,
+) -> DbResult<()> {
+    connection
+        .execute(
+            "INSERT INTO worktree_usage_aggregates(
+                registration_id, source_kind, day_epoch, dimension_id,
+                calls, estimated_without, estimated_with, observed_without,
+                observed_with, modeled_without, modeled_with,
+                deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+                observed_file_read_replacements, modeled_file_reads_avoided
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(registration_id, source_kind, day_epoch, dimension_id) DO UPDATE SET
+                calls = worktree_usage_aggregates.calls + excluded.calls,
+                estimated_without = worktree_usage_aggregates.estimated_without + excluded.estimated_without,
+                estimated_with = worktree_usage_aggregates.estimated_with + excluded.estimated_with,
+                observed_without = worktree_usage_aggregates.observed_without + excluded.observed_without,
+                observed_with = worktree_usage_aggregates.observed_with + excluded.observed_with,
+                modeled_without = worktree_usage_aggregates.modeled_without + excluded.modeled_without,
+                modeled_with = worktree_usage_aggregates.modeled_with + excluded.modeled_with,
+                deduped_modeled_without = worktree_usage_aggregates.deduped_modeled_without + excluded.deduped_modeled_without,
+                deduped_modeled_with = worktree_usage_aggregates.deduped_modeled_with + excluded.deduped_modeled_with,
+                repeated_baselines = worktree_usage_aggregates.repeated_baselines + excluded.repeated_baselines,
+                observed_file_read_replacements = worktree_usage_aggregates.observed_file_read_replacements + excluded.observed_file_read_replacements,
+                modeled_file_reads_avoided = worktree_usage_aggregates.modeled_file_reads_avoided + excluded.modeled_file_reads_avoided",
+            worktree_aggregate_params!(
+                registration_id,
+                source_kind,
+                day_epoch,
+                dimension_id,
+                delta
+            ),
+        )
+        .map_err(aggregate_write_error)?;
+    Ok(())
+}
+
+/// Keep routed daily attribution bounded while lifetime totals remain exact.
+fn reserve_routed_worktree_daily_row(
+    connection: &Connection,
+    registration_id: i64,
+    day_epoch: i64,
+    dimension_id: i64,
+    max_daily_rows: usize,
+) -> DbResult<()> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2
+               AND day_epoch = ?3 AND dimension_id = ?4
+         )",
+        params![
+            registration_id,
+            WORKTREE_USAGE_ROUTED,
+            day_epoch,
+            dimension_id
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if exists {
+        return Ok(());
+    }
+    let daily_rows = connection.query_row(
+        "SELECT COUNT(*) FROM worktree_usage_aggregates WHERE day_epoch >= 0",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let daily_rows = count_usize("worktree_daily_rows", daily_rows)?;
+    if daily_rows < max_daily_rows {
+        return Ok(());
+    }
+    let removed = connection.execute(
+        "DELETE FROM worktree_usage_aggregates
+         WHERE (registration_id, source_kind, day_epoch, dimension_id) IN (
+             SELECT registration_id, source_kind, day_epoch, dimension_id
+             FROM worktree_usage_aggregates
+             WHERE day_epoch >= 0 AND source_kind = ?2
+               AND NOT (
+                   registration_id = ?1 AND source_kind = ?2
+                   AND day_epoch = ?3 AND dimension_id = ?4
+               )
+             ORDER BY day_epoch, registration_id, source_kind, dimension_id
+             LIMIT 1
+         )",
+        params![
+            registration_id,
+            WORKTREE_USAGE_ROUTED,
+            day_epoch,
+            dimension_id
+        ],
+    )?;
+    if removed != 1 {
+        return Err(DbError::WorktreeTelemetrySnapshotLimit {
+            resource: "daily_rows",
+            limit: max_daily_rows,
+            observed: daily_rows.saturating_add(1),
+        });
+    }
     Ok(())
 }
 
@@ -3391,8 +4487,14 @@ fn map_usage_event(row: &rusqlite::Row<'_>) -> DbResult<UsageEvent> {
         command: row.get(1)?,
         path: row.get(2)?,
         query: row.get(3)?,
-        estimated_tokens_without_projectatlas: row.get(4)?,
-        estimated_tokens_with_projectatlas: row.get(5)?,
+        estimated_tokens_without_projectatlas: row
+            .get::<_, Option<i64>>(4)?
+            .map(|value| count_usize("estimated_tokens_without_projectatlas", value))
+            .transpose()?,
+        estimated_tokens_with_projectatlas: row
+            .get::<_, Option<i64>>(5)?
+            .map(|value| count_usize("estimated_tokens_with_projectatlas", value))
+            .transpose()?,
         estimated_tokens_saved: row.get(6)?,
         token_savings_bucket: row.get(7)?,
         provider: row.get(8)?,
@@ -3482,10 +4584,72 @@ fn load_overview_aggregates(
     Ok(result)
 }
 
+/// Load bounded worktree lifetime aggregates, grouped by normalized dimension.
+fn load_worktree_overview_aggregates(
+    connection: &Connection,
+    registration_id: Option<i64>,
+    synchronized_only: bool,
+) -> DbResult<Vec<(DimensionValues, AggregateCounters)>> {
+    let predicate = if registration_id.is_some() {
+        "a.registration_id = ?1"
+    } else if synchronized_only {
+        "a.source_kind = ?1"
+    } else {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "worktree aggregate scope is unbounded",
+        });
+    };
+    let sql = format!(
+        "SELECT d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
+                d.accuracy, d.baseline_kind, d.confidence, d.accounting_layer,
+                d.estimate_method, d.denominator_kind, d.dedupe_scope, d.overflow,
+                SUM(a.calls), SUM(a.estimated_without), SUM(a.estimated_with),
+                SUM(a.observed_without), SUM(a.observed_with),
+                SUM(a.modeled_without), SUM(a.modeled_with),
+                SUM(a.deduped_modeled_without), SUM(a.deduped_modeled_with),
+                SUM(a.repeated_baselines), SUM(a.observed_file_read_replacements),
+                SUM(a.modeled_file_reads_avoided)
+         FROM worktree_usage_aggregates AS a
+              INDEXED BY idx_worktree_usage_aggregates_day_registration
+         JOIN usage_bucket_dimensions AS d USING(dimension_id)
+         WHERE a.day_epoch = -1 AND {predicate}
+         GROUP BY a.dimension_id
+         ORDER BY a.dimension_id"
+    );
+    let mut statement = connection.prepare_cached(&sql)?;
+    let mut rows = if let Some(registration_id) = registration_id {
+        statement.query([registration_id])?
+    } else {
+        statement.query([WORKTREE_USAGE_SYNCHRONIZED])?
+    };
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        result.push((read_dimension(row, 0)?, read_counters_offset(row, 12)?));
+    }
+    Ok(result)
+}
+
+/// Return whether any routed or synchronized worktree totals exist.
+fn worktree_aggregates_exist(connection: &Connection) -> DbResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM worktree_usage_aggregates
+                      INDEXED BY idx_worktree_usage_aggregates_day_registration
+                 WHERE day_epoch = -1
+                 LIMIT 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)
+}
+
 /// Combine normalized aggregate rows into one overview and bounded buckets.
 fn aggregate_report_rows(
     rows: Vec<(DimensionValues, AggregateCounters)>,
-) -> DbResult<(Vec<TokenBucketOverview>, TokenAccountingTotals)> {
+) -> DbResult<(Vec<TokenBucketOverview>, TokenAccountingTotals, bool)> {
     let mut by_dimension = BTreeMap::<DimensionValues, AggregateCounters>::new();
     for (dimension, counters) in rows {
         let entry = by_dimension.entry(dimension).or_default();
@@ -3493,7 +4657,16 @@ fn aggregate_report_rows(
     }
     let mut totals = TokenAccountingTotals::default();
     let mut buckets = Vec::with_capacity(by_dimension.len());
+    let mut average_directory_without = 0u128;
+    let mut average_directory_with = 0u128;
+    let mut average_policy_complete = true;
     for (dimension, counters) in by_dimension {
+        if dimension.overflow
+            && dimension.denominator_kind == OVERFLOW_DIMENSION
+            && counters.modeled_without > 0
+        {
+            average_policy_complete = false;
+        }
         totals.measured_tokens_saved = totals
             .measured_tokens_saved
             .checked_add(component_difference(
@@ -3512,15 +4685,44 @@ fn aggregate_report_rows(
             .ok_or(DbError::TelemetryIntegerOverflow {
                 field: "gross_modeled_tokens_avoided",
             })?;
+        let deduped_modeled_delta = component_difference(
+            counters.deduped_modeled_without,
+            counters.deduped_modeled_with,
+        );
         totals.deduped_modeled_tokens_avoided = totals
             .deduped_modeled_tokens_avoided
-            .checked_add(component_difference(
-                counters.deduped_modeled_without,
-                counters.deduped_modeled_with,
-            ))
+            .checked_add(deduped_modeled_delta)
             .ok_or(DbError::TelemetryIntegerOverflow {
                 field: "deduped_modeled_tokens_avoided",
             })?;
+        if dimension.denominator_kind == TOKEN_BASELINE_DIRECTORY_WALK {
+            let emitted_with = count_u128("modeled_with", counters.modeled_with)?;
+            let retained_without = if deduped_modeled_delta >= 0 {
+                emitted_with.checked_add(deduped_modeled_delta.unsigned_abs())
+            } else {
+                emitted_with.checked_sub(deduped_modeled_delta.unsigned_abs())
+            }
+            .ok_or(DbError::TelemetryIntegerOverflow {
+                field: "average_directory_without",
+            })?;
+            average_directory_without = average_directory_without
+                .checked_add(retained_without)
+                .ok_or(DbError::TelemetryIntegerOverflow {
+                    field: "average_directory_without",
+                })?;
+            average_directory_with = average_directory_with.checked_add(emitted_with).ok_or(
+                DbError::TelemetryIntegerOverflow {
+                    field: "average_directory_with",
+                },
+            )?;
+        } else {
+            totals.average_modeled_tokens_avoided = totals
+                .average_modeled_tokens_avoided
+                .checked_add(deduped_modeled_delta)
+                .ok_or(DbError::TelemetryIntegerOverflow {
+                    field: "average_modeled_tokens_avoided",
+                })?;
+        }
         totals.repeated_baselines_deduped = totals
             .repeated_baselines_deduped
             .checked_add(count_u128(
@@ -3550,7 +4752,25 @@ fn aggregate_report_rows(
             })?;
         buckets.push(bucket_from_counters(dimension, counters)?);
     }
-    Ok((buckets, totals))
+    let average_directory_without =
+        average_modeled_baseline_tokens(TOKEN_BASELINE_DIRECTORY_WALK, average_directory_without);
+    let average_directory_delta = i128::try_from(average_directory_without)
+        .ok()
+        .and_then(|without| {
+            i128::try_from(average_directory_with)
+                .ok()
+                .and_then(|with| without.checked_sub(with))
+        })
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "average_modeled_tokens_avoided",
+        })?;
+    totals.average_modeled_tokens_avoided = totals
+        .average_modeled_tokens_avoided
+        .checked_add(average_directory_delta)
+        .ok_or(DbError::TelemetryIntegerOverflow {
+            field: "average_modeled_tokens_avoided",
+        })?;
+    Ok((buckets, totals, average_policy_complete))
 }
 
 /// Convert one normalized counter row into the public bucket contract.
@@ -3636,6 +4856,79 @@ fn load_daily_aggregates(
         statement.query(params![project.as_bytes().as_slice(), label])?
     } else {
         statement.query([project.as_bytes().as_slice()])?
+    };
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        result.push((
+            row.get::<_, String>(0)?,
+            read_dimension(row, 1)?,
+            read_counters_offset(row, 13)?,
+        ));
+    }
+    Ok(result)
+}
+
+/// Load bounded worktree daily aggregates for combined or exact-origin trends.
+fn load_worktree_daily_aggregates(
+    connection: &Connection,
+    registration_id: Option<i64>,
+    synchronized_only: bool,
+    window: TokenTrendWindow,
+) -> DbResult<Vec<(String, DimensionValues, AggregateCounters)>> {
+    let period_expression = match window {
+        TokenTrendWindow::Day => "strftime('%Y-%m-%d', a.day_epoch, 'unixepoch')",
+        TokenTrendWindow::Week => "strftime('%Y-W%W', a.day_epoch, 'unixepoch')",
+        TokenTrendWindow::Month => "strftime('%Y-%m', a.day_epoch, 'unixepoch')",
+        TokenTrendWindow::Year => "strftime('%Y', a.day_epoch, 'unixepoch')",
+    };
+    let predicate = if registration_id.is_some() {
+        "a.registration_id = ?1"
+    } else if synchronized_only {
+        "a.source_kind = ?1"
+    } else {
+        return Err(DbError::WorktreeRegistrationRow {
+            reason: "worktree trend scope is unbounded",
+        });
+    };
+    let sql = format!(
+        "SELECT grouped.period,
+                d.token_savings_bucket, d.provider, d.model, d.tokenizer_backend,
+                d.accuracy, d.baseline_kind, d.confidence, d.accounting_layer,
+                d.estimate_method, d.denominator_kind, d.dedupe_scope, d.overflow,
+                grouped.calls, grouped.estimated_without, grouped.estimated_with,
+                grouped.observed_without, grouped.observed_with,
+                grouped.modeled_without, grouped.modeled_with,
+                grouped.deduped_modeled_without, grouped.deduped_modeled_with,
+                grouped.repeated_baselines, grouped.observed_file_read_replacements,
+                grouped.modeled_file_reads_avoided
+         FROM (
+             SELECT {period_expression} AS period, a.dimension_id,
+                    SUM(a.calls) AS calls,
+                    SUM(a.estimated_without) AS estimated_without,
+                    SUM(a.estimated_with) AS estimated_with,
+                    SUM(a.observed_without) AS observed_without,
+                    SUM(a.observed_with) AS observed_with,
+                    SUM(a.modeled_without) AS modeled_without,
+                    SUM(a.modeled_with) AS modeled_with,
+                    SUM(a.deduped_modeled_without) AS deduped_modeled_without,
+                    SUM(a.deduped_modeled_with) AS deduped_modeled_with,
+                    SUM(a.repeated_baselines) AS repeated_baselines,
+                    SUM(a.observed_file_read_replacements)
+                        AS observed_file_read_replacements,
+                    SUM(a.modeled_file_reads_avoided) AS modeled_file_reads_avoided
+             FROM worktree_usage_aggregates AS a
+                  INDEXED BY idx_worktree_usage_aggregates_day_registration
+             WHERE a.day_epoch >= 0 AND {predicate}
+             GROUP BY period, a.dimension_id
+         ) AS grouped
+         JOIN usage_bucket_dimensions AS d USING(dimension_id)
+         ORDER BY grouped.period, grouped.dimension_id"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = if let Some(registration_id) = registration_id {
+        statement.query([registration_id])?
+    } else {
+        statement.query([WORKTREE_USAGE_SYNCHRONIZED])?
     };
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {
@@ -3963,12 +5256,64 @@ fn synchronous_mode(value: i64) -> DbResult<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AtlasStore;
-    use projectatlas_core::telemetry::usage_from_estimates;
+    use crate::{AtlasStore, WorktreeAlias, WorktreeRegistrationState};
+    use projectatlas_core::telemetry::{
+        TOKEN_BASELINE_DIRECTORY_WALK, TOKEN_DEDUPE_SCOPE_EVENT, usage_from_estimates,
+        usage_from_text,
+    };
     use projectatlas_core::{Node, NodeKind, normalized_parent};
     use rusqlite::{Transaction, TransactionBehavior};
+    use std::cell::RefCell;
     use std::error::Error;
     use std::fs;
+    use std::io;
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
+    thread_local! {
+        /// Statements executed by the connection under the intended-scale worktree probe.
+        static WORKTREE_TRACE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        /// One deterministic pause between revision and aggregate reads.
+        static WORKTREE_SNAPSHOT_EXPORT_BLOCKER: RefCell<Option<SnapshotExportBlocker>> = const { RefCell::new(None) };
+    }
+
+    struct SnapshotExportBlocker {
+        entered: SyncSender<()>,
+        resume: Receiver<()>,
+    }
+
+    fn record_worktree_statement(sql: &str) {
+        WORKTREE_TRACE.with(|statements| statements.borrow_mut().push(sql.to_string()));
+    }
+
+    /// Adapt `rusqlite` statement trace events to the SQL text collector used by tests.
+    #[allow(clippy::needless_pass_by_value)]
+    fn record_worktree_event(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            record_worktree_statement(sql);
+        }
+    }
+
+    fn block_worktree_snapshot_aggregate_query(sql: &str) {
+        if !sql.contains("SELECT -1 AS day_epoch") {
+            return;
+        }
+        WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
+            let Some(blocker) = slot.borrow_mut().take() else {
+                return;
+            };
+            if blocker.entered.send(()).is_ok() {
+                let _resume = blocker.resume.recv_timeout(Duration::from_secs(10));
+            }
+        });
+    }
+
+    /// Adapt `rusqlite` statement trace events to the snapshot query blocker.
+    #[allow(clippy::needless_pass_by_value)]
+    fn block_worktree_snapshot_aggregate_event(event: rusqlite::trace::TraceEvent<'_>) {
+        if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+            block_worktree_snapshot_aggregate_query(sql);
+        }
+    }
 
     struct TestDatabase {
         temp: tempfile::TempDir,
@@ -4016,6 +5361,39 @@ mod tests {
         })
     }
 
+    fn store_at(root: &std::path::Path) -> Result<AtlasStore, Box<dyn Error>> {
+        let atlas = root.join(".projectatlas");
+        fs::create_dir_all(&atlas)?;
+        Ok(AtlasStore::open_for_project(
+            &atlas.join("projectatlas.db"),
+            root,
+        )?)
+    }
+
+    /// Return a test error instead of panicking inside a fallible test.
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
+        if condition {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(message).into())
+        }
+    }
+
+    /// Compare test values without panicking inside a fallible test.
+    fn require_eq<T>(actual: &T, expected: &T, label: &str) -> Result<(), Box<dyn Error>>
+    where
+        T: std::fmt::Debug + PartialEq,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "{label} mismatch: expected {expected:?}, found {actual:?}"
+            ))
+            .into())
+        }
+    }
+
     fn instance(byte: u8) -> Result<UsageInstanceId, Box<dyn Error>> {
         Ok(UsageInstanceId::from_bytes([byte; 16])?)
     }
@@ -4031,6 +5409,15 @@ mod tests {
         );
         event.baseline_identity = "source:src/lib.rs".to_string();
         event.baseline_fingerprint = "source:src/lib.rs:v1".to_string();
+        event
+    }
+
+    fn directory_event(label: &str, without: usize, with: usize) -> UsageEvent {
+        let mut event = event(label, without, with);
+        event.command = "folders".to_string();
+        event.denominator_kind = TOKEN_BASELINE_DIRECTORY_WALK.to_string();
+        event.baseline_identity = "directory:src".to_string();
+        event.baseline_fingerprint = "directory:src:v1".to_string();
         event
     }
 
@@ -4076,6 +5463,8 @@ mod tests {
                 project,
                 instance,
                 owner,
+                None,
+                true,
                 event,
                 policy,
                 now,
@@ -4319,6 +5708,205 @@ mod tests {
             Ok(())
         })();
         assert!(result.is_ok(), "on-disk telemetry test failed: {result:?}");
+    }
+
+    #[test]
+    fn sqlite_average_and_maximum_match_raw_event_accounting() {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            let database = test_database()?;
+            let policy = TelemetryRetentionPolicy::default();
+            let mut second_folder_scope = directory_event("agent", 5, 1);
+            second_folder_scope.baseline_identity = "directory:tests".to_string();
+            second_folder_scope.baseline_fingerprint = "directory:tests:v1".to_string();
+            let events = vec![
+                directory_event("agent", 101, 20),
+                directory_event("agent", 101, 10),
+                second_folder_scope,
+                event("agent", 80, 20),
+                usage_from_text(
+                    "agent",
+                    "summary",
+                    Some("src/other.rs".to_string()),
+                    None,
+                    "abcdabcd",
+                    "ab",
+                ),
+            ];
+            let expected = TokenOverview::from_events(&events);
+
+            record_transaction(
+                &database.connection,
+                database.project,
+                instance(21)?,
+                UsageInstanceOwner::McpProcess,
+                &events[0],
+                policy,
+                false,
+            )?;
+            record_transaction(
+                &database.connection,
+                database.project,
+                instance(21)?,
+                UsageInstanceOwner::McpProcess,
+                &events[1],
+                policy,
+                true,
+            )?;
+            for (identity, event) in [(22, &events[2]), (23, &events[3]), (24, &events[4])] {
+                record_transaction(
+                    &database.connection,
+                    database.project,
+                    instance(identity)?,
+                    UsageInstanceOwner::McpProcess,
+                    event,
+                    policy,
+                    true,
+                )?;
+            }
+
+            let actual =
+                token_overview_for_project(&database.connection, database.project, Some("agent"))?;
+            assert_eq!(actual.average_modeled_tokens_avoided, 82);
+            assert_eq!(actual.average_tokens_avoided, 83);
+            assert_eq!(actual.maximum_tokens_avoided, 136);
+            assert_eq!(actual.tokens_avoided, actual.average_tokens_avoided);
+            assert_eq!(
+                actual.average_modeled_tokens_avoided,
+                expected.average_modeled_tokens_avoided
+            );
+            assert_eq!(
+                actual.average_tokens_avoided,
+                expected.average_tokens_avoided
+            );
+            assert_eq!(
+                actual.maximum_tokens_avoided,
+                expected.maximum_tokens_avoided
+            );
+            assert_eq!(
+                actual.deduped_modeled_tokens_avoided,
+                expected.deduped_modeled_tokens_avoided
+            );
+            assert_eq!(actual.buckets, expected.buckets);
+            Ok(())
+        })();
+        assert!(
+            result.is_ok(),
+            "SQLite average/maximum parity test failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn directory_overflow_retains_average_policy_and_raw_parity() {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            let database = test_database()?;
+            let policy = TelemetryRetentionPolicy {
+                max_dimensions: 2,
+                ..TelemetryRetentionPolicy::default()
+            };
+            let selected = event("overflow-average", 100, 10);
+            let folder = directory_event("overflow-average", 101, 20);
+            let expected = TokenOverview::from_events(&[selected.clone(), folder.clone()]);
+
+            record_transaction(
+                &database.connection,
+                database.project,
+                instance(25)?,
+                UsageInstanceOwner::McpProcess,
+                &selected,
+                policy,
+                false,
+            )?;
+            record_transaction(
+                &database.connection,
+                database.project,
+                instance(25)?,
+                UsageInstanceOwner::McpProcess,
+                &folder,
+                policy,
+                true,
+            )?;
+
+            let actual = token_overview_for_project(
+                &database.connection,
+                database.project,
+                Some("overflow-average"),
+            )?;
+            assert_eq!(actual.average_tokens_avoided, 120);
+            assert_eq!(actual.maximum_tokens_avoided, 171);
+            assert_eq!(
+                actual.average_tokens_avoided,
+                expected.average_tokens_avoided
+            );
+            assert_eq!(
+                actual.maximum_tokens_avoided,
+                expected.maximum_tokens_avoided
+            );
+            assert_eq!(actual.detail_availability, UsageDetailAvailability::Partial);
+            assert_eq!(
+                scalar_count(
+                    &database.connection,
+                    "SELECT COUNT(*) FROM usage_bucket_dimensions",
+                )?,
+                3
+            );
+            Ok(())
+        })();
+        assert!(
+            result.is_ok(),
+            "directory overflow average-policy test failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn sqlite_and_raw_accounting_narrow_once_at_signed_bounds() {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            let database = test_database()?;
+            let policy = TelemetryRetentionPolicy::default();
+            let bound = isize::MAX as usize;
+            let mut events = vec![
+                event("wide", bound, 0),
+                event("wide", bound, 0),
+                event("wide", 0, bound),
+            ];
+            for (index, event) in events.iter_mut().enumerate() {
+                event.provider = format!("wide-{index}");
+                event.dedupe_scope = TOKEN_DEDUPE_SCOPE_EVENT.to_string();
+            }
+            let expected = TokenOverview::from_events(&events);
+
+            for (index, event) in events.iter().enumerate() {
+                record_transaction(
+                    &database.connection,
+                    database.project,
+                    instance(30 + u8::try_from(index)?)?,
+                    UsageInstanceOwner::McpProcess,
+                    event,
+                    policy,
+                    true,
+                )?;
+            }
+
+            let actual =
+                token_overview_for_project(&database.connection, database.project, Some("wide"))?;
+            assert_eq!(expected.average_tokens_avoided, isize::MAX);
+            assert_eq!(
+                actual.average_tokens_avoided,
+                expected.average_tokens_avoided
+            );
+            assert_eq!(
+                actual.maximum_tokens_avoided,
+                expected.maximum_tokens_avoided
+            );
+            assert_eq!(
+                actual.deduped_modeled_tokens_avoided,
+                expected.deduped_modeled_tokens_avoided
+            );
+            Ok(())
+        })();
+        assert!(
+            result.is_ok(),
+            "SQLite wide signed accounting parity test failed: {result:?}"
+        );
     }
 
     #[test]
@@ -4997,6 +6585,10 @@ mod tests {
                 overview.detail_availability,
                 UsageDetailAvailability::Partial
             );
+            assert_eq!(
+                overview.average_policy.evidence,
+                TOKEN_AVERAGE_POLICY_OVERFLOW_EVIDENCE
+            );
             Ok(())
         })();
         assert!(
@@ -5146,7 +6738,12 @@ mod tests {
 
             let lookalike = database.temp.path().join("usage-telemetry-spill.db");
             std::fs::write(&lookalike, b"not owned by ProjectAtlas")?;
-            maintain_after_commit_for_project(&database.connection, database.project, policy)?;
+            maintain_after_commit_for_project(
+                &database.connection,
+                None,
+                database.project,
+                policy,
+            )?;
             assert_eq!(std::fs::read(lookalike)?, b"not owned by ProjectAtlas");
             Ok(())
         })();
@@ -5154,6 +6751,35 @@ mod tests {
             result.is_ok(),
             "telemetry rejection rollback test failed: {result:?}"
         );
+    }
+
+    #[test]
+    fn public_raw_event_read_rejects_negative_optional_token_estimate() -> Result<(), Box<dyn Error>>
+    {
+        let database = production_database()?;
+        database
+            .store
+            .record_usage(&event("corrupt-reader", 100, 10))?;
+        database.store.connection.execute(
+            "UPDATE usage_events
+             SET estimated_tokens_without_projectatlas = -1
+             WHERE id = (SELECT id FROM usage_events ORDER BY id DESC LIMIT 1)",
+            [],
+        )?;
+
+        let Err(error) = database.store.usage_events(Some("corrupt-reader")) else {
+            return Err(io::Error::other("negative persisted token estimate was accepted").into());
+        };
+        require(
+            matches!(
+                error,
+                DbError::TelemetryIntegerOverflow {
+                    field: "estimated_tokens_without_projectatlas"
+                }
+            ),
+            "negative persisted token estimate returned the wrong error",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -5396,7 +7022,113 @@ mod tests {
     }
 
     #[test]
-    fn production_store_checkpoint_retries_after_a_held_reader_and_rejects_stale_binding() {
+    fn checkpoint_finalization_preserves_writes_committed_after_attempt() {
+        assert_eq!(
+            writes_after_checkpoint_attempt(
+                TelemetryCheckpointState::Completed,
+                1_024,
+                1_025,
+                true,
+            ),
+            1
+        );
+        assert_eq!(
+            writes_after_checkpoint_attempt(
+                TelemetryCheckpointState::Completed,
+                1_024,
+                1_025,
+                false,
+            ),
+            1_025
+        );
+        assert_eq!(
+            writes_after_checkpoint_attempt(TelemetryCheckpointState::Busy, 1_024, 1_025, true,),
+            1_025
+        );
+        assert_eq!(
+            writes_after_checkpoint_attempt(TelemetryCheckpointState::Error, 1_024, 1_025, true,),
+            1_025
+        );
+    }
+
+    #[test]
+    fn overlapping_checkpoint_finalizers_preserve_later_event_debt() {
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            let database = production_database()?;
+            let policy = TelemetryRetentionPolicy::default();
+            let first = AtlasStore::open_for_project(&database.database_path, &database.root)?;
+            let second = AtlasStore::open_for_project(&database.database_path, &database.root)?;
+            let event_writer =
+                AtlasStore::open_for_project(&database.database_path, &database.root)?;
+            let first_instance = instance(91)?;
+            let second_instance = instance(92)?;
+            let first_event = event("checkpoint-overlap-first", 100, 10);
+            let second_event = event("checkpoint-overlap-second", 100, 10);
+            database.store.connection.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1 WHERE singleton = 1",
+                [to_i64(
+                    "checkpoint_write_interval",
+                    policy.checkpoint_write_interval,
+                )?],
+            )?;
+
+            maintain_after_commit_for_project_with_checkpoint(
+                &first.connection,
+                first.validated_project_root.as_deref(),
+                database.project,
+                policy,
+                |connection| {
+                    let state = passive_checkpoint_state(connection);
+                    record_transaction(
+                        &event_writer.connection,
+                        database.project,
+                        first_instance,
+                        UsageInstanceOwner::McpProcess,
+                        &first_event,
+                        policy,
+                        false,
+                    )?;
+                    maintain_after_commit_for_project_with_checkpoint(
+                        &second.connection,
+                        second.validated_project_root.as_deref(),
+                        database.project,
+                        policy,
+                        |connection| {
+                            let state = passive_checkpoint_state(connection);
+                            record_transaction(
+                                &event_writer.connection,
+                                database.project,
+                                second_instance,
+                                UsageInstanceOwner::McpProcess,
+                                &second_event,
+                                policy,
+                                false,
+                            )?;
+                            Ok(state)
+                        },
+                    )?;
+                    Ok(state)
+                },
+            )?;
+
+            let retention = database.store.telemetry_retention_state()?;
+            assert_eq!(
+                retention.writes_since_checkpoint,
+                policy.checkpoint_write_interval + 2,
+                "overlapping checkpoint finalizers erased later event debt"
+            );
+            assert!(retention.maintenance_pending);
+            Ok(())
+        })();
+        assert!(
+            result.is_ok(),
+            "overlapping checkpoint test failed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn production_store_checkpoint_retries_and_rejects_stale_schema_or_binding() {
         let result = (|| -> Result<(), Box<dyn Error>> {
             let database = production_database()?;
             let runtime = instance(90)?;
@@ -5429,6 +7161,7 @@ mod tests {
             )?;
             maintain_after_commit_for_project(
                 &database.store.connection,
+                database.store.validated_project_root.as_deref(),
                 database.project,
                 policy,
             )?;
@@ -5442,6 +7175,7 @@ mod tests {
             reader.finish_index_read_snapshot()?;
             maintain_after_commit_for_project(
                 &database.store.connection,
+                database.store.validated_project_root.as_deref(),
                 database.project,
                 policy,
             )?;
@@ -5451,6 +7185,121 @@ mod tests {
                 TelemetryCheckpointState::Completed
             );
             assert_eq!(completed.writes_since_checkpoint, 0);
+
+            database.store.connection.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1 WHERE singleton = 1",
+                [to_i64(
+                    "checkpoint_write_interval",
+                    policy.checkpoint_write_interval,
+                )?],
+            )?;
+            let newer_owner = Connection::open(&database.database_path)?;
+            let future_schema = crate::schema::SCHEMA_VERSION + 1;
+            newer_owner.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                params![crate::schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+            )?;
+            let wal_path = crate::schema::sqlite_sidecar_path(&database.database_path, "-wal");
+            let wal_before = fs::read(&wal_path)?;
+            let maintenance_before = database.store.telemetry_retention_state()?;
+            let Err(error) = maintain_after_commit_for_project(
+                &database.store.connection,
+                database.store.validated_project_root.as_deref(),
+                database.project,
+                policy,
+            ) else {
+                return Err(std::io::Error::other(
+                    "post-commit maintenance accepted a newer schema",
+                )
+                .into());
+            };
+            assert!(matches!(
+                error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == crate::schema::SCHEMA_VERSION
+            ));
+            assert_eq!(
+                database.store.telemetry_retention_state()?,
+                maintenance_before,
+                "newer-schema maintenance refusal changed retention state"
+            );
+            assert_eq!(
+                fs::read(&wal_path)?,
+                wal_before,
+                "newer-schema maintenance refusal checkpointed the WAL"
+            );
+            assert_eq!(
+                newer_owner.query_row(
+                    "SELECT value FROM metadata WHERE key = ?1",
+                    [crate::schema::SCHEMA_VERSION_KEY],
+                    |row| row.get::<_, String>(0),
+                )?,
+                future_schema.to_string(),
+                "newer-schema owner stopped observing its schema"
+            );
+            newer_owner.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                params![
+                    crate::schema::SCHEMA_VERSION_KEY,
+                    crate::schema::SCHEMA_VERSION.to_string()
+                ],
+            )?;
+
+            database.store.connection.execute(
+                "UPDATE usage_retention_state
+                 SET writes_since_checkpoint = ?1 WHERE singleton = 1",
+                [to_i64(
+                    "checkpoint_write_interval",
+                    policy.checkpoint_write_interval,
+                )?],
+            )?;
+            let transition_before = database.store.telemetry_retention_state()?;
+            let Err(error) = maintain_after_commit_for_project_with_checkpoint(
+                &database.store.connection,
+                database.store.validated_project_root.as_deref(),
+                database.project,
+                policy,
+                |connection| {
+                    let state = passive_checkpoint_state(connection);
+                    newer_owner.execute(
+                        "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                        params![crate::schema::SCHEMA_VERSION_KEY, future_schema.to_string()],
+                    )?;
+                    Ok(state)
+                },
+            ) else {
+                return Err(std::io::Error::other(
+                    "maintenance finalized after a schema transition at the checkpoint boundary",
+                )
+                .into());
+            };
+            assert!(matches!(
+                error,
+                DbError::SchemaVersion { found, expected }
+                    if found == future_schema && expected == crate::schema::SCHEMA_VERSION
+            ));
+            assert_eq!(
+                database.store.telemetry_retention_state()?,
+                transition_before,
+                "checkpoint-boundary schema transition changed retention state"
+            );
+            assert_eq!(
+                newer_owner.query_row(
+                    "SELECT value FROM metadata WHERE key = ?1",
+                    [crate::schema::SCHEMA_VERSION_KEY],
+                    |row| row.get::<_, String>(0),
+                )?,
+                future_schema.to_string(),
+                "checkpoint-boundary refusal changed the concurrent owner's schema"
+            );
+            newer_owner.execute(
+                "UPDATE metadata SET value = ?2 WHERE key = ?1",
+                params![
+                    crate::schema::SCHEMA_VERSION_KEY,
+                    crate::schema::SCHEMA_VERSION.to_string()
+                ],
+            )?;
 
             let old_project = database.project;
             let captured = database.store.captured_project_binding()?;
@@ -5467,8 +7316,12 @@ mod tests {
                     .revalidate_captured_project_binding()
                     .is_err()
             );
-            let stale =
-                maintain_after_commit_for_project(&database.store.connection, old_project, policy);
+            let stale = maintain_after_commit_for_project(
+                &database.store.connection,
+                database.store.validated_project_root.as_deref(),
+                old_project,
+                policy,
+            );
             assert!(stale.is_err());
             Ok(())
         })();
@@ -5561,6 +7414,880 @@ mod tests {
     }
 
     #[test]
+    fn synchronization_coalesces_dimensions_that_share_an_overflow_bucket()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let worktree_root = temp.path().join("worktree");
+        let common = temp.path().join("common.git");
+        let administrative = common.join("worktrees/overflow");
+        for path in [&control_root, &worktree_root, &administrative] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let worktree = store_at(&worktree_root)?;
+        let project = worktree
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let alias = WorktreeAlias::parse("overflow")?;
+        let registration = control.register_worktree(
+            &alias,
+            &common,
+            &administrative,
+            &"66".repeat(32),
+            &worktree_root,
+            Some(project),
+            10,
+        )?;
+        let policy = TelemetryRetentionPolicy::default().validate()?;
+        for index in 0..policy.max_dimensions {
+            if retention_counter(&control.connection, RetentionCounter::DimensionRows)?
+                >= policy.max_dimensions
+            {
+                break;
+            }
+            let mut dimension = DimensionValues::from_event(&event("control", 1, 0));
+            dimension.model = format!("control-{index}");
+            ensure_dimension(&control.connection, &dimension, policy)?;
+        }
+        require_eq(
+            &retention_counter(&control.connection, RetentionCounter::DimensionRows)?,
+            &policy.max_dimensions,
+            "full control dimension capacity",
+        )?;
+
+        let first = event("local", 100, 20);
+        let mut second = event("local", 80, 20);
+        second.provider = "other-provider".to_string();
+        second.baseline_identity = "source:src/other.rs".to_string();
+        second.baseline_fingerprint = "source:src/other.rs:v1".to_string();
+        for usage in [&first, &second] {
+            worktree.record_usage(usage)?;
+        }
+        require_eq(
+            &control
+                .synchronize_worktree_usage(&alias, &worktree.export_worktree_usage_snapshot()?)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "first overflow synchronization",
+        )?;
+        for usage in [&first, &second] {
+            worktree.record_usage(usage)?;
+        }
+        require_eq(
+            &control
+                .synchronize_worktree_usage(&alias, &worktree.export_worktree_usage_snapshot()?)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "monotonic overflow synchronization",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &4,
+            "coalesced overflow lifetime calls",
+        )?;
+        let rows = control.connection.query_row(
+            "SELECT SUM(day_epoch = -1), SUM(day_epoch >= 0)
+             FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        require_eq(&rows, &(1, 1), "coalesced overflow aggregate rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn routed_and_synchronized_worktree_usage_remain_exact_monotonic_and_retained()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let worktree_root = temp.path().join("feature");
+        let other_root = temp.path().join("other");
+        let common = temp.path().join("common.git");
+        let administrative = common.join("worktrees/feature");
+        for path in [&control_root, &worktree_root, &other_root, &administrative] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let worktree = store_at(&worktree_root)?;
+        let other = store_at(&other_root)?;
+        let worktree_project = worktree
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let alias = WorktreeAlias::parse("issue-430")?;
+        let registration = control.register_worktree(
+            &alias,
+            &common,
+            &administrative,
+            &"11".repeat(32),
+            &worktree_root,
+            Some(worktree_project),
+            10,
+        )?;
+
+        let routed_instance = instance(41)?;
+        control.record_usage_for_worktree_instance(
+            routed_instance,
+            UsageInstanceOwner::McpProcess,
+            registration.registration_id,
+            &event("routed", 100, 20),
+            false,
+        )?;
+        require_eq(
+            &control.token_overview(None)?.calls,
+            &1,
+            "routed native total",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &1,
+            "routed repository total",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &1,
+            "routed origin total",
+        )?;
+        require(
+            matches!(
+                control.record_usage_for_instance(
+                    routed_instance,
+                    UsageInstanceOwner::McpProcess,
+                    &event("routed", 100, 20),
+                    false,
+                ),
+                Err(DbError::WorktreeTelemetryOriginConflict)
+            ),
+            "runtime instance crossed telemetry origins",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &1,
+            "origin-conflict rollback total",
+        )?;
+
+        worktree.record_usage(&event("local", 80, 20))?;
+        let first = worktree.export_worktree_usage_snapshot()?;
+        require_eq(&first.revision(), &1, "first local revision")?;
+        require(
+            first.row_count() >= 2,
+            "first snapshot omitted aggregate rows",
+        )?;
+        require(
+            first.logical_bytes() > 0,
+            "first snapshot omitted logical bytes",
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &first)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "first synchronization",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &2,
+            "first combined total",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &2,
+            "first exact worktree total",
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &first)?,
+            &WorktreeUsageSyncState::Current,
+            "stale synchronization",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &2,
+            "stale synchronization total",
+        )?;
+
+        worktree.record_usage(&event("local", 90, 20))?;
+        let second = worktree.export_worktree_usage_snapshot()?;
+        require_eq(&second.revision(), &2, "second local revision")?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &second)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "second synchronization",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &3,
+            "second combined total",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &3,
+            "second exact worktree total",
+        )?;
+
+        let first_lifetime = first
+            .rows
+            .iter()
+            .find(|row| row.day_epoch == -1)
+            .cloned()
+            .ok_or_else(|| io::Error::other("first lifetime row missing"))?;
+        let first_daily = first
+            .rows
+            .iter()
+            .find(|row| row.day_epoch >= 0 && row.dimension_id == first_lifetime.dimension_id)
+            .cloned()
+            .ok_or_else(|| io::Error::other("first daily row missing"))?;
+        let mut daily_rollback = second.clone();
+        daily_rollback.revision = 3;
+        let newer_lifetime = daily_rollback
+            .rows
+            .iter_mut()
+            .find(|row| row.day_epoch == -1 && row.dimension_id == first_lifetime.dimension_id)
+            .ok_or_else(|| io::Error::other("newer lifetime row missing"))?;
+        newer_lifetime.counters = newer_lifetime
+            .counters
+            .checked_add(first_lifetime.counters)?;
+        let rolled_back_daily = daily_rollback
+            .rows
+            .iter_mut()
+            .find(|row| {
+                row.day_epoch == first_daily.day_epoch
+                    && row.dimension_id == first_daily.dimension_id
+            })
+            .ok_or_else(|| io::Error::other("newer daily row missing"))?;
+        rolled_back_daily.counters = first_daily.counters;
+        daily_rollback.logical_bytes = validate_worktree_usage_snapshot(
+            &daily_rollback.dimensions,
+            &daily_rollback.rows,
+            TelemetryRetentionPolicy::default().validate()?,
+        )?;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&alias, &daily_rollback),
+                Err(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot reduces accepted retained daily totals"
+                })
+            ),
+            "newer revision from a recent backup reduced an accepted daily bucket",
+        )?;
+        require_eq(
+            &control
+                .worktree_registration(&alias)?
+                .accepted_telemetry_revision,
+            &2,
+            "revision after restored daily snapshot",
+        )?;
+        let retained_daily_calls = control.connection.query_row(
+            "SELECT calls FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0
+             ORDER BY day_epoch, dimension_id LIMIT 1",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &retained_daily_calls,
+            &2,
+            "daily bucket after restored daily snapshot",
+        )?;
+
+        let mut restored = first;
+        restored.revision = 3;
+        let source_dimension = restored
+            .dimensions
+            .values()
+            .next()
+            .cloned()
+            .ok_or_else(|| io::Error::other("restored source dimension missing"))?;
+        let compensating_counters = second
+            .rows
+            .iter()
+            .filter(|row| row.day_epoch == -1)
+            .try_fold(AggregateCounters::default(), |total, row| {
+                total.checked_add(row.counters)
+            })?;
+        let compensating_dimension_id = restored
+            .dimensions
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or_default()
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("restored dimension identifier overflow"))?;
+        let mut compensating_dimension = source_dimension;
+        compensating_dimension.model.push_str("-other");
+        restored
+            .dimensions
+            .insert(compensating_dimension_id, compensating_dimension);
+        restored.rows.push(WorktreeUsageSnapshotRow {
+            day_epoch: -1,
+            dimension_id: compensating_dimension_id,
+            counters: compensating_counters,
+        });
+        restored.logical_bytes = validate_worktree_usage_snapshot(
+            &restored.dimensions,
+            &restored.rows,
+            TelemetryRetentionPolicy::default().validate()?,
+        )?;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&alias, &restored),
+                Err(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot reduces accepted lifetime totals"
+                })
+            ),
+            "newer revision from an older backup reduced accepted lifetime totals",
+        )?;
+        require_eq(
+            &control
+                .worktree_registration(&alias)?
+                .accepted_telemetry_revision,
+            &2,
+            "revision after restored older snapshot",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &3,
+            "total after restored older snapshot",
+        )?;
+
+        let mut invalid = second.clone();
+        invalid.revision = 3;
+        invalid
+            .rows
+            .first_mut()
+            .ok_or_else(|| std::io::Error::other("invalid snapshot row missing"))?
+            .counters
+            .calls = -1;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&alias, &invalid),
+                Err(DbError::TelemetryIntegerOverflow { field: "calls" })
+            ),
+            "invalid snapshot was not rejected",
+        )?;
+        require_eq(
+            &control
+                .worktree_registration(&alias)?
+                .accepted_telemetry_revision,
+            &2,
+            "revision after invalid snapshot",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &3,
+            "total after invalid snapshot",
+        )?;
+
+        let other_snapshot = other.export_worktree_usage_snapshot()?;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&alias, &other_snapshot),
+                Err(DbError::WorktreeTelemetryProjectMismatch { .. })
+            ),
+            "mismatched project snapshot was not rejected",
+        )?;
+        let aged_rows = control.connection.execute(
+            "UPDATE worktree_usage_aggregates SET day_epoch = 0
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+        )?;
+        require_eq(&aged_rows, &1, "daily rows prepared for expiry")?;
+        let mut expired = second;
+        expired.revision = 3;
+        expired.rows.retain(|row| row.day_epoch == -1);
+        expired.logical_bytes = validate_worktree_usage_snapshot(
+            &expired.dimensions,
+            &expired.rows,
+            TelemetryRetentionPolicy::default().validate()?,
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &expired)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "expired daily bucket synchronization",
+        )?;
+        let expired_rows = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch = 0",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&expired_rows, &0, "expired synchronized daily rows")?;
+        let contending_local = store_at(&worktree_root)?;
+        let local_reader = AtlasStore::open_read_only_for_project(
+            &worktree_root.join(".projectatlas").join("projectatlas.db"),
+            &worktree_root,
+        )?;
+        let (retired, final_sync) =
+            local_reader.with_exclusive_worktree_usage_snapshot(|snapshot| {
+                let blocked = contending_local.record_usage(&event("after-export", 70, 20));
+                if !blocked.as_ref().is_err_and(DbError::is_write_unavailable) {
+                    return Err(DbError::WorktreeRegistrationRow {
+                        reason: "local writer was not excluded during final synchronization",
+                    });
+                }
+                control.retire_worktree_with_usage_snapshot(
+                    registration.registration_id,
+                    &alias,
+                    &worktree_root,
+                    snapshot.project_instance_id(),
+                    snapshot,
+                    20,
+                )
+            })?;
+        require_eq(
+            &retired.state,
+            &WorktreeRegistrationState::Retired,
+            "writer-excluded retirement state",
+        )?;
+        require_eq(
+            &final_sync,
+            &WorktreeUsageSyncState::Current,
+            "writer-excluded final synchronization",
+        )?;
+        contending_local.record_usage(&event("after-retirement", 70, 20))?;
+        require_eq(
+            &contending_local.token_overview(None)?.calls,
+            &3,
+            "local usage after retirement",
+        )?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &3,
+            "retired repository total",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_usage_export_keeps_revision_and_aggregates_in_one_read_snapshot()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("worktree");
+        fs::create_dir(&root)?;
+        let database_path = root.join("projectatlas.db");
+        let worktree = AtlasStore::open_for_project(&database_path, &root)?;
+        worktree.record_usage(&event("snapshot", 100, 20))?;
+
+        let (entered_sender, entered_receiver) = sync_channel(1);
+        let (resume_sender, resume_receiver) = sync_channel(1);
+        WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
+            *slot.borrow_mut() = Some(SnapshotExportBlocker {
+                entered: entered_sender,
+                resume: resume_receiver,
+            });
+        });
+        worktree.connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(block_worktree_snapshot_aggregate_event),
+        );
+
+        let writer_root = root.clone();
+        let writer_database = database_path.clone();
+        let writer = std::thread::spawn(move || {
+            let result = (|| -> Result<(), String> {
+                entered_receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|error| error.to_string())?;
+                let writer = AtlasStore::open_for_project(&writer_database, &writer_root)
+                    .map_err(|error| error.to_string())?;
+                writer
+                    .record_usage(&event("snapshot", 90, 20))
+                    .map_err(|error| error.to_string())
+            })();
+            let _resume = resume_sender.send(());
+            result
+        });
+
+        let snapshot_result = worktree.export_worktree_usage_snapshot();
+        worktree
+            .connection
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        WORKTREE_SNAPSHOT_EXPORT_BLOCKER.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        writer
+            .join()
+            .map_err(|_panic| io::Error::other("snapshot writer panicked"))?
+            .map_err(io::Error::other)?;
+        let snapshot = snapshot_result?;
+        require_eq(&snapshot.revision(), &1, "exported snapshot revision")?;
+        let exported_calls = snapshot
+            .rows
+            .iter()
+            .filter(|row| row.day_epoch == -1)
+            .map(|row| row.counters.calls)
+            .sum::<i64>();
+        require_eq(&exported_calls, &1, "exported aggregate calls")?;
+
+        let current = worktree.export_worktree_usage_snapshot()?;
+        require_eq(&current.revision(), &2, "current snapshot revision")?;
+        let current_calls = current
+            .rows
+            .iter()
+            .filter(|row| row.day_epoch == -1)
+            .map(|row| row.counters.calls)
+            .sum::<i64>();
+        require_eq(&current_calls, &2, "current aggregate calls")?;
+        let reader = AtlasStore::open_read_only_for_project(&database_path, &root)?;
+        let read_only = reader.export_worktree_usage_snapshot()?;
+        require_eq(&read_only.revision(), &2, "read-only snapshot revision")?;
+        reader.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn routed_daily_capacity_preserves_synchronized_snapshot() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let worktree_root = temp.path().join("feature");
+        let administrative = temp.path().join("common.git/worktrees/feature");
+        for path in [&control_root, &worktree_root, &administrative] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let worktree = store_at(&worktree_root)?;
+        let worktree_project = worktree
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let alias = WorktreeAlias::parse("capacity")?;
+        let registration = control.register_worktree(
+            &alias,
+            &temp.path().join("common.git"),
+            &administrative,
+            &"22".repeat(32),
+            &worktree_root,
+            Some(worktree_project),
+            10,
+        )?;
+        let now = now_epoch_seconds()?;
+        for (offset, instance_id) in [(2, 40), (1, 41)] {
+            record_transaction_at(
+                &worktree.connection,
+                worktree_project,
+                instance(instance_id)?,
+                UsageInstanceOwner::CliInvocation,
+                &event("synchronized", 100, 20),
+                TelemetryRetentionPolicy::default(),
+                true,
+                now - i64::from(offset) * SECONDS_PER_DAY,
+            )?;
+        }
+        let snapshot = worktree.export_worktree_usage_snapshot()?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &snapshot)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "initial synchronized snapshot",
+        )?;
+
+        let policy = TelemetryRetentionPolicy {
+            max_daily_rows: 2,
+            ..TelemetryRetentionPolicy::default()
+        };
+        let control_project = control
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let routed_instance = instance(42)?;
+        let routed = control.with_validated_write(|connection| {
+            record_usage_for_project(
+                connection,
+                control_project,
+                routed_instance,
+                UsageInstanceOwner::McpProcess,
+                Some(registration.registration_id),
+                &event("routed", 90, 20),
+                policy,
+                true,
+            )
+        });
+        require(
+            matches!(
+                routed,
+                Err(DbError::WorktreeTelemetrySnapshotLimit {
+                    resource: "daily_rows",
+                    limit: 2,
+                    observed: 3
+                })
+            ),
+            "routed usage displaced a synchronized daily snapshot",
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&alias, &snapshot)?,
+            &WorktreeUsageSyncState::Current,
+            "accepted snapshot revision after routed capacity failure",
+        )?;
+        require_eq(
+            &control.registered_worktree_token_overview(&alias)?.calls,
+            &2,
+            "synchronized total after routed capacity failure",
+        )?;
+        let synchronized_daily = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![registration.registration_id, WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&synchronized_daily, &2, "retained synchronized daily rows")?;
+        Ok(())
+    }
+
+    #[test]
+    fn synchronization_prunes_expired_daily_rows_from_retired_origins() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        let retired_root = temp.path().join("retired");
+        let current_root = temp.path().join("current");
+        let common = temp.path().join("common.git");
+        let retired_administrative = common.join("worktrees/retired");
+        let current_administrative = common.join("worktrees/current");
+        for path in [
+            &control_root,
+            &retired_root,
+            &current_root,
+            &retired_administrative,
+            &current_administrative,
+        ] {
+            fs::create_dir_all(path)?;
+        }
+        let control = store_at(&control_root)?;
+        let retired = store_at(&retired_root)?;
+        let retired_project = retired
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let retired_alias = WorktreeAlias::parse("retired")?;
+        let retired_registration = control.register_worktree(
+            &retired_alias,
+            &common,
+            &retired_administrative,
+            &"33".repeat(32),
+            &retired_root,
+            Some(retired_project),
+            10,
+        )?;
+        retired.record_usage(&event("retired", 100, 20))?;
+        let accepted = retired.export_worktree_usage_snapshot()?;
+        require_eq(
+            &control.synchronize_worktree_usage(&retired_alias, &accepted)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "initial retired-origin synchronization",
+        )?;
+
+        control.connection.execute(
+            "DELETE FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+        )?;
+        let policy = TelemetryRetentionPolicy::default().validate()?;
+        let max_daily_rows = to_i64("max_daily_rows", policy.max_daily_rows)?;
+        let seeded = control.connection.execute(
+            "WITH RECURSIVE expired_days(day_epoch) AS (
+                 VALUES(0)
+                 UNION ALL
+                 SELECT day_epoch + 1 FROM expired_days WHERE day_epoch + 1 < ?3
+             )
+             INSERT INTO worktree_usage_aggregates(
+                 registration_id, source_kind, day_epoch, dimension_id,
+                 calls, estimated_without, estimated_with, observed_without,
+                 observed_with, modeled_without, modeled_with,
+                 deduped_modeled_without, deduped_modeled_with, repeated_baselines,
+                 observed_file_read_replacements, modeled_file_reads_avoided
+             )
+             SELECT aggregate.registration_id, aggregate.source_kind,
+                    expired_days.day_epoch, aggregate.dimension_id,
+                    aggregate.calls, aggregate.estimated_without, aggregate.estimated_with,
+                    aggregate.observed_without, aggregate.observed_with,
+                    aggregate.modeled_without, aggregate.modeled_with,
+                    aggregate.deduped_modeled_without, aggregate.deduped_modeled_with,
+                    aggregate.repeated_baselines, aggregate.observed_file_read_replacements,
+                    aggregate.modeled_file_reads_avoided
+             FROM worktree_usage_aggregates AS aggregate
+             CROSS JOIN expired_days
+             WHERE aggregate.registration_id = ?1 AND aggregate.source_kind = ?2
+               AND aggregate.day_epoch = -1",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED,
+                max_daily_rows
+            ],
+        )?;
+        require_eq(&seeded, &policy.max_daily_rows, "seeded expired daily rows")?;
+
+        let mut reduced = accepted;
+        reduced.revision = reduced.revision.saturating_add(1);
+        let lifetime = reduced
+            .rows
+            .iter_mut()
+            .find(|row| row.day_epoch == -1)
+            .ok_or_else(|| io::Error::other("retired lifetime row missing"))?;
+        lifetime.counters.calls = 0;
+        reduced.logical_bytes =
+            validate_worktree_usage_snapshot(&reduced.dimensions, &reduced.rows, policy)?;
+        require(
+            matches!(
+                control.synchronize_worktree_usage(&retired_alias, &reduced),
+                Err(DbError::WorktreeRegistrationRow {
+                    reason: "aggregate snapshot reduces accepted lifetime totals"
+                })
+            ),
+            "failed synchronization committed expired-row pruning",
+        )?;
+        let after_rollback = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(
+            &after_rollback,
+            &max_daily_rows,
+            "expired rows after failed synchronization",
+        )?;
+        control.retire_worktree(retired_registration.registration_id, &retired_alias, 20)?;
+
+        let current = store_at(&current_root)?;
+        let current_project = current
+            .validated_project_instance_id
+            .ok_or(DbError::ProjectInstanceIdentityMissing)?;
+        let current_alias = WorktreeAlias::parse("current")?;
+        let current_registration = control.register_worktree(
+            &current_alias,
+            &common,
+            &current_administrative,
+            &"44".repeat(32),
+            &current_root,
+            Some(current_project),
+            30,
+        )?;
+        current.record_usage(&event("current", 90, 20))?;
+        let mut current_snapshot = current.export_worktree_usage_snapshot()?;
+        let mut expired = current_snapshot
+            .rows
+            .iter()
+            .find(|row| row.day_epoch >= 0)
+            .cloned()
+            .ok_or_else(|| io::Error::other("current daily row missing"))?;
+        expired.day_epoch = 0;
+        current_snapshot
+            .rows
+            .extend(std::iter::repeat_n(expired, policy.max_daily_rows));
+        current_snapshot.logical_bytes = validate_worktree_usage_snapshot(
+            &current_snapshot.dimensions,
+            &current_snapshot.rows,
+            policy,
+        )?;
+        require_eq(
+            &control.synchronize_worktree_usage(&current_alias, &current_snapshot)?,
+            &WorktreeUsageSyncState::Synchronized,
+            "current-origin synchronization after global pruning",
+        )?;
+
+        let retired_daily = control.connection.query_row(
+            "SELECT COUNT(*) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                retired_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&retired_daily, &0, "retired expired daily rows")?;
+        let lifetime_calls = control.connection.query_row(
+            "SELECT SUM(calls) FROM worktree_usage_aggregates
+             WHERE source_kind = ?1 AND day_epoch = -1",
+            [WORKTREE_USAGE_SYNCHRONIZED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&lifetime_calls, &2, "synchronized lifetime truth")?;
+        let current_daily_calls = control.connection.query_row(
+            "SELECT SUM(calls) FROM worktree_usage_aggregates
+             WHERE registration_id = ?1 AND source_kind = ?2 AND day_epoch >= 0",
+            params![
+                current_registration.registration_id,
+                WORKTREE_USAGE_SYNCHRONIZED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        require_eq(&current_daily_calls, &1, "retained current daily truth")?;
+        require_eq(
+            &control.repository_token_overview()?.calls,
+            &2,
+            "repository lifetime truth",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn worktree_continuity_high_registration_aggregate_has_bounded_sql_and_rows()
+    -> Result<(), Box<dyn Error>> {
+        const ORIGINS: usize = 128;
+        const EXPECTED_STATEMENTS: usize = 11_407;
+        const EXPECTED_CHANGED_ROWS: u64 = 3_203;
+
+        let temp = tempfile::tempdir()?;
+        let control_root = temp.path().join("control");
+        fs::create_dir_all(&control_root)?;
+        let database = control_root.join("projectatlas.db");
+        let control = AtlasStore::open_for_project(&database, &control_root)?;
+        let project = control.captured_project_binding()?.project_instance_id;
+        let common = temp.path().join("common.git");
+        let event = event("worktree-scale", 100, 20);
+
+        WORKTREE_TRACE.with(|statements| statements.borrow_mut().clear());
+        control.connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(record_worktree_event),
+        );
+        let changed_before = control.connection.total_changes();
+        for index in 0..ORIGINS {
+            let suffix = index + 1;
+            let alias = WorktreeAlias::parse(&format!("worktree-{suffix:03}"))?;
+            let registration = control.register_worktree(
+                &alias,
+                &common,
+                &common.join(format!("worktrees/{suffix:03}")),
+                &format!("{suffix:064x}"),
+                &temp.path().join(format!("worktree-{suffix:03}")),
+                Some(ProjectInstanceId::from_bytes([u8::try_from(suffix)?; 16])?),
+                u64::try_from(suffix)?,
+            )?;
+            record_usage_for_project(
+                &control.connection,
+                project,
+                instance(u8::try_from(suffix)?)?,
+                UsageInstanceOwner::McpProcess,
+                Some(registration.registration_id),
+                &event,
+                TelemetryRetentionPolicy::default(),
+                true,
+            )?;
+        }
+        let registrations = control.worktree_registrations(false)?;
+        let overview = control.repository_token_overview()?;
+        control
+            .connection
+            .trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        let changed_rows = control.connection.total_changes() - changed_before;
+        let statements =
+            WORKTREE_TRACE.with(|statements| std::mem::take(&mut *statements.borrow_mut()));
+
+        require_eq(&registrations.len(), &ORIGINS, "active registration count")?;
+        require_eq(&overview.calls, &ORIGINS, "repository aggregate calls")?;
+        require_eq(
+            &statements.len(),
+            &EXPECTED_STATEMENTS,
+            "worktree scale statement count",
+        )?;
+        require_eq(
+            &changed_rows,
+            &EXPECTED_CHANGED_ROWS,
+            "worktree scale changed rows",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn hot_telemetry_queries_use_owned_indexes_without_duplicate_primary_key_indexes() {
         let result = (|| -> Result<(), Box<dyn Error>> {
             let database = test_database()?;
@@ -5597,6 +8324,16 @@ mod tests {
                     "SELECT calls FROM usage_global_aggregates
                  WHERE project_instance_id = X'01010101010101010101010101010101'
                    AND dimension_id = 1",
+                )?,
+                "PRIMARY KEY",
+            );
+            assert_plan_uses(
+                &query_plan(
+                    &database.connection,
+                    "SELECT day_epoch, dimension_id FROM worktree_usage_aggregates
+                 WHERE registration_id = 1 AND source_kind = 'synchronized'
+                   AND day_epoch >= 0
+                 ORDER BY day_epoch, dimension_id",
                 )?,
                 "PRIMARY KEY",
             );

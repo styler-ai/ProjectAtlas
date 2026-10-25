@@ -132,6 +132,7 @@ pub(super) fn impact_findings(
                 nodes: Vec::new(),
                 metric: Some(0),
                 evidence: None,
+                community: None,
             });
         }
         for (key, hops) in distance {
@@ -148,6 +149,7 @@ pub(super) fn impact_findings(
                 nodes: analysis_nodes_for(nodes, std::slice::from_ref(&key)),
                 metric: Some(u64::from(hops)),
                 evidence: None,
+                community: None,
             });
         }
     } else if let VcsImpact::Unavailable { reason, .. } = vcs {
@@ -158,6 +160,7 @@ pub(super) fn impact_findings(
             nodes: Vec::new(),
             metric: None,
             evidence: None,
+            community: None,
         });
     }
     check_control(control)?;
@@ -185,6 +188,7 @@ fn dead_code_findings(
             nodes: Vec::new(),
             metric: None,
             evidence: None,
+            community: None,
         }]);
     }
     #[cfg(test)]
@@ -215,6 +219,7 @@ fn dead_code_findings(
             nodes: Vec::new(),
             metric: None,
             evidence: None,
+            community: None,
         }]);
     }
     let indegree = usage_indegrees(nodes, edges, control)?;
@@ -256,6 +261,7 @@ fn dead_code_findings(
             nodes: analysis_nodes_for(nodes, std::slice::from_ref(&key)),
             metric: Some(0),
             evidence: None,
+            community: None,
         }]
     }))
 }
@@ -436,7 +442,10 @@ pub(super) fn load_vcs_paths(
 /// Build one Git command bound to the explicitly selected repository root.
 pub(super) fn git_command(root: &Path) -> Command {
     let mut command = Command::new("git");
-    command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0");
+    command
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null());
     clear_git_repository_environment(&mut command);
     command
 }

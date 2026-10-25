@@ -18,6 +18,8 @@ use std::path::Path;
 const MAX_MODULE_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 /// Maximum aggregate compiler-configuration bytes retained by one graph stage.
 const MAX_MODULE_CONFIG_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+/// Optional byte-order mark accepted at the start of UTF-8 compiler configuration.
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 /// Work interval between cancellation/deadline checks while decoding mappings.
 const MODULE_CONFIG_CONTROL_INTERVAL: usize = 64;
 
@@ -87,14 +89,16 @@ pub(super) fn load_configured_module_resolution(
         if node.content_hash.as_deref() != Some(current_hash.as_str()) {
             return Err(source_changed_during_derivation(root, &node.path));
         }
-        let content = String::from_utf8(bytes).map_err(|_utf8_error| {
-            CliError::InvalidInput(format!(
-                "compiler configuration '{}' is not valid UTF-8",
-                node.path
-            ))
-        })?;
+        let content = std::str::from_utf8(bytes.strip_prefix(UTF8_BOM).unwrap_or(&bytes)).map_err(
+            |_utf8_error| {
+                CliError::InvalidInput(format!(
+                    "compiler configuration '{}' is not valid UTF-8",
+                    node.path
+                ))
+            },
+        )?;
         let value: Value =
-            parse_to_serde_value(&content, &JsoncParseOptions::default()).map_err(|error| {
+            parse_to_serde_value(content, &JsoncParseOptions::default()).map_err(|error| {
                 CliError::InvalidInput(format!(
                     "failed to parse compiler configuration '{}': {error}",
                     node.path
@@ -283,7 +287,7 @@ fn module_config_resource_limit(
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, MAX_MODULE_CONFIG_FILE_BYTES, MAX_MODULE_CONFIG_TOTAL_BYTES,
+        CliError, MAX_MODULE_CONFIG_FILE_BYTES, MAX_MODULE_CONFIG_TOTAL_BYTES, UTF8_BOM,
         claim_module_config_total, decode_config, load_configured_module_resolution,
         normalize_repository_target,
     };
@@ -340,6 +344,93 @@ mod tests {
             return Err(std::io::Error::other("expected both configured path mappings").into());
         }
         let _configured = projectatlas_symbols::ConfiguredModuleResolution::new(vec![config])?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_config_loader_accepts_utf8_bom_for_both_config_kinds() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let content = br#"{"compilerOptions":{"baseUrl":"src"}}"#;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+
+        for config_path in ["tsconfig.json", "jsconfig.json"] {
+            fs::write(temp.path().join(config_path), content)?;
+            let plain = load_configured_module_resolution(
+                temp.path(),
+                &[config_node(config_path, content)],
+                &control,
+            )?;
+
+            let bom_content = [UTF8_BOM, content].concat();
+            fs::write(temp.path().join(config_path), &bom_content)?;
+            let with_bom = load_configured_module_resolution(
+                temp.path(),
+                &[config_node(config_path, &bom_content)],
+                &control,
+            )?;
+            if with_bom != plain {
+                return Err(std::io::Error::other(format!(
+                    "{config_path} decoded differently with a UTF-8 BOM"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_config_loader_rejects_malformed_and_non_utf8_after_bom()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+
+        for config_path in ["tsconfig.json", "jsconfig.json"] {
+            for (case, malformed) in [
+                ("after a leading BOM", [UTF8_BOM, b"{"].concat()),
+                (
+                    "with a complete BOM after byte zero",
+                    [b"{".as_slice(), UTF8_BOM, b"}".as_slice()].concat(),
+                ),
+            ] {
+                fs::write(temp.path().join(config_path), &malformed)?;
+                match load_configured_module_resolution(
+                    temp.path(),
+                    &[config_node(config_path, &malformed)],
+                    &control,
+                ) {
+                    Err(CliError::InvalidInput(message))
+                        if message.contains("failed to parse compiler configuration") => {}
+                    result => {
+                        return Err(std::io::Error::other(format!(
+                            "{config_path} malformed input {case} returned {result:?}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+
+            for (case, non_utf8) in [
+                ("after a BOM", [UTF8_BOM, &[0xFF]].concat()),
+                ("with a partial BOM", b"\xEF\xBB{}".to_vec()),
+            ] {
+                fs::write(temp.path().join(config_path), &non_utf8)?;
+                match load_configured_module_resolution(
+                    temp.path(),
+                    &[config_node(config_path, &non_utf8)],
+                    &control,
+                ) {
+                    Err(CliError::InvalidInput(message))
+                        if message.contains("is not valid UTF-8") => {}
+                    result => {
+                        return Err(std::io::Error::other(format!(
+                            "{config_path} non-UTF-8 input {case} returned {result:?}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

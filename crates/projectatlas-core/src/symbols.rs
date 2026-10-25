@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Source label for a parser relation outside a named declaration or namespace.
+pub const MODULE_RELATION_SOURCE: &str = "<module>";
+
 /// Kind of symbol stored in the `ProjectAtlas` graph.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -23,6 +26,8 @@ pub enum SymbolKind {
     Interface,
     /// A module, namespace, package, or source unit.
     Module,
+    /// A documentation heading with an exact source selector.
+    Heading,
     /// A type alias or type declaration.
     Type,
     /// A constant, static, field, or variable declaration worth indexing.
@@ -50,6 +55,7 @@ impl fmt::Display for SymbolKind {
             Self::Trait => "trait",
             Self::Interface => "interface",
             Self::Module => "module",
+            Self::Heading => "heading",
             Self::Type => "type",
             Self::Value => "value",
             Self::Import => "import",
@@ -74,6 +80,7 @@ impl SymbolKind {
             "trait" => Self::Trait,
             "interface" => Self::Interface,
             "module" => Self::Module,
+            "heading" => Self::Heading,
             "type" => Self::Type,
             "value" => Self::Value,
             "import" => Self::Import,
@@ -162,6 +169,19 @@ impl ParserKind {
     }
 }
 
+/// Exact parser-supplied byte and column selector for one symbol.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SymbolSourceSelector {
+    /// Inclusive UTF-8 byte offset.
+    pub byte_start: usize,
+    /// Exclusive UTF-8 byte offset.
+    pub byte_end: usize,
+    /// Zero-based Unicode-scalar start column.
+    pub column_start: usize,
+    /// Exclusive zero-based Unicode-scalar end column.
+    pub column_end: usize,
+}
+
 /// A code or manifest symbol indexed by `ProjectAtlas`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CodeSymbol {
@@ -183,6 +203,9 @@ pub struct CodeSymbol {
     pub line_start: usize,
     /// One-based end line.
     pub line_end: usize,
+    /// Exact byte and column selector when the parser supplies one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_selector: Option<SymbolSourceSelector>,
     /// Optional containing symbol name.
     pub parent: Option<String>,
     /// Parser strategy that produced this symbol.
@@ -251,5 +274,25 @@ impl SourceParseMetadata {
             symbol_count: graph.symbols.len(),
             relation_count: graph.relations.len(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heading_symbol_kind_round_trips_without_changing_unknown_fallback() {
+        assert_eq!(SymbolKind::Heading.to_string(), "heading");
+        assert_eq!(SymbolKind::from_db("heading"), SymbolKind::Heading);
+        assert!(matches!(
+            serde_json::to_string(&SymbolKind::Heading).as_deref(),
+            Ok("\"heading\"")
+        ));
+        assert!(matches!(
+            serde_json::from_str::<SymbolKind>("\"heading\""),
+            Ok(SymbolKind::Heading)
+        ));
+        assert_eq!(SymbolKind::from_db("future-kind"), SymbolKind::Unknown);
     }
 }
