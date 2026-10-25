@@ -137,6 +137,12 @@ Commit identity is provenance, not a general test invalidation key. After a comm
 - Release notes for every RC and the final stable promotion use the preceding stable tag as their baseline. Later candidates and the final notes therefore remain cumulative across the entire release series without duplicating an RC as the history baseline.
 - Release archives are published with a `SHA256SUMS` asset. If the clean-main seed producer supplies the optional exact-tag `projectatlas-main-atlas-seed-<tag>-<snapshot-digest>.tar.zst` and matching `.manifest.json`, release staging validates the pair and checksums both without opening or modifying the seed. Verify downloaded assets with `sha256sum -c SHA256SUMS` or `shasum -a 256 -c SHA256SUMS`.
 
+### GitHub page and documentation site updates
+
+README text, artwork, charts, and documentation-site content can be updated through normal pull requests without a new product release. Keep the workspace and plugin versions unchanged for these page-only updates. GitHub renders the README when the change merges, and `04-docs.yml` republishes the documentation site from `main`. For an already published version, the tag-exists check in `03-auto-release.yml` skips another release dispatch.
+
+Marketplace plugins install from a release tag. Changes to bundled agent skills and references reach installed users through a plugin release.
+
 ### First RC run with tag-dependent native proof
 
 The automatic `03-auto-release.yml` dispatch uses `prepublish_only=false`. For a new candidate, its native Codex plugin-convergence proof needs a marketplace tag that does not yet exist. Do not count that dispatch as release acceptance. Bootstrap a tag-only ref before the normal release run. For example:
