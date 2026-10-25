@@ -32,3 +32,8 @@ None. The release owner composes accepted child contracts and does not redefine 
 - Read-only composition of the complete installed CLI/MCP/host/plugin/skill/runtime/database surface on Windows, Linux, macOS x64, and macOS arm64 as supported.
 - Release workflow, assets, checksums, installers, npm/plugin/runtime identity, prerelease/Latest metadata, IssueOps/OpenSpec/review/milestone state, and independent hosted readback.
 - No product schema or feature ownership. Confirmed failures return to #310, #314, #388, or another accepted sanitized owner.
+
+
+## Language and refresh scope
+
+Issue #563 is a required direct child for ABAP, COBOL, Fortran, Ruby, and SQL navigation, the major-language audit including Python, and a representative legacy-to-Rust planning example. Issue #708 owns fast incremental refresh. The release owner proves their combined installed behavior after both owners and all other accepted children close.
