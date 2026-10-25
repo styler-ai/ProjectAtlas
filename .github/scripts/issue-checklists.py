@@ -119,7 +119,7 @@ REQUIRED_OPEN_ISSUE_HEADINGS = (
     "pre-mortem",
 )
 RELEASE_MILESTONE_RE = re.compile(
-    r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-00$"
+    r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-stable)?-00$"
 )
 REQUIRED_PROPOSAL_HEADINGS = {"why", "what changes", "capabilities", "impact"}
 REQUIRED_DESIGN_HEADINGS = {
@@ -2797,15 +2797,23 @@ def check_publication_ready(
 
     try:
         version = parse_release_version(tag, source="release")
-        graph = publication_graph(issue_map_path, version.milestone, mapped_issues)
+        milestone = version.milestone
+        graph = None
+        if not version.is_prerelease:
+            stable_milestone = f"{version.stable_tag}-stable-00"
+            graph = publication_graph(issue_map_path, stable_milestone, mapped_issues)
+            if graph is not None:
+                milestone = stable_milestone
         if graph is None:
-            return check_milestone_complete(repo, version.milestone, mapped_issues)
-        issues = milestone_issues(repo, version.milestone)
+            graph = publication_graph(issue_map_path, milestone, mapped_issues)
+        if graph is None:
+            return check_milestone_complete(repo, milestone, mapped_issues)
+        issues = milestone_issues(repo, milestone)
         numbers = [positive_issue(item.get("number"), "issue number") for item in issues]
         if len(numbers) != len(set(numbers)) or set(numbers) != graph.issues:
-            return [f"{version.milestone} native membership differs from its release graph"]
+            return [f"{milestone} native membership differs from its release graph"]
         failures = milestone_issue_failures(
-            version.milestone,
+            milestone,
             [item for item in issues if item["number"] != graph.release_issue],
             mapped_issues,
         )
@@ -2883,6 +2891,41 @@ def self_test() -> None:
                 return check_publication_ready("owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3-rc1")
 
             assert check_publication() == []
+            stable_declaration = {
+                **declaration,
+                "release_graphs": {
+                    **declaration["release_graphs"],
+                    "v1.2.3-stable-00": {
+                        "release_issue": 3,
+                        "issues": {"3": {"blocked_by": []}},
+                    },
+                },
+            }
+            write_publication_map(stable_declaration)
+            selected_milestones: list[str] = []
+            def stable_milestone_issues(_repo: str, milestone: str) -> list[dict[str, object]]:
+                selected_milestones.append(milestone)
+                return [{"number": 3, "state": "OPEN"}] if milestone.endswith("-stable-00") else members
+            globals()["milestone_issues"] = stable_milestone_issues
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2, 3}, "v1.2.3"
+            ) == []
+            assert selected_milestones == ["v1.2.3-stable-00"]
+            selected_milestones.clear()
+            assert check_publication() == []
+            assert selected_milestones == ["v1.2.3-00"]
+            stable_declaration["release_graphs"]["v1.2.3-stable-00"]["issues"]["3"]["blocked_by"] = [1]
+            write_publication_map(stable_declaration)
+            selected_milestones.clear()
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2, 3}, "v1.2.3"
+            )
+            assert selected_milestones == []
+            write_publication_map(declaration)
+            globals()["milestone_issues"] = lambda *_args: members
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3"
+            ) == []
             assert check_milestone_complete("owner/repo", "v1.2.3-00", {1, 2})
             assert check_publication_ready("owner/repo", publication_root, publication_map, {2}, "v1.2.3-rc1")
             for invalid_members in (
@@ -2905,6 +2948,12 @@ def self_test() -> None:
                 return {"sha": commit_sha}
             globals()["gh_api_json"] = exact_release_api
             assert check_publication() == []
+            stable_release = {"tag_name": "v1.2.3", "draft": False, "prerelease": False}
+            globals()["gh_api_json"] = lambda args: stable_release if "/releases/" in args[0] else {"sha": commit_sha}
+            assert check_publication_ready(
+                "owner/repo", publication_root, publication_map, {1, 2}, "v1.2.3"
+            ) == []
+            globals()["gh_api_json"] = exact_release_api
             for field, value in (("draft", True), ("prerelease", False), ("tag_name", "v1.2.3")):
                 invalid_release = dict(release, **{field: value})
                 globals()["gh_api_json"] = lambda args: invalid_release if "/releases/" in args[0] else {"sha": commit_sha}
