@@ -650,7 +650,7 @@ jobs:
         target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target != 'all' && format('["{0}"]', inputs.target) || '["x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc"]') }}
     steps:
       - name: Download platform construction output
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: parser-pack-${{ matrix.target }}-construction
           path: ${{ runner.temp }}/parser-pack-download
@@ -926,7 +926,7 @@ jobs:
         run: cargo build --locked --release --bin optional_parser_pack_release
 
       - name: Download supported Linux construction output
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: parser-pack-x86_64-unknown-linux-gnu-construction
           path: ${{ runner.temp }}/parser-pack-macos-download
@@ -1014,7 +1014,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Download platform construction output
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: parser-pack-${{ matrix.target }}-construction
           path: ${{ runner.temp }}/parser-pack-runtime-e2e
@@ -1291,13 +1291,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download Linux construction tools
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: parser-pack-x86_64-unknown-linux-gnu-construction
           path: ${{ runner.temp }}/parser-pack-aggregate-tools
 
       - name: Download all platform proofs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: parser-pack-*-proof
           path: ${{ runner.temp }}/parser-pack-aggregate-proofs
@@ -1336,7 +1336,7 @@ jobs:
 
       - name: Download clean release construction archives
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: parser-pack-*-construction
           path: ${{ runner.temp }}/parser-pack-release-source/construction
@@ -1344,7 +1344,7 @@ jobs:
 
       - name: Download clean release construction receipts
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_construction && inputs.target == 'all' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: parser-pack-*-cargo-layer-receipt
           path: ${{ runner.temp }}/parser-pack-release-source/receipts
