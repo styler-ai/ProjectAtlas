@@ -12,6 +12,8 @@ Use existing release and installed-product gates to verify the entire accepted p
 
 The existing `v0.5.1-00` milestone has #715 as its sole release owner. #708 is its required direct child and blocker for the complete indexing/refresh performance work. Remove #708 from #493's 0.6.0 child/blocker set while preserving every other accepted child and task owner. The 0.6.0 features consume the accepted indexing baseline later.
 
+#718 separately owns documentation of manual CI eligibility and the existing protected integration route. It changes no runtime or workflow definition.
+
 Additional confirmed fixes need their own accepted owners. #715 implements no product change and cannot start candidate acceptance until the complete #708 work and every other accepted child are implemented, reviewed and closed.
 
 ### Reuse the existing candidate and stable pipeline

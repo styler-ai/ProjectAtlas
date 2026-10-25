@@ -251,7 +251,7 @@ RELEASE_VERSION=v0.5.0
 - PRs must reference exactly one open GitHub issue and use that issue's milestone.
 - Ordinary PRs may reference an issue without closing it; use `Closes #NNN` only when the issue's complete checklist is ready to close.
 - Active OpenSpec task lists must be mapped in `openspec/issue-map.json`, and their authoritative GitHub task sections must exactly mirror local text, order, ownership, and checked state.
-- CI can be run manually via `workflow_dispatch` when checks do not auto-trigger.
+- CI can be run manually via `workflow_dispatch` for diagnosis when checks do not auto-trigger. GitHub does not count those workflow-job checks toward protected-branch requirements, even when the commit and check names match. Use the existing `pull_request` workflow for protected integration, and verify the current head, event and trusted check source. See [GitHub's event restriction](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
 
 Environment toggles:
 

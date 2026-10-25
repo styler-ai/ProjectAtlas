@@ -25,6 +25,8 @@ Release planning, native milestone hierarchy and blockers, the existing release 
 
 ## Release Scope
 
+#718 is an additional documentation-only child and blocker for accurate protected-branch CI guidance. It changes no runtime behavior or release pipeline.
+
 Planning only. #708 is the required direct child and blocker of #715 for the complete 0.5.1 performance scope. Implementation, measurements and installed acceptance remain pending; scheduling does not authorize publication.
 
 ## Non-Goals
