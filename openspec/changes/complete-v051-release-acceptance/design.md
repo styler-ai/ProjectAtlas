@@ -8,11 +8,11 @@ Use existing release and installed-product gates to verify the entire accepted p
 
 ## Decisions
 
-### Establish release ownership before migrating the child
+### Keep implementation and acceptance separate
 
-Reopen the existing empty `v0.5.1-00` milestone. First admit a mapped singleton #715 acceptance plan. Then move and expand #708 through its own issue-owned planning change, updating milestone membership, its sole parent, direct blockers and both release graphs together. This keeps each planning PR tied to one existing task owner and avoids changing another issue's task slice before its accepted baseline exists.
+The existing `v0.5.1-00` milestone has #715 as its sole release owner. #708 is its required direct child and blocker for the complete indexing/refresh performance work. Remove #708 from #493's 0.6.0 child/blocker set while preserving every other accepted child and task owner. The 0.6.0 features consume the accepted indexing baseline later.
 
-The singleton is an initial planning state. It cannot satisfy the candidate requirement that the complete #708 work is admitted, implemented, reviewed and closed. Additional confirmed fixes need their own accepted owners; the release issue never contains product fixes.
+Additional confirmed fixes need their own accepted owners. #715 implements no product change and cannot start candidate acceptance until the complete #708 work and every other accepted child are implemented, reviewed and closed.
 
 ### Reuse the existing candidate and stable pipeline
 
@@ -43,7 +43,7 @@ N/A: release and runtime ownership are unchanged. Reuse the existing pipeline; #
 
 ## Dependencies / Cross-Issue Impact
 
-#708 is the required implementation owner, with no new dependency on 0.6.0 features. Its later planning change moves it from #493 to #715 and makes it a direct release blocker. #715 does not start candidate acceptance until that complete work and every later accepted child are closed. Preserve the separate 0.6.0 language, agent-continuity and distribution plans.
+#708 is the required implementation owner, with no new dependency on 0.6.0 features. #708 moves from #493 to #715 as a direct release blocker. #715 does not start candidate acceptance until that complete work and every later accepted child are closed. Preserve the separate 0.6.0 language, agent-continuity and distribution plans.
 
 ## Open Questions
 

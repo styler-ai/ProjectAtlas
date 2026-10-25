@@ -25,7 +25,7 @@ Release planning, native milestone hierarchy and blockers, the existing release 
 
 ## Release Scope
 
-Planning only. Establish the release owner first; #708 enters this graph when its full 0.5.1 scope and task mirror are synchronized. The initial graph contains only #715 and cannot authorize publication of an unimplemented performance fix.
+Planning only. #708 is the required direct child and blocker of #715 for the complete 0.5.1 performance scope. Implementation, measurements and installed acceptance remain pending; scheduling does not authorize publication.
 
 ## Non-Goals
 

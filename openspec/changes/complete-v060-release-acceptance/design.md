@@ -75,4 +75,4 @@ None.
 
 ## Language and refresh scope
 
-Issue #563 is a required direct child for ABAP, COBOL, Fortran, Ruby, and SQL navigation, the major-language audit including Python, and a representative legacy-to-Rust planning example. Issue #708 owns fast incremental refresh. The release owner proves their combined installed behavior after both owners and all other accepted children close.
+Issue #563 remains a required direct child for ABAP, COBOL, Fortran, Ruby, and SQL navigation, the major-language audit including Python, and a representative legacy-to-Rust planning example. Issue #708 now belongs to 0.5.1 under #715 and covers complete indexing and refresh performance. Version 0.6.0 consumes that accepted indexing baseline and checks compatibility; #708 is no longer a child or blocker of #493.

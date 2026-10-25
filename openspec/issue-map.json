@@ -4,7 +4,8 @@
     "v0.5.1-00": {
       "release_issue": 715,
       "issues": {
-        "715": { "blocked_by": [] }
+        "708": { "blocked_by": [] },
+        "715": { "blocked_by": [708] }
       }
     },
     "v0.5.0-stable-00": {
@@ -87,9 +88,8 @@
         "310": { "blocked_by": [] },
         "314": { "blocked_by": [310] },
         "388": { "blocked_by": [] },
-        "493": { "blocked_by": [310, 314, 388, 563, 708] },
-        "563": { "blocked_by": [] },
-        "708": { "blocked_by": [] }
+        "493": { "blocked_by": [310, 314, 388, 563] },
+        "563": { "blocked_by": [] }
       }
     }
   },
