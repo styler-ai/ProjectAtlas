@@ -1,6 +1,12 @@
 {
   "schema_version": 2,
   "release_graphs": {
+    "v0.5.1-00": {
+      "release_issue": 715,
+      "issues": {
+        "715": { "blocked_by": [] }
+      }
+    },
     "v0.5.0-stable-00": {
       "release_issue": 602,
       "issues": {
@@ -88,6 +94,11 @@
     }
   },
   "changes": {
+    "complete-v051-release-acceptance": {
+      "contract": "checklist-v1",
+      "primary_issue": 715,
+      "owners": [{ "issue": 715, "first_task": "1.1", "last_task": "3.2" }]
+    },
     "complete-language-navigation": {
       "contract": "checklist-v1",
       "primary_issue": 563,
