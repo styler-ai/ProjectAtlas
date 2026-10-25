@@ -11,10 +11,10 @@
 
 ## 3. Accept exact stable packages
 
-- [ ] 3.1 Complete independent source, page, chart, and release-scope review, resolve actionable feedback, and pass required locked local hooks and exact-head hosted Rust, documentation, security, OpenSpec, and IssueOps checks.
-- [ ] 3.2 Freeze accepted main, construct and verify the clean stable parser pack, and pass prepublication native package, complete CLI/nested-command/MCP/plugin/host, preserved-state upgrade, failure/retry, cancellation, concurrency, and compatible-rollback proof on all four supported platforms.
+- [x] 3.1 Complete independent source, page, chart, and release-scope review, resolve actionable feedback, and pass required locked local hooks and exact-head hosted Rust, documentation, security, OpenSpec, and IssueOps checks.
+- [x] 3.2 Freeze accepted main, construct and verify the clean stable parser pack, and pass prepublication native package, complete CLI/nested-command/MCP/plugin/host, preserved-state upgrade, failure/retry, cancellation, concurrency, and compatible-rollback proof on all four supported platforms.
 
 ## 4. Publish and reconcile
 
-- [ ] 4.1 Publish the exact accepted v0.5.0 as a non-draft stable release and independently verify tag/head, all assets and checksums, installed runtime/plugin/skill/hook/CLI/MCP/host behavior, generated root/database bindings, GitHub Latest, and supported downstream pins.
-- [ ] 4.2 Resolve current human and automated feedback, reconcile published source, specification, issue, review, graph, and milestone state, and verify that stable acceptance is complete and ready for the release owner to close last.
+- [x] 4.1 Publish the exact accepted v0.5.0 as a non-draft stable release and independently verify tag/head, all assets and checksums, installed runtime/plugin/skill/hook/CLI/MCP/host behavior, generated root/database bindings, GitHub Latest, and supported downstream pins.
+- [x] 4.2 Resolve current human and automated feedback, reconcile published source, specification, issue, review, graph, and milestone state, and verify that stable acceptance is complete and ready for the release owner to close last.
