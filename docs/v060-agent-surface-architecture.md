@@ -138,6 +138,8 @@ The integration does not read or write host-private registries, caches, credenti
 
 ## v0.6.0 holistic release acceptance
 
+Required language navigation from #563 and large-project incremental refresh from #708 are part of the installed regression and source-evidence proof below. Language acceptance includes ABAP, COBOL, Fortran, Ruby, SQL, the major-language audit, and the legacy-to-Rust planning example.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Hierarchy: all accepted children, including #310, #314, and #388, closed and reviewed

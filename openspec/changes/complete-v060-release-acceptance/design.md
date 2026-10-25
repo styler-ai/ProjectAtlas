@@ -71,3 +71,8 @@ Rollback leaves stable v0.5.0 as Latest, retains failed candidates as prerelease
 ## Open Questions
 
 None.
+
+
+## Language and refresh scope
+
+Issue #563 is a required direct child for ABAP, COBOL, Fortran, Ruby, and SQL navigation, the major-language audit including Python, and a representative legacy-to-Rust planning example. Issue #708 owns fast incremental refresh. The release owner proves their combined installed behavior after both owners and all other accepted children close.
