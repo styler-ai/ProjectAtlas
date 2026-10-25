@@ -1,171 +1,149 @@
-# ProjectAtlas
-
 <p align="center">
-  <a href="docs/design/ani-mascot-reference.png" title="Open Ani's versioned mascot reference">
-    <img src="docs/assets/projectatlas-mascot.png" alt="ProjectAtlas mascot Ani holding a repository map labeled src, docs, tests, and issues" width="720">
+  <a href="docs/design/ani-mascot-reference.png">
+    <img src="docs/assets/projectatlas-mascot.png" width="880" alt="Ani holding a map of the repository: source, docs, tests, and issues">
   </a>
 </p>
 
+<h1 align="center">A map for your coding agent.</h1>
+
 <p align="center">
-  <strong>Rust-native, high-performance local repository intelligence for coding agents and large codebases.</strong><br>
-  A persistent SQLite map guides Codex, Claude Code, OpenCode, and other MCP-capable agents to the right code before they spend context reading the wrong files.
+  <strong>Every file not opened. Every folder not explored. Tokens saved.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5"><img alt="release" src="https://img.shields.io/badge/release-v0.4.5-blue"></a>
-  <img alt="rust" src="https://img.shields.io/badge/Rust-2024-orange">
-  <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
+  <a href="https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0"><img src="https://img.shields.io/badge/release-0.5.0-e0b75b?style=flat-square&labelColor=171717" alt="ProjectAtlas 0.5.0"></a>
+  <a href="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml"><img src="https://github.com/styler-ai/ProjectAtlas/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/native-Rust-171717?style=flat-square" alt="Native Rust CLI and MCP server">
+  <img src="https://img.shields.io/badge/license-MIT-171717?style=flat-square" alt="MIT license">
 </p>
 
-## About
+<p align="center">
+  <a href="#install">Install</a> · <a href="#work-in-parallel">Worktrees &amp; subagents</a> · <a href="#smaller-context">Charts</a> · <a href="docs/v0.5.0-release-notes.md">0.5.0</a> · <a href="#documentation">Documentation</a>
+</p>
 
-Every file not opened. Every folder not explored. ProjectAtlas guides coding agents with purpose metadata and an intelligent code graph, reducing token costs by over 90%.
+A coding agent needs to know where to look before it can make a change. **ProjectAtlas keeps a map of the repository:** what each area is for, how the code connects, and where the relevant source lives. The agent follows that map and opens the code it needs.
 
-The "over 90%" figure is a workload-specific local estimate from the published audit, not a universal savings guarantee or provider-billing result; see [One Large-Application Audit](#one-large-application-audit).
+The map stays on your machine, in a project-local SQLite database. Use it from the native `atlas` CLI or through MCP in Codex, Claude Code, OpenCode, and other compatible agents.
 
-ProjectAtlas is a native Rust CLI and MCP server that keeps a project-local map of folders, files, reviewed purposes, deterministic summaries, symbols, graph relationships, searchable text, health findings, and token telemetry. `.gitignore`-aware scanning, BLAKE3 hashing, SQLite storage, filesystem watching, and compact TOON output keep repeated repository orientation local and fast.
+## Start with the map
 
-The map is deliberately agent-first: purposes identify the responsible area, graph relationships reveal connected code, compact summaries and outlines explain the selected files, and exact source slices provide the final evidence. Agents narrow before they read broadly.
+<p align="center">
+  <img src="docs/assets/atlas-navigation.svg" width="880" alt="Start with a task, find the responsible area, follow connected code, then read exact source. Native atlas commands support each step.">
+</p>
 
-No required `.purpose` files. No source-header tax. No hosted index or credentials. Project state lives beside the repository in `.projectatlas/`.
+Folder and file purposes explain responsibility. Summaries and outlines show what is inside. Symbol relationships lead to connected code. Exact slices give the agent current source lines to check its answer.
+
+```bash
+atlas next "where is watch refresh implemented?"
+atlas summary crates/projectatlas-cli/src/runtime.rs
+atlas symbols relations --file crates/projectatlas-cli/src/runtime.rs
+```
+
+The native CLI covers local navigation, search, indexing, graph analysis, purposes, health, and maintenance. MCP adds session briefs, registered worktree aliases, and queries across worktree maps. Both use the same index and underlying services.
+
+## Work in parallel
+
+<p align="center">
+  <img src="docs/assets/atlas-parallel-work.svg" width="880" alt="Two agents work in separate Git worktrees, each with its own SQLite map. Session and subagent hooks provide version-matched guidance and readiness checks.">
+</p>
+
+**Each worktree keeps its own map.** An agent can address registered worktrees by short MCP alias, inspect connections across them, and reuse a validated baseline when a new worktree needs its first index. Branches, saved edits, purposes, and database identities remain separate.
+
+**Subagents get the guidance too.** The Codex plugin includes session and subagent hooks that remind agents to read the matching ProjectAtlas skill and select their own checkout. Readiness checks report a stale runtime, plugin, or database binding and point to the supported repair. The hook itself does not index or change the project.
+
+ProjectAtlas works with the coding host's agents and subagents. Git continues to manage the worktrees. [Worktree guide](docs/worktree-lifecycle.md) · [Hooks and host setup](docs/agent-integration.md#codex-skills)
+
+## Follow the code
+
+| What you need to know | What the map gives you |
+| --- | --- |
+| Where a change belongs | Reviewed folder and file purposes, ranked candidates, summaries, and outlines. |
+| What a change could affect | Callers, imports, references, dependency paths, and bounded impact analysis. |
+| Where structure needs attention | Cycles, entry points, related groups of code, and dead-code candidates with coverage information. |
+| How the docs connect to the source | Indexed Markdown, PDF, and DOCX content, heading links, and source relationships. |
+| What changed since the last visit | Ignore-aware scanning, file watching, and incremental refresh of the saved working tree. |
+| What evidence supports an answer | Exact source locations, parser provenance, and visible unresolved or incomplete results. |
+
+Search supports literal, regex, and fuzzy queries, including Unicode-aware case-insensitive matching. Health and purpose queues help maintain the map as the project changes.
+
+The graph describes static source facts. Results keep unresolved references and coverage limits attached, including when reviewing dead-code candidates. [Graph and navigation guide](docs/agent-navigation.md)
+
+## Smaller context
+
+A focused answer leaves more room for the code the agent actually needs.
+
+<p align="center">
+  <img src="docs/assets/graph-context-comparison.svg" width="880" alt="Historical six-question graph evaluation: compact responses used 57.5% fewer bytes on clean Git and 55.9% fewer on saved-edit and non-Git fixtures, with the same ten calls per fixture and all six answers correct.">
+</p>
+
+In this retained fixture evaluation, compact graph responses used **55.9–57.5% fewer bytes**. The calls and correct answers stayed the same. These are response-size results, not complete-session token counts. [Data and method](docs/benchmarks/v0.4-mcp-composition-evaluation.md)
+
+<p align="center">
+  <img src="docs/assets/token-savings-bar.svg" width="880" alt="Historical large-application workflow estimate across 142 lookups: a modeled broad-reading baseline of 221.1 million tokens compared with 425,622 estimated tokens in Atlas output.">
+</p>
+
+One large-application audit recorded a **99.8% gross estimated reduction** against a modeled broad-reading baseline. This is a historical workflow estimate, not provider billing. Current reporting also deduplicates repeated baselines. [Audit, formulas, and limits](docs/benchmarks/large-application-token-savings.md) · [Controlled agent trials, including mixed results](docs/benchmarks/v0.4-agent-navigation-evaluation.md)
+
+## See your own usage
+
+```bash
+atlas token --view tui
+```
+
+[![ProjectAtlas's local token dashboard, showing average and maximum estimates, observed source compression, modeled navigation, and a repository graph](docs/assets/token-impact-tui.png)](docs/assets/token-impact-tui.png)
+
+An example dashboard snapshot. The report separates observed source compression from modeled navigation and shows where the estimates came from. Control-checkout totals can include active and retired registered worktrees; an exact worktree report stays local. [Token reporting](docs/agent-integration.md#token-reporting-and-human-tui)
+
+## Languages and documents
+
+Built-in navigation covers Rust, Python, JavaScript, TypeScript, Java, Kotlin, C#, Go, C/C++, Objective-C, Zig, PHP, and PowerShell, with language-specific levels of parsing, symbols, and resolution. Vue and documentation have dedicated handling too.
+
+The optional parser pack contains **150 grammars**, including COBOL and Fortran, for Linux x64 and Windows x64. Grammar availability, symbol extraction, and semantic resolution are separate capabilities. The generated [language matrix](docs/language-support.md) and [relation matrix](docs/relation-support.md) show the exact coverage.
+
+Broader ABAP, COBOL, Fortran, Ruby, and SQL navigation is planned for [0.6.0](https://github.com/styler-ai/ProjectAtlas/issues/563).
+
+## In 0.5.0
+
+- Built-in PHP 8 navigation and bounded PDF/DOCX text extraction, with source evidence and coverage reporting.
+- The short native `atlas` command, matched runtime/plugin installation, generated host configurations, and packaged hook readiness checks.
+- Entry-point and related-code analysis through the existing graph tools, plus Unicode-aware search corrections.
+- Preserved worktree identity, authored purposes, and valid published index state through supported refreshes and upgrades.
+
+[Release notes](docs/v0.5.0-release-notes.md) · [Native packages](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0)
 
 ## Install
 
-Point your agent to the ProjectAtlas GitHub repository and ask it to install the latest version of ProjectAtlas.
+**Point your coding agent at this repository and ask it to install ProjectAtlas, preferably with the marketplace plugin.**
 
-The Codex plugin is the recommended path:
+> Install ProjectAtlas from https://github.com/styler-ai/ProjectAtlas for this project. Prefer the marketplace plugin and follow its installation instructions.
+
+**Then restart your terminal and coding environment.** This reloads the installed commands, plugin guidance, and MCP process. Open the project again and tell the agent: **“Use ProjectAtlas for this repo.”**
+
+### Codex marketplace plugin
 
 ```bash
-codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.4.5
+codex plugin marketplace add styler-ai/ProjectAtlas --ref v0.5.0
 codex plugin add projectatlas --marketplace projectatlas
 ```
 
-Then tell Codex: **“Use ProjectAtlas for this repo.”**
+The plugin packages the version-matched skill, hooks, native runtime installer, and MCP templates. Follow its installer instructions so the runtime, host configuration, and selected repository agree.
 
-| Route | When to use it |
+### Other setups
+
+| Setup | Route |
 | --- | --- |
-| Codex plugin | Recommended agent setup; supplies the version-matched skill, native runtime installer, and MCP templates. |
-| [Native release](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5) | Install a verified prebuilt binary without Rust/Cargo. |
-| Cargo | `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.4.5 projectatlas-cli --locked` |
-| Claude Code / OpenCode | Run the native installer, then `projectatlas init`; it writes their version-matched project-local MCP configs. |
+| Native CLI | [Verified release binaries](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0) for Windows x64, Linux x64, macOS Intel, and Apple Silicon. No Rust toolchain required. |
+| Claude Code / OpenCode | The native installer writes project-local MCP configurations for these hosts. [Setup guide](docs/agent-integration.md#runtime-installation-and-repair). |
+| Cargo | `cargo install --git https://github.com/styler-ai/ProjectAtlas --tag v0.5.0 projectatlas-cli --locked` |
 
-Initialize each repository once:
+Initialize each repository once with `atlas init`. After edits, use `atlas watch --once` when a refresh is needed, or keep `atlas watch` running while you work. Each checkout owns its database; no source headers or `.purpose` files are required.
 
-```bash
-projectatlas init
-```
-
-That creates the project-local database, performs the initial index, and writes version-matched host configs. See [installation, upgrades, and runtime repair](docs/agent-integration.md#runtime-installation-and-repair) for stale plugin caches, PATH conflicts, generated Claude Code/OpenCode configs, and manual installer commands.
-
-## See The Atlas
-
-```bash
-projectatlas token --view tui
-```
-
-[![ProjectAtlas token-impact TUI showing estimated tokens avoided, file reads avoided, measured and modeled navigation work, savings composition, source rows, and a bounded Atlas map](docs/assets/token-impact-tui.png)](docs/assets/token-impact-tui.png)
-
-Compare the live dashboard with the [versioned TUI design reference](docs/design/token-impact-tui-reference.png).
-
-The TUI is a local snapshot, not provider billing data. In a control checkout with registered worktrees, it combines native-control and active/retired worktree aggregates without changing the dashboard layout; an exact worktree report remains local. It also shows the reconciled token estimate, observed and modeled navigation work, source attribution, calibration status, and—at wide terminal sizes—a bounded live map from resolved repository relations. Rerun the command to refresh it; use `--theme light` for light terminals or `--theme terminal` to preserve the terminal background.
-
-Read the [token methodology](docs/benchmarks/large-application-token-savings.md) or the [TUI and agent-integration guide](docs/agent-integration.md#token-reporting-and-human-tui) for the detailed accounting and theme controls.
-
-## How Agents Use It
-
-1. Bind the intended project and refresh only when the index may be stale.
-2. Start with one `atlas_session_brief` using `compact: true`.
-3. Follow its returned summary, search, relation, health, or exact-slice call.
-4. Continue from returned selectors instead of repeating discovery.
-5. Open the smallest exact source slice needed for the answer.
-
-`atlas_overview` → `atlas_folders` → `atlas_files` remains the fallback when broader repository shape is itself the task. Continuous `watch` or bounded `watch --once` keeps active work fresh.
-
-The complete [agent and MCP workflow](docs/agent-integration.md) owns tool routing, project isolation, generated host configuration, cancellation, and runtime repair. The [workflow guide](docs/workflow.md) covers human CLI use.
-
-## Work Across Existing Git Worktrees
-
-ProjectAtlas v0.4.5 lets an agent stay in one selected control checkout and address existing Git worktrees anywhere on the filesystem by short MCP alias:
-
-```text
-atlas_worktree_list(include_retired: false)
-atlas_worktree_add(worktree: "<returned-stable-selector>", alias: "issue-430")
-atlas_init(worktree: "issue-430")
-atlas_session_brief(worktree: "issue-430", query: "target behavior", compact: true)
-```
-
-A missing target atlas can reuse validated control-atlas data, then reconcile the exact branch and dirty files into its own writable database. `main` names the selected control atlas, not a branch or folder. It owns labelled read-only federation and repository-wide token totals; unregister retains accepted totals without deleting Git, source, `.projectatlas`, or SQLite state.
-
-Git remains the worktree lifecycle authority. See [Worktree atlas continuity](docs/worktree-lifecycle.md) for isolation, recovery, and diagrams; team-shared released atlases remain future [issue #456](https://github.com/styler-ai/ProjectAtlas/issues/456) work.
-
-## What Agents Get
-
-| Need | ProjectAtlas surface |
-| --- | --- |
-| Task-oriented startup | Project identity, index state, ranked candidates, blockers, and one ready next call |
-| Responsibility | Reviewed folder/file purposes before broad source reads |
-| Connections | Symbols and resolved graph relationships with bounded selectors |
-| Exact evidence | Current summaries, outlines, searches, and source slices |
-| Freshness | `.gitignore`-aware scan plus incremental watcher refresh |
-| Worktree continuity | Short-alias routing, safe target hydration, labelled read-only federation, and exact isolated databases |
-| Maintenance | Purpose queues, health findings, lint, and project-local configuration |
-| Human overview | The existing token-impact TUI with repository-wide control totals and a bounded Atlas map |
-
-See the [CLI/MCP capability guide](docs/agent-integration.md#mcp-tool-sequence), [configuration reference](docs/configuration.md), and generated [language](docs/language-support.md) and [relation](docs/relation-support.md) support inventories.
-
-## One Large-Application Audit
-
-The chart and table below describe one representative audit, not a universal savings constant. The default local estimator is `ceil(chars_or_bytes / 4)` and is separate from provider billing. ProjectAtlas reports measured source compression separately from modeled navigation narrowing. In v0.4.4, the primary `tokens_avoided`/`average_tokens_avoided` value admits 50% of the deduped aggregate folder-navigation baseline, charges the complete Atlas payload, and leaves every other category unchanged. `maximum_tokens_avoided` retains the all-files folder-scope calculation.
-
-<p align="center">
-  <img src="docs/assets/token-savings-bar.svg" alt="One large-application audit: 221.1 million estimated tokens without ProjectAtlas and 0.4 million with ProjectAtlas across 142 calls" width="820">
-</p>
-
-| Audit signal | Result |
-| --- | ---: |
-| Repository shape | 679 files · 206 folders |
-| Indexed intelligence | 5,145 symbols · 12,122 relations |
-| ProjectAtlas lookups | 142 |
-| Average baseline avoided per lookup | 1,557,144 estimated tokens |
-| Average ProjectAtlas payload | 2,997 estimated tokens |
-| Estimated without / with ProjectAtlas | 221,114,448 / 425,622 tokens |
-| Legacy gross estimated saved | 220,688,826 tokens |
-| Observed savings rate in this one audit | 99.8% |
-
-Warm indexed CLI reads in the same audit stayed around 160–166 ms. Repository shape, hardware, database state, command bounds, and access pattern all matter; initial scan/build work is separate. The [audit report](docs/benchmarks/large-application-token-savings.md) owns the formulas, corpus details, command samples, caveats, and current telemetry-field meanings.
-
-## Release Quality
-
-When published as a prerelease, [v0.5.0-rc4](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.5.0-rc4) does not replace the preceding stable GitHub Latest release. [Notes](docs/v0.5.0-rc4-release-notes.md).
-
-`v0.4.5` ships through the full release matrix:
-
-- Rust format, check, clippy, dependency policy, tests, doctests, and rustdoc.
-- Linux x64, Windows x64, macOS x64, and macOS arm64 native packages.
-- Prepublish and postpublish packaged-runtime installer smokes.
-- Codex plugin plus Claude Code/OpenCode generated MCP-config checks.
-
-Full benchmark campaigns are manual-only and run only when explicitly requested.
-
-ProjectAtlas [v0.4.5](https://github.com/styler-ai/ProjectAtlas/releases/tag/v0.4.5) promotes the tested RC3 line to stable. The [RC1](docs/v0.4.5-rc1-release-notes.md), [RC2](docs/v0.4.5-rc2-release-notes.md), and [RC3](docs/v0.4.5-rc3-release-notes.md) notes cover worktree navigation, stabilization, and the shared root-cause fixes included in this release.
+[Installation, upgrades, and runtime repair](docs/agent-integration.md#runtime-installation-and-repair)
 
 ## Documentation
 
-| Topic | Guide |
-| --- | --- |
-| Install, agent workflow, MCP, host configs, runtime repair | [Agent integration](docs/agent-integration.md) |
-| Scan, ignore, purpose, and runtime settings | [Configuration](docs/configuration.md) |
-| Human CLI workflow | [Workflow](docs/workflow.md) |
-| Existing Git worktree registration, hydration, routing, federation, and token continuity | [Worktree atlas continuity](docs/worktree-lifecycle.md) |
-| v0.4.5-rc2 stabilization, compatibility, boundaries, and proof policy | [RC2 release notes](docs/v0.4.5-rc2-release-notes.md) |
-| Formats and compact agent output | [Format](docs/format.md) |
-| Structural summaries | [Structural summaries](docs/structural-summaries.md) |
-| Language and relation coverage | [Language support](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Relation support](https://styler-ai.github.io/ProjectAtlas/relation-support/) |
-| Token methodology and large-app audit | [Token-savings audit](docs/benchmarks/large-application-token-savings.md) |
-| System, database, indexing, navigation, and packaging design | [Architecture](docs/projectatlas-3-architecture.md) |
-| Published site and Rust API docs | [ProjectAtlas Pages](https://styler-ai.github.io/ProjectAtlas/) · [CLI/runtime crate](https://styler-ai.github.io/ProjectAtlas/projectatlas/) |
+[Agent setup and MCP](docs/agent-integration.md) · [CLI workflow](docs/workflow.md) · [Configuration](docs/configuration.md) · [Worktrees](docs/worktree-lifecycle.md) · [Graph navigation](docs/agent-navigation.md) · [Architecture](docs/projectatlas-3-architecture.md) · [Language coverage](docs/language-support.md) · [Ecosystem catalog](https://styler-ai.github.io/ProjectAtlas/language-support/) · [Published docs and Rust API](https://styler-ai.github.io/ProjectAtlas/)
 
 ## License
 
-MIT. See `LICENSE`.
+[MIT](LICENSE).

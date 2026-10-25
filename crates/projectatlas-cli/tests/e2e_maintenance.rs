@@ -315,34 +315,23 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
     let public_docs_index = fs::read_to_string(workspace_root.join("docs").join("index.md"))?;
     let gitignore = fs::read_to_string(workspace_root.join(".gitignore"))?;
     for required in [
-        "Rust-native, high-performance local repository intelligence",
-        "persistent SQLite map",
-        "native Rust CLI and MCP server",
-        "purposes identify the responsible area",
-        "graph relationships reveal connected code",
-        "compact summaries and outlines",
-        "exact source slices provide the final evidence",
         "docs/design/ani-mascot-reference.png",
         "docs/agent-integration.md#runtime-installation-and-repair",
         "docs/agent-integration.md#token-reporting-and-human-tui",
-        "docs/agent-integration.md#mcp-tool-sequence",
+        "docs/agent-navigation.md",
     ] {
         if !readme.contains(required) {
             return Err(io::Error::other(format!(
-                "README must retain the consolidated Rust-native agent-first positioning; missing {required:?}"
+                "README must retain the mascot and links to its detailed guides; missing {required:?}"
             ))
             .into());
         }
     }
-    let about_claim = "Every file not opened. Every folder not explored. ProjectAtlas guides coding agents with purpose metadata and an intelligent code graph, reducing token costs by over 90%.";
-    let about_qualification = "The \"over 90%\" figure is a workload-specific local estimate from the published audit, not a universal savings guarantee or provider-billing result; see [One Large-Application Audit](#one-large-application-audit).";
-    if readme.matches(about_claim).count() != 1
-        || !readme.contains(&format!("{about_claim}\n\n{about_qualification}"))
-    {
-        return Err(io::Error::other(
-            "README must retain the exact requested About claim once with its adjacent audit qualification",
-        )
-        .into());
+    let punch_line = "Every file not opened. Every folder not explored. Tokens saved.";
+    if readme.matches(punch_line).count() != 1 {
+        return Err(
+            io::Error::other("README must retain the exact requested punch line once").into(),
+        );
     }
     for required in [
         "### Runtime installation and repair",
@@ -377,10 +366,7 @@ fn repository_guidance_keeps_atlas_state_local_and_legacy_export_optional()
             .into());
         }
     }
-    for required in [
-        "projectatlas token --view tui",
-        "docs/assets/token-impact-tui.png",
-    ] {
+    for required in ["atlas token --view tui", "docs/assets/token-impact-tui.png"] {
         if !readme.contains(required) {
             return Err(io::Error::other(format!(
                 "README must show the human TUI product example; missing {required:?}"

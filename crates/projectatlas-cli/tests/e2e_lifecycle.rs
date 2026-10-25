@@ -1760,10 +1760,13 @@ fn bundled_hook_distinguishes_ready_and_stale_mcp_without_mutation() -> Result<(
     }
     #[cfg(windows)]
     {
-        stale["transport"]["args"][1] = json!(version.to_ascii_uppercase());
-        fs::write(&registry_path, serde_json::to_vec(&stale)?)?;
-        if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
-            return Err(io::Error::other("case-mismatched version guard was accepted").into());
+        let uppercase_version = version.to_ascii_uppercase();
+        if uppercase_version != version {
+            stale["transport"]["args"][1] = json!(uppercase_version);
+            fs::write(&registry_path, serde_json::to_vec(&stale)?)?;
+            if !run_hook(&repo, &path)?.contains("ProjectAtlas integration incomplete") {
+                return Err(io::Error::other("case-mismatched version guard was accepted").into());
+            }
         }
     }
     let moved_root = fixture.path().join("moved-repo");
@@ -5338,7 +5341,6 @@ fn packaged_skill_routes_startup_and_registered_worktrees() -> Result<(), Box<dy
         }
     }
     for path in [
-        "README.md",
         "templates/AGENTS.md",
         "docs/agent-integration.md",
         "docs/index.md",
