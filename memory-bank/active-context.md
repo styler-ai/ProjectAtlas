@@ -146,3 +146,10 @@ upgrade/callers/purpose-status and keeps0.4.5schemamigrationseparate. NoRCexists
 72242707df fullnativehookPASSED andpushed; currentheadautomatedCodexreviewcompleted
 withoutfindings. Repository/prstatePASS, fourplatformnativeCIrunning (IntelMac
 queued). Earlier inlineRefsfailureobsolete. No reviewreplies/resolutionwritesneeded.
+
+Nativebudgetpush70bdb76stopped ononeoldCLIhelpexpectation requiringfixed30minute
+default;51otherdeliverytestsPASS. Reopened2.5whilecorrectingtest, retainedall
+clamp/failclosed/workscope checks andaddedautomaticdefault/ceiling/unknownfallback/
+explicitprecedence/zero-refusal fragments. RealpackagedCLIhelpcontract nowPASS;
+2.5recheckedandmitigationstatesderivedfromactualowner tasks. No productcodechange.
+RegeneratedE2Esourcehashes; mandatoryhook willrerun withoutbypass.

@@ -22910,7 +22910,11 @@ fn cli_help_surface(executable: &Path, route: &str) -> Result<CliHelpSurface, Bo
             .join(" ");
         for fragment in [
             "cooperative indexing-work budget",
-            "30-minute default and ceiling",
+            "automatic work-based default",
+            "30-minute ceiling",
+            "unknown-work fallback",
+            "explicit values take precedence",
+            "zero refuses immediately",
             "clamped",
             "fail closed",
             "setup after work-control creation",
