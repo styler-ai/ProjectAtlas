@@ -4,6 +4,14 @@
 
 Deliver the scheduled 0.5.1 work and publish `v0.5.1-rc1` for testing. Preserve the preceding stable release as GitHub Latest. Stable promotion is not authorized by this objective.
 
+The user explicitly renewed the instruction to work until RC1 is released. Keep the goal active through implementation, review, required local/hosted checks, publication, and independent readback; do not stop at a partial slice.
+
+## Latest user direction
+
+- Index only the required or invalidated scope. Reuse verified source bytes, text, parser facts and graph state. Avoid repeated whole-tree discovery/hashing and unnecessary full builds; do not weaken source/writer race safety to achieve this.
+- Do not get stuck cycling between tool calls. Use bounded calls, follow ranked evidence, avoid repeating passing checks without cause, and communicate useful progress.
+- Sleep prevention is enabled in global Codex `config.toml` as `features.prevent_idle_sleep = true`. Native 0.164.0 Linux support and an actual temporary systemd idle inhibitor were verified. Existing app processes may need restart to read the new setting.
+
 ## Baseline and history
 
 - The integration worktree starts at `7cd5a79` on `release/0.5.1`, from accepted `main`.
@@ -35,10 +43,14 @@ The diagnostic stable scan of the ~747 KB source fixture performed 1.6 million p
 
 First repeated optimized results (Linux reference only): initial median 3.770 s (-28.3%), full 5.373 s (-22.4%), explicit rebuild 5.039 s (-23.5%), sparse 0.144 s (-97.8%, ~46x), cold no-op ~43.8 ms. Sparse maximum RSS 24,208 KiB versus 174,424 KiB baseline. All full paths still parse all candidates. Full supported-platform/large-fixture acceptance remains unproven.
 
+Stable first-slice commit: `4456d36`. Independent Luna Max review of `d998199..4456d36` found no confirmed correctness/integrity/compatibility blocker, but requires an end-to-end oversized/dependency-closure fallback publication regression before acceptance. Cold refresh still scans/hashes for detection, rescans changed paths and revalidates the full tree; safe evidence reuse remains material pending work. `reconcile_hydrated_index_controlled` currently catches closure limits only; reconcile the explicit fallback policy where applicable.
+
 ## Verification and access
 
 - Rust 1.98.0 with Cargo, Clippy, and rustfmt is installed from the repository toolchain pin.
 - Baseline locked all-target/all-feature workspace check passed. Source-cursor, mixed-change/same-size/same-mtime and no-op generation/cleanup tests passed; all 59 runtime-module tests passed. Full database suite passed before the final bulk-index edit; its updated atomic reader/rollback test passed, including exact index-definition restoration. Full workspace gates and independent diff review are next; inspect current logs rather than assuming completion.
+- Workspace fmt/check/Clippy passed at the first checkpoint. The full workspace test run passed 343 CLI main tests plus earlier unit/candidate targets, then stopped in `e2e_delivery`: 47 passed, 5 failed, 2 explicitly ignored. Three failures are fixture PATH collisions with the real installed `~/.local/bin/atlas`; two fake python3 wrappers execute an absent `python` alias. Rerun these cases with a clean system PATH plus the existing isolated Python venv; do not overwrite/remove the user's working Atlas installation. Remaining workspace tests, docs and strict-string gates have not completed.
 - Use `TMPDIR=/home/utopien/.cache/projectatlas-test-tmp` for filesystem-backed tests: `/tmp` is unsupported tmpfs for production WAL admission; a TMPDIR inside the repository inherits Git routing/ignores and corrupts non-Git fixture assumptions. Keep tests outside Git on ext4. Shared build cache: `.worktrees/v0.5.1/target` through `CARGO_TARGET_DIR`.
 - Local diagnostics/results live in `/tmp/projectatlas-issue708-*.log` and `/tmp/projectatlas-v050-index-reference.json`; reference fixtures live in the exact `.cache/projectatlas-benchmarks` subdirectories. Do not index their parent/home.
 - GitHub CLI authentication now succeeds as styler-ai, stored in the OS keyring with repo/workflow scopes. Connected GitHub reads/writes also work. No RC is published yet.
+- Sibling `.worktrees/issue-721` / `perf/relations-721` is initialized and indexed with stable 0.5.0, but its OpenSpec plan and source implementation are still pending. #718 is live-verified closed. #721 remains backlog and is missing from the local release graph; planning must reconcile native/local membership before implementation.

@@ -12727,6 +12727,94 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
+    fn oversized_watch_batch_reconciles_complete_state_in_one_publication()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn previous() {}\n")?;
+        fs::write(root.join("stable.rs"), "pub fn stable() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "lib.rs",
+            "Expose the library entry point",
+            PurposeSource::Agent,
+        )?;
+        let before = publication_base_generation(&store)?;
+        let identity = store.project_instance_id()?;
+        fs::write(root.join("lib.rs"), "pub fn updated() {}\n")?;
+        fs::write(root.join("late.rs"), "pub fn late() {}\n")?;
+
+        // Event overflow requires exact discovery, including a live addition
+        // not present in the retained event set. None of these deleted paths
+        // should be published, and the known source edit must not be lost.
+        let changes = WatchChangeSet {
+            requires_full_scan: false,
+            document_paths: HashSet::new(),
+            paths: (0..=MAX_INCREMENTAL_CHANGED_PATHS)
+                .map(|index| root.join(format!("deleted_{index}.rs")))
+                .chain(std::iter::once(root.join("lib.rs")))
+                .collect(),
+        };
+        let report = refresh_index_for_changes(&mut store, &plan, &changes, &options)?;
+        require_eq(
+            &report.text_index.candidates,
+            &3,
+            "full fallback covers every current file",
+        )?;
+        require_eq(&report.symbols.candidates, &3, "complete symbol inventory")?;
+        require_eq(
+            &report.symbols.parsed,
+            &2,
+            "changed and newly discovered sources parsed",
+        )?;
+        require_eq(
+            &report.symbols.unchanged,
+            &1,
+            "unrelated valid parser facts reused",
+        )?;
+        require_eq(
+            &store.overview()?.files,
+            &3,
+            "deleted event paths remain absent",
+        )?;
+        require_eq(
+            &store.load_file_text("lib.rs")?.map(|text| text.content),
+            &Some("pub fn updated() {}\n".to_string()),
+            "retained edit published",
+        )?;
+        require_eq(
+            &store.load_file_text("late.rs")?.is_some(),
+            &true,
+            "addition outside event set discovered",
+        )?;
+        require_eq(
+            &publication_base_generation(&store)?,
+            &before
+                .checked_next()
+                .ok_or_else(|| io::Error::other("generation overflow"))?,
+            "fallback publishes exactly one complete generation",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "fallback preserves identity",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Expose the library entry point".to_string()),
+            "fallback preserves approved purpose",
+        )?;
+        verify_index_freshness(&store, root, None)?;
+        Ok(())
+    }
+
+    #[test]
     fn watcher_preserves_explicit_full_refresh_guidance() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         fs::write(temp.path().join("source.rs"), "pub fn source() {}\n")?;
