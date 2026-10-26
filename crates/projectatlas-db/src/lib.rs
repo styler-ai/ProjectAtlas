@@ -434,6 +434,9 @@ pub enum DbError {
     /// An existing database has no durable schema version.
     #[error("existing database is missing schema_version metadata")]
     SchemaVersionMissing,
+    /// The caller requires a previously initialized schema.
+    #[error("database initialization is required before this operation")]
+    InitializationRequired,
     /// A durable `SQLite` object does not match the supported schema contract.
     #[error("incompatible schema object {object:?}: expected {expected}, found {found}")]
     SchemaShape {
@@ -1152,6 +1155,15 @@ enum ProjectIdentityRequirement {
     TransitionOwned,
 }
 
+/// Whether opening a writable store may create its initial schema.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StoreInitializationPolicy {
+    /// Explicit initialization and ordinary creation APIs admit fresh storage.
+    AllowFresh,
+    /// Existing-state operations admit current or supported predecessor schemas only.
+    ExistingSchema,
+}
+
 impl ProjectIdentityRequirement {
     /// Whether a missing identity must fail the open.
     const fn is_required(self) -> bool {
@@ -1732,6 +1744,28 @@ impl AtlasStore {
             None,
             Some(&expected_identity),
             ProjectIdentityRequirement::Required,
+            StoreInitializationPolicy::AllowFresh,
+        )
+    }
+
+    /// Open an initialized project store, migrating a supported predecessor when needed.
+    ///
+    /// Fresh storage is refused during read-only preflight, before writable setup.
+    /// Supported migrations recheck schema-creation authority inside their writer transaction.
+    /// Existing native root and instance identity checks retain their ordinary guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::InitializationRequired`] for fresh storage, or the normal
+    /// compatibility, binding, migration and storage errors for an existing schema.
+    pub fn open_existing_for_project(path: &Path, root: &Path) -> DbResult<Self> {
+        let expected_identity = CanonicalProjectRoot::from_path(root)?;
+        Self::open_with_binding_requirement(
+            path,
+            None,
+            Some(&expected_identity),
+            ProjectIdentityRequirement::Required,
+            StoreInitializationPolicy::ExistingSchema,
         )
     }
 
@@ -1742,6 +1776,7 @@ impl AtlasStore {
             expected_root,
             None,
             ProjectIdentityRequirement::Required,
+            StoreInitializationPolicy::AllowFresh,
         )
     }
 
@@ -1752,6 +1787,7 @@ impl AtlasStore {
             None,
             None,
             ProjectIdentityRequirement::TransitionOwned,
+            StoreInitializationPolicy::AllowFresh,
         )
     }
 
@@ -1761,12 +1797,18 @@ impl AtlasStore {
         expected_root: Option<&str>,
         expected_identity: Option<&CanonicalProjectRoot>,
         identity_requirement: ProjectIdentityRequirement,
+        initialization: StoreInitializationPolicy,
     ) -> DbResult<Self> {
         let (preflight, location) = if let Some(expected_identity) = expected_identity {
             schema::preflight_for_project(path, expected_identity)?
         } else {
             schema::preflight(path, None)?
         };
+        if initialization == StoreInitializationPolicy::ExistingSchema
+            && preflight.state == SchemaState::Fresh
+        {
+            return Err(DbError::InitializationRequired);
+        }
         if expected_identity.is_none()
             && identity_requirement.is_required()
             && preflight.state == SchemaState::UpgradeRequired
@@ -1847,11 +1889,22 @@ impl AtlasStore {
             } else {
                 if let Some(expected_identity) = expected_identity {
                     let expected_display = expected_identity.display_string().ok();
-                    schema::initialize_with_project_root(
-                        &connection,
-                        expected_display.as_deref(),
-                        Some(expected_identity),
-                    )?;
+                    match initialization {
+                        StoreInitializationPolicy::AllowFresh => {
+                            schema::initialize_with_project_root(
+                                &connection,
+                                expected_display.as_deref(),
+                                Some(expected_identity),
+                            )?;
+                        }
+                        StoreInitializationPolicy::ExistingSchema => {
+                            schema::migrate_existing_with_project_root(
+                                &connection,
+                                expected_display.as_deref(),
+                                Some(expected_identity),
+                            )?;
+                        }
+                    }
                 } else {
                     let initialization_root = expected_root.or(preflight.project_root.as_deref());
                     if transition_transaction {
@@ -8936,6 +8989,101 @@ mod tests {
                 ))
             ),
             "negative node size returned the wrong conversion error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn existing_project_open_refuses_fresh_storage_and_preserves_supported_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let database = root.join("existing.db");
+        require(
+            matches!(
+                AtlasStore::open_existing_for_project(&database, root),
+                Err(DbError::InitializationRequired)
+            ),
+            "missing database was admitted",
+        )?;
+        require(
+            !database.exists(),
+            "existing open created an absent database",
+        )?;
+        fs::write(&database, [])?;
+        require(
+            matches!(
+                AtlasStore::open_existing_for_project(&database, root),
+                Err(DbError::InitializationRequired)
+            ),
+            "empty database was admitted",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &Vec::<u8>::new(),
+            "empty database bytes unchanged",
+        )?;
+        require_eq(
+            &fs::read_dir(root)?.count(),
+            &1,
+            "no fresh journal or sidecar",
+        )?;
+        {
+            let connection = Connection::open(&database)?;
+            require(
+                matches!(
+                    schema::migrate_existing_with_project_root(&connection, None, None),
+                    Err(DbError::InitializationRequired)
+                ),
+                "migration admitted fresh replacement",
+            )?;
+            require_eq(
+                &connection.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type = 'table'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                &0,
+                "migration did not create a schema",
+            )?;
+        }
+        let identity = {
+            let mut store = AtlasStore::open_for_project(&database, root)?;
+            store.replace_scan(&[test_file_node("lib.rs", "source-hash")])?;
+            store.set_purpose("lib.rs", "Preserve authored state", PurposeSource::Agent)?;
+            store.project_instance_id()?
+        };
+        let current = AtlasStore::open_existing_for_project(&database, root)?;
+        require_eq(
+            &current.project_instance_id()?,
+            &identity,
+            "existing project identity retained",
+        )?;
+        require_eq(
+            &current
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Preserve authored state".to_string()),
+            "existing purpose retained",
+        )?;
+        schema::drop_worktree_native_identity_schema(&current.connection)?;
+        current.connection.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
+        )?;
+        drop(current);
+        let upgraded = AtlasStore::open_existing_for_project(&database, root)?;
+        require_eq(
+            &upgraded
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Preserve authored state".to_string()),
+            "supported migration preserved purpose",
+        )?;
+        require_eq(
+            &schema::preflight(&database, None)?.0.state,
+            &SchemaState::Current,
+            "supported migration completed",
         )?;
         Ok(())
     }

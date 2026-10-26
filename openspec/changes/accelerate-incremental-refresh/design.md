@@ -57,6 +57,17 @@ A fresh CLI process cannot infer edits made before it started from an empty even
 
 This chooses the existing observer plus exact fallback, rather than introducing an unproved persistent service or silently relaxing freshness. If measurements show that cross-invocation evidence needs an additional component, publish and review that concrete design before adding it; the issue cannot close with only a fast MCP path and an unexplained slow CLI path.
 
+MCP one-shot refresh may admit an unchanged result through that same verified-read
+boundary, with source repair disabled. Establish a missing epoch by exact comparison;
+reuse an existing valid epoch without project traversal, content hashing, node decode,
+parsing or publication. A detected delta transfers its operation-owned assessment to
+the existing mutable refresh owner, which revalidates database identity, generation,
+root and contract without repeating discovery, so repaired work is never reported as
+a no-op. Caller text-policy overrides use the
+normal refresh owner. Preserve worktree identity checks and the normal background task,
+cooperative cancellation and exact-fallback contracts. This read-only admission grants
+no write authority and does not relax mutation validation.
+
 ### Prove the standalone CLI approach before production changes
 
 Task 2.1 settles the exact-discovery/cross-invocation evidence contract and a separate cold-CLI target using code analysis and a focused reference check. The selected initial implementation uses exact discovery plus lightweight ordered comparison and affected updates when no trusted history exists. Task 2.4 proves that CLI approach as well as the warm MCP path. A fast MCP result cannot substitute for a slow CLI result.
@@ -68,6 +79,27 @@ If exact cold discovery cannot meet that target, publish and review a concrete t
 Convert discovered or observed changes into the existing incremental path. Use source/dependency invalidation rules to expand the affected set only when necessary. Relevant compiler, ignore, parser or publication-policy changes may legitimately invalidate a wider scope.
 
 Use source-only stored fields for comparison where feasible, and compare ordered source records in a linear pass instead of building unnecessary maps on an unchanged result. These are concrete candidates to measure, not permission to add a speculative index or cache.
+
+The next implementation slice retains the exact discovery's ordered current nodes,
+captured database instance identity, publication generation, root and contract as
+operation-owned source evidence.
+An admitted delta consumes that evidence: select changed nodes from it, query downstream
+authored/derived state only for affected paths after the full ordered source-only
+comparison, and move the complete current-node vector into the
+existing graph/publication plan. Do not hash changed paths again merely to reconstruct
+nodes already captured by discovery, or build a second whole-source lookup map.
+Reject a changed database identity, generation, root or contract before reuse. Existing source reads
+must still match the captured content hashes, and final exact publication validation
+remains until an equivalent writer-safe witness is established. A delayed source edit
+or concurrent publication must refuse without exposing a partial generation.
+
+Text staging already holds hash-verified UTF-8 content. Built-in symbol parsing may
+borrow that operation-owned plain-text content instead of reopening the file only when
+its bytes preserve parser semantics, including BOMs and newlines; do not
+clone the corpus or apply this shortcut to extracted PDF/DOCX text, skipped text,
+incompatible parser policies or external parser-worker inputs. Keep bounded fallback
+reads and existing final source validation. This is evidence reuse within the existing
+owners, not a new cache or cross-invocation history claim.
 
 Reuse a valid observed epoch and per-source verification across staging and publication where the existing safety contract permits it. Remove repeated exact scans only after proving their race/failure protection is provided by the retained observation and writer checks. When that proof is unavailable, keep the exact fallback. Optimize initial/full discovery separately where measurement identifies avoidable work.
 

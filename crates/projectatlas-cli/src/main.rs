@@ -2858,6 +2858,9 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
             let path = cli.project_root_for_path(path)?;
             let symbol_options =
                 SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, *max_workers, *timeout_seconds);
+            if !cli.db.is_file() {
+                return Err(runtime::index_init_required(&path, &cli.db));
+            }
             let report = if *once {
                 let control = index_work_control(&symbol_options);
                 let plan = ScanRuntimePlan::for_path_controlled(
@@ -2866,12 +2869,14 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     *text_index_max_bytes,
                     &control,
                 )?;
-                let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
+                let mut store =
+                    runtime::open_existing_atlas_store_for_project(&cli.db, &plan.root)?;
                 run_single_watch_refresh_controlled(&mut store, &plan, &symbol_options, &control)?
             } else {
                 let plan =
                     ScanRuntimePlan::for_path(cli.config.as_deref(), &path, *text_index_max_bytes)?;
-                let mut store = open_atlas_store_for_project(&cli.db, &plan.root)?;
+                let mut store =
+                    runtime::open_existing_atlas_store_for_project(&cli.db, &plan.root)?;
                 run_watch_loop(
                     &mut store,
                     &plan,

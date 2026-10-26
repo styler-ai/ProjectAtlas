@@ -91,6 +91,7 @@ impl AtlasStore {
             None,
             None,
             super::ProjectIdentityRequirement::TransitionOwned,
+            super::StoreInitializationPolicy::AllowFresh,
         )?;
         let transaction = rusqlite::Transaction::new_unchecked(
             &store.connection,

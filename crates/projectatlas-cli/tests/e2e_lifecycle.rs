@@ -208,6 +208,47 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[test]
+fn watch_requires_initialization_without_creating_project_state() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join(LIB_RS_FILE_NAME), "pub fn source() {}\n")?;
+    for arguments in [
+        &["watch", "--once"][..],
+        &["watch", "--max-cycles", "1"][..],
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(temp.path())
+            .args(["--format", "json"])
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("init_required"));
+        if temp.path().join(ATLAS_DIR_NAME).exists() {
+            return Err(io::Error::other("watch implicitly created project state").into());
+        }
+    }
+    let atlas_dir = temp.path().join(ATLAS_DIR_NAME);
+    fs::create_dir(&atlas_dir)?;
+    let database = atlas_dir.join("projectatlas.db");
+    fs::write(&database, [])?;
+    for arguments in [
+        &["watch", "--once"][..],
+        &["watch", "--max-cycles", "1"][..],
+    ] {
+        Command::cargo_bin("projectatlas")?
+            .current_dir(temp.path())
+            .args(["--format", "json"])
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("init_required"));
+        if !fs::read(&database)?.is_empty() || fs::read_dir(&atlas_dir)?.count() != 1 {
+            return Err(io::Error::other("watch changed uninitialized database storage").into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn runtime_info_does_not_create_projectatlas_directory() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);

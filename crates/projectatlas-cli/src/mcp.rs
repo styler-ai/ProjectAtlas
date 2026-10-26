@@ -19,21 +19,23 @@ use crate::runtime::{
     InitHydrationStatus, InitPhaseStatus, InitScanPhase, InitSetupReport, MAX_HEALTH_LIMIT,
     MAX_SYMBOL_FILE_BYTES, ProjectWorktreeRequired, PurposeCuratorHandoff, PurposeLintLevel,
     PurposeReviewRequest, ResetIndexReport, ScanReport, ScanRuntimePlan,
-    SettingsClassifiedNavigationReport, SourceObservationRegistry, SymbolBuildOptions,
-    UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp, build_settings_report,
-    byte_count_to_tokens, canonical_project_root, canonical_source_project_root,
-    classified_navigation_capabilities, classified_ranked_file_nodes_with_reasons,
-    config_root_mismatch_error, default_mcp_project_root,
-    estimated_source_tokens_for_indexed_files, estimated_source_tokens_for_paths,
-    federated_worktree_error, index_init_required, index_work_control, init_config_path,
-    init_next_steps, lint_project, load_synchronized_repository_token_report,
-    lossless_native_path_display, lossless_project_root_display, next_step_report_payload,
-    next_step_report_with_selection, normalized_folder_filter, open_atlas_store_for_project,
-    open_atlas_store_read_only_for_project, open_federated_atlas_stores_for_project,
-    preflight_existing_project_binding, purpose_curation_page, purpose_curator_handoff,
-    ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons, read_indexed_file_content,
-    reconcile_hydrated_index_controlled, record_directory_walk_usage_estimate,
-    record_usage_estimate, record_usage_text, render_classified_ranked_file_rows,
+    SettingsClassifiedNavigationReport, SourceObservationRegistry, SourceReadAdmission,
+    SymbolBuildOptions, UsageRuntimeInstance, VerifiedReadOutcome, VerifiedReadStamp, WatchReport,
+    build_settings_report, byte_count_to_tokens, canonical_project_root,
+    canonical_source_project_root, classified_navigation_capabilities,
+    classified_ranked_file_nodes_with_reasons, config_root_mismatch_error,
+    default_mcp_project_root, estimated_source_tokens_for_indexed_files,
+    estimated_source_tokens_for_paths, federated_worktree_error, index_init_required,
+    index_work_control, init_config_path, init_next_steps, lint_project,
+    load_synchronized_repository_token_report, lossless_native_path_display,
+    lossless_project_root_display, next_step_report_payload, next_step_report_with_selection,
+    normalized_folder_filter, open_atlas_store_for_project, open_atlas_store_read_only_for_project,
+    open_existing_atlas_store_for_project, open_federated_atlas_stores_for_project,
+    preflight_existing_project_binding, publication_contract_matches, purpose_curation_page,
+    purpose_curator_handoff, ranked_file_nodes_with_reasons, ranked_folder_nodes_with_reasons,
+    read_indexed_file_content, reconcile_hydrated_index_controlled,
+    record_directory_walk_usage_estimate, record_usage_estimate, record_usage_text,
+    refresh_index_from_assessment_controlled, render_classified_ranked_file_rows,
     render_classified_symbol_rows, render_health_page, render_purpose_curation_page,
     render_purpose_review_report, require_current_worktree_usage_snapshot,
     require_registered_worktree_lifecycle, reset_index_files, reset_index_files_with_revalidation,
@@ -3942,6 +3944,52 @@ impl ProjectAtlasMcpServer {
         Self::open_registered_worktree_mut_store(state, control_state, selection)
     }
 
+    /// Admit a read-only observed no-op or run the existing mutable refresh owner.
+    fn run_observed_watch_refresh(
+        state: &McpProjectState,
+        control_state: &McpProjectState,
+        plan: &ScanRuntimePlan,
+        options: &SymbolBuildOptions,
+        control: &IndexWorkControl,
+        observations: &SourceObservationRegistry,
+        allow_observed_noop: bool,
+    ) -> Result<WatchReport, CliError> {
+        if allow_observed_noop && plan.root == state.root && state.db_path.is_file() {
+            let current = observations.with_verified_current_read(
+                &state.db_path,
+                &state.root,
+                state.config_path.as_deref(),
+                control,
+                |store, _stamp| {
+                    Self::require_captured_worktree_identity(state.worktree.as_ref(), store)?;
+                    publication_contract_matches(store, plan)
+                },
+            );
+            match current {
+                Ok(SourceReadAdmission::Current(outcome)) if outcome.value => {
+                    return Ok(WatchReport::unchanged(plan.text_options));
+                }
+                Ok(SourceReadAdmission::Reconcile(assessment)) => {
+                    let mut store = Self::open_existing_mut_store(state, control_state)?;
+                    let refresh = refresh_index_from_assessment_controlled(
+                        &mut store,
+                        plan,
+                        options,
+                        *assessment,
+                        control,
+                    )?;
+                    return Ok(WatchReport::from_refresh(refresh));
+                }
+                Ok(_) | Err(CliError::RefreshRequired(_) | CliError::VerificationIncomplete(_)) => {
+                }
+                Err(CliError::Db(source)) if source.supported_schema_migration().is_some() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let mut store = Self::open_existing_mut_store(state, control_state)?;
+        run_single_watch_refresh_controlled(&mut store, plan, options, control)
+    }
+
     /// Open and, when needed, bind one alias under exact control-writer exclusion.
     fn open_registered_worktree_mut_store(
         state: &McpProjectState,
@@ -3955,7 +4003,8 @@ impl ProjectAtlasMcpServer {
                 .ok_or_else(|| DbError::WorktreeRegistrationNotFound {
                     alias: selection.alias.clone(),
                 })?;
-        let control = open_atlas_store_for_project(&control_state.db_path, &control_state.root)?;
+        let control =
+            open_existing_atlas_store_for_project(&control_state.db_path, &control_state.root)?;
         Self::require_captured_control_identity(Some(selection), &control)?;
         control.with_active_worktree_registration(registration_id, &alias, |guard| {
             if let Err(error) =
@@ -3969,7 +4018,7 @@ impl ProjectAtlasMcpServer {
                     state,
                 )));
             }
-            let target = match open_atlas_store_for_project(&state.db_path, &state.root) {
+            let target = match open_existing_atlas_store_for_project(&state.db_path, &state.root) {
                 Ok(store) => store,
                 Err(error) => return Ok(Err(error)),
             };
@@ -4027,7 +4076,16 @@ impl ProjectAtlasMcpServer {
                 state,
             ));
         }
-        Self::open_mut_store(state, control_state)
+        if state
+            .worktree
+            .as_ref()
+            .is_some_and(|selection| selection.registration_id.is_some())
+        {
+            return Self::open_mut_store(state, control_state);
+        }
+        let store = open_existing_atlas_store_for_project(&state.db_path, &state.root)?;
+        Self::require_captured_worktree_identity(state.worktree.as_ref(), &store)?;
+        Ok(store)
     }
 
     /// Apply one purpose mutation under a source witness retained through commit.
@@ -9956,6 +10014,7 @@ impl ProjectAtlasMcpServer {
             let text_index_max_bytes = params.text_index_max_bytes;
             if background {
                 let control_state = self.control_state.clone();
+                let observations = Arc::clone(&self.source_observations);
                 let task = self.start_index_task(
                     McpTaskOperation::WatchOnce,
                     symbol_options,
@@ -9967,12 +10026,14 @@ impl ProjectAtlasMcpServer {
                             text_index_max_bytes,
                             control,
                         )?;
-                        let mut store = Self::open_mut_store(&state, &control_state)?;
-                        run_single_watch_refresh_controlled(
-                            &mut store,
+                        Self::run_observed_watch_refresh(
+                            &state,
+                            &control_state,
                             &plan,
                             &symbol_options,
                             control,
+                            &observations,
+                            text_index_max_bytes.is_none(),
                         )?;
                         Ok(())
                     },
@@ -9986,9 +10047,15 @@ impl ProjectAtlasMcpServer {
                 text_index_max_bytes,
                 &control,
             )?;
-            let mut store = Self::open_mut_store(&state, &self.control_state)?;
-            let report =
-                run_single_watch_refresh_controlled(&mut store, &plan, &symbol_options, &control)?;
+            let report = Self::run_observed_watch_refresh(
+                &state,
+                &self.control_state,
+                &plan,
+                &symbol_options,
+                &control,
+                &self.source_observations,
+                text_index_max_bytes.is_none(),
+            )?;
             Self::encode_named_payload(MCP_PAYLOAD_WATCH, &report)
         })())
     }
@@ -17257,6 +17324,208 @@ mod tests {
             "controlled plan loading did not preserve root-redirection refusal",
         )?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn watch_once_requires_initialized_state_without_creating_a_database()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn source() {}\n")?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let server = ProjectAtlasMcpServer::new(
+            database.clone(),
+            None,
+            "missing-watch-test".to_string(),
+            false,
+        );
+        let response = server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
+            project_path: Some(root.to_string_lossy().into_owned()),
+            worktree: None,
+            path: None,
+            nearest_project: Some(false),
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(false),
+        }));
+        require(
+            response.contains("init_required"),
+            "missing index did not return typed initialization guidance",
+        )?;
+        require(
+            !database.exists(),
+            "watch implicitly created the missing database",
+        )?;
+        fs::create_dir(root.join(".projectatlas"))?;
+        fs::write(&database, [])?;
+        let response = server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
+            project_path: Some(root.to_string_lossy().into_owned()),
+            worktree: None,
+            path: None,
+            nearest_project: Some(false),
+            max_workers: Some(1),
+            timeout_seconds: None,
+            text_index_max_bytes: None,
+            background: Some(false),
+        }));
+        require(
+            response.contains("init_required"),
+            "empty database did not return typed initialization guidance",
+        )?;
+        require(
+            fs::read(&database)?.is_empty()
+                && fs::read_dir(root.join(".projectatlas"))?.count() == 1,
+            "watch initialized or journaled an empty database",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn watch_adapters_reuse_verified_noop_and_report_real_changed_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn initial() {}\n")?;
+        let config = root.join(".projectatlas/config.toml");
+        init_project_with_config(root, Some(&config))?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, Some(1), None);
+        let mut writer = open_atlas_store_for_project(&database, root)?;
+        run_scan_pipeline(&mut writer, &plan, &options)?;
+        let initial = writer.index_publication()?;
+        let server = ProjectAtlasMcpServer::new(
+            database.clone(),
+            None,
+            "watch-epoch-test".to_string(),
+            false,
+        );
+        let watch = |background| {
+            server.atlas_watch_once(Parameters(AtlasWatchOnceParams {
+                project_path: Some(root.to_string_lossy().into_owned()),
+                worktree: None,
+                path: None,
+                nearest_project: Some(false),
+                max_workers: Some(1),
+                timeout_seconds: None,
+                text_index_max_bytes: None,
+                background: Some(background),
+            }))
+        };
+        for _ in 0..2 {
+            let result: serde_json::Value = toon_format::decode_default(&watch(false))?;
+            require(
+                result
+                    .pointer("/watch/last_symbols/parsed")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(0),
+                "unchanged watch reported parser work",
+            )?;
+            let epoch = server
+                .source_observations
+                .with_verified_current_read(
+                    &database,
+                    root,
+                    Some(&config),
+                    &index_work_control(&options),
+                    |_store, _stamp| Ok(()),
+                )?
+                .require_current()?;
+            require(
+                epoch.work.exact_verifications == 0
+                    && epoch.work.filesystem_entries == 0
+                    && epoch.work.filesystem_bytes == 0
+                    && epoch.work.decoded_nodes == 0,
+                "watch adapter did not establish and reuse its observed epoch",
+            )?;
+        }
+        require(
+            writer.index_publication()? == initial,
+            "unchanged watch published a generation",
+        )?;
+        require(
+            watch(true).contains(MCP_PAYLOAD_TASK_START),
+            "background no-op was not admitted",
+        )?;
+        let terminal = wait_for_background_operation(&server, &McpTaskOperation::WatchOnce)?;
+        require(
+            terminal.state == McpTaskState::Complete,
+            "background no-op failed",
+        )?;
+        require(
+            writer.index_publication()? == initial,
+            "background no-op published",
+        )?;
+        fs::write(root.join("lib.rs"), "pub fn changed() {}\n")?;
+        // A fresh server observes an already changed source: its empty event queue is no history.
+        let cold = ProjectAtlasMcpServer::new(database, None, "cold-watch-test".to_string(), false);
+        let changed: serde_json::Value = toon_format::decode_default(&cold.atlas_watch_once(
+            Parameters(AtlasWatchOnceParams {
+                project_path: Some(root.to_string_lossy().into_owned()),
+                worktree: None,
+                path: None,
+                nearest_project: Some(false),
+                max_workers: Some(1),
+                timeout_seconds: None,
+                text_index_max_bytes: None,
+                background: Some(false),
+            }),
+        ))?;
+        require(
+            changed
+                .pointer("/watch/last_symbols/parsed")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+            "source repair was hidden behind a no-op report",
+        )?;
+        require(
+            writer
+                .load_file_text("lib.rs")?
+                .is_some_and(|text| text.content == "pub fn changed() {}\n"),
+            "watch did not publish changed text",
+        )?;
+        let before = initial
+            .ok_or_else(|| io::Error::other("initial generation missing"))?
+            .generation;
+        require(
+            writer
+                .index_publication()?
+                .is_some_and(|publication| Some(publication.generation) == before.checked_next()),
+            "changed watch did not publish exactly one generation",
+        )?;
+        let identity = writer.project_instance_id()?;
+        drop(writer);
+        let database = root.join(".projectatlas/projectatlas.db");
+        let predecessor = rusqlite::Connection::open(&database)?;
+        drop_native_worktree_identity_schema(&predecessor)?;
+        predecessor.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
+        )?;
+        drop(predecessor);
+        let migrated: serde_json::Value = toon_format::decode_default(&cold.atlas_watch_once(
+            Parameters(AtlasWatchOnceParams {
+                project_path: Some(root.to_string_lossy().into_owned()),
+                worktree: None,
+                path: None,
+                nearest_project: Some(false),
+                max_workers: Some(1),
+                timeout_seconds: None,
+                text_index_max_bytes: None,
+                background: Some(false),
+            }),
+        ))?;
+        require(
+            migrated.pointer("/watch/last_symbols").is_some(),
+            &format!("no-op admission prevented supported migration: {migrated}"),
+        )?;
+        require(
+            open_existing_atlas_store_for_project(&database, root)?.project_instance_id()?
+                == identity,
+            "supported migration changed project instance identity",
+        )?;
         Ok(())
     }
 

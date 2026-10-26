@@ -38,6 +38,75 @@ const VERIFIED_READ_ATTEMPTS: usize = 3;
 /// Maximum bytes read from any one external source-selection policy input.
 const MAX_POLICY_INPUT_BYTES: u64 = 16 * 1_024 * 1_024;
 
+/// Whether exact verification may repair a bounded delta before returning a read.
+#[derive(Clone, Copy)]
+enum SourceRepairPolicy {
+    /// Ordinary navigation may reconcile a safe incremental delta.
+    Incremental,
+    /// Refresh no-op admission requires an already current publication.
+    RequireCurrent,
+}
+
+/// Read admission either proves current state or transfers exact discovery to refresh.
+pub(crate) enum SourceReadAdmission<T> {
+    /// The requested snapshot/result is backed by current source evidence.
+    Current(T),
+    /// No mutation occurred; the refresh owner can consume this exact assessment.
+    Reconcile(Box<super::IndexFreshnessAssessment>),
+}
+
+impl<T> SourceReadAdmission<T> {
+    /// Preserve typed guidance for callers that do not own a refresh operation.
+    pub(crate) fn require_current(self) -> Result<T, CliError> {
+        match self {
+            Self::Current(value) => Ok(value),
+            Self::Reconcile(assessment) => Err(CliError::RefreshRequired(Box::new(
+                assessment.delta.map_or_else(
+                    || super::index_policy_refresh_required(&assessment.source.root),
+                    |delta| delta.report,
+                ),
+            ))),
+        }
+    }
+}
+
+impl SourceRepairPolicy {
+    /// Open exact source evidence with the caller's explicit mutation policy.
+    fn open_exact(
+        self,
+        binding: &SourceBinding,
+        control: &IndexWorkControl,
+    ) -> Result<SourceReadAdmission<super::ExactFreshIndexRead>, CliError> {
+        match self {
+            Self::Incremental => open_exact_fresh_atlas_store_for_project_controlled(
+                &binding.database,
+                &binding.root,
+                binding.config.as_deref(),
+                control,
+            )
+            .map(SourceReadAdmission::Current),
+            Self::RequireCurrent => {
+                let (store, _plan, assessment) = super::open_exact_index_assessment(
+                    &binding.database,
+                    &binding.root,
+                    binding.config.as_deref(),
+                    projectatlas_fs::ScanLimits::default(),
+                    control,
+                )?;
+                if assessment.delta.is_some() {
+                    store.finish_index_read_snapshot()?;
+                    Ok(SourceReadAdmission::Reconcile(Box::new(assessment)))
+                } else {
+                    Ok(SourceReadAdmission::Current(super::ExactFreshIndexRead {
+                        store,
+                        work: assessment.work,
+                    }))
+                }
+            }
+        }
+    }
+}
+
 /// Exact process-local evidence attached to one accepted `SQLite` read snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VerifiedReadStamp {
@@ -789,11 +858,57 @@ impl SourceObservationRegistry {
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
     {
+        self.with_read_policy(
+            database,
+            root,
+            config,
+            control,
+            SourceRepairPolicy::Incremental,
+            query,
+        )
+        .and_then(SourceReadAdmission::require_current)
+    }
+
+    /// Verify current source without repairing it, for truthful refresh no-op admission.
+    pub(crate) fn with_verified_current_read<T, F>(
+        &self,
+        database: &Path,
+        root: &Path,
+        config: Option<&Path>,
+        control: &IndexWorkControl,
+        query: F,
+    ) -> Result<SourceReadAdmission<VerifiedReadOutcome<T>>, CliError>
+    where
+        F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
+    {
+        self.with_read_policy(
+            database,
+            root,
+            config,
+            control,
+            SourceRepairPolicy::RequireCurrent,
+            query,
+        )
+    }
+
+    /// Share epoch, snapshot and acceptance checks across read mutation policies.
+    fn with_read_policy<T, F>(
+        &self,
+        database: &Path,
+        root: &Path,
+        config: Option<&Path>,
+        control: &IndexWorkControl,
+        repair: SourceRepairPolicy,
+        query: F,
+    ) -> Result<SourceReadAdmission<VerifiedReadOutcome<T>>, CliError>
+    where
+        F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
+    {
         let binding = SourceBinding::new(database, root, config)?;
         let Some(entry) = self.entry(binding.clone())? else {
-            return self.with_exact_fallback(&binding, control, query);
+            return self.with_exact_fallback(&binding, control, repair, query);
         };
-        self.with_observed_read(&entry, control, query)
+        self.with_observed_read(&entry, control, repair, query)
     }
 
     /// Admit a purpose mutation and retain its source witness through commit.
@@ -959,8 +1074,9 @@ impl SourceObservationRegistry {
         &self,
         entry: &SourceObservationEntry,
         control: &IndexWorkControl,
+        repair: SourceRepairPolicy,
         mut query: F,
-    ) -> Result<VerifiedReadOutcome<T>, CliError>
+    ) -> Result<SourceReadAdmission<VerifiedReadOutcome<T>>, CliError>
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
     {
@@ -971,10 +1087,15 @@ impl SourceObservationRegistry {
                 entry.invalidate();
                 return Err(error.into());
             }
-            let (store, epoch) = match self.prepare_observed_store(entry, control, &mut work, false)
+            let (store, epoch) = match self
+                .prepare_observed_store_with_policy(entry, control, &mut work, false, repair)
             {
-                Ok(Some(prepared)) => prepared,
-                Ok(None) => {
+                Ok(SourceReadAdmission::Current(Some(prepared))) => prepared,
+                Ok(SourceReadAdmission::Reconcile(assessment)) => {
+                    entry.invalidate();
+                    return Ok(SourceReadAdmission::Reconcile(assessment));
+                }
+                Ok(SourceReadAdmission::Current(None)) => {
                     entry.invalidate();
                     return Err(source_changed_during_derivation(&entry.binding.root, "."));
                 }
@@ -997,11 +1118,11 @@ impl SourceObservationRegistry {
                 Ok(ObservedAcceptance::Accepted) => {
                     store.finish_index_read_snapshot()?;
                     work.elapsed = started.elapsed();
-                    return Ok(VerifiedReadOutcome {
+                    return Ok(SourceReadAdmission::Current(VerifiedReadOutcome {
                         value,
                         stamp: epoch.stamp,
                         work,
-                    });
+                    }));
                 }
                 Ok(ObservedAcceptance::Superseded | ObservedAcceptance::Invalidated) => {}
                 Err(error) => {
@@ -1026,6 +1147,25 @@ impl SourceObservationRegistry {
         work: &mut VerifiedReadWork,
         force_exact: bool,
     ) -> Result<Option<(AtlasStore, VerifiedSourceEpoch)>, CliError> {
+        self.prepare_observed_store_with_policy(
+            entry,
+            control,
+            work,
+            force_exact,
+            SourceRepairPolicy::Incremental,
+        )
+        .and_then(SourceReadAdmission::require_current)
+    }
+
+    /// Establish or reuse an observed epoch with an explicit source-repair policy.
+    fn prepare_observed_store_with_policy(
+        &self,
+        entry: &SourceObservationEntry,
+        control: &IndexWorkControl,
+        work: &mut VerifiedReadWork,
+        force_exact: bool,
+        repair: SourceRepairPolicy,
+    ) -> Result<SourceReadAdmission<Option<(AtlasStore, VerifiedSourceEpoch)>>, CliError> {
         let _reconcile = entry
             .reconcile
             .lock()
@@ -1064,7 +1204,7 @@ impl SourceObservationRegistry {
                 .is_some_and(|publication| publication.generation == epoch.stamp.generation)
                 && captured.project_instance_id == epoch.stamp.project_instance_id
             {
-                return Ok(Some((store, epoch)));
+                return Ok(SourceReadAdmission::Current(Some((store, epoch))));
             }
             entry.invalidate();
             drop(store.finish_index_read_snapshot());
@@ -1081,12 +1221,12 @@ impl SourceObservationRegistry {
             .map_err(|source| publication_input_error(&entry.binding.root, source))?;
             let before_contract = before_plan.publication_contract_fingerprint();
             let before_policy = source_policy_witness(&before_plan, control)?;
-            let exact = open_exact_fresh_atlas_store_for_project_controlled(
-                &entry.binding.database,
-                &entry.binding.root,
-                entry.binding.config.as_deref(),
-                control,
-            )?;
+            let exact = match repair.open_exact(&entry.binding, control)? {
+                SourceReadAdmission::Current(exact) => exact,
+                SourceReadAdmission::Reconcile(assessment) => {
+                    return Ok(SourceReadAdmission::Reconcile(assessment));
+                }
+            };
             work.add_exact(exact.work);
             let after_plan = ScanRuntimePlan::for_path_controlled(
                 entry.binding.config.as_deref(),
@@ -1134,9 +1274,9 @@ impl SourceObservationRegistry {
                 after_contract,
                 after_policy,
             )?;
-            return Ok(Some((exact.store, epoch)));
+            return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
         }
-        Ok(None)
+        Ok(SourceReadAdmission::Current(None))
     }
 
     /// Confirm that no source, policy, or observer event invalidated a query result.
@@ -1216,31 +1356,32 @@ impl SourceObservationRegistry {
         &self,
         binding: &SourceBinding,
         control: &IndexWorkControl,
+        repair: SourceRepairPolicy,
         mut query: F,
-    ) -> Result<VerifiedReadOutcome<T>, CliError>
+    ) -> Result<SourceReadAdmission<VerifiedReadOutcome<T>>, CliError>
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
     {
         let started = Instant::now();
         let mut work = VerifiedReadWork::default();
         for attempt in 0..VERIFIED_READ_ATTEMPTS {
-            let exact = open_exact_fresh_atlas_store_for_project_controlled(
-                &binding.database,
-                &binding.root,
-                binding.config.as_deref(),
-                control,
-            )?;
+            let exact = match repair.open_exact(binding, control)? {
+                SourceReadAdmission::Current(exact) => exact,
+                SourceReadAdmission::Reconcile(assessment) => {
+                    return Ok(SourceReadAdmission::Reconcile(assessment));
+                }
+            };
             work.add_exact(exact.work);
             let stamp = self.exact_stamp(&exact.store, &binding.root)?;
             let value = query(&exact.store, stamp.clone())?;
             exact.store.finish_index_read_snapshot()?;
 
-            let post = open_exact_fresh_atlas_store_for_project_controlled(
-                &binding.database,
-                &binding.root,
-                binding.config.as_deref(),
-                control,
-            )?;
+            let post = match repair.open_exact(binding, control)? {
+                SourceReadAdmission::Current(exact) => exact,
+                SourceReadAdmission::Reconcile(assessment) => {
+                    return Ok(SourceReadAdmission::Reconcile(assessment));
+                }
+            };
             work.add_exact(post.work);
             let post_publication = post.store.index_publication()?;
             let post_binding = post.store.captured_project_binding()?;
@@ -1250,7 +1391,11 @@ impl SourceObservationRegistry {
                     && post_binding.project_instance_id == stamp.project_instance_id
             }) {
                 work.elapsed = started.elapsed();
-                return Ok(VerifiedReadOutcome { value, stamp, work });
+                return Ok(SourceReadAdmission::Current(VerifiedReadOutcome {
+                    value,
+                    stamp,
+                    work,
+                }));
             }
             if attempt + 1 < VERIFIED_READ_ATTEMPTS {
                 work.retries = work.retries.saturating_add(1);
@@ -1610,6 +1755,139 @@ mod tests {
 
         assert_eq!(sequence.load(Ordering::Acquire), 0);
         assert!(!lost.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn current_read_reuses_epoch_but_never_repairs_a_detected_delta() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let options = super::super::SymbolBuildOptions::new(
+            super::super::MAX_SYMBOL_FILE_BYTES,
+            Some(1),
+            None,
+        );
+        let first = registry
+            .with_verified_current_read(
+                &database,
+                temp.path(),
+                None,
+                &test_control(),
+                |store, _stamp| Ok(store.index_publication()?),
+            )?
+            .require_current()?;
+        let second = registry
+            .with_verified_current_read(
+                &database,
+                temp.path(),
+                None,
+                &test_control(),
+                |store, _stamp| Ok(store.index_publication()?),
+            )?
+            .require_current()?;
+        require(
+            first.value == second.value && first.stamp == second.stamp,
+            "unchanged admission changed publication or epoch",
+        )?;
+        require(
+            second.work.exact_verifications == 0
+                && second.work.filesystem_entries == 0
+                && second.work.filesystem_bytes == 0
+                && second.work.decoded_nodes == 0,
+            "warm unchanged admission repeated source work",
+        )?;
+
+        // A source event is not the only invalidation: an external writer advances generation.
+        let mut writer = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let generation = first.stamp.generation;
+        super::super::run_scan_pipeline(&mut writer, &plan, &options)?;
+        let advanced = registry
+            .with_verified_current_read(
+                &database,
+                temp.path(),
+                None,
+                &test_control(),
+                |_store, stamp| Ok(stamp.generation),
+            )?
+            .require_current()?;
+        require(
+            advanced.value != generation && advanced.work.exact_verifications > 0,
+            "external publication reused the previous verified epoch",
+        )?;
+        let before = writer.index_publication()?;
+        let previous_text = writer.load_file_text("source.rs")?.map(|row| row.content);
+        fs::write(&source, "fn changed_before_observation() {}\n")?;
+        let cold = SourceObservationRegistry::default();
+        let admission = cold.with_verified_current_read(
+            &database,
+            temp.path(),
+            None,
+            &test_control(),
+            |_store, _stamp| Ok(()),
+        )?;
+        let SourceReadAdmission::Reconcile(assessment) = admission else {
+            return Err(
+                std::io::Error::other("changed source did not transfer its discovery").into(),
+            );
+        };
+        require(
+            writer.index_publication()? == before
+                && writer.load_file_text("source.rs")?.map(|row| row.content) == previous_text,
+            "refused no-op admission changed the prior publication",
+        )?;
+        let refresh = super::super::refresh_index_from_assessment_controlled(
+            &mut writer,
+            &plan,
+            &options,
+            *assessment,
+            &test_control(),
+        )?;
+        require(
+            refresh.symbols.parsed == 1,
+            "transferred discovery did not publish the affected source",
+        )?;
+        require(
+            writer
+                .load_file_text("source.rs")?
+                .is_some_and(|row| row.content == "fn changed_before_observation() {}\n"),
+            "transferred discovery did not publish current text",
+        )?;
+        fs::write(&source, "fn changed_after_handoff() {}\n")?;
+        let stale = SourceObservationRegistry::default().with_verified_current_read(
+            &database,
+            temp.path(),
+            None,
+            &test_control(),
+            |_store, _stamp| Ok(()),
+        )?;
+        let SourceReadAdmission::Reconcile(assessment) = stale else {
+            return Err(std::io::Error::other("second change did not transfer discovery").into());
+        };
+        super::super::run_scan_pipeline(&mut writer, &plan, &options)?;
+        let winner = writer.index_publication()?;
+        let result = super::super::refresh_index_from_assessment_controlled(
+            &mut writer,
+            &plan,
+            &options,
+            *assessment,
+            &test_control(),
+        );
+        require(
+            matches!(
+                result,
+                Err(CliError::Db(
+                    projectatlas_db::DbError::PublicationBaseGenerationChanged { .. }
+                ))
+            ),
+            "handoff discarded captured generation and repeated discovery",
+        )?;
+        require(
+            writer.index_publication()? == winner,
+            "stale handoff changed the winner",
+        )?;
+        Ok(())
     }
 
     #[test]

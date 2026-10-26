@@ -2420,12 +2420,18 @@ fn notify_watch_refreshes_symbols_after_file_change() -> Result<(), Box<dyn Erro
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
     fs::create_dir(repo.join(SRC_DIR_NAME))?;
+    let db = temp.path().join("projectatlas.db");
+    Command::cargo_bin("projectatlas")?
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .arg("init")
+        .assert()
+        .success();
     fs::write(
         repo.join(SRC_DIR_NAME).join("lib.rs"),
         "pub fn initial() {}\n",
     )?;
-    let db = temp.path().join("projectatlas.db");
-
     let executable = assert_cmd::cargo::cargo_bin("projectatlas");
     let mut child = StdCommand::new(&executable)
         .current_dir(&repo)
