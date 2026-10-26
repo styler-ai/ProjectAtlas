@@ -9291,7 +9291,11 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             let normalized = current_description.to_lowercase();
             for fragment in [
                 "cooperative indexing-work budget",
-                "30-minute default and ceiling",
+                "automatic work-based default",
+                "30-minute ceiling",
+                "unknown-work fallback",
+                "explicit values take precedence",
+                "zero refuses",
                 "clamped",
                 "fail closed",
                 "setup after work-control creation",

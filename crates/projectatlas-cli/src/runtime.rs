@@ -2,6 +2,7 @@
 //! Shared runtime orchestration for the `ProjectAtlas` CLI and MCP adapters.
 
 mod graph_projection;
+mod index_budget;
 mod module_resolution;
 #[cfg(feature = "optional-parser-supervisor")]
 mod optional_parser_runtime;
@@ -124,7 +125,7 @@ pub(crate) const MAX_PURPOSE_REVIEW_INPUT_FILE_BYTES: u64 = 2 * 1_024 * 1_024;
 /// Stable serialized recommendation for host-owned purpose curator selection.
 pub(crate) const PURPOSE_CURATOR_RECOMMENDED_REASONING: &str = "lowest_reliable_host_supported";
 /// Default whole-operation deadline when no narrower parser limit is supplied.
-const DEFAULT_INDEX_WORK_TIMEOUT: Duration = Duration::from_mins(30);
+const MAX_INDEX_WORK_TIMEOUT: Duration = Duration::from_mins(30);
 /// Maximum UTF-8 source bytes retained while one publication is staged.
 const MAX_STAGED_TEXT_BYTES: u64 = 512 * 1024 * 1024;
 /// Maximum aggregate retained string bytes across one in-memory publication batch.
@@ -3031,9 +3032,12 @@ fn stage_full_index_publication_from_source(
         .into());
     }
     let contract_fingerprint = plan.publication_contract_fingerprint();
-    let previous_hashes = reuse_unchanged_symbols
-        .then(|| indexed_file_hashes(store, control))
-        .transpose()?;
+    let (previous_hashes, previous_work) = if reuse_unchanged_symbols {
+        let (hashes, work) = indexed_file_hashes(store, control)?;
+        (Some(hashes), work)
+    } else {
+        (None, None)
+    };
     let nodes = match captured {
         Some(source) => source.nodes,
         None => scan_repo_controlled(
@@ -3044,6 +3048,13 @@ fn stage_full_index_publication_from_source(
         )
         .map_err(|source| source_inspection_error(&plan.root, source))?,
     };
+    let automatic_timeout = if base_generation == IndexGeneration::ZERO {
+        MAX_INDEX_WORK_TIMEOUT
+    } else {
+        index_budget::replacement_timeout(symbol_options, &nodes, previous_work)
+    };
+    let stage_control = control.with_timeout_ceiling(automatic_timeout);
+    let control = &stage_control;
     control.check(IndexWorkStage::Publication)?;
     let purpose_import = import_legacy_purposes
         .then(|| plan.purpose_import_snapshot_controlled(&nodes, control))
@@ -3112,6 +3123,7 @@ fn stage_full_index_publication_from_source(
             .saturating_add(structural_summaries.retained_bytes),
     )?;
     Ok(IndexPublicationBatch {
+        automatic_timeout,
         base_generation,
         contract_fingerprint,
         root: plan.root.clone(),
@@ -3314,8 +3326,11 @@ fn publish_index_batch(
     batch: IndexPublicationBatch,
     control: &IndexWorkControl,
 ) -> Result<IndexPublicationOutcome, CliError> {
+    let publication_control = control.with_timeout_ceiling(batch.automatic_timeout);
+    let control = &publication_control;
     control.check(IndexWorkStage::Publication)?;
     let IndexPublicationBatch {
+        automatic_timeout: _,
         base_generation,
         contract_fingerprint,
         root,
@@ -3458,6 +3473,8 @@ pub(crate) fn run_scan_pipeline_controlled(
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
     let batch = stage_full_index_publication(store, plan, symbol_options, false, true, control)?;
+    let publication_control = control.with_timeout_ceiling(batch.automatic_timeout);
+    let control = &publication_control;
     revalidate_staged_publication_inputs_with_purpose_snapshot(
         plan,
         batch.nodes.expected_nodes(),
@@ -3489,7 +3506,15 @@ pub(crate) fn reconcile_hydrated_index_controlled(
     let assessment =
         detect_index_freshness_controlled(store, plan, ScanLimits::default(), control)?;
     let (refresh, source_unchanged) = match assessment.delta {
-        None => (empty_index_refresh_report(plan.text_options), true),
+        None => {
+            check_unchanged_index_budget(
+                symbol_options,
+                control,
+                assessment.work.filesystem_entries,
+                assessment.work.filesystem_bytes,
+            )?;
+            (empty_index_refresh_report(plan.text_options), true)
+        }
         Some(delta) if delta.report.scope == IndexRefreshScope::Incremental => {
             let changes = WatchChangeSet {
                 requires_full_scan: false,
@@ -3564,6 +3589,14 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         nodes.push(node);
         Ok(())
     })?;
+    let work_control = control.with_timeout_ceiling(index_budget::planned_timeout(
+        symbol_options,
+        &nodes,
+        &nodes,
+        false,
+    ));
+    let control = &work_control;
+    control.check(IndexWorkStage::SymbolParsing)?;
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let retained_before_symbols =
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
@@ -5032,6 +5065,8 @@ pub(crate) struct SymbolBuildReport {
 
 /// Filesystem and derived facts prepared before acquiring the `SQLite` writer.
 struct IndexPublicationBatch {
+    /// Selected same-clock budget retained through final validation and publication.
+    automatic_timeout: Duration,
     /// Complete publication generation observed before source preparation.
     base_generation: IndexGeneration,
     /// Derivation contract bound to every staged projection.
@@ -6197,21 +6232,33 @@ impl SymbolPublicationLimits {
     };
 }
 
-/// Create one indexing boundary with the caller timeout capped by the safe default.
+/// Start unknown work at the ceiling while preserving explicit caller limits.
 pub(crate) fn index_work_control(options: &SymbolBuildOptions) -> IndexWorkControl {
     IndexWorkControl::new(IndexCancellation::new(), options.timeout)
-        .with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT)
+        .with_timeout_ceiling(MAX_INDEX_WORK_TIMEOUT)
         .with_worker_ceiling(options.effective_workers())
+}
+
+/// Check a refresh no-op against its actual discovery work and the original operation clock.
+pub(crate) fn check_unchanged_index_budget(
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+    entries: u64,
+    bytes: u64,
+) -> Result<(), CliError> {
+    index_budget::unchanged_control(options, control, entries, bytes)
+        .check(IndexWorkStage::Publication)?;
+    Ok(())
 }
 
 /// Create a bounded work boundary for runtime paths without symbol options.
 pub(crate) fn standalone_index_work_control() -> IndexWorkControl {
-    IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_INDEX_WORK_TIMEOUT))
+    IndexWorkControl::new(IndexCancellation::new(), Some(MAX_INDEX_WORK_TIMEOUT))
 }
 
 /// Apply the runtime's safe whole-operation deadline without weakening caller bounds.
 fn bounded_index_work_control(control: &IndexWorkControl) -> IndexWorkControl {
-    control.with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT)
+    control.with_timeout_ceiling(MAX_INDEX_WORK_TIMEOUT)
 }
 
 /// Source file queued for symbol parsing.
@@ -8261,6 +8308,14 @@ pub(crate) fn refresh_index_from_assessment_controlled(
     verify_captured_source_identity(store, plan, &assessment.source)?;
     match assessment.delta {
         None => {
+            let work_control = index_budget::unchanged_control(
+                symbol_options,
+                control,
+                assessment.work.filesystem_entries,
+                assessment.work.filesystem_bytes,
+            );
+            let control = &work_control;
+            control.check(IndexWorkStage::Publication)?;
             graph_projection::cleanup_abandoned_repository_graph_staging(
                 store, &plan.root, control,
             )?;
@@ -8337,6 +8392,8 @@ fn refresh_full_index_from_source_controlled(
         captured,
         control,
     )?;
+    let publication_control = control.with_timeout_ceiling(batch.automatic_timeout);
+    let control = &publication_control;
     revalidate_staged_publication_inputs_controlled(
         plan,
         batch.nodes.expected_nodes(),
@@ -8584,10 +8641,24 @@ fn refresh_index_for_changes_from_source_controlled(
         Some(source) => source.nodes,
         None => expected_nodes_after_incremental(baseline_nodes, &nodes, &absent_paths),
     };
+    let automatic_timeout = index_budget::planned_timeout(
+        symbol_options,
+        &nodes,
+        &expected_nodes,
+        !absent_paths.is_empty(),
+    );
     if nodes.is_empty() && absent_paths.is_empty() && direct_document_paths.is_empty() {
-        revalidate_staged_publication_inputs_controlled(plan, &expected_nodes, None, control)?;
+        let work_control = control.with_timeout_ceiling(automatic_timeout);
+        revalidate_staged_publication_inputs_controlled(
+            plan,
+            &expected_nodes,
+            None,
+            &work_control,
+        )?;
         return Ok(empty_index_refresh_report(plan.text_options));
     }
+    // Closure work is unknown until its existing staging owner measures old and new rows.
+    // Retain the original bounded control until then; never restart the operation clock.
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
     drop(existing_nodes);
@@ -8638,6 +8709,15 @@ fn refresh_index_for_changes_from_source_controlled(
         &symbols,
         control,
     )?;
+    let automatic_timeout = index_budget::staged_timeout(
+        symbol_options,
+        automatic_timeout,
+        symbols.retained_bytes,
+        graph.incremental_work_bytes(),
+    );
+    let work_control = control.with_timeout_ceiling(automatic_timeout);
+    let control = &work_control;
+    control.check(IndexWorkStage::Publication)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
         &nodes,
@@ -8654,6 +8734,7 @@ fn refresh_index_for_changes_from_source_controlled(
             .saturating_add(structural_summaries.retained_bytes),
     )?;
     let batch = IndexPublicationBatch {
+        automatic_timeout,
         base_generation,
         contract_fingerprint,
         root: root.clone(),
@@ -9311,13 +9392,15 @@ fn indexed_file_texts_for_nodes_with_limit(
     Ok(rows)
 }
 
-/// Load indexed file hashes for incremental refresh comparison.
+/// Load reusable hashes and accumulate prior work in the same required source cursor.
 fn indexed_file_hashes(
     store: &AtlasStore,
     control: &IndexWorkControl,
-) -> Result<HashMap<String, String>, CliError> {
+) -> Result<(HashMap<String, String>, Option<index_budget::SourceWork>), CliError> {
     let mut hashes = HashMap::new();
+    let mut work = Some(index_budget::SourceWork::default());
     store.visit_source_nodes_controlled(control, |node| {
+        work = work.and_then(|work| work.include(&node));
         if node.kind == NodeKind::File
             && let Some(hash) = node.content_hash
         {
@@ -9325,7 +9408,7 @@ fn indexed_file_hashes(
         }
         Ok(())
     })?;
-    Ok(hashes)
+    Ok((hashes, work))
 }
 
 /// Load indexed file hashes for selected repository paths.
@@ -10907,14 +10990,95 @@ mod tests {
     }
 
     #[test]
+    fn automatic_budget_survives_staging_and_refuses_late_publication() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("lib.rs"), "pub fn first() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&plan.root)?;
+        let control = index_work_control(&options);
+        let initial =
+            stage_full_index_publication(&store, &plan, &options, false, false, &control)?;
+        require_eq(
+            &initial.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "unknown initial fallback",
+        )?;
+        publish_index_batch(&mut store, initial, &control)?;
+        let publication = store.index_publication()?;
+        let identity = store.captured_project_binding()?;
+        let mut batch =
+            stage_full_index_publication(&store, &plan, &options, true, false, &control)?;
+        require_eq(
+            &(batch.automatic_timeout < MAX_INDEX_WORK_TIMEOUT),
+            &true,
+            "known full-work selection",
+        )?;
+        let unknown_prior =
+            stage_full_index_publication(&store, &plan, &options, false, false, &control)?;
+        require_eq(
+            &unknown_prior.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "replacement without prior work evidence retains fallback",
+        )?;
+        fs::remove_file(temp.path().join("lib.rs"))?;
+        let removed = stage_full_index_publication(&store, &plan, &options, true, false, &control)?;
+        require_eq(
+            &removed.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "shrinking replacement retains deletion headroom",
+        )?;
+        fs::write(temp.path().join("lib.rs"), "pub fn first() {}\n")?;
+        let explicit = SymbolBuildOptions::new(1_024, Some(1), Some(1_800));
+        let explicit_batch =
+            stage_full_index_publication(&store, &plan, &explicit, false, false, &control)?;
+        require_eq(
+            &explicit_batch.automatic_timeout,
+            &MAX_INDEX_WORK_TIMEOUT,
+            "explicit ceiling bypasses estimation",
+        )?;
+        // Inject exhaustion after preparation; publication must retain the selected bound.
+        batch.automatic_timeout = Duration::ZERO;
+        require_eq(
+            &matches!(
+                publish_index_batch(&mut store, batch, &control),
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::DeadlineExceeded { .. }
+                ))
+            ),
+            &true,
+            "staged deadline still protects publication",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication,
+            "publication preserved on deadline",
+        )?;
+        require_eq(
+            &store.captured_project_binding()?,
+            &identity,
+            "identity preserved on deadline",
+        )?;
+        run_scan_pipeline_controlled(&mut store, &plan, &options, &control)?;
+        require_eq(
+            &store.load_symbols(Some("lib.rs"), None, 10)?.len(),
+            &1,
+            "adequate retry succeeds",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn operation_deadline_preserves_default_ceiling_and_fail_closed_bounds() {
         for (timeout_seconds, expected) in [
-            (None, DEFAULT_INDEX_WORK_TIMEOUT),
+            (None, MAX_INDEX_WORK_TIMEOUT),
             (Some(0), Duration::ZERO),
             (Some(1), Duration::from_secs(1)),
             (
-                Some(DEFAULT_INDEX_WORK_TIMEOUT.as_secs() + 1),
-                DEFAULT_INDEX_WORK_TIMEOUT,
+                Some(MAX_INDEX_WORK_TIMEOUT.as_secs() + 1),
+                MAX_INDEX_WORK_TIMEOUT,
             ),
             (Some(u64::MAX), Duration::ZERO),
         ] {
@@ -12005,7 +12169,7 @@ mod tests {
             &store,
             &cumulative_plan,
             Some(&cumulative_snapshot.fingerprint),
-            &cumulative_control.with_timeout_ceiling(DEFAULT_INDEX_WORK_TIMEOUT),
+            &cumulative_control.with_timeout_ceiling(MAX_INDEX_WORK_TIMEOUT),
             cumulative_limits,
         );
         if !matches!(
@@ -13658,6 +13822,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &preparation_control,
         )?;
         let IndexPublicationBatch {
+            automatic_timeout: _,
             base_generation,
             contract_fingerprint,
             root,

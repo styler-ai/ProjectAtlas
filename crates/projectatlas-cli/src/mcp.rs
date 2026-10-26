@@ -981,7 +981,8 @@ struct AtlasScanParams {
     max_bytes: Option<u64>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
-    /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
+    /// Cooperative indexing-work budget in seconds (automatic work-based default; 30-minute ceiling and unknown-work fallback).
+    /// Omitted limits use existing source-work estimates; explicit values take precedence and zero refuses.
     /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
     /// Covers root/config/store setup after work-control creation, traversal, source hashing,
     /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
@@ -1005,7 +1006,8 @@ struct AtlasWatchOnceParams {
     nearest_project: Option<bool>,
     /// Maximum parser worker threads.
     max_workers: Option<usize>,
-    /// Cooperative indexing-work budget for this refresh in seconds (30-minute default and ceiling).
+    /// Cooperative indexing-work budget for this refresh in seconds (automatic work-based default; 30-minute ceiling and unknown-work fallback).
+    /// Omitted limits use existing source-work estimates; explicit values take precedence and zero refuses.
     /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
     /// Covers root/config/store setup after work-control creation, traversal, source hashing,
     /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
@@ -3971,6 +3973,12 @@ impl ProjectAtlasMcpServer {
             );
             match current {
                 Ok(SourceReadAdmission::Current(outcome)) if outcome.value => {
+                    crate::runtime::check_unchanged_index_budget(
+                        options,
+                        control,
+                        outcome.work.filesystem_entries,
+                        outcome.work.filesystem_bytes,
+                    )?;
                     return Ok(WatchReport::unchanged(plan.text_options));
                 }
                 Ok(SourceReadAdmission::Reconcile(assessment)) => {

@@ -8,9 +8,9 @@
 
 - [x] 2.1 Settle the shared indexing architecture and work-count guarantees from current code. Use a small optimized 0.5.0 reference baseline to set practical speed/resource targets for the required paths, and resolve cold-CLI history/fallback before production changes; defer the broad platform matrix to release acceptance.
 - [x] 2.2 Implement lightweight ordered source comparison and one affected-work plan in the existing shared owners, reusing valid source evidence and avoiding full-node decoding or repeated discovery. Verify the slice with causal work-count and real SQLite read/write/rollback tests, bounded workers/memory and documented wider invalidation.
-- [ ] 2.3 Optimize initial indexing, full scan and explicit symbol/graph rebuild in their shared owners. Meet their measured speed/throughput/memory targets and verify complete selection, parser/document/projection results, existing rebuild semantics, publication races and preserved authored state.
+- [x] 2.3 Optimize initial indexing, full scan and explicit symbol/graph rebuild in their shared owners. Meet their measured speed/throughput/memory targets and verify complete selection, parser/document/projection results, existing rebuild semantics, publication races and preserved authored state.
 - [ ] 2.4 Reuse change tracking and incremental updates safely in CLI, MCP and continuous watch. Meet cold-CLI and warm no-op targets; test arbitrary mixed changes, missed/offline/same-metadata edits, policy changes, concurrent writes, cancellation, retry and exact fallback.
-- [ ] 2.5 Select work-based defaults at the shared indexing boundary while retaining the 1,800-second ceiling, larger-request clamp and unknown-work fallback. Test estimates, explicit-limit precedence, zero/unrepresentable refusal and cancellation; update affected help, schemas and guidance together without treating longer timeouts as a speedup.
+- [x] 2.5 Select work-based defaults at the shared indexing boundary while retaining the 1,800-second ceiling, larger-request clamp and unknown-work fallback. Test estimates, explicit-limit precedence, zero/unrepresentable refusal and cancellation; update affected help, schemas and guidance together without treating longer timeouts as a speedup.
 
 ## 3. Accept the complete 0.5.1 behavior
 

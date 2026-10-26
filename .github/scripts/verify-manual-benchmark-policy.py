@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep full benchmark campaigns out of automated validation and release paths."""
+"""Keep campaigns manual; admit only the explicit prepublication indexing diagnostic."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py")
+CAMPAIGN_ENTRYPOINTS = ("agent_navigation.py", "system_scale.py", "indexing_acceptance.py")
 MAX_TRACKED_RAW_BENCHMARK_BYTES = 4 * 1024 * 1024
 
 
@@ -68,6 +68,28 @@ def campaign_entrypoint(line: str) -> bool:
     )
 
 
+def explicit_indexing_diagnostic(relative: str, lines: list[str], position: int) -> bool:
+    """Admit only the opt-in step of the dispatch-only prepublication diagnostic."""
+    if relative != ".github/workflows/release.yml" or "indexing_acceptance.py" not in lines[position]:
+        return False
+    if any(name in lines[position] for name in ("system_scale.py", "agent_navigation.py")):
+        return False
+    source = "\n".join(lines)
+    event = re.search(r"^on:\n(.*?)(?=^\S)", source, re.MULTILINE | re.DOTALL)
+    if event is None or re.findall(r"^  ([\w-]+):", event[1], re.MULTILINE) != ["workflow_dispatch"]:
+        return False
+    option = re.search(
+        r"^      run_indexing_performance:\n((?:^        [^\n]*\n)+)",
+        event[1] + "\n", re.MULTILINE,
+    )
+    if option is None or "        default: false\n" not in option[1] or "        type: boolean\n" not in option[1]:
+        return False
+    for start in range(position, -1, -1):
+        if lines[start].startswith("      - name:"):
+            return "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}" in lines[start:position]
+    return False
+
+
 def self_test() -> None:
     """Protect the narrow raw-trace boundary and its allowed false positives."""
 
@@ -75,6 +97,25 @@ def self_test() -> None:
         "docs/benchmarks/v0.4-agent-navigation-results.json",
         MAX_TRACKED_RAW_BENCHMARK_BYTES + 1,
     )
+    diagnostic = [
+        "on:", "  workflow_dispatch:", "    inputs:",
+        "      run_indexing_performance:", "        default: false", "        type: boolean",
+        "permissions:", "  contents: read", "jobs:", "  smoke:", "    steps:",
+        "      - name: Explicit diagnostic",
+        "        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}",
+        "        run: python docs/benchmarks/harness/indexing_acceptance.py",
+    ]
+    route = ".github/workflows/release.yml"
+    assert explicit_indexing_diagnostic(route, diagnostic, len(diagnostic) - 1)
+    for before, after in [
+        ("        default: false", "        default: true"),
+        ("        type: boolean", "        type: string"),
+        ("  workflow_dispatch:", "  push:"),
+        ("        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}", "        if: ${{ always() }}"),
+    ]:
+        changed = [after if line == before else line for line in diagnostic]
+        assert not explicit_indexing_diagnostic(route, changed, len(changed) - 1)
+    assert not explicit_indexing_diagnostic(".github/workflows/ci.yml", diagnostic, len(diagnostic) - 1)
     assert not is_oversized_tracked_raw_result(
         "docs/benchmarks/fixtures/generated.jsonl",
         MAX_TRACKED_RAW_BENCHMARK_BYTES + 1,
@@ -152,6 +193,8 @@ def self_test() -> None:
 
 def main() -> int:
     self_test()
+    if campaign_entrypoint("python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py"):
+        raise RuntimeError("indexing arithmetic unit tests must remain allowed")
     if campaign_entrypoint("python docs/benchmarks/harness/test_agent_navigation.py"):
         raise RuntimeError("benchmark unit tests must remain allowed")
     if not campaign_entrypoint(
@@ -175,10 +218,9 @@ def main() -> int:
     violations: list[str] = []
     for path in automated_routes:
         relative_path = path.relative_to(root).as_posix()
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if campaign_entrypoint(line):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for line_number, line in enumerate(lines, start=1):
+            if campaign_entrypoint(line) and not explicit_indexing_diagnostic(relative_path, lines, line_number - 1):
                 violations.append(f"{relative_path}:{line_number}")
 
     if violations:

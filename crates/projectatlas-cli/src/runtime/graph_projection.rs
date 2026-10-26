@@ -1386,6 +1386,8 @@ pub(super) struct StagedRepositoryGraph {
     database: Option<StagedGraphDatabase>,
     /// Conservative bytes retained until the parent publication completes.
     retained_bytes: u64,
+    /// Already measured old and new affected work, including retained path identities.
+    incremental_work_bytes: Option<u64>,
 }
 
 /// File-backed graph rows staged outside the main database writer transaction.
@@ -1443,6 +1445,11 @@ impl Drop for StagedGraphDatabase {
 }
 
 impl StagedRepositoryGraph {
+    /// Return complete affected work evidence, or unknown for full/spilled staging.
+    pub(super) const fn incremental_work_bytes(&self) -> Option<u64> {
+        self.incremental_work_bytes
+    }
+
     /// Return conservative retained bytes counted toward the parent staging budget.
     pub(super) const fn retained_bytes(&self) -> u64 {
         self.retained_bytes
@@ -2004,7 +2011,7 @@ fn stage_incremental_repository_graph_with_limit(
             .saturating_add(document_projection_bytes)
             .saturating_add(direct_identity_admission.observed_fact_bytes),
     )?;
-    let staged = finish_projection_with_documents(
+    let mut staged = finish_projection_with_documents(
         project,
         generation,
         RepositoryGraphMutation::AffectedPaths(affected_paths.iter().cloned().collect()),
@@ -2018,7 +2025,20 @@ fn stage_incremental_repository_graph_with_limit(
         scan_policy,
         control,
     )?;
+    let prior_bytes = persisted_footprint.retained_bytes;
     enforce_incremental_projection_limits(root, &affected_paths, persisted_footprint, &staged)?;
+    if staged.database.is_none() {
+        staged.incremental_work_bytes =
+            prior_bytes
+                .checked_add(staged.retained_bytes)
+                .and_then(|bytes| {
+                    affected_paths.iter().try_fold(bytes, |total, path| {
+                        total
+                            .checked_add(STAGED_GRAPH_ROW_BYTES)?
+                            .checked_add(path.len() as u64)
+                    })
+                });
+    }
     Ok(staged)
 }
 
@@ -3048,6 +3068,7 @@ fn finish_projection_in_database_with_documents(
             .sum::<u64>()
         + identity_rejection_bytes;
     Ok(StagedRepositoryGraph {
+        incremental_work_bytes: None,
         project,
         mutation: RepositoryGraphMutation::Full,
         entities: Vec::new(),
@@ -3220,6 +3241,7 @@ fn finish_projection_with_documents(
                 }),
         );
     Ok(StagedRepositoryGraph {
+        incremental_work_bytes: None,
         project,
         mutation,
         entities: entities.entity_by_digest.into_values().collect(),
@@ -9389,6 +9411,7 @@ mod tests {
             truncated: false,
         };
         let staged = StagedRepositoryGraph {
+            incremental_work_bytes: None,
             project: ProjectInstanceId::from_bytes([1; 16])?,
             mutation: RepositoryGraphMutation::AffectedPaths(vec!["src/lib.rs".to_string()]),
             entities: Vec::new(),
@@ -12921,6 +12944,7 @@ function helper() {}
         ];
         let scan_policy = RootScanPolicy::discover(&root, &ScanOptions::default(), &control)?;
         let staged = StagedRepositoryGraph {
+            incremental_work_bytes: None,
             project,
             mutation: RepositoryGraphMutation::Full,
             entities,
@@ -14208,6 +14232,7 @@ function helper() {}
         let document_target_states = vec![("docs/target.md".to_string(), stale)];
         drop(index);
         let staged = StagedRepositoryGraph {
+            incremental_work_bytes: None,
             project: ProjectInstanceId::from_bytes([34; 16])?,
             mutation: RepositoryGraphMutation::Full,
             entities: Vec::new(),
@@ -16644,6 +16669,27 @@ function helper() {}
             &incremental_policy,
             &repaired_symbols,
             &incremental_control,
+        )?;
+        let RepositoryGraphMutation::AffectedPaths(affected) = &incremental_stage.mutation else {
+            return Err("incremental repair unexpectedly selected full mutation".into());
+        };
+        let prior = store.repository_affected_source_footprint(
+            project,
+            affected,
+            u32::try_from(super::MAX_INCREMENTAL_GRAPH_ROWS)?,
+        )?;
+        require(
+            prior.retained_bytes > 0,
+            "budget fixture has no prior graph work",
+        )?;
+        let path_bytes = affected.iter().map(|path| path.len() as u64).sum::<u64>();
+        require(
+            incremental_stage
+                .incremental_work_bytes()
+                .is_some_and(|bytes| {
+                    bytes >= prior.retained_bytes + incremental_stage.retained_bytes() + path_bytes
+                }),
+            "incremental budget omitted old graph removal, new graph or affected path identities",
         )?;
         {
             let mut publication = store.begin_index_publication("incremental-identity-repair")?;

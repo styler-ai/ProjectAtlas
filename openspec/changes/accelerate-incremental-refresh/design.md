@@ -22,7 +22,7 @@ Use one validated operation plan in the existing shared indexing owners. Reuse t
 
 | Work mode | Architectural guarantee |
 | --- | --- |
-| Verified unchanged observation | Bounded identity/policy/generation checks; no tree traversal, content hashing, full-node decode, parsing or publication. |
+| Unchanged current-contract source | One exact detection discovery and ordered source-only comparison; no full-node decode, parsing or publication. |
 | Known changes | Read and parse changed sources; update the actual affected data and dependency closure, without restaging unrelated project state. |
 | Fresh CLI without reliable history | One exact source-discovery/comparison phase, then affected work. Compare lightweight ordered source records with the stored hash cursor; avoid loading complete stored nodes or repeatedly rediscovering the same project. |
 | Required initial/full/rebuild work | Capture required source evidence once for building, share valid bytes and parse facts across projections, and publish complete required state. Wider validation is retained only where the source/writer evidence needs it. |
@@ -51,28 +51,28 @@ Preserve selection, ignores, parser provenance, document partial coverage, sourc
 
 ### Reuse trustworthy observations; handle missing history honestly
 
-For a long-lived process, use the existing observer only while its root, policy, publication identity and event continuity remain valid. Integrating that observation with writes must fence concurrent writers and source changes; a read stamp alone is not permission to publish.
+For explicit one-shot refresh, both long-lived MCP and fresh CLI reconcile source exactly. The existing observer may retain operation-local source evidence for the writer, but native callback delivery cannot establish a zero-work freshness witness. A read stamp alone is not permission to publish.
 
 A fresh CLI process cannot infer edits made before it started from an empty event queue. Without trustworthy retained evidence it performs exact initial discovery. Start observation before this baseline where the existing backend supports it, so later source changes can be checked during the same refresh. Lost events, unavailable observation or invalid identities require exact reconciliation. No unchanged result may be inferred solely from equal size/mtime or the absence of newly observed events.
 
 This chooses the existing observer plus exact fallback, rather than introducing an unproved persistent service or silently relaxing freshness. If measurements show that cross-invocation evidence needs an additional component, publish and review that concrete design before adding it; the issue cannot close with only a fast MCP path and an unexplained slow CLI path.
 
-MCP one-shot refresh may admit an unchanged result through that same verified-read
-boundary, with source repair disabled. Establish a missing epoch by exact comparison;
-reuse an existing valid epoch without project traversal, content hashing, node decode,
-parsing or publication. A detected delta transfers its operation-owned assessment to
-the existing mutable refresh owner, which revalidates database identity, generation,
-root and contract without repeating discovery, so repaired work is never reported as
-a no-op. Caller text-policy overrides use the
-normal refresh owner. Preserve worktree identity checks and the normal background task,
-cooperative cancellation and exact-fallback contracts. This read-only admission grants
-no write authority and does not relax mutation validation.
+MCP one-shot refresh uses the verified-read boundary with repair disabled and
+forces exact source comparison on every explicit refresh. An unchanged current
+contract avoids node decoding, parsing and publication, while still discovering
+and hashing the selected source. A detected delta transfers its operation-owned
+assessment to the existing mutable owner, which fences database identity,
+generation, root and contract without repeating detection discovery. Caller
+text-policy overrides use the normal refresh owner. Preserve worktree checks,
+background task cancellation and final exact publication validation. Operation-local
+evidence is reusable within this operation; a retained epoch cannot authorize
+zero-source-work admission across requests.
 
 ### Prove the standalone CLI approach before production changes
 
 Task 2.1 settles the exact-discovery/cross-invocation evidence contract and a separate cold-CLI target using code analysis and a focused reference check. The selected initial implementation uses exact discovery plus lightweight ordered comparison and affected updates when no trusted history exists. Task 2.4 proves that CLI approach as well as the warm MCP path. A fast MCP result cannot substitute for a slow CLI result.
 
-If exact cold discovery cannot meet that target, publish and review a concrete trustworthy cross-invocation evidence design before implementing that alternative. Cover how history is obtained and retained, root/identity validation, gaps, restart, fallback, ownership and any required process lifetime or deployment behavior. Do not silently introduce a service. The zero-traversal bound applies to a continuously observed MCP route or a CLI route that actually implements such reviewed retained evidence; it is not promised for an ordinary fresh CLI with no history.
+If exact cold discovery cannot meet that target, publish and review a concrete trustworthy cross-invocation evidence design before implementing that alternative. Cover how history is obtained and retained, root/identity validation, gaps, restart, fallback, ownership and any required process lifetime or deployment behavior. Do not silently introduce a service. Zero-traversal admission for either route is deferred to unscheduled #725; it is not an RC1 acceptance target.
 
 ### Apply the delta and avoid repeated whole-project work
 
@@ -124,7 +124,7 @@ Record distributions rather than one timing. Record visited entries, hashed byte
 
 Choose the smallest causal checks for each implementation slice and a focused before/after comparison for its performance claim. Reuse existing fixtures and counters. Run the complete installed/platform matrix at release acceptance; repeat a passing check only for changed inputs, failures, an uncovered behavior or a mandatory gate. Measurement confirms the architecture; it does not replace the architectural work.
 
-The hard work-count target for a verified unchanged observation is no project-tree traversal/content hashing/full-node decode, no parse work and no new publication. Delta processing must avoid unrelated parsing/publication. Cold discovery, initial indexing, full reindexing, symbol rebuilding and recovery each have separate targets. Report each result independently so a warm-path gain cannot conceal another slow path. Normal cases must finish within their selected budgets; injected deadlines still prove safe refusal. A larger budget alone is never a performance result. Unaffected navigation and supported upgrades must not regress beyond preregistered noise/resource limits.
+The RC1 work-count target for unchanged current-contract source is one exact detection discovery/comparison with no full-node decode, parse work or new publication. Zero-source-work admission is deferred to #725. Delta processing must avoid unrelated parsing/publication. Cold discovery, initial indexing, full reindexing, symbol rebuilding and recovery each have separate targets. Report each result independently so a warm-path gain cannot conceal another slow path. Normal cases must finish within their selected budgets; injected deadlines still prove safe refusal. A larger budget alone is never a performance result. Unaffected navigation and supported upgrades must not regress beyond preregistered noise/resource limits.
 
 ## Risks / Trade-offs
 
@@ -148,12 +148,37 @@ No schema change, public route removal or new dependency is required by this pla
 
 None.
 
-### Notification-delivery finding during platform proof
+## Notification-delivery finding during platform proof
 
 The macOS ARM64 installed release test exposed delayed callback delivery after an
 immediate saved edit. Notify 8.2.0 exposes no backend delivery fence; draining the
 Rust receiver and checking its callback counter cannot prove the native event queue
 is empty, on macOS or other asynchronous backends. One-shot refresh currently uses
-exact no-repair admission and transfers its discovery to the existing writer. The
-zero-source-work warm target remains open until a causal fence is designed, reviewed
-and proven; neither a sleep nor a Linux timing pass establishes that proof.
+exact no-repair admission and transfers its discovery to the existing writer. The user explicitly accepted shipping RC1 with exact reconciliation and measured
+gains, deferring zero-source-work warm admission to unscheduled #725. No sleep or
+Linux timing pass can replace the future causal proof. Task 2.4 retains exact
+unchanged/change/failure acceptance rather than the deferred target.
+
+## Concrete automatic-budget policy
+
+The coefficients, unknown-work admission, explicit-limit precedence and same-clock
+fallback rules are specified once in
+[the indexing reference](../../../docs/benchmarks/v0.5.1-indexing.md#automatic-budget-coefficients).
+Use a private concrete runtime policy over already-required node inventories and
+verification counters. Carry the selected duration with the existing publication
+batch so final validation and publication retain the same bound; no shared mutable
+deadline, extra source walk, public schema or new core API is necessary.
+
+Incremental graph staging retains the original bounded control until the existing
+projection owner has measured old persisted work, new staged graph bytes and
+affected-path identities. Its selected child then applies to summaries, final
+validation and publication using the same start time. Unknown/spilled or removed
+work keeps the ceiling; no sizing query or source traversal is added.
+
+The existing release workflow has an explicit opt-in prepublication comparison
+across its four native package lanes. Optimized development packages may retain
+the current 0.5.0 workspace label so child performance proof can precede #715's RC
+freeze; artifact/source identities distinguish them from published 0.5.0. The
+preregistered input catalog, targets and compact Linux draft evidence are linked
+from the indexing reference. Pure arithmetic/completeness tests run normally;
+full measurements remain manual and do not establish RC publication acceptance.

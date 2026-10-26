@@ -1261,7 +1261,8 @@ enum Command {
         /// Maximum parser worker threads during refresh.
         #[arg(long)]
         max_workers: Option<usize>,
-        /// Cooperative indexing-work budget per refresh in seconds (30-minute default and ceiling).
+        /// Cooperative indexing-work budget per refresh in seconds (automatic work-based default; 30-minute ceiling and unknown-work fallback).
+        /// Explicit values take precedence; zero refuses immediately.
         /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
         /// Covers root/config/store setup after work-control creation, traversal, source hashing,
         /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.
@@ -1648,7 +1649,8 @@ enum SymbolsCommand {
         /// Maximum parser worker threads. Defaults to Rayon automatic sizing.
         #[arg(long)]
         max_workers: Option<usize>,
-        /// Cooperative indexing-work budget in seconds (30-minute default and ceiling).
+        /// Cooperative indexing-work budget in seconds (automatic work-based default; 30-minute ceiling and unknown-work fallback).
+        /// Explicit values take precedence; zero refuses immediately.
         /// Larger representable budgets are clamped; unrepresentable deadlines fail closed.
         /// Covers root/config/store setup after work-control creation, traversal, source hashing,
         /// parsing and publication checkpoints. Earlier startup/target selection is outside this budget.

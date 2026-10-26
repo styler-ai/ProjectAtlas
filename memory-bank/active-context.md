@@ -1,101 +1,106 @@
 # Active context
 
-## Objective
+## Objective and rules
 
-Deliver the scheduled 0.5.1 work and publish `v0.5.1-rc1` for testing. Preserve the preceding stable release as GitHub Latest. Stable promotion is not authorized by this objective.
+Continue until v0.5.1-rc1 is published and independently verified for testing.
+Preserve prior stable Latest. Stable promotion requires later user instruction.
+Primary writes implementation/fixes; independent GPT-6 Luna max reviews load our
+custom Rust and applicable database/SQLite skills and accepted specification.
+Use .worktrees, private stable0.5.0 official Atlas plugin indexes, CLI preferred,
+affected-only refresh and bounded visible tool calls. Never reset existing indexes.
 
-## Baseline and history
+## Accepted release scope
 
-- The integration worktree starts at `7cd5a79` on `release/0.5.1`, from accepted `main`.
-- Stable 0.5.0 shipped PHP navigation, bounded PDF/DOCX extraction, the short `atlas` CLI, bounded analysis views, worktree routing, Unicode search, coordinated plugin/runtime installation, and preserved-state atomic publication.
-- Follow-up planning moved complete indexing performance from 0.6.0 into 0.5.1. Language navigation, Memory Atlas product implementation, and npm distribution remain 0.6.0 work.
-- The stable 0.5.0 native Linux archive was verified against published SHA256SUMS and used to initialize this worktree's private index. The official Codex marketplace plugin was installed from `v0.5.0`; runtime/registry convergence is being verified.
+#708 owns indexing/budgets, #721 bounded relation navigation, #722 confirmed Python
+parenthesized-import repair, #718 closed workflow guidance; all belong under #715
+release acceptance. #715 stays open through RC and closes only after later stable
+acceptance. User explicitly accepted exact reconciliation and measured indexing
+gains for RC1, deferring zero-source-work warm admission to unscheduled #725.
+Native event queue emptiness/read epochs are insufficient causal source history.
+No sleep/metadata heuristic can replace exact source comparison.
 
-## Release scope
+## Integration and worktrees
 
-- #708: indexing, full scan, symbol/graph rebuild, one-shot and continuous refresh performance, trustworthy no-op and exact fallback, adaptive cooperative budgets. OpenSpec: `accelerate-incremental-refresh`.
-- #721: bounded useful relation navigation, compatibility behavior, row/output/work budgets and continuation. Currently milestone backlog; its implementation plan and graph mapping must be completed before implementation.
-- #718: protected-branch check guidance; already present on the baseline. Verify live closure before release.
-- #715: release acceptance and publication, closes last after stable verification. OpenSpec: `complete-v051-release-acceptance`.
-- The local release graph currently omits #721 despite its live milestone membership. Reconcile it as part of planning.
+- Main9845364 includes merged #723: ordered source-only comparison, operation-owned
+  discovery/delta/UTF8 evidence, full graph bulk-index deferral, strict ExistingSchema
+  watch admission and final exact validation. One-shot refresh always reconciles
+  exactly after macOSARM exposed delayed notification delivery. Full fallback reuses
+  captured inventory rather than detecting twice. Four platforms passed before merge.
+- issue708 branch perf/indexing-budgets-708 at9845364 retains owned mixed changes.
+  No budget commit/PR yet. Stage every owned source/doc/workflow/helper file together.
+- issue721 branch perf/relations-721, PR#724, source0192e47 and task-onlyf54a712.
+  All implementation/five acceptance tasks checked, independent holistic Luna approved,
+  normal hook/push passed. Current head Rust/repository/PRstate passed; four installed
+  platform jobs still running. PR closes721; merge normally after required gates.
+- issue722 branch fix/python-imports-722, commits90efe7d/bc1ad64/01114f6. Confirmed
+  stable0.5.0 bug, translated English, milestone/nativeparent715/blocker715 verified.
+  Plan1.1/code2.1/proofhandoff2.2 checked4/4/3; final3.1/allacceptance remain open.
+  Source Luna approved. Native push running; first attempt stopped on machine path in
+  memory, fixed portably without bypass. Read issue722 memory for proof details.
+- Integration release/0.5.1 still old memory-only1fe2b86 base with owned dirty memory.
+  Safely preserve that change and rebase onto accepted main before release preparation.
+- Retained stashes named owned issue721 implementation and owned adaptive-budget
+  follow-up are already recovered/applied. Do not apply them again.
 
-## Working rules
+## Budget implementation and verified proof
 
-The primary agent implements and fixes. Independent reviews use GPT-6 Luna at max effort and explicitly read the custom Rust skill, applicable Rust subskills, database/SQLite skills when relevant, and accepted OpenSpec. Reviewers do not edit. Use `docs/workflow.md` for the native IssueOps, quality, PR, and release contracts.
+Private concrete automatic policy uses already-required source/verification counts,
+no sizing walk or schema/API. Unknown initial, overflow, incremental removals and
+unproven/shrinking prior full work retain1800seconds. Full prior totals accumulate
+on the existing hash cursor; symbol-only uses existing inventory. Explicit limits
+bypass selection. Dense staging keeps original parent until old/new graph+path work
+is known, then bounds final summary/validation/publication from the same start.
+No deadline/cancellation permits fallback or a reset clock. Guidance matches help,
+MCP schema and selected policy; recompute combined frozen schema/source hashes after
+integrating721. Budget-only MCP digest fb6efe7d0616573c4c436ab826475eb585b73eb38f38fc2fd04470597992095a.
 
-## Current implementation checkpoint
+Four real --bin estimator tests, real publication refusal/retry, closure-work proof,
+workspace Clippy, warning-clean docs, MCP SQLite effects, schema compatibility and
+E2E inventory passed. Logs /tmp/projectatlas-issue708-budget-*.log and closure-work.log.
+Source approved by independent Luna across deletion/dense sizing fixes. Final scope
+and measurement review approved after removing every old retained-epoch bypass.
+Strict OpenSpec/scoped IssueOps8/8/5 passed; tasks2.4/3.1/3.2 still unchecked.
+No final warm/matrix acceptance claimed.
 
-This is `.worktrees/issue-721`, branch `perf/relations-721`, with uncommitted
-implementation and the accepted `bound-relation-navigation` plan. Luna Max accepted
-the specification and independently reviewed the storage/adapter implementation.
-Local/live #721 tasks 1.1, 2.1, 2.2 and 2.3 are checked; task 3.1 and all
-acceptance rows remain pending hosted/final proof. The task mirror is being verified.
+## Performance protocol
 
-The storage-owned compatibility reader admits at most 200 rows, 100,000 SQLite VM
-instructions, 1,000 ms and 1 MiB intermediate state. ID-only candidate selection
-refuses its overflow sentinel before hydration; complete small results retain their
-ordering. RAII restores limits/progress hooks and respects caller transactions.
-No schema change; existing rusqlite limits feature is enabled. Full DB suite:
-237 tests plus doctests passed, with focused query-plan/limits/cleanup tests.
+Local corrected paired optimized Linux draft results pass historical targets:
+initial5.1981->3.8597s, full6.8153->5.3870s, rebuild6.5073->5.1662s,
+sparse6.4984->0.1249s, larger15.9982->0.1706s, dense9.265->7.1501s;
+coldnoop ratio1.027 below60ms; navigation/RSS targets pass. Exact full-work oracles
+validated retained reports. Compact draft docs/benchmarks/v0.5.1-indexing-linux-draft.json;
+raw cache budget-expanded-corrected/results-verified.json. These are not RC proof.
 
-CLI and MCP default to existing detailed ten-row/32-KiB pages. Explicit legacy
-retains complete small arrays, omitted rows 50, hard rows/output bounds and typed
-read/output refusals. Shared service policy owns defaults; adapters enforce final
-encoded UTF-8 bytes (including MCP routing wrapper). Real JSON/TOON/MCP test covers
-exact N/N-1 output limits, invalid controls, typed work, continuation and isolation.
-Workspace Clippy and warning-clean docs passed; new real-adapter E2E passed.
+New honest #722 protocol:9 current-contract summary/detailed/open samples; separate
+3 restored0.5DB semantic_upgrade rounds, baselinefullscan vs requiredcandidate repair,
+<=110% full-baseline latency/RSS, exact counts/ID/purpose,+1generation and subsequent
+noop; rollback after timings. #722 advances semanticcontract3->4, so oldbudgetdraft
+cannot prove new upgrade case. WarmMCP9calls <=110% median latency, no publicRSSclaim;
+causal tests own exact source/no-parse/no-publication proof. Deferred zero-work725.
+Four arithmetic/completeness tests and manual-benchmark policy pass. All four exact
+optimized installed platform results still required before708 closure. Historical
+Linux draft cannot substitute for new upgrade cases or exact RC acceptance.
 
-The first full workspace run exposed two obsolete implicit-legacy unit probes;
-both were corrected and passed affected reruns. First delivery integration run
-passed 49 cases and exposed three intentional guidance/default compatibility
-expectations. Narrow normalization, exact advertised-schema digest and explicit
-legacy array probes now pass all three targeted reruns. Frozen historical fixtures
-remain unchanged. E2E inventory positive and two negative contracts pass. The remaining
-platform/library/workspace/doctest checks passed (artifact-only ignored contracts
-remain release-owned). The offline/worktree legacy probes were corrected and
-passed their affected reruns. Logs `/tmp/projectatlas-issue721-*`.
-Reuse unchanged passing proof; normal push hook remains mandatory.
+Harness hash-pins baseline archives and executable members, binds candidate archive,
+normal telemetry, sampled process-tree RSS (not allocator/IO claims), paired order,
+complete work counts, larger/dense fixtures and owned process cleanup. Workflow opt-in
+run_indexing_performance=false by default; prepublish-only0.5.0 or0.5.1-rcN diagnostic,
+existing0.4.5 migration proof unchanged. Measurement venv/cache remain isolated.
 
-Rebased onto accepted main 9845364 (PR #723 merged after all four platforms and
-required verify passed). The owned backup stash is retained. Coordinate
-coordinate #708 shared runtime/MCP/guidance/E2E inventory changes. No #721 commit or PR yet. #708 PR #723 merged normally at 9845364 after
-all four platforms, Rust, repository, PR-state and required verify passed; automated
-review had no findings. Its restored adaptive-budget draft is in the
-sibling issue-708 checkout on perf/indexing-budgets-708, under independent review.
+## Tooling and next actions
 
-## Access and release limits
+Rust1.98 proxies, wasm32-wasip1 and cargo-deny0.20.2 installed; gh authenticated via
+OS keyring. zstd0.14.3/zstd-safe8.2.0/zstd-sys2.1.2 security patch independently
+approved and passing cargo-deny, carried identically in721/722/this budget lane.
+Use filesystem TMPDIR under ~/.cache/projectatlas-test-tmp, shared CARGO_TARGET_DIR
+.worktrees/v0.5.1/target and clean test PATH with rustup/gh-only helper/Pythonvenv.
+No sibling CLI compilation during another lane's E2E/native hook. Normal hooks and
+trusted hosted verify/pr-state required; no bypass or force merge. Reuse unchanged
+proof and keep live checklists exact. Public commit identity Shaun Tyler/noreply.
 
-GitHub CLI 2.103.2 is authenticated as styler-ai through the OS keyring. Use clean
-test PATH (rustup proxies, task gh-only helper, existing Python venv), filesystem
-TMPDIR `~/.cache/projectatlas-test-tmp`, and shared integration target. Never compile
-siblings into that target during CLI E2E tests. Stable Atlas 0.5.0 remains installed;
-this checkout received typed full-refresh guidance after the dependency closure
-limit, and that required full refresh completed without resetting its database.
-The following rebase/edits invalidate prior indexed facts; refresh only when needed.
-
-RC1 is not released. Exact one-shot reconciliation fixes the native-notification
-race; no warm zero-source-work claim is accepted. A user scope question is pending
-before deferring that promised target. Continue all independent work toward RC1.
-
-## Integrated task proof
-
-On accepted main 9845364, locked all-target workspace check, Clippy, warning-clean
-docs and strict string policy pass. The inventory now retains both issue slices
-(207 test entries, frozen historical metadata unchanged). Real-adapter reruns pass;
-MCP now consumes its own continuation to terminal and compares complete relation
-coverage with CLI, rejects a changed root digest and cross-project replay with the
-same anchor. Luna approved these added causal assertions. Final strict OpenSpec
-and scoped IssueOps are running before the sole-owner commit/push. Normal native
-pre-push remains mandatory. Do not report #721 accepted or close it before hosted
-and final issue gates.
-
-## Publication checkpoint
-
-Local commit 8279cfa owns #721 implementation on accepted main 9845364; it is not
-pushed yet. The first native push hook passed planner/IssueOps/string policy but
-stopped at newly fetched RustSec advisories RUSTSEC-2026-0391/0398/0403 affecting
-zstd0.14.0/zstd-safe8.0.0. The primary updated the exact workspace zstd pin to
-0.14.3; the lock moves only zstd, zstd-safe8.2.0 and zstd-sys2.1.2. No ignore or
-exception was added. Fresh dependency review/gate and normal complete push proof
-must pass before publishing. Earlier Rust evidence predates this dependency fix.
-Task2.2/2.3 mirror is confirmed: local5/remote5/checked4; strict OpenSpec passes.
+Next: finish724/722 ordinary gates and PR integration, reconcile budget branch onto
+accepted main including semantic fix, publish budget follow-up and run opted-in
+four-platform installed diagnostic, close708 after complete proof/review; prepare
+715 RC version/pins/installed public-surface and Python exactpackage acceptance,
+publish RC tag/assets and independently verify checksums/install/prerelease/Latest.
+No RC exists yet. Goal remains active.
