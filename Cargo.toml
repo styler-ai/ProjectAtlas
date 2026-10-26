@@ -106,7 +106,7 @@ regex-syntax = { version = "0.8.11", default-features = false, features = ["std"
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 rmcp = { version = "3.1.4", default-features = false, features = ["server", "transport-io", "macros"] }
-rusqlite = { version = "0.40", features = ["backup", "bundled", "hooks"] }
+rusqlite = { version = "0.40", features = ["backup", "bundled", "hooks", "limits"] }
 scraper = "0.27"
 same-file = "1.0"
 seccompiler = { version = "=0.5.0", default-features = false }
@@ -138,7 +138,7 @@ tree-sitter-php = "=0.24.2"
 tree-sitter-python = "=0.25.0"
 tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
-zstd = "=0.14.0"
+zstd = "=0.14.3"
 tree-sitter-zig = "=1.1.2"
 whichdisk = { version = "0.6.0", default-features = false, features = ["list"] }
 yaml-rust2 = "0.12"

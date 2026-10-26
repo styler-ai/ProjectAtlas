@@ -23,6 +23,79 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
+/// Public relation response policy shared by CLI and MCP admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationNavigationView {
+    /// Ordinary anchored graph pages with continuation.
+    Detailed,
+    /// Explicit complete small compatibility arrays.
+    Legacy,
+    /// Explicit analysis with its established defaults.
+    Analysis,
+}
+
+impl RelationNavigationView {
+    /// Return the omitted row limit for the selected response contract.
+    #[must_use]
+    pub const fn default_rows(self) -> usize {
+        match self {
+            Self::Detailed => 10,
+            Self::Legacy | Self::Analysis => 50,
+        }
+    }
+
+    /// Resolve omitted output bytes and enforce compatibility's hard ceiling.
+    ///
+    /// # Arguments
+    ///
+    /// `requested` is the caller's explicit encoded-output bound, if present.
+    ///
+    /// # Returns
+    ///
+    /// The selected view's byte budget. Detailed/analysis absolute validation
+    /// remains owned by their existing graph-limit boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero or more than 256 KiB for explicit compatibility output.
+    pub fn output_bytes(self, requested: Option<u32>) -> ServiceResult<u32> {
+        let bytes = requested.unwrap_or(match self {
+            Self::Detailed | Self::Legacy => 32 * 1_024,
+            Self::Analysis => 256 * 1_024,
+        });
+        if self == Self::Legacy && (bytes == 0 || bytes > 256 * 1_024) {
+            return Err(ServiceError::InvalidInput(
+                "legacy output requires 1..262144 bytes; use view detailed with an exact file anchor for larger requests".to_string(),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Check the actual selected adapter payload after its complete envelope is encoded.
+///
+/// # Arguments
+///
+/// `payload` includes the CLI's final newline or MCP's selected-project/audit wrapper;
+/// `limit` is the validated encoded-output bound.
+///
+/// # Returns
+///
+/// Success only when all encoded UTF-8 bytes fit.
+///
+/// # Errors
+///
+/// Returns narrowing guidance rather than emitting an oversized compatibility array.
+pub fn check_legacy_relation_output(payload: &str, limit: u32) -> ServiceResult<()> {
+    if payload.len() as u64 > u64::from(limit) {
+        return Err(ServiceError::LegacyRelationOutputLimit {
+            limit_bytes: limit,
+            encoded_bytes: payload.len() as u64,
+        });
+    }
+    Ok(())
+}
+
 /// Stable maximum rows materialized by the generated adjacency statement.
 const ADJACENCY_WORK_ROWS: usize = GraphLimits::MAX_ROWS as usize + 1;
 

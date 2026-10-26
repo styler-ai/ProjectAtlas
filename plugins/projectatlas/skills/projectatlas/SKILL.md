@@ -46,6 +46,24 @@ Treat `main` as the reserved alias for the explicitly selected control atlas, no
 
 Use the returned typed recovery state rather than switching to paths: `ambiguous` returns bounded selectors; `init_required` returns the exact alias init call; `refresh_required` names the stale alias; invalid or mismatched Git evidence fails closed; `worktree_required` asks for an exact active checkout when a bare/common manager cannot select one. If Git externally removes a registered checkout, `atlas_worktree_list` retains its active alias, last validated root, accepted telemetry revision, and typed missing state so `atlas_worktree_remove(worktree: "<alias>")` can retire it without reconstructing a path. A manager with `core.worktree`, an enabled `config.worktree` override, or unresolved config includes never guesses its parent. Add revalidates the selected root and lifecycle immediately before registration, and a moved-root refresh cannot reactivate an alias retired by a concurrent remove. If Git recreates a worktree administrative directory at a previously registered path, remove the stale ProjectAtlas alias and add the replacement explicitly; ProjectAtlas will not let the replacement inherit the alias or touch its atlas through that stale mapping. Lifecycle identity requires creation time plus platform file-object identity (Unix device/inode or Windows retained-handle volume/128-bit file ID), and every persisted common, administrative, and source path must be lossless UTF-8 for SQLite metadata and MCP JSON. If the filesystem or path cannot provide the complete evidence, alias registration fails closed; never reuse a replacement-character display path as `project_path`. `project_path` remains the compatibility route for unregistered and older workflows when the path is lossless UTF-8, while alias routing is the normal concurrent-agent path.
 
+## Bounded Relation Navigation
+
+Ordinary `atlas symbols relations --file <path>` / `atlas_symbol_relations(file: "<path>")`
+uses detailed pages: ten rows and 32 KiB encoded output. Supply an exact file,
+optionally an exact symbol. Follow returned continuations unchanged; preserve
+unknown totals, coverage and reached limits rather than treating a page as the
+whole graph. Analysis stays explicit with its existing 50-row/256-KiB defaults.
+
+Use explicit `--view legacy` / `view: "legacy"` only for complete small compatibility
+arrays. Omitted legacy rows remain 50; valid requests are 1–200 rows, default
+32 KiB and hard maximum 256 KiB output. Additional eligible rows, excess bytes
+or query work refuse with detailed-navigation guidance. Legacy SQL/decode work is
+bounded by 100,000 instructions, a cooperative one-second deadline and 1 MiB
+intermediate state; query text is at most 1,024 UTF-8 bytes with existing LIKE
+wildcard semantics. Tighter applicable caller limits win. Unsupported detailed
+controls and zero/oversized bounds are errors; never increase a legacy limit to
+try to fetch the whole graph.
+
 ## Classified Documentation Navigation
 
 - Treat `classification` as a derived file role, not parser trust, purpose authority, or runtime truth. `documentation` is guidance; confirm implementation claims in current `source` summaries, symbols, or exact slices.

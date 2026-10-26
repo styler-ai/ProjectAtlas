@@ -1773,16 +1773,16 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
         .stdout(predicate::str::contains("Atlas"))
         .stdout(predicate::str::contains("helper"));
 
-    let legacy_default = Command::cargo_bin("projectatlas")?
+    let detailed_default = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
         .args(["symbols", "relations", "--file", "src/lib.rs"])
         .output()?;
-    if !legacy_default.status.success()
-        || !String::from_utf8_lossy(&legacy_default.stdout).contains("helper")
+    if !detailed_default.status.success()
+        || !String::from_utf8_lossy(&detailed_default.stdout).contains("symbol_relations:")
     {
-        return Err(io::Error::other("default legacy relation command failed").into());
+        return Err(io::Error::other("default detailed relation command failed").into());
     }
     let legacy_explicit = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -1797,11 +1797,12 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
             "src/lib.rs",
         ])
         .output()?;
-    if !legacy_explicit.status.success() || legacy_default.stdout != legacy_explicit.stdout {
-        return Err(io::Error::other(
-            "explicit legacy relation view changed default output bytes or ordering",
-        )
-        .into());
+    if !legacy_explicit.status.success()
+        || !String::from_utf8_lossy(&legacy_explicit.stdout).contains("helper")
+    {
+        return Err(
+            io::Error::other("explicit legacy relation view lost its complete result").into(),
+        );
     }
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -1816,8 +1817,8 @@ fn symbols_watch_and_legacy_cleanup_flow() -> Result<(), Box<dyn Error>> {
             "0",
         ])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("relations[1]"));
+        .failure()
+        .stderr(predicate::str::contains("limit"));
 
     Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -4060,7 +4061,14 @@ fn exercise_normal_read_freshness(
         .current_dir(repo)
         .arg("--db")
         .arg(db)
-        .args(["symbols", "relations", "--file", "src/lib.rs"])
+        .args([
+            "symbols",
+            "relations",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "session_route",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("legacy_store"));
@@ -4398,7 +4406,14 @@ fn exercise_normal_read_freshness(
         .current_dir(repo)
         .arg("--db")
         .arg(db)
-        .args(["symbols", "relations", "--file", "src/lib.rs"])
+        .args([
+            "symbols",
+            "relations",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "session_route",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("active_store"))

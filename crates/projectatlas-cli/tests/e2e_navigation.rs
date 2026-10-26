@@ -6462,8 +6462,6 @@ fn assert_identity_relation_surfaces(
                 "legacy",
                 "--file",
                 caller_path,
-                "--relation",
-                "imports",
                 "--limit",
                 "10",
             ])
@@ -6494,6 +6492,11 @@ fn assert_identity_relation_surfaces(
         });
         if let Some(view) = view {
             arguments["view"] = serde_json::json!(view);
+            let object = arguments
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("relation arguments are not an object"))?;
+            object.remove("relation");
+            object.remove("direction");
         }
         let messages = vec![
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"identity-relation-e2e","version":"0.1.0"}}}"#.to_string(),
@@ -6521,6 +6524,23 @@ fn assert_identity_relation_surfaces(
         )?;
         let mcp_relations_text = mcp_tool_text(&stdout, 2)?;
         let mcp_relations: Value = toon_format::decode_default(&mcp_relations_text)?;
+        if view.is_none() {
+            require_json_usize(&mcp_relations, &["symbol_relations", "returned"], 1)?;
+            require_json_string(
+                &mcp_relations,
+                &["symbol_relations", "rows", "0", "relation", "kind", "value"],
+                "imports",
+            )?;
+            if mcp_relations_text.contains("LeakedIdentity")
+                || !mcp_relations_text.contains("worker")
+            {
+                return Err(io::Error::other(format!(
+                    "MCP default detailed relation surface exposed or lost identities: {mcp_relations}"
+                ))
+                .into());
+            }
+            continue;
+        }
         let rows = mcp_relations["symbol_relations"]
             .as_array()
             .ok_or_else(|| io::Error::other(format!(
@@ -7757,7 +7777,16 @@ fn full_repository_intelligence_flow_indexes_database_and_commands() -> Result<(
         .current_dir(&repo)
         .arg("--db")
         .arg(&db)
-        .args(["symbols", "relations", "--query", "helper", "--limit", "20"])
+        .args([
+            "symbols",
+            "relations",
+            "--view",
+            "legacy",
+            "--query",
+            "helper",
+            "--limit",
+            "20",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("helper"));
@@ -9180,6 +9209,10 @@ fn mcp_response(stdout: &str, id: i64) -> Result<Value, Box<dyn Error>> {
 
 /// Prove that every frozen v0.3.26 and v0.4.0 MCP contract remains intact.
 fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Error>> {
+    // 0.5.1 deliberately changes relation defaults/legacy limits. Admit only the
+    // reviewed guidance replacements; retain every other frozen schema constraint.
+    let relation_limit_description =
+        "Row limit: detailed defaults to 10; explicit legacy/analysis to 50; legacy maximum 200.";
     let baseline: Value = serde_json::from_str(include_str!("fixtures/mcp-v0.3.26-tools.json"))?;
     let baseline_tools = baseline
         .get("tools")
@@ -9211,6 +9244,10 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
         let expected_description = if name == "atlas_map" {
             Some("Return the current ProjectAtlas map; optionally write a JSON sidecar.")
+        } else if name == "atlas_symbol_relations" {
+            Some(
+                "Navigate anchored detailed relation pages (10 rows, 32 KiB by default); explicit legacy returns only complete small arrays, and analysis remains opt-in.",
+            )
         } else {
             baseline_tool.get("description").and_then(Value::as_str)
         };
@@ -9224,7 +9261,19 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         let baseline_schema = baseline_tool
             .get("inputSchema")
             .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
-        let normalized_schema = if name == "atlas_purpose_review" {
+        let normalized_schema = if name == "atlas_symbol_relations" {
+            require_json_string(
+                current_tool,
+                &["inputSchema", "properties", "limit", "description"],
+                relation_limit_description,
+            )?;
+            let mut schema = baseline_schema.clone();
+            *schema
+                .pointer_mut("/properties/limit/description")
+                .ok_or_else(|| io::Error::other("frozen relation row guidance missing"))? =
+                json!(relation_limit_description);
+            Some(schema)
+        } else if name == "atlas_purpose_review" {
             Some(inline_legacy_purpose_review_item_schema(baseline_schema)?)
         } else if matches!(
             name,
@@ -9317,6 +9366,26 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
                 *description = json!(
                     "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`."
                 );
+            }
+            for (field, expected) in [
+                (
+                    "view",
+                    "Anchored `detailed` by default; explicit `legacy` returns complete small arrays; `analysis` is opt-in.",
+                ),
+                (
+                    "output_bytes",
+                    "Encoded bytes: detailed/legacy default 32768; analysis default 262144; legacy maximum 262144.",
+                ),
+            ] {
+                require_json_string(
+                    current_schema,
+                    &["properties", field, "description"],
+                    expected,
+                )?;
+                *schema
+                    .pointer_mut(&format!("/properties/{field}/description"))
+                    .ok_or_else(|| io::Error::other("frozen relation policy guidance missing"))? =
+                    json!(expected);
             }
             schema
         } else if name == "atlas_root_set" {
@@ -9978,6 +10047,8 @@ function save(): void {}
             .args([
                 "symbols",
                 "relations",
+                "--view",
+                "legacy",
                 "--file",
                 "src/Atlas/Service.php",
                 "--limit",
@@ -10174,7 +10245,7 @@ function save(): void {}
         assert_summary(&initialized_summary)?;
         let mcp_relations: Value = toon_format::decode_default(&mcp.call_tool(
             "atlas_symbol_relations",
-            &json!({"file": "src/Atlas/Service.php", "limit": 100}),
+            &json!({"file": "src/Atlas/Service.php", "view": "legacy", "limit": 100}),
         )?)?;
         assert_relations(&mcp_relations, false)?;
         let mcp_slice: Value = toon_format::decode_default(&mcp.call_tool(
@@ -10216,7 +10287,7 @@ function save(): void {}
         assert_summary_after_refresh(&refreshed_mcp_summary)?;
         let refreshed_mcp_relations: Value = toon_format::decode_default(&mcp.call_tool(
             "atlas_symbol_relations",
-            &json!({"file": "src/Atlas/Service.php", "limit": 100}),
+            &json!({"file": "src/Atlas/Service.php", "view": "legacy", "limit": 100}),
         )?)?;
         assert_relations(&refreshed_mcp_relations, true)?;
         Ok(())
@@ -12437,6 +12508,406 @@ endcmap CMapName currentdict /CMap defineresource pop end end";
                 io::Error::other("explicit document language override lost indexed text").into(),
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries()
+-> Result<(), Box<dyn Error>> {
+    const RELATION_FIXTURE_FILE: &str = "lib.py";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("bounded-relation-clients");
+    fs::create_dir_all(&repo)?;
+    let mut source = String::new();
+    for index in 0..30 {
+        writeln!(source, "import module_{index}")?;
+    }
+    fs::write(repo.join(RELATION_FIXTURE_FILE), &source)?;
+    let database = repo.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    run_scan(&repo, &database)?;
+    let stored = AtlasStore::open_read_only(&database)?;
+    let legacy_rows = stored.symbol_relation_count()?;
+    let publication = stored.index_publication()?;
+    if !(11..=50).contains(&legacy_rows) {
+        return Err(
+            io::Error::other("compatibility fixture must exercise omitted 50-row limit").into(),
+        );
+    }
+    drop(stored);
+    let executable = mcp_contract_executable();
+    let cli = |format: &str, arguments: &[&str]| {
+        StdCommand::new(&executable)
+            .current_dir(&repo)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .arg("--db")
+            .arg(&database)
+            .args(["--format", format, "symbols", "relations"])
+            .args(arguments)
+            .output()
+    };
+    for format in ["json", "toon"] {
+        let output = cli(format, &["--file", RELATION_FIXTURE_FILE])?;
+        if !output.status.success() || output.stdout.len() > 32 * 1_024 {
+            return Err(io::Error::other(format!(
+                "default {format} relation bound failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        let page: Value = if format == "json" {
+            serde_json::from_slice(&output.stdout)?
+        } else {
+            toon_format::decode_default(&String::from_utf8(output.stdout)?)?
+        };
+        if !page
+            .pointer("/symbol_relations/returned")
+            .and_then(Value::as_u64)
+            .is_some_and(|rows| (1..=10).contains(&rows))
+        {
+            return Err(io::Error::other("default page did not return bounded useful rows").into());
+        }
+        if page.pointer("/symbol_relations/anchor").is_none() {
+            return Err(
+                io::Error::other("ordinary relation call did not use detailed navigation").into(),
+            );
+        }
+        let complete = cli(
+            format,
+            &["--view", "legacy", "--file", RELATION_FIXTURE_FILE],
+        )?;
+        if !complete.status.success() {
+            return Err(io::Error::other(format!(
+                "complete legacy {format} failed: {}",
+                String::from_utf8_lossy(&complete.stderr)
+            ))
+            .into());
+        }
+        let size = complete.stdout.len();
+        let rows: Value = if format == "json" {
+            serde_json::from_slice(&complete.stdout)?
+        } else {
+            toon_format::decode_default(&String::from_utf8(complete.stdout)?)?
+        };
+        let array = if format == "json" {
+            rows.as_array()
+        } else {
+            rows.get("symbol_relations").and_then(Value::as_array)
+        }
+        .ok_or_else(|| io::Error::other("explicit legacy array shape changed"))?;
+        if array.len() != legacy_rows {
+            return Err(
+                io::Error::other("omitted legacy limit silently lost eligible rows").into(),
+            );
+        }
+        for (bound, succeeds) in [(size, true), (size - 1, false)] {
+            let bound = bound.to_string();
+            let result = cli(
+                format,
+                &[
+                    "--view",
+                    "legacy",
+                    "--file",
+                    RELATION_FIXTURE_FILE,
+                    "--output-bytes",
+                    &bound,
+                ],
+            )?;
+            if result.status.success() != succeeds {
+                return Err(io::Error::other(format!(
+                    "{format} legacy byte admission ignored actual encoded bytes"
+                ))
+                .into());
+            }
+            if !succeeds {
+                let error: Value = if format == "json" {
+                    serde_json::from_slice(&result.stderr)?
+                } else {
+                    toon_format::decode_default(&String::from_utf8(result.stderr)?)?
+                };
+                require_json_string(&error, &["error", "kind"], "legacy_relation_limit")?;
+                require_json_string(
+                    &error,
+                    &["error", "legacy_relation_limit", "scope"],
+                    "output",
+                )?;
+                require_json_usize(
+                    &error,
+                    &["error", "legacy_relation_limit", "encoded_bytes"],
+                    size,
+                )?;
+            }
+        }
+    }
+    for arguments in [
+        vec![],
+        vec![
+            "--view",
+            "legacy",
+            "--file",
+            RELATION_FIXTURE_FILE,
+            "--limit",
+            "0",
+        ],
+        vec![
+            "--view",
+            "legacy",
+            "--file",
+            RELATION_FIXTURE_FILE,
+            "--limit",
+            "10",
+        ],
+        vec![
+            "--view",
+            "legacy",
+            "--file",
+            RELATION_FIXTURE_FILE,
+            "--limit",
+            "10001",
+            "--output-bytes",
+            "4096",
+        ],
+        vec![
+            "--view",
+            "legacy",
+            "--file",
+            RELATION_FIXTURE_FILE,
+            "--output-bytes",
+            "262145",
+        ],
+        vec![
+            "--view",
+            "legacy",
+            "--file",
+            RELATION_FIXTURE_FILE,
+            "--depth",
+            "1",
+        ],
+    ] {
+        let output = cli("json", &arguments)?;
+        if output.status.success() || output.stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "invalid/incomplete CLI relation request succeeded: {arguments:?}"
+            ))
+            .into());
+        }
+    }
+    let initial = cli("json", &["--file", RELATION_FIXTURE_FILE])?;
+    let mut page: Value = serde_json::from_slice(&initial.stdout)?;
+    let mut seen = BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        for row in page
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("detailed page has no rows"))?
+        {
+            if !seen.insert(serde_json::to_string(&row["relation"])?) {
+                return Err(
+                    io::Error::other("default continuation repeated a logical relation").into(),
+                );
+            }
+        }
+        let Some(cursor) = page
+            .pointer("/symbol_relations/continuation")
+            .and_then(Value::as_str)
+        else {
+            break;
+        };
+        if pages >= 10 {
+            return Err(io::Error::other("default continuation did not terminate").into());
+        }
+        let output = cli(
+            "json",
+            &["--file", RELATION_FIXTURE_FILE, "--cursor", cursor],
+        )?;
+        if !output.status.success() || output.stdout.len() > 32 * 1_024 {
+            return Err(io::Error::other("default continuation lost its bounded response").into());
+        }
+        page = serde_json::from_slice(&output.stdout)?;
+    }
+    if pages < 2 || seen.len() != legacy_rows {
+        return Err(io::Error::other("default edge budget prevented continuation progress").into());
+    }
+
+    let mut session = McpContractSession::spawn(&executable, &repo, &database)?;
+    let operation = (|| -> Result<(), Box<dyn Error>> {
+        let default_text = session.call_tool(
+            "atlas_symbol_relations",
+            &json!({"file": RELATION_FIXTURE_FILE}),
+        )?;
+        if default_text.len() > 32 * 1_024 {
+            return Err(io::Error::other("MCP detailed default exceeded bytes").into());
+        }
+        let default: Value = toon_format::decode_default(&default_text)?;
+        if !default
+            .pointer("/symbol_relations/returned")
+            .and_then(Value::as_u64)
+            .is_some_and(|rows| (1..=10).contains(&rows))
+        {
+            return Err(
+                io::Error::other("MCP default page did not return bounded useful rows").into(),
+            );
+        }
+        let first_cursor = default
+            .pointer("/symbol_relations/continuation")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::other("MCP default page has no continuation"))?
+            .to_string();
+        let mut mcp_page = default;
+        let mut mcp_seen = BTreeSet::new();
+        let mut mcp_pages = 0;
+        loop {
+            mcp_pages += 1;
+            for row in mcp_page
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("MCP detailed page has no rows"))?
+            {
+                if !mcp_seen.insert(serde_json::to_string(&row["relation"])?) {
+                    return Err(io::Error::other("MCP continuation repeated a relation").into());
+                }
+            }
+            let Some(cursor) = mcp_page
+                .pointer("/symbol_relations/continuation")
+                .and_then(Value::as_str)
+            else {
+                break;
+            };
+            if mcp_pages >= 10 {
+                return Err(io::Error::other("MCP continuation did not terminate").into());
+            }
+            let next = session.call_tool(
+                "atlas_symbol_relations",
+                &json!({"file": RELATION_FIXTURE_FILE, "cursor": cursor}),
+            )?;
+            if next.len() > 32 * 1_024 {
+                return Err(io::Error::other("MCP continuation exceeded bytes").into());
+            }
+            mcp_page = toon_format::decode_default(&next)?;
+        }
+        if mcp_pages < 2 || mcp_seen != seen {
+            return Err(
+                io::Error::other("MCP continuation lost complete CLI relation coverage").into(),
+            );
+        }
+        let mut wrong_root_cursor: Value = serde_json::from_str(&first_cursor)?;
+        let root_digest = wrong_root_cursor
+            .pointer_mut("/binding/root_digest/0")
+            .ok_or_else(|| io::Error::other("cursor omitted selected-root binding"))?;
+        *root_digest = json!(root_digest.as_u64().unwrap_or_default() ^ 1);
+        let wrong_root = session.call_tool_text(
+            "atlas_symbol_relations",
+            &json!({"file": RELATION_FIXTURE_FILE, "cursor": serde_json::to_string(&wrong_root_cursor)?}),
+            false,
+        )?;
+        if !wrong_root.contains("cursor is stale for project root") {
+            return Err(io::Error::other("MCP accepted a different root digest").into());
+        }
+        let complete = session.call_tool(
+            "atlas_symbol_relations",
+            &json!({"view": "legacy", "file": RELATION_FIXTURE_FILE}),
+        )?;
+        let decoded: Value = toon_format::decode_default(&complete)?;
+        if decoded
+            .get("symbol_relations")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(legacy_rows)
+        {
+            return Err(io::Error::other("MCP explicit legacy omitted complete rows").into());
+        }
+        for (arguments, resource_error) in [
+            (json!({}), false),
+            (
+                json!({"view": "legacy", "file": RELATION_FIXTURE_FILE, "limit": 10}),
+                true,
+            ),
+            (
+                json!({"view": "legacy", "file": RELATION_FIXTURE_FILE, "limit": 0}),
+                false,
+            ),
+            (
+                json!({"view": "legacy", "file": RELATION_FIXTURE_FILE, "limit": 10001, "output_bytes": 4096}),
+                false,
+            ),
+            (
+                json!({"view": "legacy", "file": RELATION_FIXTURE_FILE, "output_bytes": complete.len() - 1}),
+                true,
+            ),
+            (
+                json!({"view": "legacy", "file": RELATION_FIXTURE_FILE, "direction": "outbound"}),
+                false,
+            ),
+        ] {
+            let error =
+                session.call_tool_text("atlas_symbol_relations", &arguments, resource_error)?;
+            let decoded: Value = toon_format::decode_default(&error)?;
+            if resource_error {
+                require_json_string(&decoded, &["error", "kind"], "legacy_relation_limit")?;
+            }
+            if arguments.get("limit").and_then(Value::as_u64) == Some(10) {
+                require_json_string(
+                    &decoded,
+                    &["error", "legacy_relation_limit", "limit"],
+                    "rows",
+                )?;
+                require_json_usize(
+                    &decoded,
+                    &["error", "legacy_relation_limit", "work", "candidate_rows"],
+                    11,
+                )?;
+            }
+            if decoded.get("error").is_none() {
+                return Err(io::Error::other(
+                    "MCP invalid legacy request returned successful data",
+                )
+                .into());
+            }
+            if error.len() > 8 * 1_024 {
+                return Err(io::Error::other("relation refusal diagnostic is unbounded").into());
+            }
+        }
+        // Force a selected-project wrapper, then test its complete encoded byte boundary.
+        let other = temp.path().join("routed-relations");
+        fs::create_dir_all(&other)?;
+        fs::write(
+            other.join("lib.rs"),
+            "pub fn target() {}\npub fn caller() { target(); }\n",
+        )?;
+        fs::write(other.join(RELATION_FIXTURE_FILE), &source)?;
+        run_scan(&other, &other.join(ATLAS_DIR_NAME).join("projectatlas.db"))?;
+        let replay = session.call_tool_text(
+            "atlas_symbol_relations",
+            &json!({"project_path": other, "file": RELATION_FIXTURE_FILE, "cursor": first_cursor}),
+            false,
+        )?;
+        if !replay.contains("cursor is stale for project identity") {
+            return Err(io::Error::other("MCP accepted another selected project's cursor").into());
+        }
+
+        let mut routed =
+            json!({"view": "legacy", "file": other.join("lib.rs"), "nearest_project": true});
+        let wrapped = session.call_tool("atlas_symbol_relations", &routed)?;
+        if !wrapped.contains("selected_project") {
+            return Err(io::Error::other("routed legacy fixture omitted project audit").into());
+        }
+        routed["output_bytes"] = json!(wrapped.len() - 1);
+        let refusal: Value = toon_format::decode_default(
+            &session.call_tool_error("atlas_symbol_relations", &routed)?,
+        )?;
+        require_json_string(&refusal, &["error", "kind"], "legacy_relation_limit")?;
+        require_json_string(
+            &refusal,
+            &["error", "legacy_relation_limit", "scope"],
+            "output",
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+    if AtlasStore::open_read_only(&database)?.index_publication()? != publication {
+        return Err(io::Error::other("relation reads mutated publication").into());
     }
     Ok(())
 }
