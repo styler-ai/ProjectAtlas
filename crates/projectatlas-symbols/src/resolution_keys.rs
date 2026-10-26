@@ -1386,6 +1386,54 @@ mod tests {
     }
 
     #[test]
+    fn preserves_unicode_python_import_names_and_aliases() {
+        let name = "a\u{301}";
+        let alias = "r\u{301}";
+        let module = "helper\u{301}.reader";
+        assert_eq!(
+            parse_import_references(&format!("from {module} import (run)")),
+            vec![reference(ImportSyntax::Python, module, Some("run"), "run")]
+        );
+        for list in [
+            format!("{name}, run"),
+            format!("({name}, run,)"),
+            format!("(\n{name},\nrun,\n)"),
+        ] {
+            assert_eq!(
+                parse_import_references(&format!("from helper import {list}")),
+                vec![
+                    reference(ImportSyntax::Python, "helper", Some(name), name),
+                    reference(ImportSyntax::Python, "helper", Some("run"), "run"),
+                ]
+            );
+        }
+        for list in [
+            format!("run as {alias}, {name}"),
+            format!("(run as {alias}, {name},)"),
+        ] {
+            assert_eq!(
+                parse_import_references(&format!("from helper import {list}")),
+                vec![
+                    reference(ImportSyntax::Python, "helper", Some(name), name),
+                    reference(ImportSyntax::Python, "helper", Some("run"), alias),
+                ]
+            );
+        }
+        for invalid in ["\u{301}a", "a\u{2022}", "a\u{b2}", "a\u{200c}", "a\u{200d}"] {
+            assert!(
+                parse_import_references(&format!("from helper import ({invalid}, run)")).is_empty()
+            );
+            assert!(
+                parse_import_references(&format!("from helper import (run as {invalid})"))
+                    .is_empty()
+            );
+            assert!(
+                parse_import_references(&format!("from {invalid}.reader import run")).is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn resolves_relative_imports_without_platform_path_rules() {
         assert_eq!(
             resolve_relative_import_path("src/features/main.ts", "../shared/reader.ts"),

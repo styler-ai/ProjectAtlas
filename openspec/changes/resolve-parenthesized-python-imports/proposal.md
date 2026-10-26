@@ -20,7 +20,7 @@ None. Existing relation routes and persisted schema remain unchanged.
 
 ## Impact
 
-Python semantic normalization, resolution-key tests, existing CLI graph/caller integration and the semantic projection contract. No dependencies, parser pack, schema or public route changes.
+Python semantic normalization, resolution-key tests, existing CLI graph/caller integration and the semantic projection contract. Reuse the already-locked canonical unicode-ident crate as a direct dependency for Python-compatible identifier character classes. No new transitive packages, parser pack, schema or public route changes.
 
 ## Release Scope
 

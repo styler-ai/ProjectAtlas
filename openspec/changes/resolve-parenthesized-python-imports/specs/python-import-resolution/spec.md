@@ -13,6 +13,15 @@ The existing Python provider SHALL normalize a single flat parenthesized from-im
 - **WHEN** an import list is empty, unbalanced, nested, contains empty items, invalid names or aliases, or unsupported wildcard syntax
 - **THEN** semantic normalization abstains rather than inventing a local target
 
+### Requirement: Unicode import compatibility is preserved
+
+The Python normalizer SHALL retain XID-valid imported names and aliases, including combining-mark continuations, without dropping ASCII siblings. It SHALL use locked Unicode 17 properties with underscore-start support and reject join controls U+200C/U+200D. Source spelling SHALL remain unchanged; interpreter-version targeting and NFKC name equivalence are outside this correction.
+
+#### Scenario: Unicode names do not suppress ordinary ASCII imports
+- **WHEN** an ordinary or parenthesized list contains a combining-mark name or alias alongside an ASCII name
+- **THEN** both static references are retained with their exact spellings
+- **AND** an invalid start, punctuation or join-control item causes conservative list abstention
+
 ### Requirement: Existing semantic projections are repaired safely
 
 The implementation SHALL advance the existing semantic resolution contract and use existing fingerprint invalidation and publication ownership to repair unchanged compatible indexes. It SHALL preserve project identity and approved purposes without a schema change or index reset. Required one-time semantic upgrade work SHALL be distinguished from steady-state open performance.

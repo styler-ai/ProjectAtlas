@@ -114,7 +114,7 @@ fn valid_module(module: &str) -> bool {
         .all(|component| !component.is_empty() && valid_identifier(component))
 }
 
-/// Accept conservative Python identifiers and abstain on punctuation.
+/// Accept exact XID spellings with Python's underscore and join-control profile.
 fn valid_identifier(value: &str) -> bool {
     // Soft keywords such as `match`, `case` and `type` remain legal names here.
     if matches!(
@@ -160,6 +160,9 @@ fn valid_identifier(value: &str) -> bool {
     let mut characters = value.chars();
     characters
         .next()
-        .is_some_and(|character| character == '_' || character.is_alphabetic())
-        && characters.all(|character| character == '_' || character.is_alphanumeric())
+        .is_some_and(|character| character == '_' || unicode_ident::is_xid_start(character))
+        && characters.all(|character| {
+            !matches!(character, '\u{200c}' | '\u{200d}')
+                && unicode_ident::is_xid_continue(character)
+        })
 }

@@ -3219,6 +3219,15 @@ fn parenthesized_python_imports_resolve_and_converge_after_refresh() -> Result<(
         repo.join("example/redaction.py"),
         "def redact_token():\n    return '***'\n",
     )?;
+    fs::write(
+        repo.join("example/unicode_helper.py"),
+        "def a\u{301}():\n    return True\n\ndef run():\n    return True\n",
+    )?;
+    let unicode_caller = "example/unicode_refresh.py";
+    fs::write(
+        repo.join(unicode_caller),
+        "from example.unicode_helper import a\u{301}, run\n\ndef refresh_unicode():\n    return a\u{301}(), run()\n",
+    )?;
     let caller = "example/token_refresh.py";
     let source = |imports: &str| {
         format!(
@@ -3257,56 +3266,75 @@ fn parenthesized_python_imports_resolve_and_converge_after_refresh() -> Result<(
         ),
     ] {
         fs::write(repo.join(caller), source(imports))?;
-        run_watch_once_report(&repo, &db)?;
-        let output = Command::new(mcp_contract_executable())
-            .current_dir(&repo)
-            .arg("--db")
-            .arg(&db)
-            .args([
-                "--format",
-                "json",
-                "symbols",
-                "relations",
-                "--view",
-                "detailed",
-                "--file",
-                caller,
-                "--relation",
-                "imports",
-                "--direction",
-                "outbound",
-                "--limit",
-                "10",
-            ])
-            .output()?;
-        require(
-            output.status.success(),
-            &String::from_utf8_lossy(&output.stderr),
-        )?;
-        let report: Value = serde_json::from_slice(&output.stdout)?;
-        let rows = report["symbol_relations"]["rows"]
-            .as_array()
-            .ok_or_else(|| io::Error::other("Python import rows missing"))?;
-        require(rows.len() == 2, "Python import count is not exactly two")?;
-        let mut targets = BTreeSet::new();
-        for row in rows {
-            require(
-                row["relation"]["resolution"]["status"] == "resolved",
-                "Python import remained unresolved",
+        if checkpoint == "multiline" {
+            fs::write(
+                repo.join(unicode_caller),
+                "from example.unicode_helper import (\n    a\u{301} as r\u{301},\n    run,\n)\n\ndef refresh_unicode():\n    return r\u{301}(), run()\n",
             )?;
-            let target = row["target"]["entity"]["selector"]["path"]
-                .as_str()
-                .ok_or_else(|| io::Error::other("resolved Python target missing"))?;
-            targets.insert(target.to_owned());
         }
-        require(
-            targets
-                == BTreeSet::from([
+        run_watch_once_report(&repo, &db)?;
+        for (query_file, expected_targets) in [
+            (
+                caller,
+                BTreeSet::from([
                     "example/token_contract.py".to_owned(),
                     "example/redaction.py".to_owned(),
                 ]),
-            "Python imports resolved to wrong files",
-        )?;
+            ),
+            (
+                unicode_caller,
+                BTreeSet::from(["example/unicode_helper.py".to_owned()]),
+            ),
+        ] {
+            let output = Command::new(mcp_contract_executable())
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&db)
+                .args([
+                    "--format",
+                    "json",
+                    "symbols",
+                    "relations",
+                    "--view",
+                    "detailed",
+                    "--file",
+                    query_file,
+                    "--relation",
+                    "imports",
+                    "--direction",
+                    "outbound",
+                    "--limit",
+                    "10",
+                ])
+                .output()?;
+            require(
+                output.status.success(),
+                &String::from_utf8_lossy(&output.stderr),
+            )?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            let rows = report["symbol_relations"]["rows"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("Python import rows missing"))?;
+            require(
+                rows.len() == expected_targets.len(),
+                "Python import count differs from the expected targets",
+            )?;
+            let mut targets = BTreeSet::new();
+            for row in rows {
+                require(
+                    row["relation"]["resolution"]["status"] == "resolved",
+                    "Python import remained unresolved",
+                )?;
+                let target = row["target"]["entity"]["selector"]["path"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("resolved Python target missing"))?;
+                targets.insert(target.to_owned());
+            }
+            require(
+                targets == expected_targets,
+                "Python imports resolved to wrong files",
+            )?;
+        }
         for (file, function) in [
             ("example/token_contract.py", "validate_token"),
             ("example/token_contract.py", "persist_token"),
@@ -3318,6 +3346,15 @@ fn parenthesized_python_imports_resolve_and_converge_after_refresh() -> Result<(
                 file,
                 function,
                 "example/token_refresh.py::refresh_token",
+            )?;
+        }
+        for function in ["a\u{301}", "run"] {
+            assert_summary_called_by(
+                &repo,
+                &db,
+                "example/unicode_helper.py",
+                function,
+                "example/unicode_refresh.py::refresh_unicode",
             )?;
         }
         assert_clean_scan_convergence(&repo, &db, temp.path(), checkpoint)?;
