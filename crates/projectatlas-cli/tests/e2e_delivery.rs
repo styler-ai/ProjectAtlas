@@ -490,7 +490,7 @@ const SHORT_CLI_FILE_NAME: &str = "short-cli.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "40fc803fcc36e5044cdf9248518afc8276348a1c98ac8732429b6796e3bd54d3";
+const MCP_TOOLS_SHA256: &str = "70218bfe77a40085c88eb14e0f09dc06dac566ec4345f5f816bb494286f0be19";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -20539,11 +20539,17 @@ fn packaged_cli_surface_preserves_frozen_routes_and_defaults() -> Result<(), Box
         }
     }
     for route in &current_routes {
-        let expected = current_defaults
-            .get(route)
-            .map(|value| cli_value_strings(value, route))
-            .transpose()?
-            .unwrap_or_default();
+        let expected = if route == "symbols relations" {
+            // 0.5.1 resolves omitted row/byte/control values after selecting the view.
+            // Historical fixtures remain unchanged; real adapter tests verify semantics.
+            vec!["--view=detailed".to_string()]
+        } else {
+            current_defaults
+                .get(route)
+                .map(|value| cli_value_strings(value, route))
+                .transpose()?
+                .unwrap_or_default()
+        };
         let advertised = cli_help_surface(&executable, route)?.defaults;
         if advertised != expected {
             return Err(io::Error::other(format!(
@@ -20597,6 +20603,10 @@ fn packaged_cli_surface_preserves_frozen_routes_and_defaults() -> Result<(), Box
             .as_object()
             .ok_or_else(|| io::Error::other("legacy CLI defaults fixture was not an object"))?;
         for (route, expected) in legacy_defaults {
+            if route == "symbols relations" {
+                // Its deliberate 0.5.1 policy is checked above and through real requests.
+                continue;
+            }
             let expected = cli_value_strings(expected, route)?;
             let advertised = cli_help_surface(&executable, route)?.defaults;
             if !ordered_subsequence(&expected, &advertised) {
@@ -22138,7 +22148,7 @@ fn mcp_stdio_serves_toon_tool_payloads() -> Result<(), Box<dyn Error>> {
         r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"atlas_file_summary","arguments":{"file":"src/lib.rs"}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","symbol_parent":"","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":65536}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"detailed","compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","include_occurrences":true,"limit":10,"output_bytes":2048}}}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","limit":10}}}"#.to_string(),
+        r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"legacy","compact":true,"file":"src/lib.rs","symbol":"indexed","direction":"outbound","limit":10}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"output_bytes":65536,"include_communities":true,"include_cycles":true}}}"#.to_string(),
         r#"{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"atlas_symbol_relations","arguments":{"view":"analysis","file":"src/lib.rs","symbol":"architecture_root","direction":"outbound","depth":3,"limit":100,"edge_limit":1,"output_bytes":65536,"include_communities":true}}}"#.to_string(),
     ];
@@ -23660,6 +23670,8 @@ fn assert_packaged_cli_legacy_leaf_contracts(
     let relations = run(&[
         "symbols",
         "relations",
+        "--view",
+        "legacy",
         "--file",
         "src/lib.rs",
         "--limit",
@@ -26283,6 +26295,10 @@ fn mcp_response(stdout: &str, id: i64) -> Result<Value, Box<dyn Error>> {
 
 /// Prove that every frozen v0.3.26 and v0.4.0 MCP contract remains intact.
 fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Error>> {
+    // 0.5.1 deliberately changes relation defaults/legacy limits. Admit only the
+    // reviewed guidance replacements; retain every other frozen schema constraint.
+    let relation_limit_description =
+        "Row limit: detailed defaults to 10; explicit legacy/analysis to 50; legacy maximum 200.";
     let baseline: Value = serde_json::from_str(include_str!("fixtures/mcp-v0.3.26-tools.json"))?;
     let baseline_tools = baseline
         .get("tools")
@@ -26314,6 +26330,10 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             .ok_or_else(|| io::Error::other(format!("current MCP tool {name} is missing")))?;
         let expected_description = if name == "atlas_map" {
             Some("Return the current ProjectAtlas map; optionally write a JSON sidecar.")
+        } else if name == "atlas_symbol_relations" {
+            Some(
+                "Navigate anchored detailed relation pages (10 rows, 32 KiB by default); explicit legacy returns only complete small arrays, and analysis remains opt-in.",
+            )
         } else {
             baseline_tool.get("description").and_then(Value::as_str)
         };
@@ -26327,7 +26347,19 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
         let baseline_schema = baseline_tool
             .get("inputSchema")
             .ok_or_else(|| io::Error::other(format!("baseline schema missing for {name}")))?;
-        let normalized_schema = if name == "atlas_purpose_review" {
+        let normalized_schema = if name == "atlas_symbol_relations" {
+            require_json_string(
+                current_tool,
+                &["inputSchema", "properties", "limit", "description"],
+                relation_limit_description,
+            )?;
+            let mut schema = baseline_schema.clone();
+            *schema
+                .pointer_mut("/properties/limit/description")
+                .ok_or_else(|| io::Error::other("frozen relation row guidance missing"))? =
+                json!(relation_limit_description);
+            Some(schema)
+        } else if name == "atlas_purpose_review" {
             Some(inline_legacy_purpose_review_item_schema(baseline_schema)?)
         } else if matches!(
             name,
@@ -26420,6 +26452,26 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
                 *description = json!(
                     "Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`."
                 );
+            }
+            for (field, expected) in [
+                (
+                    "view",
+                    "Anchored `detailed` by default; explicit `legacy` returns complete small arrays; `analysis` is opt-in.",
+                ),
+                (
+                    "output_bytes",
+                    "Encoded bytes: detailed/legacy default 32768; analysis default 262144; legacy maximum 262144.",
+                ),
+            ] {
+                require_json_string(
+                    current_schema,
+                    &["properties", field, "description"],
+                    expected,
+                )?;
+                *schema
+                    .pointer_mut(&format!("/properties/{field}/description"))
+                    .ok_or_else(|| io::Error::other("frozen relation policy guidance missing"))? =
+                    json!(expected);
             }
             schema
         } else if name == "atlas_root_set" {

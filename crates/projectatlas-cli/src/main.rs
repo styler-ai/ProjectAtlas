@@ -321,6 +321,8 @@ struct CliErrorPayload<'a> {
 enum AgentErrorKind {
     /// General command, input, storage, or service failure.
     Error,
+    /// A complete legacy relation array reached its work, row or output bound.
+    LegacyRelationLimit,
     /// The selected project root needs explicit initialization.
     InitRequired,
     /// A checked-out source worktree must be selected.
@@ -479,12 +481,22 @@ enum OutputFormat {
 /// Symbol-relation response contract selected by the caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum RelationViewArg {
-    /// Preserve the v0.3 relation rows and ordering exactly.
+    /// Return complete small legacy arrays (1 through 200 rows).
     Legacy,
     /// Use bounded normalized-graph navigation.
     Detailed,
     /// Project one closed architecture, impact, or static-trace analysis.
     Analysis,
+}
+
+impl From<RelationViewArg> for projectatlas_service::RelationNavigationView {
+    fn from(view: RelationViewArg) -> Self {
+        match view {
+            RelationViewArg::Detailed => Self::Detailed,
+            RelationViewArg::Legacy => Self::Legacy,
+            RelationViewArg::Analysis => Self::Analysis,
+        }
+    }
 }
 
 /// Closed relation analysis selected on the existing symbol-relations route.
@@ -658,32 +670,32 @@ struct DetailedRelationFilterArgs {
     /// Optional classified-content selection: source, documentation, or both.
     #[arg(long, value_name = "source|documentation|both")]
     content_selection: Option<ContentSelection>,
-    /// Direction followed from every detailed frontier.
-    #[arg(long, value_enum, default_value_t = RelationDirectionArg::Outbound)]
-    direction: RelationDirectionArg,
+    /// Direction followed from every detailed frontier (default outbound).
+    #[arg(long, value_enum)]
+    direction: Option<RelationDirectionArg>,
     /// Optional exact legacy or extended relation family.
     #[arg(long)]
     relation: Option<String>,
-    /// Lowest confidence retained by detailed navigation.
-    #[arg(long, value_enum, default_value_t = RelationConfidenceArg::Low)]
-    minimum_confidence: RelationConfidenceArg,
-    /// Resolution state retained by detailed navigation.
-    #[arg(long, value_enum, default_value_t = RelationResolutionArg::Any)]
-    resolution: RelationResolutionArg,
+    /// Lowest confidence retained by detailed navigation (default low).
+    #[arg(long, value_enum)]
+    minimum_confidence: Option<RelationConfidenceArg>,
+    /// Resolution state retained by detailed navigation (default any).
+    #[arg(long, value_enum)]
+    resolution: Option<RelationResolutionArg>,
 }
 
 /// Traversal and output ceilings for detailed relation navigation.
 #[derive(Args, Debug)]
 struct DetailedRelationLimitArgs {
-    /// Maximum detailed traversal depth.
-    #[arg(long, default_value_t = 1)]
-    depth: u32,
+    /// Maximum detailed traversal depth (default 1).
+    #[arg(long)]
+    depth: Option<u32>,
     /// Retain bounded exact source occurrences in detailed rows.
     #[arg(long)]
     include_occurrences: bool,
-    /// Maximum exact occurrences retained per detailed relation.
-    #[arg(long, default_value_t = 25)]
-    occurrence_limit: u32,
+    /// Maximum exact occurrences retained per detailed relation (default 25).
+    #[arg(long)]
+    occurrence_limit: Option<u32>,
     /// Maximum adjacency rows inspected across the complete request.
     #[arg(long)]
     edge_limit: Option<u32>,
@@ -702,9 +714,9 @@ struct DetailedRelationLimitArgs {
     /// Maximum service-owned elapsed milliseconds.
     #[arg(long)]
     deadline_ms: Option<u64>,
-    /// Maximum encoded bytes admitted to the detailed response.
-    #[arg(long, default_value_t = 256 * 1024)]
-    output_bytes: u32,
+    /// Encoded output bytes (detailed/legacy 32768; analysis 262144).
+    #[arg(long)]
+    output_bytes: Option<u32>,
 }
 
 /// Optional exact symbol selector shared by the top-level slice command.
@@ -1658,10 +1670,10 @@ enum SymbolsCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// List symbol relations by optional file and query.
+    /// Navigate anchored detailed pages, explicit legacy arrays or opt-in analysis.
     Relations {
-        /// Preserve legacy rows or opt in to detailed normalized-graph navigation.
-        #[arg(long, value_enum, default_value_t = RelationViewArg::Legacy)]
+        /// Anchored detailed pages by default; legacy is an explicit complete small array.
+        #[arg(long, value_enum, default_value_t = RelationViewArg::Detailed)]
         view: RelationViewArg,
         /// Optional repository-relative file path.
         #[arg(long)]
@@ -1672,9 +1684,9 @@ enum SymbolsCommand {
         /// Additive normalized-graph traversal controls.
         #[command(flatten)]
         detailed: Box<DetailedRelationArgs>,
-        /// Maximum relations to return.
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
+        /// Row limit (detailed 10; explicit legacy or analysis 50).
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Return an exact source slice for a named symbol.
     Slice {
@@ -2259,6 +2271,46 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     include_cycles,
                     include_dead_code,
                 } = analysis.as_ref();
+                let policy = projectatlas_service::RelationNavigationView::from(*view);
+                let row_limit = limit.unwrap_or(policy.default_rows());
+                let output_limit = policy.output_bytes(*output_bytes)?;
+                let legacy_budget = if *view == RelationViewArg::Legacy {
+                    if cursor.is_some()
+                        || symbol.is_some()
+                        || symbol_parent.is_some()
+                        || symbol_kind.is_some()
+                        || symbol_signature.is_some()
+                        || direction.is_some()
+                        || relation.is_some()
+                        || minimum_confidence.is_some()
+                        || resolution.is_some()
+                        || depth.is_some()
+                        || *include_occurrences
+                        || occurrence_limit.is_some()
+                        || edge_limit.is_some()
+                        || node_limit.is_some()
+                        || visited_limit.is_some()
+                        || occurrence_total_limit.is_some()
+                    {
+                        return Err(CliError::Service(ServiceError::InvalidInput(
+                            "graph selectors, traversal and continuation controls require --view detailed or --view analysis".to_string(),
+                        )));
+                    }
+                    Some(projectatlas_db::LegacyRelationReadBudget::new(
+                        row_limit,
+                        Duration::from_millis(deadline_ms.unwrap_or(1_000)),
+                        intermediate_bytes.unwrap_or(
+                            projectatlas_db::LegacyRelationReadBudget::MAX_INTERMEDIATE_BYTES,
+                        ),
+                    )?)
+                } else {
+                    None
+                };
+                if *view == RelationViewArg::Detailed && file.is_none() {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        "detailed relations require an exact --file anchor; discover candidates with atlas files <query> --limit 3, then atlas symbols relations --file <path>".to_string(),
+                    )));
+                }
                 let analysis_controls_explicit = analysis_mode.is_some()
                     || profile_name.is_some()
                     || !entrypoints.is_empty()
@@ -2324,11 +2376,28 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     ))
                 })?;
                 if *view == RelationViewArg::Legacy {
-                    let relations =
-                        store.load_symbol_relations(file.as_deref(), query.as_deref(), *limit)?;
-                    let toon = render_symbol_relations(&relations);
-                    print_tracked_output_estimate(
-                        cli.format,
+                    let budget = legacy_budget.ok_or_else(|| {
+                        CliError::Service(ServiceError::InvalidInput(
+                            "legacy relation budget was not admitted".to_string(),
+                        ))
+                    })?;
+                    let control = standalone_index_work_control();
+                    let relations = store
+                        .load_symbol_relations_bounded(
+                            file.as_deref(),
+                            query.as_deref(),
+                            budget,
+                            &control,
+                        )?
+                        .relations;
+                    let toon = if cli.format == OutputFormat::Toon {
+                        render_symbol_relations(&relations)
+                    } else {
+                        String::new()
+                    };
+                    let output = serialized_output(cli.format, &toon, &relations)?;
+                    projectatlas_service::check_legacy_relation_output(&output, output_limit)?;
+                    print_tracked_serialized_output_estimate(
                         store,
                         usage_instance,
                         &cli.session,
@@ -2341,8 +2410,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                                 relations.iter().map(|relation| relation.path.as_str()),
                             )
                         },
-                        &toon,
-                        &relations,
+                        &output,
                     )?;
                 } else {
                     if query.is_some() {
@@ -2429,24 +2497,31 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                         }
                         RelationAnchor::File { file }
                     };
-                    let rows = u32::try_from(*limit).map_err(|_overflow| {
+                    let rows = u32::try_from(row_limit).map_err(|_overflow| {
                         CliError::Service(ServiceError::InvalidInput(
                             "detailed relation limit exceeds the u32 range".to_string(),
                         ))
                     })?;
-                    let limits = GraphLimits::new(rows, *occurrence_limit, *depth, *output_bytes)
-                        .map_err(|error| {
+                    let limits = GraphLimits::new(
+                        rows,
+                        occurrence_limit.unwrap_or(25),
+                        depth.unwrap_or(1),
+                        output_limit,
+                    )
+                    .map_err(|error| {
                         CliError::Service(ServiceError::InvalidInput(error.to_string()))
                     })?;
                     let relations = DetailedRelationQuery {
                         anchor,
-                        direction: (*direction).into(),
+                        direction: direction.unwrap_or(RelationDirectionArg::Outbound).into(),
                         relation: relation
                             .as_deref()
                             .map(parse_coverage_relation)
                             .transpose()?,
-                        minimum_confidence: (*minimum_confidence).into(),
-                        resolution: (*resolution).into(),
+                        minimum_confidence: minimum_confidence
+                            .unwrap_or(RelationConfidenceArg::Low)
+                            .into(),
+                        resolution: resolution.unwrap_or(RelationResolutionArg::Any).into(),
                         content_selection: content_selection.unwrap_or_default(),
                         include_occurrences: *include_occurrences,
                         budget: DetailedRelationBudget::from_graph_limits(limits)
@@ -3279,8 +3354,84 @@ fn run_parser_pack_command(
     print_output(format, &toon, &report)
 }
 
+/// Shared CLI/MCP envelope for a complete-array resource refusal.
+#[derive(Serialize)]
+struct LegacyRelationErrorResponse {
+    /// Typed bounded error and actionable narrowing guidance.
+    error: LegacyRelationErrorPayload,
+}
+
+/// Exact reason and observed work for a refused compatibility array.
+#[derive(Serialize)]
+struct LegacyRelationErrorPayload {
+    /// Stable agent-facing error category.
+    kind: AgentErrorKind,
+    /// Human-readable narrowing/continuation guidance.
+    message: String,
+    /// Storage work or actual selected-adapter output boundary.
+    legacy_relation_limit: LegacyRelationLimitDetail,
+}
+
+/// Independent storage-work and output boundaries of compatibility reads.
+#[derive(Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+enum LegacyRelationLimitDetail {
+    /// Storage refused before a complete result could be returned.
+    Read {
+        /// Resource whose bound was reached.
+        limit: projectatlas_db::LegacyRelationReadLimit,
+        /// Actual bounded work before refusal.
+        work: projectatlas_db::LegacyRelationReadWork,
+    },
+    /// The complete encoded adapter payload cannot fit.
+    Output {
+        /// Requested inclusive byte ceiling.
+        limit_bytes: u32,
+        /// Actual encoded payload size.
+        encoded_bytes: u64,
+    },
+}
+
+/// Preserve complete-array resource failures identically across CLI and MCP.
+fn legacy_relation_error_response(error: &CliError) -> Option<LegacyRelationErrorResponse> {
+    let detail = match error {
+        CliError::Db(DbError::LegacyRelationReadLimit { limit, work })
+        | CliError::Service(ServiceError::Db(DbError::LegacyRelationReadLimit { limit, work })) => {
+            LegacyRelationLimitDetail::Read {
+                limit: *limit,
+                work: *work,
+            }
+        }
+        CliError::Service(ServiceError::LegacyRelationOutputLimit {
+            limit_bytes,
+            encoded_bytes,
+        }) => LegacyRelationLimitDetail::Output {
+            limit_bytes: *limit_bytes,
+            encoded_bytes: *encoded_bytes,
+        },
+        _ => return None,
+    };
+    Some(LegacyRelationErrorResponse {
+        error: LegacyRelationErrorPayload {
+            kind: AgentErrorKind::LegacyRelationLimit,
+            message: error.to_string(),
+            legacy_relation_limit: detail,
+        },
+    })
+}
+
 /// Render typed source-state failures in the selected agent/script format.
 fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, serde_json::Error> {
+    if let Some(response) = legacy_relation_error_response(error) {
+        return match format {
+            OutputFormat::Toon => {
+                serde_json::to_value(response).map(|value| encode_agent_payload(&value))
+            }
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&response).map(|text| format!("{text}\n"))
+            }
+        };
+    }
     if let Some(schema_version_mismatch) = schema_version_mismatch_payload(error) {
         let response = SchemaVersionMismatchErrorResponse {
             error: SchemaVersionMismatchErrorPayload {
@@ -4416,7 +4567,33 @@ where
     F: FnOnce() -> Result<usize, CliError>,
 {
     let output = serialized_output(format, toon, payload)?;
-    write_stdout(&output)?;
+    print_tracked_serialized_output_estimate(
+        store,
+        usage_instance,
+        session,
+        command,
+        path,
+        query,
+        estimate_without_projectatlas,
+        &output,
+    )
+}
+
+/// Emit and record an already encoded payload without serializing it again.
+fn print_tracked_serialized_output_estimate<F>(
+    store: &AtlasStore,
+    usage_instance: Option<UsageRuntimeInstance>,
+    session: &str,
+    command: &str,
+    path: Option<String>,
+    query: Option<String>,
+    estimate_without_projectatlas: F,
+    output: &str,
+) -> Result<(), CliError>
+where
+    F: FnOnce() -> Result<usize, CliError>,
+{
+    write_stdout(output)?;
     if usage_instance.is_none() || runtime::telemetry_disabled() {
         return Ok(());
     }
@@ -4431,7 +4608,7 @@ where
         path,
         query,
         estimated_without_projectatlas,
-        &output,
+        output,
     ));
     Ok(())
 }
@@ -8431,6 +8608,8 @@ mod tests {
             &nested_active_db,
             "nearest-routed nested symbols",
         )?;
+        // This route exercises the legacy substring filter; detailed uses exact anchors.
+        nested_active_symbols_args.insert("view".to_string(), json!("legacy"));
         let nested_active_relations =
             call_text!("atlas_symbol_relations", nested_active_symbols_args);
         if !nested_active_relations.contains("nested_active_marker") {

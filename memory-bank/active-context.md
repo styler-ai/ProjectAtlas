@@ -77,3 +77,13 @@ Use filesystem TMPDIR under ~/.cache/projectatlas-test-tmp and sharedtarget
 gh authenticated; requirednative andtrustedhostedgates, no bypass. Publiccommit
 identity ShaunTyler/noreply percommand. Retainedstashes alreadyrecovered; neverapply
 again. Goal remainsactive.
+
+## Accepted baseline integrated
+
+#724 merged normally into main612ce65 aftertrustedfourplatformverifypassed; #721
+closedreadbackconfirmed. This publicPythonbranch mergesacceptedmainnormally,
+preservinghistory/no forcepush. Resolved onlydeclaredmapunion721+722, selected
+issue722memory and regeneratedcombinedE2Esourcehashes/207testownershipinventory.
+Boundedrelationdefaults/compatibilityfromaccepted721retained. Unicodefix5650f07
+needsmandatorynativepushhook oncombinedbaseline, hostedchecks andcurrentautomated
+review before final722acceptance.

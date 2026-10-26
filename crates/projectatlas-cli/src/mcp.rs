@@ -499,8 +499,12 @@ const MCP_ERROR_SYMBOL_RELATION_VIEW: &str = "unsupported symbol relation view";
 /// MCP validation error for legacy query fields in detailed requests.
 const MCP_ERROR_DETAILED_RELATION_QUERY: &str =
     "detailed symbol relations use exact symbol selectors, not query";
-/// MCP validation error for a detailed request without a file anchor.
-const MCP_ERROR_DETAILED_RELATION_FILE: &str = "detailed symbol relations require file";
+/// Unsupported graph controls on the complete compatibility-array route.
+const MCP_ERROR_LEGACY_RELATION_CONTROLS: &str = "graph selectors, federation, traversal and continuation controls require view detailed or analysis";
+/// Missing compatibility admission after view selection.
+const MCP_ERROR_LEGACY_RELATION_BUDGET: &str = "legacy relation budget was not admitted";
+/// Exact-file narrowing guidance for detailed relation requests.
+const MCP_ERROR_DETAILED_RELATION_FILE: &str = "detailed relations require an exact file anchor; discover candidates with atlas_files (limit 3), then call atlas_symbol_relations with file and optional symbol";
 /// MCP validation error for an empty detailed symbol anchor.
 const MCP_ERROR_DETAILED_RELATION_SYMBOL: &str = "detailed relation symbol must not be empty";
 /// MCP validation error for symbol disambiguators without a symbol.
@@ -1189,7 +1193,7 @@ struct AtlasSymbolRelationsParams {
     nearest_project: Option<bool>,
     /// Optional symbol, signature, relation, or path query.
     query: Option<String>,
-    /// Preserve `legacy`, opt in to `detailed`, or select closed `analysis`.
+    /// Anchored `detailed` by default; explicit `legacy` returns complete small arrays; `analysis` is opt-in.
     view: Option<String>,
     /// Optional classified-content selection: source, documentation, or both.
     content_selection: Option<String>,
@@ -1235,7 +1239,7 @@ struct AtlasSymbolRelationsParams {
     intermediate_bytes: Option<u64>,
     /// Maximum service-owned elapsed milliseconds.
     deadline_ms: Option<u64>,
-    /// Maximum encoded bytes admitted to the detailed response.
+    /// Encoded bytes: detailed/legacy default 32768; analysis default 262144; legacy maximum 262144.
     output_bytes: Option<u32>,
     /// Closed analysis mode: `architecture`, `impact`, `trace`, or `entrypoint`.
     analysis_mode: Option<String>,
@@ -1267,7 +1271,7 @@ struct AtlasSymbolRelationsParams {
     include_cycles: Option<bool>,
     /// Include conservative dead-code candidates.
     include_dead_code: Option<bool>,
-    /// Maximum rows to return.
+    /// Row limit: detailed defaults to 10; explicit legacy/analysis to 50; legacy maximum 200.
     limit: Option<usize>,
 }
 
@@ -7618,6 +7622,9 @@ impl ProjectAtlasMcpServer {
 
     /// Encode an MCP error as a structured agent-readable payload.
     fn encode_error_payload(error: &CliError) -> String {
+        if let Some(response) = crate::legacy_relation_error_response(error) {
+            return encode_agent_payload(&response);
+        }
         let schema_version_mismatch = schema_version_mismatch_payload(error);
         let schema_migration_required = schema_migration_required_payload(error);
         let message = schema_migration_required.as_ref().map_or_else(
@@ -7818,6 +7825,9 @@ impl ProjectAtlasMcpServer {
         match result {
             Ok(text) => McpToolTextResult(Ok(text)),
             Err(error) => {
+                if let Some(response) = crate::legacy_relation_error_response(&error) {
+                    return McpToolTextResult(Err(encode_agent_payload(&response)));
+                }
                 let payload = Self::encode_error_payload(&error);
                 if schema_version_mismatch_payload(&error).is_some() {
                     McpToolTextResult(Err(payload))
@@ -9215,16 +9225,22 @@ impl ProjectAtlasMcpServer {
             }
             RelationAnchor::File { file: graph_file }
         };
-        let rows = u32::try_from(params.limit.unwrap_or(50)).map_err(|_overflow| {
-            CliError::Service(ServiceError::InvalidInput(
-                MCP_ERROR_DETAILED_RELATION_LIMIT.to_string(),
-            ))
-        })?;
+        let policy = if analysis {
+            projectatlas_service::RelationNavigationView::Analysis
+        } else {
+            projectatlas_service::RelationNavigationView::Detailed
+        };
+        let rows =
+            u32::try_from(params.limit.unwrap_or(policy.default_rows())).map_err(|_overflow| {
+                CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_DETAILED_RELATION_LIMIT.to_string(),
+                ))
+            })?;
         let limits = GraphLimits::new(
             rows,
             params.occurrence_limit.unwrap_or(25),
             params.depth.unwrap_or(1),
-            params.output_bytes.unwrap_or(256 * 1024),
+            policy.output_bytes(params.output_bytes)?,
         )
         .map_err(|error| CliError::Service(ServiceError::InvalidInput(error.to_string())))?;
         let relations = DetailedRelationQuery {
@@ -9468,7 +9484,7 @@ impl ProjectAtlasMcpServer {
             let (detailed, analysis) = match params
                 .view
                 .as_deref()
-                .unwrap_or(MCP_SYMBOL_RELATION_VIEW_LEGACY)
+                .unwrap_or(MCP_SYMBOL_RELATION_VIEW_DETAILED)
             {
                 MCP_SYMBOL_RELATION_VIEW_LEGACY => (false, false),
                 MCP_SYMBOL_RELATION_VIEW_DETAILED => (true, false),
@@ -9487,6 +9503,52 @@ impl ProjectAtlasMcpServer {
             if !analysis && relation_analysis_controls_present(params) {
                 return Err(CliError::Service(ServiceError::InvalidInput(
                     MCP_ERROR_ANALYSIS_VIEW_REQUIRED.to_string(),
+                )));
+            }
+            let legacy_limits = if detailed {
+                None
+            } else {
+                if params.roots.is_some()
+                    || params.worktrees.is_some()
+                    || params.compact.is_some()
+                    || params.cursor.is_some()
+                    || params.symbol.is_some()
+                    || params.symbol_parent.is_some()
+                    || params.symbol_kind.is_some()
+                    || params.symbol_signature.is_some()
+                    || params.direction.is_some()
+                    || params.relation.is_some()
+                    || params.minimum_confidence.is_some()
+                    || params.resolution.is_some()
+                    || params.depth.is_some()
+                    || params.include_occurrences.is_some()
+                    || params.occurrence_limit.is_some()
+                    || params.edge_limit.is_some()
+                    || params.node_limit.is_some()
+                    || params.visited_limit.is_some()
+                    || params.occurrence_total_limit.is_some()
+                {
+                    return Err(CliError::Service(ServiceError::InvalidInput(
+                        MCP_ERROR_LEGACY_RELATION_CONTROLS.to_string(),
+                    )));
+                }
+                Some((
+                    projectatlas_db::LegacyRelationReadBudget::new(
+                        params.limit.unwrap_or(
+                            projectatlas_service::RelationNavigationView::Legacy.default_rows(),
+                        ),
+                        Duration::from_millis(params.deadline_ms.unwrap_or(1_000)),
+                        params.intermediate_bytes.unwrap_or(
+                            projectatlas_db::LegacyRelationReadBudget::MAX_INTERMEDIATE_BYTES,
+                        ),
+                    )?,
+                    projectatlas_service::RelationNavigationView::Legacy
+                        .output_bytes(params.output_bytes)?,
+                ))
+            };
+            if detailed && !analysis && params.file.is_none() {
+                return Err(CliError::Service(ServiceError::InvalidInput(
+                    MCP_ERROR_DETAILED_RELATION_FILE.to_string(),
                 )));
             }
             let content_selection = parse_content_selection(params.content_selection.as_deref())?;
@@ -9647,16 +9709,25 @@ impl ProjectAtlasMcpServer {
                         );
                     }
 
-                    let relations = store.load_symbol_relations(
-                        file.as_deref(),
-                        params.query.as_deref(),
-                        params.limit.unwrap_or(50),
-                    )?;
+                    let (budget, output_limit) = legacy_limits.ok_or_else(|| {
+                        CliError::Service(ServiceError::InvalidInput(
+                            MCP_ERROR_LEGACY_RELATION_BUDGET.to_string(),
+                        ))
+                    })?;
+                    let relations = store
+                        .load_symbol_relations_bounded(
+                            file.as_deref(),
+                            params.query.as_deref(),
+                            budget,
+                            control,
+                        )?
+                        .relations;
                     let toon = Self::with_selected_project_audit(
                         &state,
                         routed_project,
                         render_symbol_relations(&relations),
                     )?;
+                    projectatlas_service::check_legacy_relation_output(&toon, output_limit)?;
                     let usage = Self::telemetry_enabled()
                         .then(|| {
                             estimated_source_tokens_for_paths(
@@ -9682,7 +9753,7 @@ impl ProjectAtlasMcpServer {
     /// List indexed symbol relations.
     #[tool(
         name = "atlas_symbol_relations",
-        description = "List imports, calls, dependencies, and containment edges as compact TOON."
+        description = "Navigate anchored detailed relation pages (10 rows, 32 KiB by default); explicit legacy returns only complete small arrays, and analysis remains opt-in."
     )]
     fn atlas_symbol_relations(
         &self,
@@ -12058,6 +12129,7 @@ mod tests {
             &AtlasSymbolRelationsParams {
                 project_path: Some(project_path.to_string()),
                 file: Some("src/lib.rs".to_string()),
+                symbol: Some(expected_symbol.to_string()),
                 nearest_project: Some(false),
                 query: None,
                 limit: Some(50),
@@ -12066,7 +12138,7 @@ mod tests {
             None,
         );
         require(
-            relations.contains("relations[") && relations.contains(expected_symbol),
+            relations.contains("symbol_relations:") && relations.contains(expected_symbol),
             "agent relation read omitted published graph output",
         )?;
         let explicit_legacy = server.atlas_symbol_relations_response(
@@ -12082,14 +12154,15 @@ mod tests {
             None,
         );
         require(
-            relations == explicit_legacy,
-            "explicit MCP legacy relation view changed default response bytes or ordering",
+            explicit_legacy.contains("relations[") && explicit_legacy.contains(expected_symbol),
+            "explicit MCP legacy relation view lost its complete small array",
         )?;
         let compact_legacy = server.atlas_symbol_relations_response(
             &AtlasSymbolRelationsParams {
                 project_path: Some(project_path.to_string()),
                 file: Some("src/lib.rs".to_string()),
                 nearest_project: Some(false),
+                view: Some("legacy".to_string()),
                 compact: Some(true),
                 limit: Some(50),
                 ..AtlasSymbolRelationsParams::default()
@@ -12105,14 +12178,15 @@ mod tests {
                 project_path: Some(project_path.to_string()),
                 file: Some("src/lib.rs".to_string()),
                 nearest_project: Some(false),
+                view: Some("legacy".to_string()),
                 limit: Some(0),
                 ..AtlasSymbolRelationsParams::default()
             },
             None,
         );
         require(
-            zero_limit_legacy.contains("relations[1]"),
-            "MCP legacy zero limit no longer preserves its one-row compatibility behavior",
+            zero_limit_legacy.contains("1..200"),
+            "MCP legacy zero row bound was accepted",
         )?;
         let detailed = server.atlas_symbol_relations_response(
             &AtlasSymbolRelationsParams {

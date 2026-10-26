@@ -410,6 +410,31 @@ Reviewed CLI-only exceptions: `projectatlas mcp` starts the server process, cont
 For read-only reviews or diagnostics, set `PROJECTATLAS_NO_TELEMETRY=1` before running CLI commands or the MCP server.
 This preserves normal atlas reads while preventing usage telemetry writes to `.projectatlas/projectatlas.db`.
 
+## Relation navigation in 0.5.1
+
+`atlas symbols relations --file src/lib.rs` and
+`atlas_symbol_relations(file: "src/lib.rs")` now select detailed graph pages by
+default: ten rows and 32 KiB encoded output. Select an exact file first; use an
+optional exact symbol anchor to narrow it. Follow the returned continuation
+unchanged. Returned rows, total knowledge, coverage and reached budgets are
+separate facts; a bounded page does not imply the remaining graph is empty.
+
+Explicit `--view analysis` / `view: "analysis"` keeps its established 50-row and
+256-KiB defaults and opt-in profiles/modes. Larger detailed requests retain their
+existing validated bounds.
+
+Clients that need the compatibility array must explicitly select `legacy`.
+Its omitted row limit remains 50; requests accept 1–200 rows, default to 32 KiB
+and permit at most 256 KiB encoded output. The whole eligible array must fit:
+additional rows, excess bytes or exhausted query work return narrowing guidance,
+not a silently truncated array. Use detailed continuation for large results.
+Zero bounds and unsupported graph selectors/traversal controls are errors.
+File and substring filters retain their SQL LIKE `%`/`_` semantics, with at most
+1,024 UTF-8 query bytes. Compatibility reads share 100,000 SQLite instructions,
+a cooperative one-second query deadline and 1 MiB intermediate/decoded state;
+smaller applicable caller limits take precedence. Output bytes include the final
+CLI JSON/TOON payload or MCP selected-project/audit text wrapper.
+
 ## When To Call What
 
 | Situation | MCP route when needed | Equivalent CLI route (`atlas` preferred) |

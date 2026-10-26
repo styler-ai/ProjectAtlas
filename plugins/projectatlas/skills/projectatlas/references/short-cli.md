@@ -16,7 +16,7 @@
 | `atlas search <pattern>` | Search indexed text with optional file pattern, context, regex, or fuzzy mode; inspect completeness and truncation. |
 | `atlas slice <file>` | Read an exact line or declaration range after selecting it; copy returned selectors. |
 | `atlas symbols list` | Find declarations in a selected file or bounded query. |
-| `atlas symbols relations` | Inspect callers, dependencies, imports, documentation bridges, or bounded graph analysis when a summary is insufficient. |
+| `atlas symbols relations` | Inspect anchored detailed pages (default ten rows/32 KiB), documentation bridges, or explicit analysis when a summary is insufficient; explicit legacy is a complete small array only. |
 | `atlas symbols slice` | Read one exactly disambiguated declaration's current source. |
 | `atlas symbols build` | Rebuild a missing/stale deep symbol projection only when typed guidance or an explicit request calls for it. |
 | `atlas health` | Inspect filtered structural, purpose, or parser-coverage findings when planning repair/refactoring; `health-check` is the compatibility spelling. Use `atlas health resolve` only for an inspected, intentional deterministic conflict with a rationale; fill a missing purpose instead. |

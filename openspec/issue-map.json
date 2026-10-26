@@ -5,8 +5,9 @@
       "release_issue": 715,
       "issues": {
         "708": { "blocked_by": [] },
-        "715": { "blocked_by": [708, 718, 722] },
+        "715": { "blocked_by": [708, 718, 721, 722] },
         "718": { "blocked_by": [] },
+        "721": { "blocked_by": [] },
         "722": { "blocked_by": [] }
       }
     },
@@ -100,6 +101,11 @@
       "contract": "checklist-v1",
       "primary_issue": 722,
       "owners": [{ "issue": 722, "first_task": "1.1", "last_task": "3.1" }]
+    },
+    "bound-relation-navigation": {
+      "contract": "checklist-v1",
+      "primary_issue": 721,
+      "owners": [{ "issue": 721, "first_task": "1.1", "last_task": "3.1" }]
     },
     "clarify-protected-branch-checks": {
       "contract": "checklist-v1",
