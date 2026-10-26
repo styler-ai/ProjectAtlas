@@ -4,6 +4,7 @@ mod content_classification;
 mod derived_snapshot;
 mod diagnostics;
 mod hydration;
+mod legacy_relations;
 mod project_identity;
 mod repository_graph;
 mod schema;
@@ -28,6 +29,9 @@ pub use diagnostics::{
 };
 pub use hydration::{
     PreparedWorktreeHydrationCandidate, WorktreeHydrationActivation, WorktreeHydrationCandidate,
+};
+pub use legacy_relations::{
+    LegacyRelationRead, LegacyRelationReadBudget, LegacyRelationReadLimit, LegacyRelationReadWork,
 };
 pub use project_identity::{ProjectRootTransition, ProjectRootTransitionResult};
 pub use repository_graph::{
@@ -176,6 +180,16 @@ pub enum DbError {
     /// `SQLite` operation failed.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A compatibility read could not establish a complete bounded result.
+    #[error(
+        "legacy relation read reached {limit:?}; use view detailed with an exact file anchor and continuation"
+    )]
+    LegacyRelationReadLimit {
+        /// Resource that prevented complete output.
+        limit: LegacyRelationReadLimit,
+        /// Bounded work performed before refusal.
+        work: LegacyRelationReadWork,
+    },
     /// A live project database is located on a known unsupported filesystem.
     #[error(
         "database path {path:?} is on an unsupported filesystem (mount: {mount_point:?}, type: {filesystem_type:?}); live SQLite WAL requires supported local storage"

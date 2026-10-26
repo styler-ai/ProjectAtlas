@@ -22,9 +22,10 @@ pub use federation::{
 pub use relations::{
     DetailedRelationBudget, DetailedRelationNode, DetailedRelationPageDraft, DetailedRelationQuery,
     DetailedRelationReport, DetailedRelationRow, DetailedRelationWork, RelationAnchor,
-    RelationDirection, RelationNextCall, RelationPurpose, RelationResolutionFilter,
-    RelationTotalState, load_detailed_relation_page, load_detailed_relations,
-    parse_relation_confidence, parse_relation_direction, parse_relation_resolution,
+    RelationDirection, RelationNavigationView, RelationNextCall, RelationPurpose,
+    RelationResolutionFilter, RelationTotalState, check_legacy_relation_output,
+    load_detailed_relation_page, load_detailed_relations, parse_relation_confidence,
+    parse_relation_direction, parse_relation_resolution,
 };
 
 use agent_efficiency::load_agent_efficiency_comparison as load_agent_efficiency_for_binding;
@@ -149,6 +150,16 @@ pub enum ServiceError {
     ResourceLimit {
         /// Resource limit that stopped the request.
         limit: GraphLimitKind,
+    },
+    /// A complete compatibility array cannot fit its actual encoded output bound.
+    #[error(
+        "complete legacy result exceeds {limit_bytes} output bytes ({encoded_bytes} encoded); use view detailed with an exact file anchor and continuation"
+    )]
+    LegacyRelationOutputLimit {
+        /// Requested encoded-output ceiling.
+        limit_bytes: u32,
+        /// Complete selected-adapter payload bytes, including wrappers.
+        encoded_bytes: u64,
     },
     /// User input or stored metadata was invalid.
     #[error("invalid input: {0}")]
