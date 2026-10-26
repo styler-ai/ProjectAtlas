@@ -18,7 +18,7 @@ Atlas alias issue-722 hydrated private state safely: parsed17/reused655 of672, i
 
 #708 budget checkout retains owned mixed edits/untracked work; do not lose them. User explicitly accepted shipping exact reconciliation and measured gains while deferring zero-work warm optimization. Respec #708/OpenSpec/docs, reset Open Questions to None after documenting decision, track deferred causal-native-history work in unscheduled backlog, then independently review scope. Latest detailed budget/harness evidence in issue708 memory; no RC exists yet.
 
-Tests use filesystem TMPDIR=/home/utopien/.cache/projectatlas-test-tmp and shared CARGO_TARGET_DIR=/home/utopien/projects/projectAtlas/.worktrees/v0.5.1/target. Clean PATH rustup+ghonlyhelper+Pythonvenv; never compile sibling CLI during CLI E2E. gh authenticated. Mandatory native push hook and trusted hosted gates, no bypass. Commits use public Shaun Tyler/noreply identity per-command. Goal remains active.
+Tests use filesystem TMPDIR=~/.cache/projectatlas-test-tmp and shared CARGO_TARGET_DIR=.worktrees/v0.5.1/target. Clean PATH rustup+ghonlyhelper+Pythonvenv; never compile sibling CLI during CLI E2E. gh authenticated. Mandatory native push hook and trusted hosted gates, no bypass. Commits use public Shaun Tyler/noreply identity per-command. Goal remains active.
 
 ## Verified implementation checkpoint
 
