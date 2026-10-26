@@ -10,13 +10,30 @@ pub(super) fn parse_import(import_text: &str) -> Vec<ImportReference> {
         let Some((module, imports)) = rest.split_once(" import ") else {
             return Vec::new();
         };
-        if !valid_module(module.trim()) || imports.contains(['(', ')', '{', '}', '[', ']']) {
+        let imports = imports.trim();
+        let imports = if let Some(inner) = imports.strip_prefix('(') {
+            let Some(inner) = inner.strip_suffix(')') else {
+                return Vec::new();
+            };
+            inner.trim()
+        } else {
+            imports
+        };
+        if !valid_module(module.trim()) || imports.contains(['(', ')', '{', '}', '[', ']', '#']) {
             return Vec::new();
         }
         let imports = imports.trim().strip_suffix(',').unwrap_or(imports.trim());
         return imports
             .split(',')
-            .map(|item| named_reference(ImportSyntax::Python, module.trim(), item, " as "))
+            .map(|item| {
+                let (name, alias) = split_alias(item.trim(), " as ")?;
+                if !valid_identifier(name.trim())
+                    || alias.is_some_and(|alias| !valid_identifier(alias.trim()))
+                {
+                    return None;
+                }
+                named_reference(ImportSyntax::Python, module.trim(), item, " as ")
+            })
             .collect::<Option<Vec<_>>>()
             .filter(|references| !references.is_empty())
             .unwrap_or_default();
@@ -99,6 +116,47 @@ fn valid_module(module: &str) -> bool {
 
 /// Accept conservative Python identifiers and abstain on punctuation.
 fn valid_identifier(value: &str) -> bool {
+    // Soft keywords such as `match`, `case` and `type` remain legal names here.
+    if matches!(
+        value,
+        "False"
+            | "None"
+            | "True"
+            | "and"
+            | "as"
+            | "assert"
+            | "async"
+            | "await"
+            | "break"
+            | "class"
+            | "continue"
+            | "def"
+            | "del"
+            | "elif"
+            | "else"
+            | "except"
+            | "finally"
+            | "for"
+            | "from"
+            | "global"
+            | "if"
+            | "import"
+            | "in"
+            | "is"
+            | "lambda"
+            | "nonlocal"
+            | "not"
+            | "or"
+            | "pass"
+            | "raise"
+            | "return"
+            | "try"
+            | "while"
+            | "with"
+            | "yield"
+    ) {
+        return false;
+    }
     let mut characters = value.chars();
     characters
         .next()
