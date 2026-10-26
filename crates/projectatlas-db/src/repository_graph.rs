@@ -4239,11 +4239,11 @@ impl IndexPublicationGuard<'_> {
         require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
         let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
-        drop_graph_rebuildable_indexes(&savepoint)?;
         savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
         savepoint.execute("DELETE FROM graph_coverage", [])?;
         savepoint.execute("DELETE FROM graph_relations", [])?;
         savepoint.execute("DELETE FROM graph_entities", [])?;
+        drop_graph_rebuildable_indexes(&savepoint)?;
         for (table, columns) in GRAPH_STAGE_COPY_TABLES {
             copy_graph_stage_table(&staging.connection, &savepoint, table, columns, control)?;
         }
@@ -4282,6 +4282,10 @@ impl IndexPublicationGuard<'_> {
 
     /// Replace the complete graph and canonical resolution-key projection atomically.
     ///
+    /// Derived non-unique read indexes are rebuilt once after the bulk write,
+    /// using their exact captured definitions. Constraints remain active, and
+    /// the same savepoint restores both rows and indexes on failure.
+    ///
     /// # Errors
     ///
     /// Returns an error when graph or key records do not belong to the pending
@@ -4311,10 +4315,12 @@ impl IndexPublicationGuard<'_> {
         let savepoint = self.store.connection.savepoint()?;
         require_bound_project_identity(&savepoint, project)?;
         prepare_graph_identity_rejections(&savepoint, project, generation, None)?;
+        let rebuildable_indexes = graph_rebuildable_index_sql(&savepoint)?;
         savepoint.execute("DELETE FROM graph_resolution_keys", [])?;
         savepoint.execute("DELETE FROM graph_coverage", [])?;
         savepoint.execute("DELETE FROM graph_relations", [])?;
         savepoint.execute("DELETE FROM graph_entities", [])?;
+        drop_graph_rebuildable_indexes(&savepoint)?;
         insert_graph_batch(
             &savepoint,
             project,
@@ -4325,6 +4331,9 @@ impl IndexPublicationGuard<'_> {
         )?;
         insert_resolution_key_batch(&savepoint, project, entity_exports, relation_dependencies)?;
         set_graph_generation(&savepoint, generation)?;
+        for index_sql in rebuildable_indexes {
+            savepoint.execute_batch(&index_sql)?;
+        }
         savepoint.commit()?;
         Ok(())
     }
@@ -16444,6 +16453,7 @@ mod tests {
         let db_path = atlas_dir.join("projectatlas.db");
         let mut writer = AtlasStore::open_for_project(&db_path, &project_root)?;
         let fixture_v1 = publish_fixture(&mut writer, "graph-publication")?;
+        let initial_index_definitions = graph_rebuildable_index_sql(&writer.connection)?;
         let old_reader = AtlasStore::open_read_only_for_project(&db_path, &project_root)?;
         require_graph_projection(
             &old_reader,
@@ -16458,6 +16468,34 @@ mod tests {
                 path: RepositoryFilePath::new(Path::new("src/missing.rs"))?,
             },
             IndexGeneration::new(2),
+        )?;
+        {
+            let mut publication = writer.begin_index_publication("graph-publication")?;
+            let error = require_db_error(
+                publication.replace_repository_graph(
+                    fixture_v1.project,
+                    std::slice::from_ref(&missing_entity),
+                    &[],
+                    &[],
+                    &[],
+                ),
+                "full graph with an unindexed source unexpectedly succeeded",
+            )?;
+            require(
+                matches!(error, DbError::Sqlite(_)),
+                "full replacement reaches the injected late source constraint",
+            )?;
+            require_eq(
+                &graph_rebuildable_index_sql(&publication.store.connection)?,
+                &initial_index_definitions,
+                "failed bulk replacement restores exact read-index definitions",
+            )?;
+        }
+        require_graph_projection(
+            &writer,
+            &fixture_v1,
+            IndexGeneration::new(1),
+            "fn verifyToken()",
         )?;
         {
             let mut publication = writer.begin_index_publication("graph-publication")?;
@@ -16534,6 +16572,12 @@ mod tests {
             )?;
             publication.complete()?;
         }
+
+        require_eq(
+            &graph_rebuildable_index_sql(&writer.connection)?,
+            &initial_index_definitions,
+            "successful bulk replacement preserves exact read-index definitions",
+        )?;
 
         require_graph_projection(
             &old_reader,

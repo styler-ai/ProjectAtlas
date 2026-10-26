@@ -194,6 +194,7 @@ pub(super) fn parse_symbol_jobs_controlled(
     jobs: &[SymbolParseJob],
     options: &SymbolBuildOptions,
     control: &IndexWorkControl,
+    verified_text: &std::collections::HashMap<&str, &projectatlas_db::IndexedFileText>,
 ) -> Result<Vec<SymbolParseOutcome>, CliError> {
     if matches!(
         project_selection,
@@ -201,7 +202,7 @@ pub(super) fn parse_symbol_jobs_controlled(
     ) {
         deactivate_if_initialized(control)?;
         let built_in = jobs.iter().collect::<Vec<_>>();
-        return parse_built_in_jobs(pool, &built_in, options, control);
+        return parse_built_in_jobs(pool, &built_in, options, control, verified_text);
     }
 
     let lifecycle = OptionalParserPackLifecycle::new(project_root, None)?;
@@ -231,7 +232,7 @@ pub(super) fn parse_symbol_jobs_controlled(
     }
     sort_optional_jobs(&mut optional);
 
-    let mut outcomes = parse_built_in_jobs(pool, &built_in, options, control)?;
+    let mut outcomes = parse_built_in_jobs(pool, &built_in, options, control, verified_text)?;
     if outcomes.iter().any(terminal_parse_outcome) {
         return Ok(outcomes);
     }
@@ -341,6 +342,7 @@ fn parse_built_in_jobs(
     jobs: &[&SymbolParseJob],
     options: &SymbolBuildOptions,
     control: &IndexWorkControl,
+    verified_text: &std::collections::HashMap<&str, &projectatlas_db::IndexedFileText>,
 ) -> Result<Vec<SymbolParseOutcome>, CliError> {
     let mut outcomes = Vec::with_capacity(jobs.len());
     for batch in jobs.chunks(BUILT_IN_PARSE_BATCH_SIZE) {
@@ -348,7 +350,14 @@ fn parse_built_in_jobs(
         outcomes.extend(pool.install(|| {
             batch
                 .par_iter()
-                .map(|job| super::parse_symbol_job_controlled(job, options, control))
+                .map(|job| {
+                    super::parse_symbol_job_with_staged_text_controlled(
+                        job,
+                        options,
+                        control,
+                        verified_text.get(job.path.as_str()).copied(),
+                    )
+                })
                 .collect::<Vec<_>>()
         }));
     }

@@ -4,17 +4,17 @@
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "4dd76851ce1ad8ff6e38b91dceccec55bbf734c717cdbc6fc049d5925546c8ab",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "3dadbbf72f64ff33029fc0f05399cc829d2dc89eda4a8a9fd89528e58f7eeff7",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "4c4a53eff4375a14394515b572c45891c8b1980e902382a7aadb941a83b5fe2f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "68380f67ae4dc348f3ca7ac5133da97b4578627aa988ad2a60b7a5ea9c4e63cd",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "c0af55d92803b3aef04fffcdef0ed6a1707b5944df400386bc4352e7a91f9011",
-      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "16850eb63ba86c15b3f70fcedf880f7574079153a2288dedd6859140549c000c"
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "6cc4c86e35b8aa6109de3b4f79c9e984543a268e449719bf74fb30e11cb27ef0",
+      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "fe52ab7368c0206fcc03122c9e6ec8f10642a4b1b498e016918fa8f32021beb1"
     }
   },
   "baseline_commit": "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb",
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 205,
+  "test_count": 206,
   "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -29,6 +29,13 @@
     "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
+    {
+      "name": "watch_requires_initialization_without_creating_project_state",
+      "owner": "e2e_lifecycle",
+      "attributes": [
+        "#[test]"
+      ]
+    },
     {
       "name": "map_response_preserves_legacy_file_and_separates_format_from_json_sidecar",
       "owner": "e2e_navigation",

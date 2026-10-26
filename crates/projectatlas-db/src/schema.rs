@@ -1919,10 +1919,33 @@ pub(crate) fn initialize_with_project_root(
     expected_root: Option<&str>,
     expected_identity: Option<&CanonicalProjectRoot>,
 ) -> DbResult<()> {
+    initialize_with_project_root_policy(connection, expected_root, expected_identity, false)
+}
+
+/// Migrate existing storage while refusing fresh schema inside the writer transaction.
+pub(crate) fn migrate_existing_with_project_root(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    expected_identity: Option<&CanonicalProjectRoot>,
+) -> DbResult<()> {
+    initialize_with_project_root_policy(connection, expected_root, expected_identity, true)
+}
+
+/// Share atomic setup while preserving the caller's schema-creation authority.
+fn initialize_with_project_root_policy(
+    connection: &Connection,
+    expected_root: Option<&str>,
+    expected_identity: Option<&CanonicalProjectRoot>,
+    require_existing: bool,
+) -> DbResult<()> {
     configure_writable(connection)?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
-    let result =
-        initialize_with_project_root_in_transaction(connection, expected_root, expected_identity);
+    let result = (|| {
+        if require_existing && schema_state(connection)? == SchemaState::Fresh {
+            return Err(DbError::InitializationRequired);
+        }
+        initialize_with_project_root_in_transaction(connection, expected_root, expected_identity)
+    })();
     match result {
         Ok(()) => connection.execute_batch("COMMIT").map_err(Into::into),
         Err(error) => Err(rollback_after_error(connection, error)),
@@ -2250,6 +2273,9 @@ fn inspect_current(
     expected_root: Option<&str>,
 ) -> DbResult<SchemaPreflight> {
     let preflight = inspect_connection(connection, expected_root, false)?;
+    if preflight.state == SchemaState::Fresh {
+        return Err(DbError::InitializationRequired);
+    }
     if preflight.state != SchemaState::Current {
         return Err(DbError::SchemaVersion {
             found: stored_schema_version(connection)?,

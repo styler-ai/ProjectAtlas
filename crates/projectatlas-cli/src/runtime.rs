@@ -8,7 +8,7 @@ mod optional_parser_runtime;
 mod source_observation;
 
 pub(crate) use source_observation::{
-    SourceObservationRegistry, VerifiedReadOutcome, VerifiedReadStamp,
+    SourceObservationRegistry, SourceReadAdmission, VerifiedReadOutcome, VerifiedReadStamp,
 };
 
 use crate::atlas_map::{
@@ -313,8 +313,12 @@ pub(crate) enum IndexRefreshScope {
 struct IndexFreshnessDelta {
     /// Typed public report when the delta cannot be reconciled automatically.
     report: IndexRefreshRequired,
-    /// Complete native path set used for a safe affected-path publication.
+    /// Complete native paths when retained within the incremental work bound.
     paths: HashSet<PathBuf>,
+    /// Whether every changed path fits the explicit incremental-work bound.
+    paths_complete: bool,
+    /// Whether structural or policy changes require complete source discovery.
+    requires_full_scan: bool,
 }
 
 /// Measured work performed by one exact source-freshness verification.
@@ -331,11 +335,27 @@ pub(crate) struct SourceVerificationWork {
 }
 
 /// Exact freshness assessment plus its measured source/database work.
-struct IndexFreshnessAssessment {
+pub(crate) struct IndexFreshnessAssessment {
     /// Complete source delta, when current source differs from the index.
     delta: Option<IndexFreshnessDelta>,
     /// Work consumed to establish the assessment.
     work: SourceVerificationWork,
+    /// Ordered discovery retained for an affected publication in this operation.
+    source: CapturedSourceState,
+}
+
+/// Exact source records tied to the plan and durable generation used for comparison.
+struct CapturedSourceState {
+    /// Canonical selected root whose saved source was discovered.
+    root: PathBuf,
+    /// Durable instance identity of the exact database used for comparison.
+    project_instance_id: ProjectInstanceId,
+    /// Parser and selection contract governing the discovery.
+    contract_fingerprint: String,
+    /// Durable generation compared with these records.
+    generation: IndexGeneration,
+    /// Complete ordered current-source inventory, without authored metadata.
+    nodes: Vec<Node>,
 }
 
 /// Current read snapshot established through exact source verification.
@@ -662,20 +682,8 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
 ) -> Result<ExactFreshIndexRead, CliError> {
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
-    let store = open_atlas_store_read_only_for_project(db_path, root)?;
-    let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
-        .map_err(|source| publication_input_error(root, source))?;
-    let assessment = match detect_index_freshness_controlled(&store, &plan, scan_limits, control) {
-        Ok(assessment) => assessment,
-        Err(CliError::VerificationIncomplete(report))
-            if report.reason == IndexVerificationReason::PublicationContractMismatch =>
-        {
-            return Err(CliError::RefreshRequired(Box::new(
-                index_policy_refresh_required(&plan.root),
-            )));
-        }
-        Err(error) => return Err(error),
-    };
+    let (store, plan, assessment) =
+        open_exact_index_assessment(db_path, root, config_path, scan_limits, control)?;
     let mut work = assessment.work;
     let Some(delta) = assessment.delta else {
         return Ok(ExactFreshIndexRead { store, work });
@@ -696,11 +704,12 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
             document_paths: delta.paths.clone(),
             paths: delta.paths,
         };
-        refresh_index_for_changes_controlled(
+        refresh_index_for_changes_from_source_controlled(
             &mut writer,
             &plan,
             &changes,
             &SymbolBuildOptions::new(MAX_SYMBOL_FILE_BYTES, None, None),
+            Some(assessment.source),
             control,
         )
     })();
@@ -717,6 +726,31 @@ fn open_exact_fresh_atlas_store_for_project_with_repair(
     verify_index_publication(&store, &plan)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     Ok(ExactFreshIndexRead { store, work })
+}
+
+/// Capture an exact read snapshot and its reusable source assessment without publication.
+fn open_exact_index_assessment(
+    db_path: &Path,
+    root: &Path,
+    config_path: Option<&Path>,
+    scan_limits: ScanLimits,
+    control: &IndexWorkControl,
+) -> Result<(AtlasStore, ScanRuntimePlan, IndexFreshnessAssessment), CliError> {
+    let store = open_atlas_store_read_only_for_project(db_path, root)?;
+    let plan = ScanRuntimePlan::for_path_controlled(config_path, root, None, control)
+        .map_err(|source| publication_input_error(root, source))?;
+    let assessment = match detect_index_freshness_controlled(&store, &plan, scan_limits, control) {
+        Ok(assessment) => assessment,
+        Err(CliError::VerificationIncomplete(report))
+            if report.reason == IndexVerificationReason::PublicationContractMismatch =>
+        {
+            return Err(CliError::RefreshRequired(Box::new(
+                index_policy_refresh_required(&plan.root),
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((store, plan, assessment))
 }
 
 /// Open an explicit ordered set of current project indexes without mutating any root.
@@ -1199,23 +1233,57 @@ fn detect_index_freshness_controlled(
     let mut work = SourceVerificationWork::default();
     verify_index_project_root(store, &plan.root)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    verify_index_publication(store, plan)?;
+    let generation = verify_index_publication(store, plan)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+    assess_source_against_publication(store, plan, scan_limits, control, generation, work)
+}
+
+/// Compare source with the generation whose complete publication contract was verified.
+fn assess_source_against_publication(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    scan_limits: ScanLimits,
+    control: &IndexWorkControl,
+    generation: IndexGeneration,
+    mut work: SourceVerificationWork,
+) -> Result<IndexFreshnessAssessment, CliError> {
     let scan = scan_repo_controlled_with_work(&plan.root, &plan.scan_options, scan_limits, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
     work.filesystem_entries = scan.work.entries;
     work.filesystem_bytes = scan.work.source_bytes;
     let current_nodes = scan.nodes;
-    let indexed_nodes = store
-        .load_nodes()?
-        .into_iter()
-        .map(|indexed| indexed.node)
-        .collect::<Vec<_>>();
+    let mut current = current_nodes.iter().peekable();
+    let mut delta = SourceDelta::default();
+    store.visit_source_nodes_controlled(control, |indexed| {
+        delta.compare_next(&mut current, &indexed);
+        work.decoded_nodes = work.decoded_nodes.saturating_add(1);
+        Ok(())
+    })?;
+    for node in current {
+        delta.record(Some(node), None);
+    }
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-    work.decoded_nodes = u64::try_from(indexed_nodes.len()).unwrap_or(u64::MAX);
+    let current_generation = publication_base_generation(store)?;
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+    if current_generation != generation {
+        return Err(projectatlas_db::DbError::PublicationBaseGenerationChanged {
+            expected: generation,
+            found: current_generation,
+        }
+        .into());
+    }
+    let project_instance_id = store.captured_project_binding()?.project_instance_id;
+    work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     Ok(IndexFreshnessAssessment {
-        delta: source_node_delta(&plan.root, &current_nodes, &indexed_nodes),
+        delta: delta.finish(&plan.root),
         work,
+        source: CapturedSourceState {
+            root: plan.root.clone(),
+            project_instance_id,
+            contract_fingerprint: plan.publication_contract_fingerprint(),
+            generation,
+            nodes: current_nodes,
+        },
     })
 }
 
@@ -1231,97 +1299,147 @@ fn verify_source_nodes_match(
     }
 }
 
-/// Build one deterministic affected-path plan from current and indexed nodes.
+/// Build one affected-path plan from source nodes, independent of input order.
 fn source_node_delta(
     root: &Path,
     current_nodes: &[Node],
     indexed_nodes: &[Node],
 ) -> Option<IndexFreshnessDelta> {
-    let current_by_path = current_nodes
-        .iter()
-        .map(|node| (node.path.as_str(), node))
-        .collect::<BTreeMap<_, _>>();
-    let indexed_by_path = indexed_nodes
-        .iter()
-        .map(|node| (node.path.as_str(), node))
-        .collect::<BTreeMap<_, _>>();
+    let mut current = current_nodes.iter().collect::<Vec<_>>();
+    let mut indexed = indexed_nodes.iter().collect::<Vec<_>>();
+    current.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    indexed.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    let mut current = current.into_iter().peekable();
+    let mut delta = SourceDelta::default();
+    for node in indexed {
+        delta.compare_next(&mut current, node);
+    }
+    for node in current {
+        delta.record(Some(node), None);
+    }
+    delta.finish(root)
+}
 
-    let added_paths = current_by_path
-        .keys()
-        .filter(|path| !indexed_by_path.contains_key(**path))
-        .copied()
-        .collect::<Vec<_>>();
-    let removed_paths = indexed_by_path
-        .keys()
-        .filter(|path| !current_by_path.contains_key(**path))
-        .copied()
-        .collect::<Vec<_>>();
-    let mut modified_paths = Vec::new();
-    for (path, current) in &current_by_path {
-        let Some(indexed) = indexed_by_path.get(path) else {
-            continue;
-        };
-        if !same_indexed_source(current, indexed) {
-            modified_paths.push(*path);
+/// Changed source paths retained by an ordered comparison; unchanged rows are discarded.
+#[derive(Default)]
+struct SourceDelta {
+    /// Added live paths.
+    added: usize,
+    /// Removed or excluded paths.
+    removed: usize,
+    /// Paths whose source-derived fields changed.
+    modified: usize,
+    /// Current bytes belonging to added or modified files.
+    changed_bytes: u64,
+    /// A changed folder requires complete discovery, even after it was deleted.
+    folder_changed: bool,
+    /// Exact changed keys, kept sorted for diagnostics and refresh admission.
+    paths: Vec<String>,
+}
+
+impl SourceDelta {
+    /// Merge one ordered stored row with the current-source cursor.
+    fn compare_next<'a>(
+        &mut self,
+        current: &mut std::iter::Peekable<impl Iterator<Item = &'a Node>>,
+        indexed: &Node,
+    ) {
+        while current.peek().is_some_and(|node| node.path < indexed.path) {
+            self.record(current.next(), None);
+        }
+        if current.peek().is_some_and(|node| node.path == indexed.path) {
+            self.record(current.next(), Some(indexed));
+        } else {
+            self.record(None, Some(indexed));
         }
     }
-    let changed = added_paths
-        .len()
-        .saturating_add(removed_paths.len())
-        .saturating_add(modified_paths.len());
-    if changed == 0 {
-        return None;
+
+    /// Accumulate only a real addition, deletion, or source-field modification.
+    fn record(&mut self, current: Option<&Node>, indexed: Option<&Node>) {
+        let path = match (current, indexed) {
+            (Some(current), Some(indexed)) => {
+                if same_indexed_source(current, indexed) {
+                    return;
+                }
+                self.modified += 1;
+                &current.path
+            }
+            (Some(current), None) => {
+                self.added += 1;
+                &current.path
+            }
+            (None, Some(indexed)) => {
+                self.removed += 1;
+                &indexed.path
+            }
+            (None, None) => return,
+        };
+        self.changed_bytes = self
+            .changed_bytes
+            .saturating_add(current.and_then(|node| node.size_bytes).unwrap_or_default());
+        self.folder_changed |= current.is_some_and(|node| node.kind == NodeKind::Folder)
+            || indexed.is_some_and(|node| node.kind == NodeKind::Folder);
+        if self.paths.len() < MAX_INCREMENTAL_CHANGED_PATHS {
+            self.paths.push(path.clone());
+        }
     }
 
-    let changed_paths = added_paths
-        .iter()
-        .chain(&removed_paths)
-        .chain(&modified_paths)
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let changed_bytes = added_paths
-        .iter()
-        .chain(&modified_paths)
-        .filter_map(|path| current_by_path.get(path).and_then(|node| node.size_bytes))
-        .fold(0_u64, u64::saturating_add);
-    let requires_full_scan = changed > NORMAL_READ_REFRESH_MAX_PATHS
-        || changed_bytes > NORMAL_READ_REFRESH_MAX_BYTES
-        || changed_paths
+    /// Apply the existing normal-read limits to the complete compared change set.
+    fn finish(self, root: &Path) -> Option<IndexFreshnessDelta> {
+        let changed = self
+            .added
+            .saturating_add(self.removed)
+            .saturating_add(self.modified);
+        if changed == 0 {
+            return None;
+        }
+        let paths_complete = self.paths.len() == changed;
+        let requires_full_scan = !paths_complete
+            || self.folder_changed
+            || self.paths.iter().any(|path| {
+                watch_path_requires_full_scan(root, &root.join(repo_path_to_native(path)))
+            });
+        let exceeds_normal_read = changed > NORMAL_READ_REFRESH_MAX_PATHS
+            || self.changed_bytes > NORMAL_READ_REFRESH_MAX_BYTES;
+        let sample_paths = self
+            .paths
             .iter()
-            .any(|path| watch_path_requires_full_scan(root, &root.join(repo_path_to_native(path))));
-    let sample_paths = changed_paths
-        .iter()
-        .take(INDEX_FRESHNESS_SAMPLE_LIMIT)
-        .map(|path| (*path).to_string())
-        .collect();
-    Some(IndexFreshnessDelta {
-        report: IndexRefreshRequired {
-            project_root: lossless_project_root_display(root),
-            worktree: None,
-            status: IndexReadStatus::RefreshRequired,
-            reason: if added_paths.is_empty() && removed_paths.is_empty() {
-                IndexRefreshReason::SourceChanged
-            } else {
-                IndexRefreshReason::PathsChanged
+            .take(INDEX_FRESHNESS_SAMPLE_LIMIT)
+            .cloned()
+            .collect();
+        Some(IndexFreshnessDelta {
+            paths_complete,
+            requires_full_scan,
+            report: IndexRefreshRequired {
+                project_root: lossless_project_root_display(root),
+                worktree: None,
+                status: IndexReadStatus::RefreshRequired,
+                reason: if self.added == 0 && self.removed == 0 {
+                    IndexRefreshReason::SourceChanged
+                } else {
+                    IndexRefreshReason::PathsChanged
+                },
+                scope: if requires_full_scan || exceeds_normal_read {
+                    IndexRefreshScope::Full
+                } else {
+                    IndexRefreshScope::Incremental
+                },
+                changed,
+                added: self.added,
+                removed: self.removed,
+                modified: self.modified,
+                sample_paths,
             },
-            scope: if requires_full_scan {
-                IndexRefreshScope::Full
+            paths: if paths_complete {
+                self.paths
+                    .into_iter()
+                    .map(|path| root.join(repo_path_to_native(&path)))
+                    .collect()
             } else {
-                IndexRefreshScope::Incremental
+                HashSet::new()
             },
-            changed,
-            added: added_paths.len(),
-            removed: removed_paths.len(),
-            modified: modified_paths.len(),
-            sample_paths,
-        },
-        paths: changed_paths
-            .into_iter()
-            .map(|path| root.join(repo_path_to_native(path)))
-            .collect(),
-    })
+        })
+    }
 }
 
 /// Verify that the opened database belongs to the selected canonical root.
@@ -1349,7 +1467,10 @@ fn verify_index_project_root(store: &AtlasStore, selected_root: &Path) -> Result
 }
 
 /// Reject mixed or runtime-incompatible derived projections before source reads.
-fn verify_index_publication(store: &AtlasStore, plan: &ScanRuntimePlan) -> Result<(), CliError> {
+fn verify_index_publication(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+) -> Result<IndexGeneration, CliError> {
     let expected_fingerprint = plan.publication_contract_fingerprint();
     let Some(publication) = store.index_publication()? else {
         return Err(verification_incomplete(
@@ -1387,11 +1508,11 @@ fn verify_index_publication(store: &AtlasStore, plan: &ScanRuntimePlan) -> Resul
             ),
         ));
     }
-    Ok(())
+    Ok(publication.generation)
 }
 
 /// Return whether symbol reuse and incremental publication share the current derivation contract.
-fn publication_contract_matches(
+pub(crate) fn publication_contract_matches(
     store: &AtlasStore,
     plan: &ScanRuntimePlan,
 ) -> Result<bool, CliError> {
@@ -2458,6 +2579,20 @@ pub(crate) fn open_atlas_store_for_project(
     open_atlas_store_for_project_with_location_validator(path, root, validate_database_location)
 }
 
+/// Open initialized storage without permitting absent or empty schema creation.
+pub(crate) fn open_existing_atlas_store_for_project(
+    path: &Path,
+    root: &Path,
+) -> Result<AtlasStore, CliError> {
+    AtlasStore::open_existing_for_project(path, root).map_err(|source| {
+        if matches!(source, projectatlas_db::DbError::InitializationRequired) {
+            index_init_required(root, path)
+        } else {
+            project_store_error(source)
+        }
+    })
+}
+
 /// Validate storage before creating the database parent and opening the store.
 fn open_atlas_store_for_project_with_location_validator<F>(
     path: &Path,
@@ -2477,7 +2612,13 @@ pub(crate) fn open_atlas_store_read_only_for_project(
     path: &Path,
     root: &Path,
 ) -> Result<AtlasStore, CliError> {
-    AtlasStore::open_read_only_for_project(path, root).map_err(project_store_error)
+    AtlasStore::open_read_only_for_project(path, root).map_err(|source| {
+        if matches!(source, projectatlas_db::DbError::InitializationRequired) {
+            index_init_required(root, path)
+        } else {
+            project_store_error(source)
+        }
+    })
 }
 
 /// Preserve typed selected-root mismatch diagnostics across store adapters.
@@ -2855,18 +2996,54 @@ fn stage_full_index_publication(
     import_legacy_purposes: bool,
     control: &IndexWorkControl,
 ) -> Result<IndexPublicationBatch, CliError> {
-    let base_generation = publication_base_generation(store)?;
-    let contract_fingerprint = plan.publication_contract_fingerprint();
-    let previous_hashes = reuse_unchanged_symbols
-        .then(|| indexed_file_hashes(store))
-        .transpose()?;
-    let nodes = scan_repo_controlled(
-        &plan.root,
-        &plan.scan_options,
-        ScanLimits::default(),
+    stage_full_index_publication_from_source(
+        store,
+        plan,
+        symbol_options,
+        reuse_unchanged_symbols,
+        import_legacy_purposes,
+        None,
         control,
     )
-    .map_err(|source| source_inspection_error(&plan.root, source))?;
+}
+
+/// Consume operation-owned discovery when full reconciliation follows an exact assessment.
+fn stage_full_index_publication_from_source(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    reuse_unchanged_symbols: bool,
+    import_legacy_purposes: bool,
+    captured: Option<CapturedSourceState>,
+    control: &IndexWorkControl,
+) -> Result<IndexPublicationBatch, CliError> {
+    if let Some(source) = &captured {
+        verify_captured_source_identity(store, plan, source)?;
+    }
+    let base_generation = publication_base_generation(store)?;
+    if let Some(source) = &captured
+        && source.generation != base_generation
+    {
+        return Err(projectatlas_db::DbError::PublicationBaseGenerationChanged {
+            expected: source.generation,
+            found: base_generation,
+        }
+        .into());
+    }
+    let contract_fingerprint = plan.publication_contract_fingerprint();
+    let previous_hashes = reuse_unchanged_symbols
+        .then(|| indexed_file_hashes(store, control))
+        .transpose()?;
+    let nodes = match captured {
+        Some(source) => source.nodes,
+        None => scan_repo_controlled(
+            &plan.root,
+            &plan.scan_options,
+            ScanLimits::default(),
+            control,
+        )
+        .map_err(|source| source_inspection_error(&plan.root, source))?,
+    };
     control.check(IndexWorkStage::Publication)?;
     let purpose_import = import_legacy_purposes
         .then(|| plan.purpose_import_snapshot_controlled(&nodes, control))
@@ -2903,6 +3080,7 @@ fn stage_full_index_publication(
         symbol_options,
         previous_hashes.as_ref(),
         None,
+        &text.rows,
         &protected_purpose_paths,
         control,
         symbol_limits,
@@ -3318,11 +3496,12 @@ pub(crate) fn reconcile_hydrated_index_controlled(
                 document_paths: delta.paths.clone(),
                 paths: delta.paths,
             };
-            let refresh = match refresh_index_for_changes_controlled(
+            let refresh = match refresh_index_for_changes_from_source_controlled(
                 store,
                 plan,
                 &changes,
                 symbol_options,
+                Some(assessment.source),
                 control,
             ) {
                 Ok(refresh) => refresh,
@@ -3380,11 +3559,11 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
     let base_generation = publication_base_generation(store)?;
-    let nodes = store
-        .load_nodes()?
-        .into_iter()
-        .map(|indexed| indexed.node)
-        .collect::<Vec<_>>();
+    let mut nodes = Vec::new();
+    store.visit_source_nodes_controlled(control, |node| {
+        nodes.push(node);
+        Ok(())
+    })?;
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let retained_before_symbols =
         staged_publication_identity_bytes(&plan.root, &contract_fingerprint)
@@ -3399,6 +3578,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         symbol_options,
         previous_hashes,
         None,
+        &[],
         &HashSet::new(),
         control,
         symbol_limits,
@@ -5008,6 +5188,26 @@ pub(crate) struct WatchReport {
     pub(crate) last_symbols: SymbolBuildReport,
 }
 
+impl WatchReport {
+    /// Report one verified unchanged pass without claiming parse or publication work.
+    pub(crate) fn unchanged(text_options: TextIndexOptions) -> Self {
+        Self::from_refresh(empty_index_refresh_report(text_options))
+    }
+
+    /// Render one complete shared refresh outcome consistently across adapters.
+    pub(crate) fn from_refresh(refresh: IndexRefreshReport) -> Self {
+        Self {
+            mode: WATCH_MODE_ONCE.to_string(),
+            cycles: 1,
+            once: true,
+            fallback_reason: None,
+            text_index: refresh.text_index,
+            structural_summaries: refresh.structural_summaries,
+            last_symbols: refresh.symbols,
+        }
+    }
+}
+
 /// Debounced filesystem changes observed by watcher mode.
 #[derive(Debug, Default)]
 pub(crate) struct WatchChangeSet {
@@ -6164,6 +6364,7 @@ fn build_symbols_for_paths_with_limits(
         options,
         previous_hashes,
         target_paths,
+        &[],
         &HashSet::new(),
         control,
         limits,
@@ -6207,6 +6408,7 @@ fn stage_symbols_for_nodes_with_limits(
     options: &SymbolBuildOptions,
     previous_hashes: Option<&HashMap<String, String>>,
     target_paths: Option<&HashSet<String>>,
+    staged_text: &[TextIndexRow],
     protected_purpose_paths: &HashSet<String>,
     control: &IndexWorkControl,
     limits: SymbolPublicationLimits,
@@ -6363,6 +6565,10 @@ fn stage_symbols_for_nodes_with_limits(
     }
     report.max_workers = worker_count_for_work(jobs.len(), report.max_workers);
     if !jobs.is_empty() {
+        let verified_text = staged_text
+            .iter()
+            .filter_map(|row| row.text.as_ref().map(|text| (row.path.as_str(), text)))
+            .collect::<HashMap<_, _>>();
         let pool = ThreadPoolBuilder::new()
             .num_threads(report.max_workers)
             .build()
@@ -6377,9 +6583,11 @@ fn stage_symbols_for_nodes_with_limits(
             &jobs,
             options,
             control,
+            &verified_text,
         )?;
         #[cfg(not(feature = "optional-parser-supervisor"))]
-        let outcomes = parse_symbol_job_batches_controlled(&pool, &jobs, options, control)?;
+        let outcomes =
+            parse_symbol_job_batches_controlled(&pool, &jobs, options, control, &verified_text)?;
         for outcome in outcomes {
             match outcome {
                 SymbolParseOutcome::Parsed(parsed) => {
@@ -6458,11 +6666,18 @@ fn parse_symbol_job_batches_controlled(
     jobs: &[SymbolParseJob],
     options: &SymbolBuildOptions,
     control: &IndexWorkControl,
+    verified_text: &HashMap<&str, &IndexedFileText>,
 ) -> Result<Vec<SymbolParseOutcome>, CliError> {
     let mut outcomes = Vec::with_capacity(jobs.len());
     for batch in jobs.chunks(SYMBOL_PARSE_BATCH_SIZE) {
         control.check(IndexWorkStage::SymbolParsing)?;
-        outcomes.extend(parse_symbol_jobs_controlled(pool, batch, options, control)?);
+        outcomes.extend(parse_symbol_jobs_controlled(
+            pool,
+            batch,
+            options,
+            control,
+            verified_text,
+        )?);
     }
     Ok(outcomes)
 }
@@ -6504,11 +6719,19 @@ fn parse_symbol_jobs_controlled(
     jobs: &[SymbolParseJob],
     options: &SymbolBuildOptions,
     control: &IndexWorkControl,
+    verified_text: &HashMap<&str, &IndexedFileText>,
 ) -> Result<Vec<SymbolParseOutcome>, CliError> {
     control.check(IndexWorkStage::SymbolParsing)?;
     Ok(pool.install(|| {
         jobs.par_iter()
-            .map(|job| parse_symbol_job_controlled(job, options, control))
+            .map(|job| {
+                parse_symbol_job_with_staged_text_controlled(
+                    job,
+                    options,
+                    control,
+                    verified_text.get(job.path.as_str()).copied(),
+                )
+            })
             .collect::<Vec<_>>()
     }))
 }
@@ -6593,6 +6816,27 @@ pub(crate) fn parse_symbol_job(
             |deadline| IndexWorkControl::with_deadline(IndexCancellation::new(), deadline),
         );
     parse_symbol_job_controlled(job, options, &control)
+}
+
+/// Borrow byte-preserving staged UTF-8 input for built-in parsers when admission matches.
+fn parse_symbol_job_with_staged_text_controlled(
+    job: &SymbolParseJob,
+    options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+    verified_text: Option<&IndexedFileText>,
+) -> SymbolParseOutcome {
+    if let Err(failure) = control.check(IndexWorkStage::SymbolParsing) {
+        return SymbolParseOutcome::IndexWork(failure);
+    }
+    if document_format_for_path(&job.path, job.language.as_deref()).is_none()
+        && let Some(text) = verified_text
+        && text.path == job.path
+        && text.content_hash.as_deref() == Some(job.expected_content_hash.as_str())
+        && text.content.len() as u64 <= options.max_bytes
+    {
+        return parse_admitted_symbol_job(job, &text.content, None, options, control);
+    }
+    parse_symbol_job_controlled(job, options, control)
 }
 
 /// Parse one source file while observing cancellation before and during parsing.
@@ -7626,15 +7870,7 @@ pub(crate) fn run_single_watch_refresh_controlled(
     control.check(IndexWorkStage::RepositoryTraversal)?;
     let current_plan = plan.reload_controlled(control)?;
     let last_refresh = refresh_index_controlled(store, &current_plan, symbol_options, control)?;
-    Ok(WatchReport {
-        mode: WATCH_MODE_ONCE.to_string(),
-        cycles: 1,
-        once: true,
-        fallback_reason: None,
-        text_index: last_refresh.text_index,
-        structural_summaries: last_refresh.structural_summaries,
-        last_symbols: last_refresh.symbols,
-    })
+    Ok(WatchReport::from_refresh(last_refresh))
 }
 
 /// Run an event-backed watcher loop with `notify`.
@@ -7994,22 +8230,111 @@ pub(crate) fn refresh_index_controlled(
     let bounded_control = bounded_index_work_control(control);
     let control = &bounded_control;
     let reuse_unchanged_symbols = publication_contract_matches(store, plan)?;
-    if reuse_unchanged_symbols
-        && detect_index_freshness_controlled(store, plan, ScanLimits::default(), control)?
-            .delta
-            .is_none()
-    {
-        graph_projection::cleanup_abandoned_repository_graph_staging(store, &plan.root, control)?;
-        return Ok(empty_index_refresh_report(plan.text_options));
+    if reuse_unchanged_symbols {
+        let assessment =
+            detect_index_freshness_controlled(store, plan, ScanLimits::default(), control)?;
+        return refresh_index_from_assessment_controlled(
+            store,
+            plan,
+            symbol_options,
+            assessment,
+            control,
+        );
     }
+    refresh_full_index_controlled(
+        store,
+        plan,
+        symbol_options,
+        reuse_unchanged_symbols,
+        control,
+    )
+}
+
+/// Consume exact read-side discovery through the existing affected or full refresh owner.
+pub(crate) fn refresh_index_from_assessment_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    assessment: IndexFreshnessAssessment,
+    control: &IndexWorkControl,
+) -> Result<IndexRefreshReport, CliError> {
+    verify_captured_source_identity(store, plan, &assessment.source)?;
+    match assessment.delta {
+        None => {
+            graph_projection::cleanup_abandoned_repository_graph_staging(
+                store, &plan.root, control,
+            )?;
+            return Ok(empty_index_refresh_report(plan.text_options));
+        }
+        Some(delta) if delta.paths_complete && !delta.requires_full_scan => {
+            let changes = WatchChangeSet {
+                requires_full_scan: false,
+                document_paths: delta.paths.clone(),
+                paths: delta.paths,
+            };
+            match refresh_index_for_changes_from_source_controlled(
+                store,
+                plan,
+                &changes,
+                symbol_options,
+                Some(assessment.source),
+                control,
+            ) {
+                Ok(report) => return Ok(report),
+                Err(error) if incremental_refresh_needs_full(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Some(_) => {
+            return refresh_full_index_from_source_controlled(
+                store,
+                plan,
+                symbol_options,
+                true,
+                Some(assessment.source),
+                control,
+            );
+        }
+    }
+    refresh_full_index_controlled(store, plan, symbol_options, true, control)
+}
+
+/// Reconcile complete state when policy or an incremental work bound requires it.
+fn refresh_full_index_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    reuse_unchanged_symbols: bool,
+    control: &IndexWorkControl,
+) -> Result<IndexRefreshReport, CliError> {
+    refresh_full_index_from_source_controlled(
+        store,
+        plan,
+        symbol_options,
+        reuse_unchanged_symbols,
+        None,
+        control,
+    )
+}
+
+/// Keep the exact inventory alive only in the full staging owner that consumes it.
+fn refresh_full_index_from_source_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    reuse_unchanged_symbols: bool,
+    captured: Option<CapturedSourceState>,
+    control: &IndexWorkControl,
+) -> Result<IndexRefreshReport, CliError> {
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
-    let batch = stage_full_index_publication(
+    let batch = stage_full_index_publication_from_source(
         store,
         plan,
         symbol_options,
         reuse_unchanged_symbols,
         false,
+        captured,
         control,
     )?;
     revalidate_staged_publication_inputs_controlled(
@@ -8078,7 +8403,27 @@ pub(crate) fn refresh_index_for_changes(
     symbol_options: &SymbolBuildOptions,
 ) -> Result<IndexRefreshReport, CliError> {
     let control = index_work_control(symbol_options);
-    refresh_index_for_changes_controlled(store, plan, changes, symbol_options, &control)
+    match refresh_index_for_changes_controlled(store, plan, changes, symbol_options, &control) {
+        Err(error) if incremental_refresh_needs_full(&error) => {
+            let reuse = publication_contract_matches(store, plan)?;
+            refresh_full_index_controlled(store, plan, symbol_options, reuse, &control)
+        }
+        result => result,
+    }
+}
+
+/// Identify explicit-refresh uncertainty that can safely use complete reconciliation.
+fn incremental_refresh_needs_full(error: &CliError) -> bool {
+    matches!(error,
+        CliError::RefreshRequired(report)
+            if report.reason == IndexRefreshReason::DependencyClosureLimit
+    ) || matches!(
+        error,
+        CliError::IndexWork(IndexWorkFailure::ResourceLimitExceeded {
+            resource: IndexWorkResource::SourceBytes | IndexWorkResource::Entries,
+            ..
+        })
+    )
 }
 
 /// Refresh one watcher batch under one cancellation and publication boundary.
@@ -8087,6 +8432,25 @@ pub(crate) fn refresh_index_for_changes_controlled(
     plan: &ScanRuntimePlan,
     changes: &WatchChangeSet,
     symbol_options: &SymbolBuildOptions,
+    control: &IndexWorkControl,
+) -> Result<IndexRefreshReport, CliError> {
+    refresh_index_for_changes_from_source_controlled(
+        store,
+        plan,
+        changes,
+        symbol_options,
+        None,
+        control,
+    )
+}
+
+/// Consume optional exact discovery instead of inspecting affected paths again.
+fn refresh_index_for_changes_from_source_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    changes: &WatchChangeSet,
+    symbol_options: &SymbolBuildOptions,
+    captured: Option<CapturedSourceState>,
     control: &IndexWorkControl,
 ) -> Result<IndexRefreshReport, CliError> {
     let bounded_control = bounded_index_work_control(control);
@@ -8107,15 +8471,16 @@ pub(crate) fn refresh_index_for_changes_controlled(
     }
     let root = &plan.root;
     let base_generation = publication_base_generation(store)?;
-    let baseline_nodes = store
-        .load_nodes()?
-        .into_iter()
-        .map(|indexed| indexed.node)
-        .collect::<Vec<_>>();
-    let baseline_by_path = baseline_nodes
-        .iter()
-        .map(|node| (node.path.clone(), node))
-        .collect::<HashMap<_, _>>();
+    if let Some(source) = &captured {
+        verify_captured_source_identity(store, plan, source)?;
+    }
+    let mut baseline_nodes = Vec::new();
+    if captured.is_none() {
+        store.visit_source_nodes_controlled(control, |node| {
+            baseline_nodes.push(node);
+            Ok(())
+        })?;
+    }
     let mut nodes = Vec::new();
     let mut absent_paths = Vec::new();
     let mut source_bytes = 0_u64;
@@ -8131,77 +8496,62 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .collect::<BTreeSet<_>>();
     for path in sorted_watch_paths(&changes.paths) {
         control.check(IndexWorkStage::RepositoryTraversal)?;
-        match path.try_exists() {
-            Ok(true) => {
-                let remaining_source_bytes =
-                    MAX_INCREMENTAL_SOURCE_BYTES.saturating_sub(source_bytes);
-                if let Some(node) = scan_path_with_policy_controlled(
-                    &scan_policy,
-                    &path,
-                    ScanLimits::new(1, remaining_source_bytes, 1),
-                    control,
+        let node = if let Some(source) = &captured {
+            normalized_deleted_path(root, &path)?.and_then(|key| {
+                source
+                    .nodes
+                    .binary_search_by(|node| node.path.cmp(&key))
+                    .ok()
+                    .map(|index| source.nodes[index].clone())
+            })
+        } else {
+            scan_incremental_path_controlled(
+                root,
+                &scan_policy,
+                &path,
+                MAX_INCREMENTAL_SOURCE_BYTES.saturating_sub(source_bytes),
+                control,
+            )?
+        };
+        if let Some(node) = node {
+            source_bytes = source_bytes
+                .checked_add(node.size_bytes.unwrap_or_default())
+                .ok_or_else(|| {
+                    IndexWorkFailure::resource_limit(
+                        IndexWorkStage::SourceMetadata,
+                        IndexWorkResource::SourceBytes,
+                        MAX_INCREMENTAL_SOURCE_BYTES,
+                        u64::MAX,
+                    )
+                })?;
+            if source_bytes > MAX_INCREMENTAL_SOURCE_BYTES {
+                return Err(IndexWorkFailure::resource_limit(
+                    IndexWorkStage::SourceMetadata,
+                    IndexWorkResource::SourceBytes,
+                    MAX_INCREMENTAL_SOURCE_BYTES,
+                    source_bytes,
                 )
-                .map_err(|source| source_inspection_error(root, source))?
-                {
-                    source_bytes = source_bytes
-                        .checked_add(node.size_bytes.unwrap_or_default())
-                        .ok_or_else(|| {
-                            IndexWorkFailure::resource_limit(
-                                IndexWorkStage::SourceMetadata,
-                                IndexWorkResource::SourceBytes,
-                                MAX_INCREMENTAL_SOURCE_BYTES,
-                                u64::MAX,
-                            )
-                        })?;
-                    if source_bytes > MAX_INCREMENTAL_SOURCE_BYTES {
-                        return Err(IndexWorkFailure::resource_limit(
-                            IndexWorkStage::SourceMetadata,
-                            IndexWorkResource::SourceBytes,
-                            MAX_INCREMENTAL_SOURCE_BYTES,
-                            source_bytes,
-                        )
-                        .into());
-                    }
-                    nodes.push(node);
-                } else if let Some(path_key) = normalized_deleted_path(root, &path)? {
-                    absent_paths.push(path_key);
-                }
+                .into());
             }
-            Ok(false) => {
-                if let Some(path_key) = normalized_deleted_path(root, &path)? {
-                    absent_paths.push(path_key);
-                }
-            }
-            Err(source) => {
-                return Err(CliError::VerificationIncomplete(Box::new(
-                    IndexVerificationIncomplete {
-                        project_root: lossless_project_root_display(root),
-                        worktree: None,
-                        status: IndexReadStatus::VerificationIncomplete,
-                        reason: IndexVerificationReason::SourceInspectionFailed,
-                        scope: IndexRefreshScope::Full,
-                        message: format!("failed to inspect '{}': {source}", path.display()),
-                    },
-                )));
-            }
+            nodes.push(node);
+        } else if let Some(key) = normalized_deleted_path(root, &path)? {
+            absent_paths.push(key);
         }
     }
     absent_paths.sort();
     absent_paths.dedup();
-    let candidate_paths = nodes
+    let sorted_candidate_paths = nodes
         .iter()
         .map(|node| node.path.clone())
         .chain(absent_paths.iter().cloned())
-        .collect::<HashSet<_>>();
-    let mut sorted_candidate_paths = candidate_paths.into_iter().collect::<Vec<_>>();
-    sorted_candidate_paths.sort();
-    let existing_nodes = sorted_candidate_paths
-        .iter()
-        .filter_map(|path| {
-            baseline_by_path
-                .get(path)
-                .map(|node| (path.clone(), (*node).clone()))
-        })
+        .chain(direct_document_paths.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let existing_nodes = store
+        .load_nodes_by_paths_controlled(&sorted_candidate_paths, Some(control))?
+        .into_iter()
+        .map(|indexed| (indexed.node.path.clone(), indexed.node))
         .collect::<HashMap<_, _>>();
     if absent_paths.iter().any(|path| {
         existing_nodes
@@ -8229,15 +8579,18 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .chain(absent_paths.iter().cloned())
         .collect::<HashSet<_>>();
     direct_document_paths
-        .retain(|path| changed_paths.contains(path) || !baseline_by_path.contains_key(path));
+        .retain(|path| changed_paths.contains(path) || !existing_nodes.contains_key(path));
+    let expected_nodes = match captured {
+        Some(source) => source.nodes,
+        None => expected_nodes_after_incremental(baseline_nodes, &nodes, &absent_paths),
+    };
     if nodes.is_empty() && absent_paths.is_empty() && direct_document_paths.is_empty() {
-        revalidate_staged_publication_inputs_controlled(plan, &baseline_nodes, None, control)?;
+        revalidate_staged_publication_inputs_controlled(plan, &expected_nodes, None, control)?;
         return Ok(empty_index_refresh_report(plan.text_options));
     }
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
     drop(existing_nodes);
-    drop(baseline_by_path);
     let previous_hashes = indexed_file_hashes_for_paths(store, &changed_paths)?;
     let mut text_paths = changed_paths.iter().cloned().collect::<Vec<_>>();
     text_paths.sort();
@@ -8250,7 +8603,6 @@ pub(crate) fn refresh_index_for_changes_controlled(
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<HashSet<_>>();
-    let expected_nodes = expected_nodes_after_incremental(baseline_nodes, &nodes, &absent_paths);
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let retained_before_symbols = staged_publication_identity_bytes(root, &contract_fingerprint)
         .saturating_add(staged_string_bytes(&text_paths))
@@ -8271,6 +8623,7 @@ pub(crate) fn refresh_index_for_changes_controlled(
         symbol_options,
         Some(&previous_hashes),
         Some(&target_paths),
+        &text.rows,
         &protected_purpose_paths,
         control,
         symbol_limits,
@@ -8329,6 +8682,65 @@ pub(crate) fn refresh_index_for_changes_controlled(
         structural_summaries: outcome.structural_summaries,
         symbols: outcome.symbols,
     })
+}
+
+/// Fence operation-owned discovery against the current publication and selected plan.
+fn verify_captured_source_identity(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    source: &CapturedSourceState,
+) -> Result<(), CliError> {
+    if store.captured_project_binding()?.project_instance_id != source.project_instance_id {
+        return Err(CliError::InvalidInput(
+            "captured source belongs to a different project database".to_string(),
+        ));
+    }
+    if source.root != plan.root
+        || source.contract_fingerprint != plan.publication_contract_fingerprint()
+    {
+        return Err(CliError::RefreshRequired(Box::new(
+            index_policy_refresh_required(&plan.root),
+        )));
+    }
+    let generation = verify_index_publication(store, plan)?;
+    if source.generation != generation {
+        return Err(projectatlas_db::DbError::PublicationBaseGenerationChanged {
+            expected: source.generation,
+            found: generation,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Inspect one affected path when no exact operation-owned discovery is available.
+fn scan_incremental_path_controlled(
+    root: &Path,
+    policy: &RootScanPolicy,
+    path: &Path,
+    remaining_source_bytes: u64,
+    control: &IndexWorkControl,
+) -> Result<Option<Node>, CliError> {
+    match path.try_exists() {
+        Ok(true) => scan_path_with_policy_controlled(
+            policy,
+            path,
+            ScanLimits::new(1, remaining_source_bytes, 1),
+            control,
+        )
+        .map_err(|source| source_inspection_error(root, source)),
+        Ok(false) => Ok(None),
+        Err(source) => Err(CliError::VerificationIncomplete(Box::new(
+            IndexVerificationIncomplete {
+                project_root: lossless_project_root_display(root),
+                worktree: None,
+                status: IndexReadStatus::VerificationIncomplete,
+                reason: IndexVerificationReason::SourceInspectionFailed,
+                scope: IndexRefreshScope::Full,
+                message: format!("failed to inspect '{}': {source}", path.display()),
+            },
+        ))),
+    }
 }
 
 /// Seed built-in purposes for reserved `ProjectAtlas` metadata nodes when needed.
@@ -8900,13 +9312,20 @@ fn indexed_file_texts_for_nodes_with_limit(
 }
 
 /// Load indexed file hashes for incremental refresh comparison.
-pub(crate) fn indexed_file_hashes(store: &AtlasStore) -> Result<HashMap<String, String>, CliError> {
-    Ok(store
-        .load_nodes()?
-        .into_iter()
-        .filter(|node| node.node.kind == NodeKind::File)
-        .filter_map(|node| node.node.content_hash.map(|hash| (node.node.path, hash)))
-        .collect::<HashMap<_, _>>())
+fn indexed_file_hashes(
+    store: &AtlasStore,
+    control: &IndexWorkControl,
+) -> Result<HashMap<String, String>, CliError> {
+    let mut hashes = HashMap::new();
+    store.visit_source_nodes_controlled(control, |node| {
+        if node.kind == NodeKind::File
+            && let Some(hash) = node.content_hash
+        {
+            hashes.insert(node.path, hash);
+        }
+        Ok(())
+    })?;
+    Ok(hashes)
 }
 
 /// Load indexed file hashes for selected repository paths.
@@ -10511,6 +10930,67 @@ mod tests {
     }
 
     #[test]
+    fn oversized_source_delta_retains_exact_counts_without_partial_refresh_paths()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut delta = SourceDelta::default();
+        for index in 0..=MAX_INCREMENTAL_CHANGED_PATHS {
+            delta.record(
+                Some(&Node {
+                    path: format!("file_{index:08}.rs"),
+                    kind: NodeKind::File,
+                    parent_path: None,
+                    extension: None,
+                    language: None,
+                    size_bytes: Some(1),
+                    mtime_ns: None,
+                    content_hash: None,
+                }),
+                None,
+            );
+        }
+        require_eq(
+            &delta.paths.len(),
+            &MAX_INCREMENTAL_CHANGED_PATHS,
+            "bounded retained paths",
+        )?;
+        let plan = delta
+            .finish(temp.path())
+            .ok_or_else(|| io::Error::other("oversized change set disappeared"))?;
+        require_eq(
+            &plan.report.changed,
+            &(MAX_INCREMENTAL_CHANGED_PATHS + 1),
+            "complete change count",
+        )?;
+        require_eq(
+            &plan.report.added,
+            &plan.report.changed,
+            "complete addition count",
+        )?;
+        require_eq(
+            &plan.report.sample_paths.len(),
+            &INDEX_FRESHNESS_SAMPLE_LIMIT,
+            "bounded ordered sample",
+        )?;
+        require_eq(
+            &plan.paths_complete,
+            &false,
+            "incomplete path retention is explicit",
+        )?;
+        require_eq(
+            &plan.requires_full_scan,
+            &true,
+            "complete discovery selected",
+        )?;
+        require_eq(
+            &plan.paths.is_empty(),
+            &true,
+            "partial delta cannot be used for publication",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn normal_read_refresh_delta_enforces_path_and_byte_budgets() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let node = |path: String, size_bytes: u64| Node {
@@ -10777,6 +11257,135 @@ mod tests {
             &true,
             "partial PHP dynamic call abstention",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn staged_plain_text_preserves_parser_bytes_and_avoids_a_second_read()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let options = SymbolBuildOptions::new(4_096, Some(1), None);
+        let control = standalone_index_work_control();
+        for (path, language, content) in [
+            (
+                "lib.rs",
+                "rust",
+                "\u{feff}// Comment\r\npub fn entry() { helper(); }\r\nfn helper() {}\r\n",
+            ),
+            (
+                "guide.md",
+                "markdown",
+                "\u{feff}# Guide\r\n\r\n[Library](lib.rs)\r\n",
+            ),
+        ] {
+            let native_path = temp.path().join(path);
+            fs::write(&native_path, content)?;
+            let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+            let node = Node {
+                path: path.to_string(),
+                kind: NodeKind::File,
+                parent_path: None,
+                extension: None,
+                language: Some(language.to_string()),
+                size_bytes: Some(content.len() as u64),
+                mtime_ns: None,
+                content_hash: Some(hash.clone()),
+            };
+            let rows =
+                indexed_file_texts_for_nodes(temp.path(), &[node], TextIndexOptions::new(4_096))?;
+            let text = rows
+                .first()
+                .and_then(|row| row.text.as_ref())
+                .ok_or_else(|| io::Error::other("verified staged text missing"))?;
+            require_eq(
+                &text.content.as_str(),
+                &content,
+                "raw BOM and CRLF bytes preserved",
+            )?;
+            let job = SymbolParseJob {
+                path: path.to_string(),
+                native_path: native_path.clone(),
+                expected_content_hash: hash,
+                language: Some(language.to_string()),
+                fallback_summary: None,
+                purpose_needs_suggestion: false,
+            };
+            let SymbolParseOutcome::Parsed(expected) =
+                parse_symbol_job_controlled(&job, &options, &control)
+            else {
+                return Err(io::Error::other("original source did not parse").into());
+            };
+            fs::remove_file(&native_path)?;
+            let SymbolParseOutcome::Parsed(actual) =
+                parse_symbol_job_with_staged_text_controlled(&job, &options, &control, Some(text))
+            else {
+                return Err(
+                    io::Error::other("verified text was reopened instead of borrowed").into(),
+                );
+            };
+            require_eq(
+                &serde_json::to_value(&actual.graph)?,
+                &serde_json::to_value(&expected.graph)?,
+                "borrowed and independently read parser facts",
+            )?;
+            require_eq(
+                &actual.summary,
+                &expected.summary,
+                "borrowed source summary",
+            )?;
+            require_eq(
+                &actual.source_parser,
+                &expected.source_parser,
+                "borrowed parser provenance",
+            )?;
+            let smaller = SymbolBuildOptions::new((content.len() - 1) as u64, Some(1), None);
+            require_eq(
+                &matches!(
+                    parse_symbol_job_with_staged_text_controlled(
+                        &job,
+                        &smaller,
+                        &control,
+                        Some(text)
+                    ),
+                    SymbolParseOutcome::Io { .. }
+                ),
+                &true,
+                "different parser byte cap uses bounded read",
+            )?;
+            let mut mismatched = text.clone();
+            mismatched.content_hash = Some("different".to_string());
+            require_eq(
+                &matches!(
+                    parse_symbol_job_with_staged_text_controlled(
+                        &job,
+                        &options,
+                        &control,
+                        Some(&mismatched)
+                    ),
+                    SymbolParseOutcome::Io { .. }
+                ),
+                &true,
+                "unmatched source hash uses independent read",
+            )?;
+            let mut document = job;
+            document.path = "document.pdf".to_string();
+            document.language = Some("pdf".to_string());
+            mismatched.path = document.path.clone();
+            mismatched.content_hash = Some(document.expected_content_hash.clone());
+            require_eq(
+                &matches!(
+                    parse_symbol_job_with_staged_text_controlled(
+                        &document,
+                        &options,
+                        &control,
+                        Some(&mismatched)
+                    ),
+                    SymbolParseOutcome::Io { .. }
+                ),
+                &true,
+                "extracted document text never replaces source bytes",
+            )?;
+        }
         Ok(())
     }
 
@@ -11132,6 +11741,7 @@ mod tests {
             &clear_options,
             None,
             None,
+            &[],
             &HashSet::new(),
             &control,
             clear_limits,
@@ -11158,6 +11768,7 @@ mod tests {
             &clear_options,
             None,
             None,
+            &[],
             &HashSet::new(),
             &control,
             SymbolPublicationLimits {
@@ -12445,6 +13056,459 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &false,
             "incremental no-op abandoned graph stage",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_fallback_consumes_captured_discovery_and_rejects_later_changes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("lib.rs"), "pub fn baseline() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&plan.root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "lib.rs",
+            "Expose the library entry point",
+            PurposeSource::Agent,
+        )?;
+        let identity = store.project_instance_id()?;
+        let publication = store.index_publication()?;
+        fs::create_dir(temp.path().join("added"))?;
+        fs::write(temp.path().join("added/first.rs"), "pub fn first() {}\n")?;
+        let control = standalone_index_work_control();
+        let assessment =
+            detect_index_freshness_controlled(&store, &plan, ScanLimits::default(), &control)?;
+        require_eq(
+            &assessment
+                .delta
+                .as_ref()
+                .is_some_and(|delta| delta.requires_full_scan),
+            &true,
+            "folder change selects full staging",
+        )?;
+        fs::write(temp.path().join("late.rs"), "pub fn late() {}\n")?;
+        // A second discovery here would absorb this edit and wrongly accept the old assessment.
+        require_eq(
+            &matches!(
+                refresh_index_from_assessment_controlled(
+                    &mut store, &plan, &options, assessment, &control,
+                ),
+                Err(CliError::RefreshRequired(report))
+                    if report.changed == 1 && report.sample_paths == ["late.rs"]
+            ),
+            &true,
+            "captured full fallback refuses late source",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication,
+            "unchanged publication",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "preserved identity",
+        )?;
+        require_eq(
+            &store.load_symbols(Some("late.rs"), None, 10)?.is_empty(),
+            &true,
+            "late source not published",
+        )?;
+        let refreshed = refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &refreshed.symbols.parsed,
+            &2,
+            "retry parses both added sources",
+        )?;
+        require_eq(
+            &refreshed.symbols.unchanged,
+            &1,
+            "retry reuses baseline source",
+        )?;
+        require_eq(
+            &store.load_symbols(Some("late.rs"), None, 10)?.len(),
+            &1,
+            "retry publishes late symbol",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "preserved identity",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Expose the library entry point".to_string()),
+            "preserved purpose",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cold_refresh_applies_mixed_changes_and_preserves_same_metadata_edits()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let changed = root.join("lib.rs");
+        fs::write(&changed, "pub fn alpha() {}\n")?;
+        fs::write(root.join("stable.rs"), "pub fn stable() {}\n")?;
+        fs::write(root.join("removed.rs"), "pub fn removed() {}\n")?;
+        fs::write(root.join("moved.rs"), "pub fn moved() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let database = root.join(".projectatlas/projectatlas.db");
+        let mut store = open_atlas_store_for_project(&database, root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "lib.rs",
+            "Expose the library entry point",
+            PurposeSource::Agent,
+        )?;
+        let generation = publication_base_generation(&store)?;
+        let identity = store.project_instance_id()?;
+        drop(store);
+
+        let modified = fs::metadata(&changed)?.modified()?;
+        fs::write(&changed, "pub fn omega() {}\n")?;
+        fs::File::options()
+            .write(true)
+            .open(&changed)?
+            .set_times(fs::FileTimes::new().set_modified(modified))?;
+        fs::remove_file(root.join("removed.rs"))?;
+        fs::rename(root.join("moved.rs"), root.join("renamed.rs"))?;
+        fs::write(root.join("added.rs"), "pub fn added() {}\n")?;
+
+        // A new store and operation have no in-process history of these edits.
+        let mut store = open_atlas_store_for_project(&database, root)?;
+        let report = refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &report.symbols.parsed,
+            &3,
+            "only current changed files parsed",
+        )?;
+        require_eq(
+            &report.text_index.candidates,
+            &3,
+            "only changed text staged",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "native identity retained",
+        )?;
+        require_eq(
+            &publication_base_generation(&store)?,
+            &generation
+                .checked_next()
+                .ok_or_else(|| io::Error::other("generation overflow"))?,
+            "one complete mixed-change publication",
+        )?;
+        let library = store
+            .load_node_by_path("lib.rs")?
+            .ok_or_else(|| io::Error::other("updated library missing"))?;
+        require_eq(
+            &library.purpose.purpose.as_deref(),
+            &Some("Expose the library entry point"),
+            "approved purpose retained",
+        )?;
+        require_eq(
+            &store.load_file_text("lib.rs")?.map(|text| text.content),
+            &Some("pub fn omega() {}\n".to_string()),
+            "same-metadata edit indexed",
+        )?;
+        for path in ["removed.rs", "moved.rs"] {
+            require_eq(
+                &store.load_node_by_path(path)?.is_none(),
+                &true,
+                "removed source absent",
+            )?;
+            require_eq(
+                &store.load_file_text(path)?.is_none(),
+                &true,
+                "removed text absent",
+            )?;
+        }
+        require_eq(
+            &store.load_node_by_path("stable.rs")?.is_some(),
+            &true,
+            "unrelated file retained",
+        )?;
+        verify_index_freshness(&store, root, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn source_assessment_rejects_policy_publication_between_capture_and_comparison()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn stable() {}\n")?;
+        let database = root.join(".projectatlas/projectatlas.db");
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = open_atlas_store_for_project(&database, root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        let generation = verify_index_publication(&store, &plan)?;
+        // A separate publisher changes only the derivation contract, leaving source identical.
+        let mut competing = open_atlas_store_for_project(&database, root)?;
+        competing
+            .begin_index_publication_from("different-derivation-contract", generation)?
+            .complete()?;
+        let winning = competing.index_publication()?;
+        let result = assess_source_against_publication(
+            &store,
+            &plan,
+            ScanLimits::default(),
+            &standalone_index_work_control(),
+            generation,
+            SourceVerificationWork::default(),
+        );
+        require_eq(
+            &matches!(result, Err(CliError::Db(
+            DbError::PublicationBaseGenerationChanged { expected, .. }
+        )) if expected == generation),
+            &true,
+            "concurrent policy publication refused",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &winning,
+            "winning publication untouched",
+        )?;
+        let repaired = refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &(repaired.text_index.candidates > 0),
+            &true,
+            "mismatched policy cannot be reported as no-op",
+        )?;
+        verify_index_publication(&store, &plan)?;
+        Ok(())
+    }
+
+    #[test]
+    fn captured_source_rejects_changed_identity_contract_and_generation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn initial() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        let mut changes = WatchChangeSet::default();
+        changes.paths.insert(root.join("lib.rs"));
+        fs::write(root.join("lib.rs"), "pub fn updated() {}\n")?;
+        let control = standalone_index_work_control();
+        for mismatch in ["root", "project", "contract", "generation"] {
+            let mut source =
+                detect_index_freshness_controlled(&store, &plan, ScanLimits::default(), &control)?
+                    .source;
+            match mismatch {
+                "root" => source.root = root.join("different"),
+                "project" => {
+                    let alternate = ProjectInstanceId::from_bytes([1; 16])?;
+                    source.project_instance_id = if source.project_instance_id == alternate {
+                        ProjectInstanceId::from_bytes([2; 16])?
+                    } else {
+                        alternate
+                    };
+                }
+                "contract" => source.contract_fingerprint.push_str("-different"),
+                "generation" => {
+                    run_scan_pipeline(&mut store, &plan, &options)?;
+                }
+                _ => return Err(io::Error::other("unexpected mismatch fixture").into()),
+            }
+            let before = store.index_publication()?;
+            let result = refresh_index_for_changes_from_source_controlled(
+                &mut store,
+                &plan,
+                &changes,
+                &options,
+                Some(source),
+                &control,
+            );
+            let refused = match mismatch {
+                "project" => matches!(result, Err(CliError::InvalidInput(_))),
+                "generation" => matches!(
+                    result,
+                    Err(CliError::Db(
+                        DbError::PublicationBaseGenerationChanged { .. }
+                    ))
+                ),
+                _ => matches!(result, Err(CliError::RefreshRequired(_))),
+            };
+            require_eq(&refused, &true, "captured source identity mismatch refused")?;
+            require_eq(
+                &store.index_publication()?,
+                &before,
+                "last publication retained",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn captured_source_rejects_late_unrelated_edit_without_publication()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn initial() {}\n")?;
+        fs::write(root.join("stable.rs"), "pub fn stable() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "lib.rs",
+            "Expose reviewed library behavior",
+            PurposeSource::Agent,
+        )?;
+        let before = store.index_publication()?;
+        let identity = store.project_instance_id()?;
+        let library = store.load_node_by_path("lib.rs")?;
+        let text = store.load_file_text("lib.rs")?.map(|row| row.content);
+        fs::write(root.join("lib.rs"), "pub fn updated() {}\n")?;
+        let control = standalone_index_work_control();
+        let source =
+            detect_index_freshness_controlled(&store, &plan, ScanLimits::default(), &control)?
+                .source;
+        fs::write(
+            root.join("stable.rs"),
+            "pub fn changed_after_discovery() {}\n",
+        )?;
+        let mut changes = WatchChangeSet::default();
+        changes.paths.insert(root.join("lib.rs"));
+        let result = refresh_index_for_changes_from_source_controlled(
+            &mut store,
+            &plan,
+            &changes,
+            &options,
+            Some(source),
+            &control,
+        );
+        require_eq(
+            &matches!(result, Err(CliError::RefreshRequired(_))),
+            &true,
+            "late unrelated edit refused",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "last generation retained",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "identity retained",
+        )?;
+        require_eq(
+            &store.load_node_by_path("lib.rs")?,
+            &library,
+            "source and purpose retained",
+        )?;
+        require_eq(
+            &store.load_file_text("lib.rs")?.map(|row| row.content),
+            &text,
+            "last valid text retained",
+        )?;
+        let report = refresh_index(&mut store, &plan, &options)?;
+        require_eq(&report.symbols.parsed, &2, "retry reconciles both edits")?;
+        verify_index_freshness(&store, root, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_watch_batch_reconciles_complete_state_in_one_publication()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::write(root.join("lib.rs"), "pub fn previous() {}\n")?;
+        fs::write(root.join("stable.rs"), "pub fn stable() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, root, None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "lib.rs",
+            "Expose the library entry point",
+            PurposeSource::Agent,
+        )?;
+        let before = publication_base_generation(&store)?;
+        let identity = store.project_instance_id()?;
+        fs::write(root.join("lib.rs"), "pub fn updated() {}\n")?;
+        fs::write(root.join("late.rs"), "pub fn late() {}\n")?;
+
+        // Event overflow requires exact discovery, including a live addition
+        // not present in the retained event set. None of these deleted paths
+        // should be published, and the known source edit must not be lost.
+        let changes = WatchChangeSet {
+            requires_full_scan: false,
+            document_paths: HashSet::new(),
+            paths: (0..=MAX_INCREMENTAL_CHANGED_PATHS)
+                .map(|index| root.join(format!("deleted_{index}.rs")))
+                .chain(std::iter::once(root.join("lib.rs")))
+                .collect(),
+        };
+        let report = refresh_index_for_changes(&mut store, &plan, &changes, &options)?;
+        require_eq(
+            &report.text_index.candidates,
+            &3,
+            "full fallback covers every current file",
+        )?;
+        require_eq(&report.symbols.candidates, &3, "complete symbol inventory")?;
+        require_eq(
+            &report.symbols.parsed,
+            &2,
+            "changed and newly discovered sources parsed",
+        )?;
+        require_eq(
+            &report.symbols.unchanged,
+            &1,
+            "unrelated valid parser facts reused",
+        )?;
+        require_eq(
+            &store.overview()?.files,
+            &3,
+            "deleted event paths remain absent",
+        )?;
+        require_eq(
+            &store.load_file_text("lib.rs")?.map(|text| text.content),
+            &Some("pub fn updated() {}\n".to_string()),
+            "retained edit published",
+        )?;
+        require_eq(
+            &store.load_file_text("late.rs")?.is_some(),
+            &true,
+            "addition outside event set discovered",
+        )?;
+        require_eq(
+            &publication_base_generation(&store)?,
+            &before
+                .checked_next()
+                .ok_or_else(|| io::Error::other("generation overflow"))?,
+            "fallback publishes exactly one complete generation",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "fallback preserves identity",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Expose the library entry point".to_string()),
+            "fallback preserves approved purpose",
+        )?;
+        verify_index_freshness(&store, root, None)?;
         Ok(())
     }
 

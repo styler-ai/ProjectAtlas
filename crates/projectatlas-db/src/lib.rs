@@ -434,6 +434,9 @@ pub enum DbError {
     /// An existing database has no durable schema version.
     #[error("existing database is missing schema_version metadata")]
     SchemaVersionMissing,
+    /// The caller requires a previously initialized schema.
+    #[error("database initialization is required before this operation")]
+    InitializationRequired,
     /// A durable `SQLite` object does not match the supported schema contract.
     #[error("incompatible schema object {object:?}: expected {expected}, found {found}")]
     SchemaShape {
@@ -1152,6 +1155,15 @@ enum ProjectIdentityRequirement {
     TransitionOwned,
 }
 
+/// Whether opening a writable store may create its initial schema.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StoreInitializationPolicy {
+    /// Explicit initialization and ordinary creation APIs admit fresh storage.
+    AllowFresh,
+    /// Existing-state operations admit current or supported predecessor schemas only.
+    ExistingSchema,
+}
+
 impl ProjectIdentityRequirement {
     /// Whether a missing identity must fail the open.
     const fn is_required(self) -> bool {
@@ -1732,6 +1744,28 @@ impl AtlasStore {
             None,
             Some(&expected_identity),
             ProjectIdentityRequirement::Required,
+            StoreInitializationPolicy::AllowFresh,
+        )
+    }
+
+    /// Open an initialized project store, migrating a supported predecessor when needed.
+    ///
+    /// Fresh storage is refused during read-only preflight, before writable setup.
+    /// Supported migrations recheck schema-creation authority inside their writer transaction.
+    /// Existing native root and instance identity checks retain their ordinary guarantees.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::InitializationRequired`] for fresh storage, or the normal
+    /// compatibility, binding, migration and storage errors for an existing schema.
+    pub fn open_existing_for_project(path: &Path, root: &Path) -> DbResult<Self> {
+        let expected_identity = CanonicalProjectRoot::from_path(root)?;
+        Self::open_with_binding_requirement(
+            path,
+            None,
+            Some(&expected_identity),
+            ProjectIdentityRequirement::Required,
+            StoreInitializationPolicy::ExistingSchema,
         )
     }
 
@@ -1742,6 +1776,7 @@ impl AtlasStore {
             expected_root,
             None,
             ProjectIdentityRequirement::Required,
+            StoreInitializationPolicy::AllowFresh,
         )
     }
 
@@ -1752,6 +1787,7 @@ impl AtlasStore {
             None,
             None,
             ProjectIdentityRequirement::TransitionOwned,
+            StoreInitializationPolicy::AllowFresh,
         )
     }
 
@@ -1761,12 +1797,18 @@ impl AtlasStore {
         expected_root: Option<&str>,
         expected_identity: Option<&CanonicalProjectRoot>,
         identity_requirement: ProjectIdentityRequirement,
+        initialization: StoreInitializationPolicy,
     ) -> DbResult<Self> {
         let (preflight, location) = if let Some(expected_identity) = expected_identity {
             schema::preflight_for_project(path, expected_identity)?
         } else {
             schema::preflight(path, None)?
         };
+        if initialization == StoreInitializationPolicy::ExistingSchema
+            && preflight.state == SchemaState::Fresh
+        {
+            return Err(DbError::InitializationRequired);
+        }
         if expected_identity.is_none()
             && identity_requirement.is_required()
             && preflight.state == SchemaState::UpgradeRequired
@@ -1847,11 +1889,22 @@ impl AtlasStore {
             } else {
                 if let Some(expected_identity) = expected_identity {
                     let expected_display = expected_identity.display_string().ok();
-                    schema::initialize_with_project_root(
-                        &connection,
-                        expected_display.as_deref(),
-                        Some(expected_identity),
-                    )?;
+                    match initialization {
+                        StoreInitializationPolicy::AllowFresh => {
+                            schema::initialize_with_project_root(
+                                &connection,
+                                expected_display.as_deref(),
+                                Some(expected_identity),
+                            )?;
+                        }
+                        StoreInitializationPolicy::ExistingSchema => {
+                            schema::migrate_existing_with_project_root(
+                                &connection,
+                                expected_display.as_deref(),
+                                Some(expected_identity),
+                            )?;
+                        }
+                    }
                 } else {
                     let initialization_root = expected_root.or(preflight.project_root.as_deref());
                     if transition_transaction {
@@ -4656,6 +4709,57 @@ impl AtlasStore {
             .ok_or_else(|| DbError::PathNotIndexed {
                 path: path.to_string(),
             })
+    }
+
+    /// Visit live source-derived nodes in path order without loading authored metadata.
+    ///
+    /// The cursor retains one row at a time and observes the caller's current read
+    /// snapshot. The visitor must discard its accumulated result if this method
+    /// fails; it must not publish partial comparison state or mutate this store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on cancellation, invalid source fields, a database read
+    /// failure, or a visitor failure.
+    pub fn visit_source_nodes_controlled(
+        &self,
+        control: &IndexWorkControl,
+        mut visit: impl FnMut(Node) -> DbResult<()>,
+    ) -> DbResult<()> {
+        with_sqlite_read_progress(
+            &self.connection,
+            Some(control),
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self.connection.prepare_cached(
+                    "SELECT n.path, n.kind, n.parent_path, n.extension, n.language,
+                            n.size_bytes, n.mtime_ns, n.content_hash
+                     FROM nodes n JOIN purposes p ON p.node_id = n.id
+                     WHERE n.exists_now = 1 ORDER BY n.path",
+                )?;
+                let mut rows = statement.query([])?;
+                while let Some(row) = rows.next()? {
+                    control.check(IndexWorkStage::RepositoryTraversal)?;
+                    let kind_value: String = row.get(1)?;
+                    let kind =
+                        NodeKind::from_db(&kind_value).ok_or_else(|| DbError::InvalidEnum {
+                            field: "kind",
+                            value: kind_value,
+                        })?;
+                    visit(Node {
+                        path: row.get(0)?,
+                        kind,
+                        parent_path: row.get(2)?,
+                        extension: row.get(3)?,
+                        language: row.get(4)?,
+                        size_bytes: option_u64_from_sql(row, 5)?,
+                        mtime_ns: row.get(6)?,
+                        content_hash: row.get(7)?,
+                    })?;
+                }
+                Ok(())
+            },
+        )
     }
 
     /// Load existing nodes with purpose state.
@@ -8735,6 +8839,132 @@ mod tests {
     }
 
     #[test]
+    fn source_node_cursor_omits_metadata_and_preserves_order_and_cancellation()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        let expected = [
+            test_file_node("src/a.rs", "a"),
+            test_file_node("src/z.rs", "z"),
+            test_file_node("src/é.rs", "unicode"),
+        ];
+        store.replace_scan(&expected)?;
+        // Invalid unrelated authored state must not be read by source comparison.
+        store
+            .connection
+            .execute("UPDATE purposes SET status = 'invalid'", [])?;
+        let control = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        let mut visited = Vec::new();
+        store.visit_source_nodes_controlled(&control, |node| {
+            visited.push(node);
+            Ok(())
+        })?;
+        require_eq(&visited, &expected.to_vec(), "ordered source-only rows")?;
+        require(
+            store.load_nodes().is_err(),
+            "full rows still validate authored state",
+        )?;
+
+        let cancellation = projectatlas_core::IndexCancellation::new();
+        let control = IndexWorkControl::new(cancellation.clone(), None);
+        let mut count = 0;
+        let result = store.visit_source_nodes_controlled(&control, |_| {
+            count += 1;
+            cancellation.cancel();
+            Ok(())
+        });
+        require_eq(&count, &1, "source rows consumed before cancellation")?;
+        require(
+            matches!(
+                result,
+                Err(DbError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+            ),
+            "source cursor cancellation remains typed",
+        )?;
+        // Dropping the cancelled cursor also disarms its connection progress hook.
+        store.visit_source_nodes_controlled(
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            |_| Ok(()),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn source_node_cursor_keeps_a_read_snapshot_across_writer_commit() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("projectatlas.db");
+        let mut writer = AtlasStore::open(&database)?;
+        let previous = test_file_node("lib.rs", "previous");
+        writer.replace_scan(std::slice::from_ref(&previous))?;
+        let reader = AtlasStore::open_read_only(&database)?;
+        let control = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        let mut observed = Vec::new();
+        reader.visit_source_nodes_controlled(&control, |node| {
+            observed.push(node);
+            Ok(())
+        })?;
+        writer.upsert_scan_nodes(&[test_file_node("lib.rs", "updated")])?;
+        observed.clear();
+        reader.visit_source_nodes_controlled(&control, |node| {
+            observed.push(node);
+            Ok(())
+        })?;
+        require_eq(
+            &observed,
+            &vec![previous],
+            "cursor keeps captured source snapshot",
+        )?;
+        reader.finish_index_read_snapshot()?;
+        observed.clear();
+        let current = AtlasStore::open_read_only(&database)?;
+        current.visit_source_nodes_controlled(&control, |node| {
+            observed.push(node);
+            Ok(())
+        })?;
+        require_eq(
+            &observed,
+            &vec![test_file_node("lib.rs", "updated")],
+            "new snapshot sees committed source",
+        )?;
+        current.finish_index_read_snapshot()?;
+        Ok(())
+    }
+
+    #[test]
+    fn source_node_cursor_rejects_corrupt_fields_and_uses_the_path_index()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = AtlasStore::in_memory()?;
+        store.replace_scan(&[test_file_node("src/a.rs", "a")])?;
+        let plan = store
+            .connection
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT n.path, n.kind, n.parent_path, n.extension, n.language,
+                    n.size_bytes, n.mtime_ns, n.content_hash
+             FROM nodes n JOIN purposes p ON p.node_id = n.id
+             WHERE n.exists_now = 1 ORDER BY n.path",
+            )?
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            plan.iter().any(|line| line.contains("USING INDEX"))
+                && !plan.iter().any(|line| line.contains("TEMP B-TREE")),
+            "source cursor streams path index order without a temporary sort",
+        )?;
+        store
+            .connection
+            .execute("UPDATE nodes SET size_bytes = -1", [])?;
+        let control = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        let mut visited = 0;
+        let result = store.visit_source_nodes_controlled(&control, |_| {
+            visited += 1;
+            Ok(())
+        });
+        require(result.is_err(), "invalid source integer is refused")?;
+        require_eq(&visited, &0, "corrupt source row does not reach visitor")?;
+        Ok(())
+    }
+
+    #[test]
     fn load_nodes_rejects_negative_size_bytes_without_partial_page() -> Result<(), Box<dyn Error>> {
         let mut store = AtlasStore::in_memory()?;
         store.replace_scan(&[
@@ -8759,6 +8989,101 @@ mod tests {
                 ))
             ),
             "negative node size returned the wrong conversion error",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn existing_project_open_refuses_fresh_storage_and_preserves_supported_state()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let database = root.join("existing.db");
+        require(
+            matches!(
+                AtlasStore::open_existing_for_project(&database, root),
+                Err(DbError::InitializationRequired)
+            ),
+            "missing database was admitted",
+        )?;
+        require(
+            !database.exists(),
+            "existing open created an absent database",
+        )?;
+        fs::write(&database, [])?;
+        require(
+            matches!(
+                AtlasStore::open_existing_for_project(&database, root),
+                Err(DbError::InitializationRequired)
+            ),
+            "empty database was admitted",
+        )?;
+        require_eq(
+            &fs::read(&database)?,
+            &Vec::<u8>::new(),
+            "empty database bytes unchanged",
+        )?;
+        require_eq(
+            &fs::read_dir(root)?.count(),
+            &1,
+            "no fresh journal or sidecar",
+        )?;
+        {
+            let connection = Connection::open(&database)?;
+            require(
+                matches!(
+                    schema::migrate_existing_with_project_root(&connection, None, None),
+                    Err(DbError::InitializationRequired)
+                ),
+                "migration admitted fresh replacement",
+            )?;
+            require_eq(
+                &connection.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE type = 'table'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                &0,
+                "migration did not create a schema",
+            )?;
+        }
+        let identity = {
+            let mut store = AtlasStore::open_for_project(&database, root)?;
+            store.replace_scan(&[test_file_node("lib.rs", "source-hash")])?;
+            store.set_purpose("lib.rs", "Preserve authored state", PurposeSource::Agent)?;
+            store.project_instance_id()?
+        };
+        let current = AtlasStore::open_existing_for_project(&database, root)?;
+        require_eq(
+            &current.project_instance_id()?,
+            &identity,
+            "existing project identity retained",
+        )?;
+        require_eq(
+            &current
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Preserve authored state".to_string()),
+            "existing purpose retained",
+        )?;
+        schema::drop_worktree_native_identity_schema(&current.connection)?;
+        current.connection.execute_batch(
+            "DROP TABLE graph_identity_rejections;
+             UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
+        )?;
+        drop(current);
+        let upgraded = AtlasStore::open_existing_for_project(&database, root)?;
+        require_eq(
+            &upgraded
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Preserve authored state".to_string()),
+            "supported migration preserved purpose",
+        )?;
+        require_eq(
+            &schema::preflight(&database, None)?.0.state,
+            &SchemaState::Current,
+            "supported migration completed",
         )?;
         Ok(())
     }
