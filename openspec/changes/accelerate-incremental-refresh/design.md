@@ -88,6 +88,11 @@ authored/derived state only for affected paths after the full ordered source-onl
 comparison, and move the complete current-node vector into the
 existing graph/publication plan. Do not hash changed paths again merely to reconstruct
 nodes already captured by discovery, or build a second whole-source lookup map.
+Full reconciliation selected directly by that assessment also consumes its captured
+inventory, rather than retaining it while discovering another complete copy. Recheck
+the identity and generation at full staging admission; final exact validation still
+rejects edits made after capture. An attempted incremental closure that has already
+consumed its evidence may rediscover during full fallback.
 Reject a changed database identity, generation, root or contract before reuse. Existing source reads
 must still match the captured content hashes, and final exact publication validation
 remains until an equivalent writer-safe witness is established. A delayed source edit

@@ -2996,18 +2996,54 @@ fn stage_full_index_publication(
     import_legacy_purposes: bool,
     control: &IndexWorkControl,
 ) -> Result<IndexPublicationBatch, CliError> {
+    stage_full_index_publication_from_source(
+        store,
+        plan,
+        symbol_options,
+        reuse_unchanged_symbols,
+        import_legacy_purposes,
+        None,
+        control,
+    )
+}
+
+/// Consume operation-owned discovery when full reconciliation follows an exact assessment.
+fn stage_full_index_publication_from_source(
+    store: &AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    reuse_unchanged_symbols: bool,
+    import_legacy_purposes: bool,
+    captured: Option<CapturedSourceState>,
+    control: &IndexWorkControl,
+) -> Result<IndexPublicationBatch, CliError> {
+    if let Some(source) = &captured {
+        verify_captured_source_identity(store, plan, source)?;
+    }
     let base_generation = publication_base_generation(store)?;
+    if let Some(source) = &captured
+        && source.generation != base_generation
+    {
+        return Err(projectatlas_db::DbError::PublicationBaseGenerationChanged {
+            expected: source.generation,
+            found: base_generation,
+        }
+        .into());
+    }
     let contract_fingerprint = plan.publication_contract_fingerprint();
     let previous_hashes = reuse_unchanged_symbols
         .then(|| indexed_file_hashes(store, control))
         .transpose()?;
-    let nodes = scan_repo_controlled(
-        &plan.root,
-        &plan.scan_options,
-        ScanLimits::default(),
-        control,
-    )
-    .map_err(|source| source_inspection_error(&plan.root, source))?;
+    let nodes = match captured {
+        Some(source) => source.nodes,
+        None => scan_repo_controlled(
+            &plan.root,
+            &plan.scan_options,
+            ScanLimits::default(),
+            control,
+        )
+        .map_err(|source| source_inspection_error(&plan.root, source))?,
+    };
     control.check(IndexWorkStage::Publication)?;
     let purpose_import = import_legacy_purposes
         .then(|| plan.purpose_import_snapshot_controlled(&nodes, control))
@@ -8249,7 +8285,16 @@ pub(crate) fn refresh_index_from_assessment_controlled(
                 Err(error) => return Err(error),
             }
         }
-        Some(_) => {}
+        Some(_) => {
+            return refresh_full_index_from_source_controlled(
+                store,
+                plan,
+                symbol_options,
+                true,
+                Some(assessment.source),
+                control,
+            );
+        }
     }
     refresh_full_index_controlled(store, plan, symbol_options, true, control)
 }
@@ -8262,14 +8307,34 @@ fn refresh_full_index_controlled(
     reuse_unchanged_symbols: bool,
     control: &IndexWorkControl,
 ) -> Result<IndexRefreshReport, CliError> {
+    refresh_full_index_from_source_controlled(
+        store,
+        plan,
+        symbol_options,
+        reuse_unchanged_symbols,
+        None,
+        control,
+    )
+}
+
+/// Keep the exact inventory alive only in the full staging owner that consumes it.
+fn refresh_full_index_from_source_controlled(
+    store: &mut AtlasStore,
+    plan: &ScanRuntimePlan,
+    symbol_options: &SymbolBuildOptions,
+    reuse_unchanged_symbols: bool,
+    captured: Option<CapturedSourceState>,
+    control: &IndexWorkControl,
+) -> Result<IndexRefreshReport, CliError> {
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
-    let batch = stage_full_index_publication(
+    let batch = stage_full_index_publication_from_source(
         store,
         plan,
         symbol_options,
         reuse_unchanged_symbols,
         false,
+        captured,
         control,
     )?;
     revalidate_staged_publication_inputs_controlled(
@@ -12990,6 +13055,95 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             &abandoned_incremental_stage.exists(),
             &false,
             "incremental no-op abandoned graph stage",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_fallback_consumes_captured_discovery_and_rejects_later_changes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("lib.rs"), "pub fn baseline() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), None)?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store = AtlasStore::in_memory()?;
+        store.set_project_root(&plan.root)?;
+        run_scan_pipeline(&mut store, &plan, &options)?;
+        store.set_purpose(
+            "lib.rs",
+            "Expose the library entry point",
+            PurposeSource::Agent,
+        )?;
+        let identity = store.project_instance_id()?;
+        let publication = store.index_publication()?;
+        fs::create_dir(temp.path().join("added"))?;
+        fs::write(temp.path().join("added/first.rs"), "pub fn first() {}\n")?;
+        let control = standalone_index_work_control();
+        let assessment =
+            detect_index_freshness_controlled(&store, &plan, ScanLimits::default(), &control)?;
+        require_eq(
+            &assessment
+                .delta
+                .as_ref()
+                .is_some_and(|delta| delta.requires_full_scan),
+            &true,
+            "folder change selects full staging",
+        )?;
+        fs::write(temp.path().join("late.rs"), "pub fn late() {}\n")?;
+        // A second discovery here would absorb this edit and wrongly accept the old assessment.
+        require_eq(
+            &matches!(
+                refresh_index_from_assessment_controlled(
+                    &mut store, &plan, &options, assessment, &control,
+                ),
+                Err(CliError::RefreshRequired(report))
+                    if report.changed == 1 && report.sample_paths == ["late.rs"]
+            ),
+            &true,
+            "captured full fallback refuses late source",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &publication,
+            "unchanged publication",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "preserved identity",
+        )?;
+        require_eq(
+            &store.load_symbols(Some("late.rs"), None, 10)?.is_empty(),
+            &true,
+            "late source not published",
+        )?;
+        let refreshed = refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &refreshed.symbols.parsed,
+            &2,
+            "retry parses both added sources",
+        )?;
+        require_eq(
+            &refreshed.symbols.unchanged,
+            &1,
+            "retry reuses baseline source",
+        )?;
+        require_eq(
+            &store.load_symbols(Some("late.rs"), None, 10)?.len(),
+            &1,
+            "retry publishes late symbol",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &identity,
+            "preserved identity",
+        )?;
+        require_eq(
+            &store
+                .load_node_by_path("lib.rs")?
+                .and_then(|node| node.purpose.purpose),
+            &Some("Expose the library entry point".to_string()),
+            "preserved purpose",
         )?;
         Ok(())
     }
