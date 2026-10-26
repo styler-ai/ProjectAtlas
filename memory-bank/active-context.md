@@ -88,3 +88,14 @@ same anchor. Luna approved these added causal assertions. Final strict OpenSpec
 and scoped IssueOps are running before the sole-owner commit/push. Normal native
 pre-push remains mandatory. Do not report #721 accepted or close it before hosted
 and final issue gates.
+
+## Publication checkpoint
+
+Local commit 8279cfa owns #721 implementation on accepted main 9845364; it is not
+pushed yet. The first native push hook passed planner/IssueOps/string policy but
+stopped at newly fetched RustSec advisories RUSTSEC-2026-0391/0398/0403 affecting
+zstd0.14.0/zstd-safe8.0.0. The primary updated the exact workspace zstd pin to
+0.14.3; the lock moves only zstd, zstd-safe8.2.0 and zstd-sys2.1.2. No ignore or
+exception was added. Fresh dependency review/gate and normal complete push proof
+must pass before publishing. Earlier Rust evidence predates this dependency fix.
+Task2.2/2.3 mirror is confirmed: local5/remote5/checked4; strict OpenSpec passes.
