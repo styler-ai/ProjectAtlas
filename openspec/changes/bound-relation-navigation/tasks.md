@@ -12,7 +12,7 @@
 
 ## 3. Accept the integrated issue
 
-- [ ] 3.1 Resolve independent source/architecture and automated feedback; pass required locked Rust, docs, OpenSpec, IssueOps and affected local/hosted gates, reconcile the final implementation with the accepted policy, and hand the focused installed proof to #715 without claiming broader release acceptance.
+- [x] 3.1 Resolve independent source/architecture and automated feedback; pass required locked Rust, docs, OpenSpec, IssueOps and affected local/hosted gates, reconcile the final implementation with the accepted policy, and hand the focused installed proof to #715 without claiming broader release acceptance.
 
 ## Required verification routes
 
