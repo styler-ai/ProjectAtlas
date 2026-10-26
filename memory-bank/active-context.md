@@ -21,26 +21,23 @@ No sleep/metadata heuristic can replace exact source comparison.
 
 ## Integration and worktrees
 
-- Main9845364 includes merged #723: ordered source-only comparison, operation-owned
-  discovery/delta/UTF8 evidence, full graph bulk-index deferral, strict ExistingSchema
-  watch admission and final exact validation. One-shot refresh always reconciles
-  exactly after macOSARM exposed delayed notification delivery. Full fallback reuses
-  captured inventory rather than detecting twice. Four platforms passed before merge.
-- issue708 branch perf/indexing-budgets-708 at9845364 retains owned mixed changes.
-  Budget source and harness committed79660e3; no budget PR yet. Preserve the complete owned source/doc/workflow/helper set together.
-- issue721 branch perf/relations-721, PR#724, source0192e47 and task-onlyf54a712.
-  All implementation/five acceptance tasks checked, independent holistic Luna approved,
-  normal hook/push passed. Current head Rust/repository/PRstate passed; four installed
-  platform jobs still running. PR closes721; merge normally after required gates.
-- issue722 branch fix/python-imports-722, commits90efe7d/bc1ad64/01114f6. Confirmed
-  stable0.5.0 bug, translated English, milestone/nativeparent715/blocker715 verified.
-  Plan1.1/code2.1/proofhandoff2.2 checked4/4/3; final3.1/allacceptance remain open.
-  Source Luna approved. Full native push hook passed after portable-memory and test-inventory repairs;
-  PR#726 open at3ce8d83. Read issue722 memory for focused proof details.
-- Integration release/0.5.1 still old memory-only1fe2b86 base with owned dirty memory.
-  Safely preserve that change and rebase onto accepted main before release preparation.
-- Retained stashes named owned issue721 implementation and owned adaptive-budget
-  follow-up are already recovered/applied. Do not apply them again.
+- Accepted main612ce65 includes #723 indexing baseline (prior9845364) and #724
+  bounded relation navigation. Every native platform and trusted verify passed;
+  #721 closed after the normal auto-merge. Operation-owned discovery, exact
+  validation, full graph bulk indexing and ExistingSchema admission remain intact.
+- issue708 branch perf/indexing-budgets-708 is rebased onto612ce65 with952b9f6
+  budgets and5980b6c installed harness. No public budget PR yet. Current owned
+  followup reconciles the combined MCP golden/source hashes; do not lose it.
+- issue722 branch fix/python-imports-722, PR#726. Unicode correction5650f07 uses
+  existinglocked unicode-ident1.0.24 with Pythonjoin-control exclusions. 21tests,
+  real Unicode/ASCII file/caller convergence and12stable->currentupgrade checks pass.
+  42707df normally mergesacceptedmain612 without force. Mandatory nativepushhook
+  running in /tmp/projectatlas-issue722-unicode-push.log; publichead3ce untilsuccess.
+  Tasks1.1/2.1/2.2 checked4/4/3; final3.1/allacceptance remain open.
+- Integration release/0.5.1 nowbased612ce65 with four owned715 plan/memory changes
+  restored. Specscope independentlyapproved; nofreeze/versionbump whilechildrenopen.
+- Retained old issue721/budget stashes and integrationstashc012fc2 are already
+  recovered/applied backups. Do not apply them again.
 
 ## Budget implementation and verified proof
 
@@ -127,3 +124,25 @@ soleowneramongincidental708/715references. Changedto standaloneRefs722; scoped
 PRIssueOps/rerun inprogress. No productcodechange. #724automerge queued against
 f54a712; Linux/ARMgreen, Windows/IntelMacremaining. Rebase/resolve budget lane
 ontoacceptedmainbeforefinalpublication; do not skiprequiredgates.
+
+## Combined baseline review and next gate
+
+Luna independentlyapproved preservationofaccepted721detailed/legacy/analysis/work
+limits and708exactreconciliation/defaultbudget scope afterrebase. NewexpectedMCP
+schema hash1b04e4263156d1c188244a1f1db5b9d42f942bf88d1ba50d03b2e5d83704ea02
+wasderivedfromactualaccepted721inventory verifiedagainst70218... andonlythethree
+reviewedtimeoutdescriptionedits (atlas_scan, atlas_symbols_build, atlas_watch_once).
+Preservewirekeyorder; sortedJSONgivesadifferenthash. Fullrecord
+/tmp/projectatlas-combined-mcp-schema.json; source-contracthashesmatchalllocations.
+Actual compiled combined MCP effects/schema gate PASSED, including all advertised
+tool SQLite effects and frozen compatibility. Four budget tests, real late
+publication refusal/retry, affected closure work and all three inventory
+positive/negative checks PASSED on accepted612 baseline. Commit the known merge/
+schema/memory followup, normal native push and PR using standalone Refs708.
+
+715planreconciliation reviewedAPPROVED; exactRCinstalledharness consumesPython
+upgrade/callers/purpose-status and keeps0.4.5schemamigrationseparate. NoRCexists.
+
+72242707df fullnativehookPASSED andpushed; currentheadautomatedCodexreviewcompleted
+withoutfindings. Repository/prstatePASS, fourplatformnativeCIrunning (IntelMac
+queued). Earlier inlineRefsfailureobsolete. No reviewreplies/resolutionwritesneeded.
