@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 206,
+  "test_count": 207,
   "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -29,6 +29,13 @@
     "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
+    {
+      "name": "parenthesized_python_imports_resolve_and_converge_after_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
     {
       "name": "watch_requires_initialization_without_creating_project_state",
       "owner": "e2e_lifecycle",

@@ -29,3 +29,7 @@ Code borrows oneouterpair, residualdelimiter/comment rejection, existingflatcomm
 Realinstalledstable0.5.0->localdevelopmentfix upgrade9checksPASS (/tmp/projectatlas-issue722-installed-upgrade.json): unchangedsources repaired bothimports/callers, onepublication, stableidentity/purposes, secondnoopnopub andstable rollbackpreservation. Not exactRCacceptance. #715 must run thisagainstexactinstalledRC; add parenthesized_python_imports_resolve_and_converge_after_refresh to packagedrunner routing/installedselectors. NewE2E uses existing installed-executable override; assert_summary_called_by nowreusesexistingjson_summary_command for same override. Sourceinventoryupdated afteredits. Required nativepushhook/hostedgates stillpending.
 
 #708 respec acceptedzero-workdeferral725/livebodyupdated; newhonestupgrade/currentopen harnesscases/unit3pass, finalLunascopecheckpending. #724 currentheadRustpassed, fourinstalledplatformjobsstillrunning.
+
+## Native gate recovery
+
+At01114f6 mandatoryhook passed sourcepolicy, deny, locked workspacecheck/Clippy and library/main tests, then e2e_delivery49passed/3inventoryfailed because newPythonregression was notregistered in the frozen test-name ownership inventory. Registeredits exactname/owner/attributes andderivedtest_count207 without changing historicalfacets/symbols. All3inventorypositive/negativegates nowPASS. No productcodechange; normalpushhook rerunning. Do notcompile siblingCLI duringitsE2E. #724auto-merge queued normally atf54a712, Linuxpassed, remainingMac/Windowsteststeps activelyprogressing.
