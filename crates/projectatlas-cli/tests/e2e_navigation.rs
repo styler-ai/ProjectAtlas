@@ -11057,7 +11057,9 @@ fn pdf_rendering_resource_stop_preserves_source_and_repairs() -> Result<(), Box<
             .iter()
             .any(|limit| repaired_reason.contains(limit))
     {
-        return Err(io::Error::other("PDF expansion repair left stale resource coverage").into());
+        return Err(io::Error::other(format!(
+            "PDF expansion repair left stale resource coverage: text={repaired_text:?}, reason={repaired_reason:?}"
+        )).into());
     }
     drop(repaired);
     let before_failure = AtlasStore::open_read_only(&database)?

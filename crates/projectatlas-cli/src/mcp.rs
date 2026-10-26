@@ -17383,7 +17383,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_adapters_reuse_verified_noop_and_report_real_changed_work()
+    fn watch_adapters_reconcile_noop_and_report_real_changed_work()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -17434,11 +17434,11 @@ mod tests {
                 )?
                 .require_current()?;
             require(
-                epoch.work.exact_verifications == 0
-                    && epoch.work.filesystem_entries == 0
-                    && epoch.work.filesystem_bytes == 0
-                    && epoch.work.decoded_nodes == 0,
-                "watch adapter did not establish and reuse its observed epoch",
+                epoch.work.exact_verifications == 1
+                    && epoch.work.filesystem_entries > 0
+                    && epoch.work.filesystem_bytes > 0
+                    && epoch.work.decoded_nodes > 0,
+                "watch adapter trusted an unfenced callback queue",
             )?;
         }
         require(
@@ -17459,9 +17459,8 @@ mod tests {
             "background no-op published",
         )?;
         fs::write(root.join("lib.rs"), "pub fn changed() {}\n")?;
-        // A fresh server observes an already changed source: its empty event queue is no history.
-        let cold = ProjectAtlasMcpServer::new(database, None, "cold-watch-test".to_string(), false);
-        let changed: serde_json::Value = toon_format::decode_default(&cold.atlas_watch_once(
+        // The existing server must detect this immediate write even before callback delivery.
+        let changed: serde_json::Value = toon_format::decode_default(&server.atlas_watch_once(
             Parameters(AtlasWatchOnceParams {
                 project_path: Some(root.to_string_lossy().into_owned()),
                 worktree: None,
@@ -17505,6 +17504,12 @@ mod tests {
              UPDATE metadata SET value = '20' WHERE key = 'schema_version';",
         )?;
         drop(predecessor);
+        let cold = ProjectAtlasMcpServer::new(
+            database.clone(),
+            None,
+            "migration-watch-test".to_string(),
+            false,
+        );
         let migrated: serde_json::Value = toon_format::decode_default(&cold.atlas_watch_once(
             Parameters(AtlasWatchOnceParams {
                 project_path: Some(root.to_string_lossy().into_owned()),

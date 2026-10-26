@@ -1170,8 +1170,11 @@ impl SourceObservationRegistry {
             .reconcile
             .lock()
             .map_err(|_poisoned| lock_error(&entry.binding.root, "source reconciliation"))?;
-        // Mutation authority starts from exact saved source under the reconciliation lock.
-        if force_exact {
+        // One-shot refresh must include writes completed before the request. An empty
+        // callback queue cannot fence events still pending in an asynchronous backend.
+        // Until a causal backend fence is available, require exact refresh admission.
+        // Mutation authority also starts from exact saved source under this lock.
+        if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
             entry.invalidate();
         }
         let plan = ScanRuntimePlan::for_path_controlled(
@@ -1758,8 +1761,8 @@ mod tests {
     }
 
     #[test]
-    fn current_read_reuses_epoch_but_never_repairs_a_detected_delta() -> Result<(), Box<dyn Error>>
-    {
+    fn current_read_reconciles_exactly_without_repair_or_callback_delivery()
+    -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, source) = indexed_project(temp.path())?;
         let registry = SourceObservationRegistry::default();
@@ -1788,15 +1791,15 @@ mod tests {
             )?
             .require_current()?;
         require(
-            first.value == second.value && first.stamp == second.stamp,
-            "unchanged admission changed publication or epoch",
+            first.value == second.value && first.stamp.generation == second.stamp.generation,
+            "unchanged admission changed publication",
         )?;
         require(
-            second.work.exact_verifications == 0
-                && second.work.filesystem_entries == 0
-                && second.work.filesystem_bytes == 0
-                && second.work.decoded_nodes == 0,
-            "warm unchanged admission repeated source work",
+            second.work.exact_verifications == 1
+                && second.work.filesystem_entries > 0
+                && second.work.filesystem_bytes > 0
+                && second.work.decoded_nodes > 0,
+            "one-shot admission trusted an unfenced callback queue",
         )?;
 
         // A source event is not the only invalidation: an external writer advances generation.
@@ -1818,9 +1821,21 @@ mod tests {
         )?;
         let before = writer.index_publication()?;
         let previous_text = writer.load_file_text("source.rs")?.map(|row| row.content);
+        // Simulate an event still pending upstream: keep the accepted epoch but
+        // detach native ingress before the source write. No callback can expose it.
+        {
+            let binding = SourceBinding::new(&database, temp.path(), None)?;
+            let mut entries = registry.entries.lock().map_err(|_poisoned| {
+                lock_error(&binding.root, "test source observation registry")
+            })?;
+            let entry = entries
+                .get_mut(&binding)
+                .and_then(Arc::get_mut)
+                .ok_or_else(|| std::io::Error::other("test observer is not exclusively owned"))?;
+            entry.watcher = notify::recommended_watcher(|_event| {})?;
+        }
         fs::write(&source, "fn changed_before_observation() {}\n")?;
-        let cold = SourceObservationRegistry::default();
-        let admission = cold.with_verified_current_read(
+        let admission = registry.with_verified_current_read(
             &database,
             temp.path(),
             None,

@@ -50,8 +50,16 @@ full staging owner, rechecks identity/generation, and retains final validation.
 Its causal regression passes: a source added after capture must cause refusal;
 a fresh retry includes all source while identity, purpose and publication survive.
 The final assertion specifically requires the late path's typed refresh report.
-Workspace Clippy and independent Luna fix review pass. The normal push hook must
-verify this updated candidate before merge; do not merge the older PR head.
+Workspace Clippy and independent Luna fix review pass. The normal push hook passed and pushed 1ebe455. Hosted Rust/Linux passed the
+preceding head, but macOS ARM64's release-only PDF repair test exposed an unfenced
+notification-delivery race in the new no-op admission. Notify 8.2.0 has no causal
+delivery barrier; Rust queue emptiness cannot prove OS queues empty on any backend.
+One-shot RequireCurrent admission now reconciles exactly and still transfers its
+source assessment to the writer without a second detection scan. A deterministic
+regression retains an accepted epoch while detaching native ingress, then requires
+an immediate saved edit to be detected. This follow-up needs checks/review/push.
+Warm zero-source-work admission remains task 2.4 work requiring a reviewed causal
+fence, not a sleep, platform timing assumption or weakened fixture.
 
 Tasks 1.1/2.1/2.2 are checked and synchronized locally/live. Tasks 2.3 onward and all
 five acceptance tasks remain unchecked. No claim of complete #708 acceptance.

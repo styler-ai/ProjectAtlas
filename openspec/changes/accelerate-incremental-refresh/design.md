@@ -147,3 +147,13 @@ No schema change, public route removal or new dependency is required by this pla
 ## Open Questions
 
 None.
+
+### Notification-delivery finding during platform proof
+
+The macOS ARM64 installed release test exposed delayed callback delivery after an
+immediate saved edit. Notify 8.2.0 exposes no backend delivery fence; draining the
+Rust receiver and checking its callback counter cannot prove the native event queue
+is empty, on macOS or other asynchronous backends. One-shot refresh currently uses
+exact no-repair admission and transfers its discovery to the existing writer. The
+zero-source-work warm target remains open until a causal fence is designed, reviewed
+and proven; neither a sleep nor a Linux timing pass establishes that proof.
