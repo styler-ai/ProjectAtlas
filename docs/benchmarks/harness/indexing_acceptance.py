@@ -84,10 +84,14 @@ def state(root: Path) -> dict:
             "SELECT p.purpose,p.status FROM purposes p JOIN nodes n ON n.id=p.node_id WHERE n.path=?",
             (SOURCE_FILE,),
         ).fetchone()
+        approved = connection.execute(
+            "SELECT n.path,p.purpose,p.status FROM purposes p JOIN nodes n ON n.id=p.node_id "
+            "WHERE p.status='approved' ORDER BY n.path"
+        ).fetchall()
     if identity is None or publication.get("index_publication_state") != "complete":
         raise AssertionError("fixture has no complete project publication")
     return {"identity": identity[0], "generation": identity[1], "publication": publication,
-            "counts": counts, "purpose": list(purpose) if purpose else None}
+            "counts": counts, "purpose": list(purpose) if purpose else None, "approved_purposes": approved}
 
 
 def symbol_report(payload: dict) -> dict:
@@ -291,8 +295,46 @@ class Campaign:
         # A prior semantic contract requires one-time repair, not a steady-state no-op.
         upgrade = root / "semantic-upgrade"
         fixture(upgrade)
+        python = upgrade / "example"
+        python.mkdir()
+        (python / "__init__.py").write_text("", encoding="utf-8")
+        (python / "token_contract.py").write_text(
+            "def validate_token():\n    return True\n\ndef persist_token():\n    return True\n", encoding="utf-8")
+        (python / "redaction.py").write_text("def redact_token():\n    return '***'\n", encoding="utf-8")
+        (python / "token_refresh.py").write_text(
+            "from example.token_contract import (\n    validate_token as check,\n    persist_token,\n)\n"
+            "from example.redaction import redact_token\n\ndef refresh_token():\n"
+            "    if check():\n        persist_token()\n    return redact_token()\n", encoding="utf-8")
+
+        def verify_python(runtime: str) -> None:
+            caller = self.run(runtime, upgrade, ["summary", "example/token_refresh.py", "--limit", "10"])
+            self.check(caller["file_purpose"] == "Refresh tokens using the local contract."
+                       and ("example/token_refresh.py", "Refresh tokens using the local contract.", "approved")
+                       in state(upgrade)["approved_purposes"],
+                       runtime + " Python upgrade preserves its approved purpose")
+            report = self.run(runtime, upgrade, ["symbols", "relations", "--view", "detailed",
+                "--file", "example/token_refresh.py", "--relation", "imports", "--direction", "outbound", "--limit", "10"])
+            page = report["symbol_relations"]
+            self.check(page["returned"] == 2 and not page["truncated"], runtime + " Python upgrade has complete import page")
+            resolved = {row["target"]["entity"]["selector"]["path"] for row in page["rows"]
+                        if row["relation"]["resolution"]["status"] == "resolved" and row["target"] is not None}
+            expected = {"example/redaction.py"}
+            if runtime == "candidate":
+                expected.add("example/token_contract.py")
+                summary = self.run(runtime, upgrade, ["summary", "example/token_contract.py", "--limit", "10"])
+                for name in ("validate_token", "persist_token"):
+                    function = next(row for row in summary["functions"] if row["name"] == name)
+                    self.check("example/token_refresh.py::refresh_token" in function["called_by"],
+                               "installed semantic upgrade resolves Python caller for " + name)
+            else:
+                self.check(any(row["relation"]["resolution"]["status"] == "unresolved" and row["target"] is None
+                               for row in page["rows"]), "installed 0.5.0 actually reproduces unresolved Python import")
+            self.check(resolved == expected, runtime + " Python upgrade resolves exactly the supported file targets")
+
         self.run("baseline", upgrade, ["init"])
         self.run("baseline", upgrade, ["purpose", "set", SOURCE_FILE, "Own the reference navigation declarations."])
+        self.run("baseline", upgrade, ["purpose", "set", "example/token_refresh.py", "Refresh tokens using the local contract."])
+        verify_python("baseline")
         before = state(upgrade)
         backup = root / "prior-contract.db"
         with sqlite3.connect(database(upgrade)) as source, sqlite3.connect(backup) as target:
@@ -306,19 +348,28 @@ class Campaign:
                 after = state(upgrade)
                 self.check(after["identity"] == before["identity"]
                            and after["purpose"] == before["purpose"]
+                           and after["approved_purposes"] == before["approved_purposes"]
                            and after["counts"] == before["counts"]
                            and after["generation"] == before["generation"] + 1,
                            runtime + " semantic reconciliation preserves complete graph/identity/purpose and publishes once")
                 if runtime == "baseline":
-                    self.full_work(payload, 1024, "semantic upgrade full-work comparison")
+                    symbols = symbol_report(payload)
+                    self.check(symbols.get("parsed") == 1024 + 1 + 4 and symbols.get("unchanged") == 0
+                               and symbols.get("symbols") == 1024 * DECLARATIONS_PER_FILE + 1 + 6
+                               and symbols.get("relations") == 1024 * DECLARATIONS_PER_FILE + 5
+                               and all(symbols.get(field) == 0 for field in ("too_large", "binary_or_non_utf8", "timed_out")),
+                               "semantic upgrade baseline performs complete Rust/document/Python work")
                 else:
                     self.run(runtime, upgrade, ["watch", "--once"])
                     self.check(state(upgrade) == after, "semantic upgrade subsequent current-contract open is a no-op")
+                verify_python(runtime)
         # Rollback is correctness proof after the paired timings.
         self.run("candidate", upgrade, ["watch", "--once"])
         self.run("baseline", upgrade, ["watch", "--once"])
+        verify_python("baseline")
         after = state(upgrade)
         self.check(after["identity"] == before["identity"] and after["purpose"] == before["purpose"]
+                   and after["approved_purposes"] == before["approved_purposes"]
                    and after["counts"] == before["counts"], "semantic rollback preserves complete authored and derived state")
 
     def larger_and_dense(self, root: Path) -> None:

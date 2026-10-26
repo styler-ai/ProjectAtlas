@@ -27,7 +27,7 @@ No sleep/metadata heuristic can replace exact source comparison.
   exactly after macOSARM exposed delayed notification delivery. Full fallback reuses
   captured inventory rather than detecting twice. Four platforms passed before merge.
 - issue708 branch perf/indexing-budgets-708 at9845364 retains owned mixed changes.
-  No budget commit/PR yet. Stage every owned source/doc/workflow/helper file together.
+  Budget source and harness committed79660e3; no budget PR yet. Preserve the complete owned source/doc/workflow/helper set together.
 - issue721 branch perf/relations-721, PR#724, source0192e47 and task-onlyf54a712.
   All implementation/five acceptance tasks checked, independent holistic Luna approved,
   normal hook/push passed. Current head Rust/repository/PRstate passed; four installed
@@ -35,8 +35,8 @@ No sleep/metadata heuristic can replace exact source comparison.
 - issue722 branch fix/python-imports-722, commits90efe7d/bc1ad64/01114f6. Confirmed
   stable0.5.0 bug, translated English, milestone/nativeparent715/blocker715 verified.
   Plan1.1/code2.1/proofhandoff2.2 checked4/4/3; final3.1/allacceptance remain open.
-  Source Luna approved. Native push running; first attempt stopped on machine path in
-  memory, fixed portably without bypass. Read issue722 memory for proof details.
+  Source Luna approved. Full native push hook passed after portable-memory and test-inventory repairs;
+  PR#726 open at3ce8d83. Read issue722 memory for focused proof details.
 - Integration release/0.5.1 still old memory-only1fe2b86 base with owned dirty memory.
   Safely preserve that change and rebase onto accepted main before release preparation.
 - Retained stashes named owned issue721 implementation and owned adaptive-budget
@@ -104,3 +104,26 @@ four-platform installed diagnostic, close708 after complete proof/review; prepar
 715 RC version/pins/installed public-surface and Python exactpackage acceptance,
 publish RC tag/assets and independently verify checksums/install/prerelease/Latest.
 No RC exists yet. Goal remains active.
+
+## Permanent Python upgrade acceptance handoff
+
+The existing installed harness nowincludes the actualPythonreproduction in its
+semantic-upgradecase, outside measured command intervals: fourPythonfiles, four
+functiondeclarations plus twoimportsymbols, fiveimport/callfacts. It verifies
+published0.5.0unresolved vs candidatecorrectfiletargets/importedcallers and exact
+approvedPythonpurpose through upgrade androllback. state() captures allapproved
+purpose path/text/status tuples, comparedbefore/after; explicitapprovedcheck
+protects againstpreservingtextbutdemotingstatus. NarrowLuna reviewAPPROVED.
+Functionalnavigation/upgrade probe148checksPASS withcopieddebugcandidate and
+realinstalled0.5.0 (/tmp/projectatlas-issue708-python-harness-probe.log; cache
+python-upgrade-functional-qqnypwxz/results.json). This is functionalproofonly,
+not optimizednumericalacceptance. FirstprobefailedonexpectedPythoncount4vs6;
+readactualtypedrows (4functions+2importsymbols), corrected oracle/documentation.
+Fourarithmetic/completenessunittestscontinuePASS. Newmatrixcasesstillrequire
+freshoptimizedpackages, thenexactRCconsumptionby715.
+
+722PR726initialrepository/pr-statefailed becauseinlineRefsline didnotresolve
+soleowneramongincidental708/715references. Changedto standaloneRefs722; scoped
+PRIssueOps/rerun inprogress. No productcodechange. #724automerge queued against
+f54a712; Linux/ARMgreen, Windows/IntelMacremaining. Rebase/resolve budget lane
+ontoacceptedmainbeforefinalpublication; do not skiprequiredgates.
