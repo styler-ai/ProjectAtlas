@@ -5,10 +5,11 @@
       "release_issue": 715,
       "issues": {
         "708": { "blocked_by": [] },
-        "715": { "blocked_by": [708, 718, 721, 722] },
+        "715": { "blocked_by": [708, 718, 721, 722, 732] },
         "718": { "blocked_by": [] },
         "721": { "blocked_by": [] },
-        "722": { "blocked_by": [] }
+        "722": { "blocked_by": [] },
+        "732": { "blocked_by": [] }
       }
     },
     "v0.5.0-stable-00": {
@@ -97,6 +98,11 @@
     }
   },
   "changes": {
+    "harden-release-dependencies": {
+      "contract": "checklist-v1",
+      "primary_issue": 732,
+      "owners": [{ "issue": 732, "first_task": "1.1", "last_task": "3.1" }]
+    },
     "resolve-parenthesized-python-imports": {
       "contract": "checklist-v1",
       "primary_issue": 722,

@@ -3352,7 +3352,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     ] {
         for command in [
             "npm ci --ignore-scripts --prefix .github/mermaid-parser",
-            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+            "npm test --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
         ] {
             if !workflow.contains(command) {
                 return Err(io::Error::other(format!(
@@ -3368,7 +3369,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .ok_or_else(|| io::Error::other(format!("{name} omitted cargo tests")))?;
         for gate in [
             "npm ci --ignore-scripts --prefix .github/mermaid-parser",
-            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+            "npm test --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
         ] {
             let gate_position = workflow
                 .find(gate)
@@ -3384,7 +3386,8 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
     for (name, owner) in [("CI", ci.as_str()), ("pre-push", hook.as_str())] {
         for command in [
             "npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser",
-            "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+            "npm test --prefix .github/mermaid-parser",
+            "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
         ] {
             if !owner.contains(command) {
                 return Err(io::Error::other(format!(
@@ -3958,8 +3961,9 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
             .into());
         }
     }
-    if !mermaid_setup_step
-        .contains("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
+    if !mermaid_setup_step.contains("npm test --prefix .github/mermaid-parser")
+        || !mermaid_setup_step
+            .contains("npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser")
     {
         return Err(io::Error::other("CI Mermaid setup must avoid an implicit audit").into());
     }
@@ -3970,7 +3974,7 @@ fn issueops_and_workflows_use_behavior_focused_quality_gates() -> Result<(), Box
         .ok_or_else(|| io::Error::other("CI dependency-audit step is missing"))?;
     for required in [
         "contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')",
-        "npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser",
+        "npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser",
     ] {
         if !dependency_audit_step.contains(required) {
             return Err(io::Error::other(format!(

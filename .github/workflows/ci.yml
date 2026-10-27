@@ -207,11 +207,12 @@ jobs:
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')
         run: |
           npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+          npm test --prefix .github/mermaid-parser
 
       - name: Audit Mermaid dependencies
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')
         run: |
-          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser
 
       - name: Issue checklist self-test
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'issueops')

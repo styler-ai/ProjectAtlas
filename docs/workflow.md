@@ -49,7 +49,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lock
 cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 cargo deny --locked --all-features check -D warnings
 npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
-npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+npm test --prefix .github/mermaid-parser
+npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser
 python3 .github/scripts/issue-checklists.py --self-test
 python3 .github/scripts/test-optional-parser-proof-inputs.py
 python3 .github/scripts/issue-checklists.py --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" --root . --issue-map openspec/issue-map.json
