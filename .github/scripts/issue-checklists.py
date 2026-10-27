@@ -149,7 +149,7 @@ PR_STATE_NATIVE_TITLE_RE = re.compile(
     r"^pr-state\|[0-9a-f]{40}\|([1-9][0-9]*)\|([0-9a-f]{40})$"
 )
 COMMIT_ISSUE_REFERENCE_RE = re.compile(r"\(#([1-9][0-9]*)\)")
-COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^)]*)\)")
+COMMIT_ISSUE_MARKER_RE = re.compile(r"\(#([^()]*)\)")
 ISSUE_STATE_QUERY = """
 query($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
@@ -3509,6 +3509,26 @@ Mitigations:
             assert "exactly one owning issue" in str(error)
         else:
             raise AssertionError("ambiguous candidate commit ownership was accepted")
+    # Exercise the real stdin boundary with a fixed deadline: malformed nested
+    # markers must not repeatedly scan every remaining suffix. Long legitimate
+    # subjects remain accepted without imposing a new commit-length policy.
+    for subject, expected_code in (
+        ("(#(" * 100_000, 1),
+        ("ordinary subject " * 20_000 + "(#517)", 0),
+    ):
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--owner-from-commits"],
+            input=subject,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert result.returncode == expected_code
+        if expected_code == 0:
+            assert result.stdout.strip() == "517"
+        else:
+            assert "exactly one owning issue" in result.stderr
     assert complexity_label_failures(
         {"state": "OPEN", "labels": [{"name": "complexity:medium"}]}
     ) == []

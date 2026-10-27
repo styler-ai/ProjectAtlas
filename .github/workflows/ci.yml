@@ -207,11 +207,12 @@ jobs:
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')
         run: |
           npm ci --ignore-scripts --no-audit --prefix .github/mermaid-parser
+          npm test --prefix .github/mermaid-parser
 
       - name: Audit Mermaid dependencies
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'dependency-audit')
         run: |
-          npm audit --omit=dev --audit-level=moderate --prefix .github/mermaid-parser
+          npm audit --omit=dev --audit-level=low --prefix .github/mermaid-parser
 
       - name: Issue checklist self-test
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'issueops')
@@ -275,7 +276,7 @@ jobs:
 
       - name: Install cargo-deny
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'cargo-dependency') || contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -286,7 +287,7 @@ jobs:
 
       - name: Retain mismatched PDF guest for comparison
         if: failure() && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: mismatched-pdf-guest-linux
           path: .tmp/pdf-parser-build/wasm32-wasip1/release/projectatlas_pdf_parser.wasm
@@ -472,7 +473,7 @@ jobs:
 
       - name: Install cargo-deny for PDF source validation
         if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -507,7 +508,7 @@ jobs:
 
       - name: Upload document resource measurements
         if: contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: document-resources-${{ matrix.label }}
           path: .tmp/document-resources.json
@@ -644,7 +645,7 @@ jobs:
 
       - name: Upload hosted PTY token dashboards
         if: matrix.label != 'windows' && contains(matrix.contracts, 'tui')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: token-tui-pty-${{ matrix.label }}
           path: |

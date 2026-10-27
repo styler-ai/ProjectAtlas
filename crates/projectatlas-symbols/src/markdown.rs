@@ -816,6 +816,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn markdown_parser_handles_malformed_wikilinks_without_panicking() {
+        for content in [" \u{fffd} ![[] ]()]]", "- [o]:u\n \t"] {
+            let facts = extract_markdown_facts(content);
+            assert_eq!(facts.provenance, MarkdownParserProvenance::PulldownCmark);
+            assert!(facts.headings.len() <= MAX_MARKDOWN_HEADINGS);
+            assert!(facts.link_candidates.len() <= MAX_DOCUMENT_LINK_CANDIDATES);
+            for capability in projectatlas_core::language::LANGUAGE_CAPABILITIES
+                .iter()
+                .filter(|capability| {
+                    capability.symbol_parser
+                        == projectatlas_core::language::SymbolParserOwner::Markdown
+                })
+            {
+                for language in
+                    std::iter::once(capability.id).chain(capability.aliases.iter().copied())
+                {
+                    for path in [capability.fixtures.positive_path, "fixture.mdx"] {
+                        let graph = crate::extract_symbol_graph(path, Some(language), content);
+                        assert_eq!(graph.path, path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_parser_preserves_linear_wikilink_occurrences() {
+        let source = "[[a|]] ".repeat(16);
+        let facts = extract_markdown_facts(&source);
+        assert_eq!(facts.link_candidates.len(), 16);
+        assert!(facts.coverage.limits.is_empty());
+        for (index, candidate) in facts.link_candidates.iter().enumerate() {
+            assert_eq!(candidate.selector, "a");
+            assert_eq!(candidate.source.byte_start, index * 7);
+            assert_eq!(
+                &source[candidate.source.byte_start..candidate.source.byte_end],
+                "[[a|]]"
+            );
+        }
+    }
+
+    #[test]
     fn extracts_exact_unicode_headings_and_static_candidates() {
         let content = "# Über `Atlas`\n\nÜber Atlas\n----------\n\né [readme](README)\n\n[core][core]\n\n[core]: ../src/lib.rs#entry\n\nUse `src/lib.rs:12-20`.\n";
         let facts = extract_markdown_facts(content);

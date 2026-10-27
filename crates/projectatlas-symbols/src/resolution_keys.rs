@@ -17,7 +17,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 4;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 5;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -26,6 +26,13 @@ pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 4;
 /// family inventory remains a later, independently versioned responsibility.
 #[must_use]
 pub fn semantic_resolution_contract_digest() -> String {
+    semantic_resolution_contract_digest_for_identifier_profile(unicode_ident::UNICODE_VERSION)
+}
+
+/// Bind the Python identifier property's data version without duplicating its tables.
+fn semantic_resolution_contract_digest_for_identifier_profile(
+    identifier_version: (u8, u8, u8),
+) -> String {
     let mut hasher = Hasher::new();
     hasher.update(&SEMANTIC_RESOLUTION_CONTRACT_VERSION.to_le_bytes());
     hasher.update(&(MAX_RESOLUTION_KEYS_PER_FACT as u64).to_le_bytes());
@@ -41,6 +48,11 @@ pub fn semantic_resolution_contract_digest() -> String {
             &mut hasher,
             provider.resolution_family().unwrap_or("unavailable"),
         );
+        if provider == SemanticProviderOwner::Python {
+            hash_contract_value(&mut hasher, "python_xid_unicode_version");
+            let (major, minor, patch) = identifier_version;
+            hasher.update(&[major, minor, patch]);
+        }
         if semantic::supports_source_dependencies(provider) {
             hash_relation_contract(
                 &mut hasher,
@@ -1242,11 +1254,24 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 4);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 5);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
         assert_ne!(first, PRE_MODULE_CALLBACK_DIGEST);
+    }
+
+    #[test]
+    fn semantic_resolution_contract_tracks_identifier_data_version() {
+        let before = super::semantic_resolution_contract_digest_for_identifier_profile((17, 0, 0));
+        let after = super::semantic_resolution_contract_digest_for_identifier_profile((18, 0, 0));
+        assert_ne!(before, after);
+        assert_eq!(
+            semantic_resolution_contract_digest(),
+            super::semantic_resolution_contract_digest_for_identifier_profile(
+                unicode_ident::UNICODE_VERSION
+            )
+        );
     }
 
     #[test]
