@@ -37,16 +37,17 @@ Indexing SHALL reduce measured redundant traversal, reads/hashing, parsing, deco
 - **WHEN** a change invalidates dependent data or a broader compiler, ignore, parser or publication policy
 - **THEN** refresh includes that invalidated scope while preserving unrelated authored state
 
-### Requirement: Verified unchanged refresh is a cheap no-op
-When root, policy, publication identity and reliable change-history continuity prove no relevant change, refresh SHALL avoid project-tree traversal, content hashing, full-node decoding and parsing, and SHALL create no new index generation.
+### Requirement: Unchanged refresh reconciles exactly without derived work
+For 0.5.1, CLI and MCP one-shot refresh SHALL perform exact source discovery and lightweight ordered source comparison before declaring current state. They SHALL avoid full-node decoding, parsing and publication for unchanged current-contract sources. Native callback queues, equal metadata and retained read epochs alone SHALL NOT authorize bypassing this reconciliation. Zero-source-work admission is deferred to unscheduled #725.
 
-#### Scenario: Continuously observed unchanged MCP project
-- **WHEN** a long-lived MCP process has valid trusted observation and matching publication state for an unchanged project
-- **THEN** MCP completes through the verified no-op path with the required zero work counts and unchanged generation
+#### Scenario: Unchanged current-contract project
+- **WHEN** CLI or long-lived MCP refreshes an unchanged project with matching publication policy
+- **THEN** it performs one detection discovery/comparison, no parse or full-node decode and no new publication
+- **AND** it meets the registered unchanged latency/resource targets
 
-#### Scenario: CLI has reviewed retained change evidence
-- **WHEN** a CLI fast path uses trustworthy retained evidence supplied by an implemented and reviewed cross-invocation design
-- **THEN** it proves the same zero-work bounds without treating a fresh empty event queue as history
+#### Scenario: Delayed observation or same-metadata edit
+- **WHEN** a saved edit has not reached a watcher callback, or preserves size and modification time
+- **THEN** exact comparison detects it and the existing affected-work owner repairs it or refuses unsafe publication
 
 ### Requirement: Standalone CLI has its own performance gate
 Before production changes, the plan SHALL fix and evaluate a cold-CLI latency target. If exact cold discovery cannot meet it, a trustworthy cross-invocation evidence design SHALL be published and reviewed before that implementation proceeds. A fast MCP path alone SHALL not satisfy this capability.

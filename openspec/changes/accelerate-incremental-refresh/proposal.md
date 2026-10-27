@@ -8,7 +8,7 @@ Indexing and refreshing a large project can take too long and hit a deadline. Ve
 
 - Set separate, measured improvement targets for initial indexing, full `scan`, explicit symbol/graph rebuilding, cold CLI refresh, warm MCP, unchanged projects and small or large change sets. A faster watch-once path alone does not complete this issue.
 - Settle one shared operation plan: trusted no-op, affected-data update or required full work. Use lightweight ordered source comparison, reuse valid source/parse evidence and remove repeated whole-project work in the existing owners. Focused measurements verify this architecture; they are not an open-ended search for it.
-- Reuse the existing watcher and source observer safely. With trustworthy change evidence, update all changed sources and affected data, and make a verified unchanged refresh a cheap no-op.
+- Reuse the existing watcher and source observer safely. With trustworthy change evidence, update all changed sources and affected data, and make an exactly reconciled unchanged refresh avoid derived work. Zero-source-work warm admission is explicitly deferred to unscheduled #725 by the accepted RC1 scope.
 - Reconcile uncertain history, offline edits and relevant configuration changes exactly. Preserve the complete results and force/rebuild semantics of initial and full indexing.
 - Choose bounded default work budgets from the work required. Preserve explicit caller limits, cancellation, atomic publication, authored purposes, native identity and safe retry.
 - Prove each improvement with the optimized installed product, normal telemetry, realistic large-project fixtures, work counts and resource measurements on supported platforms.

@@ -143,6 +143,7 @@ fi
 
 if has_repository_contract benchmark-policy; then
   python3 docs/benchmarks/harness/mcp_composition.py --self-test
+  python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py
   python3 .github/scripts/verify-manual-benchmark-policy.py
   python3 .github/scripts/verify-published-benchmark-locks.py
 fi

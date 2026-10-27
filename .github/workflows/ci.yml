@@ -242,7 +242,9 @@ jobs:
 
       - name: Manual-only full benchmark policy
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')
-        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+        run: |
+          python3 .github/scripts/verify-manual-benchmark-policy.py
+          python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py
 
       - name: Published benchmark measurement locks
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'benchmark-policy')

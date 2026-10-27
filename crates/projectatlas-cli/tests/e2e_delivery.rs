@@ -490,7 +490,7 @@ const SHORT_CLI_FILE_NAME: &str = "short-cli.md";
 
 const MCP_CONTRACT_PLUGIN_ROOT_ENV: &str = "PROJECTATLAS_MCP_CONTRACT_PLUGIN_ROOT";
 
-const MCP_TOOLS_SHA256: &str = "70218bfe77a40085c88eb14e0f09dc06dac566ec4345f5f816bb494286f0be19";
+const MCP_TOOLS_SHA256: &str = "1b04e4263156d1c188244a1f1db5b9d42f942bf88d1ba50d03b2e5d83704ea02";
 
 const WRONG_PROJECT_OWNER_DIR_NAME: &str = "wrong-owner";
 
@@ -22910,7 +22910,11 @@ fn cli_help_surface(executable: &Path, route: &str) -> Result<CliHelpSurface, Bo
             .join(" ");
         for fragment in [
             "cooperative indexing-work budget",
-            "30-minute default and ceiling",
+            "automatic work-based default",
+            "30-minute ceiling",
+            "unknown-work fallback",
+            "explicit values take precedence",
+            "zero refuses immediately",
             "clamped",
             "fail closed",
             "setup after work-control creation",
@@ -26377,7 +26381,11 @@ fn assert_frozen_mcp_surfaces_compatible(stdout: &str) -> Result<(), Box<dyn Err
             let normalized = current_description.to_lowercase();
             for fragment in [
                 "cooperative indexing-work budget",
-                "30-minute default and ceiling",
+                "automatic work-based default",
+                "30-minute ceiling",
+                "unknown-work fallback",
+                "explicit values take precedence",
+                "zero refuses",
                 "clamped",
                 "fail closed",
                 "setup after work-control creation",

@@ -18,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_indexing_performance:
+        description: "Explicit four-platform 0.5.1 indexing comparison (prepublish diagnostic only)"
+        required: false
+        default: false
+        type: boolean
       parser_pack_run_id:
         description: "Successful clean optional-parser-pack workflow run for this release tree"
         required: true
@@ -50,6 +55,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+
+      - name: Validate explicit performance diagnostic
+        env:
+          REQUESTED_PERFORMANCE: ${{ inputs.run_indexing_performance }}
+          PREPUBLISH_ONLY: ${{ inputs.prepublish_only }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, re
+          if os.environ["REQUESTED_PERFORMANCE"] == "true":
+              if os.environ["PREPUBLISH_ONLY"] != "true" or not re.fullmatch(r"v0\.5\.(?:0|1-rc[1-9][0-9]*)", os.environ["RELEASE_VERSION"]):
+                  raise SystemExit("Indexing comparison requires an explicit prepublish-only 0.5.0-development or 0.5.1 RC diagnostic")
+          PYTHON
 
       - name: Classify release version
         id: release_version
@@ -207,7 +224,9 @@ jobs:
         run: python3 docs/benchmarks/harness/mcp_composition.py --self-test
 
       - name: Manual-only full benchmark policy
-        run: python3 .github/scripts/verify-manual-benchmark-policy.py
+        run: |
+          python3 .github/scripts/verify-manual-benchmark-policy.py
+          python3 -m unittest discover -s docs/benchmarks/harness -p test_indexing_acceptance.py
 
       - name: Published benchmark measurement locks
         run: python3 .github/scripts/verify-published-benchmark-locks.py
@@ -901,6 +920,57 @@ jobs:
               "$contract" "$test" --exact --include-ignored --nocapture
           done
 
+      - name: Prepare explicit indexing comparison baseline
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
+          "$python_command" .github/scripts/prepare-indexing-baseline.py \
+            --suffix "$BASELINE_SUFFIX" --destination "$RUNNER_TEMP/projectatlas-indexing-baseline"
+          "$python_command" -m venv "$RUNNER_TEMP/projectatlas-indexing-python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/Scripts/python.exe"
+          else
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/bin/python"
+          fi
+          "$measurement_python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r docs/benchmarks/harness/indexing-requirements.txt
+          echo "PROJECTATLAS_INDEX_MEASUREMENT_PYTHON=$measurement_python" >> "$GITHUB_ENV"
+
+      - name: Explicit installed indexing performance diagnostic
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        timeout-minutes: 30
+        shell: bash
+        env:
+          CANDIDATE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            candidate="$RUNNER_TEMP/projectatlas-prepublish/projectatlas.exe"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.zip"
+          else
+            candidate="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.tar.gz"
+          fi
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" docs/benchmarks/harness/indexing_acceptance.py \
+            --baseline "$PROJECTATLAS_INDEX_BASELINE_EXECUTABLE" \
+            --baseline-archive "$PROJECTATLAS_INDEX_BASELINE_ARCHIVE" \
+            --baseline-checksums "$PROJECTATLAS_INDEX_BASELINE_CHECKSUMS" \
+            --candidate "$candidate" --candidate-archive "$archive" --candidate-version "${RELEASE_VERSION#v}" \
+            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement"
+
+      - name: Upload explicit indexing diagnostic result
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: indexing-performance-${{ matrix.label }}
+          path: ${{ runner.temp }}/projectatlas-indexing-measurement/results.json
+          if-no-files-found: warn
+
       - name: Installed-candidate native Btrfs database placement contract
         if: matrix.label == 'linux-x64-posix'
         timeout-minutes: 10
@@ -1211,6 +1281,57 @@ jobs:
               throw "Installed-candidate contract '$test' failed with exit code $LASTEXITCODE."
             }
           }
+
+      - name: Prepare explicit indexing comparison baseline
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_SUFFIX: x86_64-pc-windows-msvc
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then python_command=python; else python_command=python3; fi
+          "$python_command" .github/scripts/prepare-indexing-baseline.py \
+            --suffix "$BASELINE_SUFFIX" --destination "$RUNNER_TEMP/projectatlas-indexing-baseline"
+          "$python_command" -m venv "$RUNNER_TEMP/projectatlas-indexing-python"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/Scripts/python.exe"
+          else
+            measurement_python="$RUNNER_TEMP/projectatlas-indexing-python/bin/python"
+          fi
+          "$measurement_python" -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r docs/benchmarks/harness/indexing-requirements.txt
+          echo "PROJECTATLAS_INDEX_MEASUREMENT_PYTHON=$measurement_python" >> "$GITHUB_ENV"
+
+      - name: Explicit installed indexing performance diagnostic
+        if: ${{ inputs.prepublish_only && inputs.run_indexing_performance }}
+        timeout-minutes: 30
+        shell: bash
+        env:
+          CANDIDATE_SUFFIX: x86_64-pc-windows-msvc
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            candidate="$RUNNER_TEMP/projectatlas-prepublish/projectatlas.exe"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.zip"
+          else
+            candidate="${PROJECTATLAS_PACKAGED_RUNTIME:?packaged runtime was not installed}"
+            archive="release-assets/projectatlas-$RELEASE_VERSION-$CANDIDATE_SUFFIX.tar.gz"
+          fi
+          "$PROJECTATLAS_INDEX_MEASUREMENT_PYTHON" docs/benchmarks/harness/indexing_acceptance.py \
+            --baseline "$PROJECTATLAS_INDEX_BASELINE_EXECUTABLE" \
+            --baseline-archive "$PROJECTATLAS_INDEX_BASELINE_ARCHIVE" \
+            --baseline-checksums "$PROJECTATLAS_INDEX_BASELINE_CHECKSUMS" \
+            --candidate "$candidate" --candidate-archive "$archive" --candidate-version "${RELEASE_VERSION#v}" \
+            --work-root "$RUNNER_TEMP/projectatlas-indexing-measurement"
+
+      - name: Upload explicit indexing diagnostic result
+        if: ${{ always() && inputs.prepublish_only && inputs.run_indexing_performance }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: indexing-performance-windows-x64
+          path: ${{ runner.temp }}/projectatlas-indexing-measurement/results.json
+          if-no-files-found: warn
 
   parser-pack-assets:
     name: optional-parser release assets
