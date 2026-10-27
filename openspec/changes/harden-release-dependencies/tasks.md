@@ -14,4 +14,4 @@
 
 ## 3. Accept the integrated dependency and security result
 
-- [ ] 3.1 Resolve independent and automated feedback and reconcile the final specification/architecture disposition; pass cargo fmt --all --check and required locked workspace check, Clippy, tests, doctests, warning-clean rustdoc, security/dependency, strict OpenSpec/IssueOps and mandatory native/hosted gates, then re-inventory all open Dependabot security alerts and verify accepted fixes or evidence-backed dispositions with no unresolved confirmed RC blocker before closure.
+- [x] 3.1 Resolve independent and automated feedback and reconcile the final specification/architecture disposition; pass cargo fmt --all --check and required locked workspace check, Clippy, tests, doctests, warning-clean rustdoc, security/dependency, strict OpenSpec/IssueOps and mandatory native/hosted gates, then re-inventory all open Dependabot security alerts and verify accepted fixes or evidence-backed dispositions with no unresolved confirmed RC blocker before closure.
