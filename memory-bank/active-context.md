@@ -1,101 +1,89 @@
 # Active context
 
-## Objective
+## Objective and ownership
 
-Deliver the scheduled 0.5.1 work and publish `v0.5.1-rc1` for testing. Preserve the preceding stable release as GitHub Latest. Stable promotion is not authorized by this objective.
+Continue until v0.5.1-rc1 is released and independently verified. Preserve stable
+Latest; stable promotion needs later user instruction. Primary writes all fixes;
+independent GPT-6 Luna max reviews use custom Rust/database skills. Use stable0.5.0
+Codex plugin and CLI from each exact private-index worktree; incremental refresh
+only when indexed evidence is needed. Keep progress visible and calls bounded.
 
-## Baseline and history
+## Python #722
 
-- The integration worktree starts at `7cd5a79` on `release/0.5.1`, from accepted `main`.
-- Stable 0.5.0 shipped PHP navigation, bounded PDF/DOCX extraction, the short `atlas` CLI, bounded analysis views, worktree routing, Unicode search, coordinated plugin/runtime installation, and preserved-state atomic publication.
-- Follow-up planning moved complete indexing performance from 0.6.0 into 0.5.1. Language navigation, Memory Atlas product implementation, and npm distribution remain 0.6.0 work.
-- The stable 0.5.0 native Linux archive was verified against published SHA256SUMS and used to initialize this worktree's private index. The official Codex marketplace plugin was installed from `v0.5.0`; runtime/registry convergence is being verified.
+User requested English translation, analysis and RC1 inclusion if real. Installed
+stable0.5.0 reproduces parenthesized local import unresolved while ordinary resolves.
+Issue translated, normalized and assigned v0.5.1-00; native soleparent/blocker715
+verified. Plan resolve-parenthesized-python-imports, spec-driven. Tasks1.1/2.1/2.2
+checked; final3.1 and allfiveacceptanceunchecked. StrictOpenSpec and scopedIssueOps
+pass. No schema/publicroute/parserpack change. Comment-bearing lists remain safely
+unsupported because extraction loses line boundaries; no fullPython/NFKCequivalence
+or target-interpreter Unicodeversion claim.
 
-## Release scope
+Checkout issue722, branch fix/python-imports-722, publicPR#726 head3ce8d83 on9845364.
+Earlier source90efe7d + reviewedzstdsecuritypatchbc1ad64 + portablememory01114f6 +
+inventory3ce8d83 passed full normal nativehook. PRbody uses standalone Refs722.
+Initial PRrepository/prstate failures were inlineRefs ambiguity; currentprstate and
+localPRIssueOps pass afterbodyfix. Cannotrerunrepositoryjobwhileworkflowrunning
+(API403); nextfixpush willsupersedeoldhead. No reviewreply/threadresolutionmutations.
 
-- #708: indexing, full scan, symbol/graph rebuild, one-shot and continuous refresh performance, trustworthy no-op and exact fallback, adaptive cooperative budgets. OpenSpec: `accelerate-incremental-refresh`.
-- #721: bounded useful relation navigation, compatibility behavior, row/output/work budgets and continuation. Currently milestone backlog; its implementation plan and graph mapping must be completed before implementation.
-- #718: protected-branch check guidance; already present on the baseline. Verify live closure before release.
-- #715: release acceptance and publication, closes last after stable verification. OpenSpec: `complete-v051-release-acceptance`.
-- The local release graph currently omits #721 despite its live milestone membership. Reconcile it as part of planning.
+## Implementation and Unicode review correction
 
-## Working rules
+Python owner borrows oneouterpair, rejects remaining delimiters/emptyitems/comments,
+normalizes flat comma/aliases and advances semanticcontract3->4 throughexisting
+fingerprint. RealCLI tests filetargets, importedcallers/aliases, incremental/full
+convergence, identity/purposes and unchangedgeneration. Initial267symboltests and
+ASCII/aliasE2E passed; installed0.5.0->localfix9checks passed.
 
-The primary agent implements and fixes. Independent reviews use GPT-6 Luna at max effort and explicitly read the custom Rust skill, applicable Rust subskills, database/SQLite skills when relevant, and accepted OpenSpec. Reviewers do not edit. Use `docs/workflow.md` for the native IssueOps, quality, PR, and release contracts.
+Automated review correctly found the first stricter imported-name guard rejected
+valid combining marks and dropped ASCII siblings. Reopened2.1/2.2 whilefixing.
+Current owned uncommitted correction uses alreadylocked unicode-ident1.0.24 directly;
+workspace/symbols dependencyedges and one locklist entry only, no newpackage/version.
+Predicate is '_'orXID_Start, XID_Continue excludingU200C/U200D, plusrawhardkeywords.
+Documented lockedUnicode17/exactspelling; no normalization of symbol/sourceidentity.
+CPython accepts fullwidthkeywordspellings asNAME and normalizes AST later, so do not
+reject all NFKC-to-keyword spellings. No newnormalizationlibrary/cache/parser.
 
-## Current implementation checkpoint
+CausalUnicodeunit failedbeforefix; all21resolutiontests nowpass including combining
+names/aliases/ASCII siblings, dottedmodulecomponent, invalidstarts/punctuation and
+joincontrols. RealCLI regression expanded ordinaryUnicode ->parenthesizedUnicodealias
+with ASCII sibling, exactfiletargets/bothcallers/fullconvergence/ID/purpose/noopPASS.
+An initial test-refactor expected-set mistake was corrected. CLI sourceinventoryhash
+updated, count207 unchanged; focusedinventorypositivegatePASS. Luna reviewed source,
+dependency/profile/spec and requested modulecoverage, nowadded/passing; no blocker.
 
-This is `.worktrees/issue-721`, branch `perf/relations-721`, with uncommitted
-implementation and the accepted `bound-relation-navigation` plan. Luna Max accepted
-the specification and independently reviewed the storage/adapter implementation.
-Local/live #721 tasks 1.1, 2.1, 2.2 and 2.3 are checked; task 3.1 and all
-acceptance rows remain pending hosted/final proof. The task mirror is being verified.
+Realinstalledstable0.5.0->currentUnicode-correcteddebugbinary12checksPASS, proving
+baselineordinaryUnicodeworks, fixedparentimportresolves, bothUnicode/ASCIIcallers
+survive, exactlyoneupgradepublication, allapprovedpurpose text/status andidentity
+survive, secondnoopnopub androllback preservation. Reports:
+/tmp/projectatlas-issue722-unicode-upgrade.json and -unicode-upgrade.log.
+This is not exactRC acceptance; #715 consumes the permanent installed harness on
+exactRCpackages. Rechecked2.1/2.2 after these affected proofs; finalnative/hosted gates
+and automatedreviewagainstcorrectedhead remainrequired. Commit currentfix first;
+mergeacceptedmainnormally into this already-publicbranch after724merges (no force).
+Then runmandatoryhook/push and finalacceptance. Preserve owned changes.
 
-The storage-owned compatibility reader admits at most 200 rows, 100,000 SQLite VM
-instructions, 1,000 ms and 1 MiB intermediate state. ID-only candidate selection
-refuses its overflow sentinel before hydration; complete small results retain their
-ordering. RAII restores limits/progress hooks and respects caller transactions.
-No schema change; existing rusqlite limits feature is enabled. Full DB suite:
-237 tests plus doctests passed, with focused query-plan/limits/cleanup tests.
+## Other lanes and shared tooling
 
-CLI and MCP default to existing detailed ten-row/32-KiB pages. Explicit legacy
-retains complete small arrays, omitted rows 50, hard rows/output bounds and typed
-read/output refusals. Shared service policy owns defaults; adapters enforce final
-encoded UTF-8 bytes (including MCP routing wrapper). Real JSON/TOON/MCP test covers
-exact N/N-1 output limits, invalid controls, typed work, continuation and isolation.
-Workspace Clippy and warning-clean docs passed; new real-adapter E2E passed.
+#723 merged main9845364. #724f54a712 normalautomerge queued; Linux/Windows/ARMgreen,
+IntelMaclastpluginsmoke stillrunning. #708 budget/harness commits79660e3/0a574b1
+unpushed while awaitingaccepted721baseline; issue708memoryowns details. Useraccepted
+exactreconciliation andmeasuredgains, zero-workwarm deferredto unscheduled725.
+Permanent installedharnessPythonupgrade148functionalchecksPASS; optimizedfourplatform
+newmatrixstillpending. #715 plan reconciled/reviewapproved, integration old1fe2b86 has
+owned proposal/design/spec/memory changes to preserve duringrebase. NoRCexistsyet.
 
-The first full workspace run exposed two obsolete implicit-legacy unit probes;
-both were corrected and passed affected reruns. First delivery integration run
-passed 49 cases and exposed three intentional guidance/default compatibility
-expectations. Narrow normalization, exact advertised-schema digest and explicit
-legacy array probes now pass all three targeted reruns. Frozen historical fixtures
-remain unchanged. E2E inventory positive and two negative contracts pass. The remaining
-platform/library/workspace/doctest checks passed (artifact-only ignored contracts
-remain release-owned). The offline/worktree legacy probes were corrected and
-passed their affected reruns. Logs `/tmp/projectatlas-issue721-*`.
-Reuse unchanged passing proof; normal push hook remains mandatory.
+Use filesystem TMPDIR under ~/.cache/projectatlas-test-tmp and sharedtarget
+.worktrees/v0.5.1/target, clean testPATH. No siblingCLI compilation duringE2E/hook.
+gh authenticated; requirednative andtrustedhostedgates, no bypass. Publiccommit
+identity ShaunTyler/noreply percommand. Retainedstashes alreadyrecovered; neverapply
+again. Goal remainsactive.
 
-Rebased onto accepted main 9845364 (PR #723 merged after all four platforms and
-required verify passed). The owned backup stash is retained. Coordinate
-coordinate #708 shared runtime/MCP/guidance/E2E inventory changes. No #721 commit or PR yet. #708 PR #723 merged normally at 9845364 after
-all four platforms, Rust, repository, PR-state and required verify passed; automated
-review had no findings. Its restored adaptive-budget draft is in the
-sibling issue-708 checkout on perf/indexing-budgets-708, under independent review.
+## Accepted baseline integrated
 
-## Access and release limits
-
-GitHub CLI 2.103.2 is authenticated as styler-ai through the OS keyring. Use clean
-test PATH (rustup proxies, task gh-only helper, existing Python venv), filesystem
-TMPDIR `~/.cache/projectatlas-test-tmp`, and shared integration target. Never compile
-siblings into that target during CLI E2E tests. Stable Atlas 0.5.0 remains installed;
-this checkout received typed full-refresh guidance after the dependency closure
-limit, and that required full refresh completed without resetting its database.
-The following rebase/edits invalidate prior indexed facts; refresh only when needed.
-
-RC1 is not released. Exact one-shot reconciliation fixes the native-notification
-race; no warm zero-source-work claim is accepted. A user scope question is pending
-before deferring that promised target. Continue all independent work toward RC1.
-
-## Integrated task proof
-
-On accepted main 9845364, locked all-target workspace check, Clippy, warning-clean
-docs and strict string policy pass. The inventory now retains both issue slices
-(207 test entries, frozen historical metadata unchanged). Real-adapter reruns pass;
-MCP now consumes its own continuation to terminal and compares complete relation
-coverage with CLI, rejects a changed root digest and cross-project replay with the
-same anchor. Luna approved these added causal assertions. Final strict OpenSpec
-and scoped IssueOps are running before the sole-owner commit/push. Normal native
-pre-push remains mandatory. Do not report #721 accepted or close it before hosted
-and final issue gates.
-
-## Publication checkpoint
-
-Local commit 8279cfa owns #721 implementation on accepted main 9845364; it is not
-pushed yet. The first native push hook passed planner/IssueOps/string policy but
-stopped at newly fetched RustSec advisories RUSTSEC-2026-0391/0398/0403 affecting
-zstd0.14.0/zstd-safe8.0.0. The primary updated the exact workspace zstd pin to
-0.14.3; the lock moves only zstd, zstd-safe8.2.0 and zstd-sys2.1.2. No ignore or
-exception was added. Fresh dependency review/gate and normal complete push proof
-must pass before publishing. Earlier Rust evidence predates this dependency fix.
-Task2.2/2.3 mirror is confirmed: local5/remote5/checked4; strict OpenSpec passes.
+#724 merged normally into main612ce65 aftertrustedfourplatformverifypassed; #721
+closedreadbackconfirmed. This publicPythonbranch mergesacceptedmainnormally,
+preservinghistory/no forcepush. Resolved onlydeclaredmapunion721+722, selected
+issue722memory and regeneratedcombinedE2Esourcehashes/207testownershipinventory.
+Boundedrelationdefaults/compatibilityfromaccepted721retained. Unicodefix5650f07
+needsmandatorynativepushhook oncombinedbaseline, hostedchecks andcurrentautomated
+review before final722acceptance.
