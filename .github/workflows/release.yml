@@ -135,7 +135,7 @@ jobs:
         run: cargo run --locked -p projectatlas-lints --bin cargo-projectatlas-lints -- strict-strings
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -342,14 +342,14 @@ jobs:
           } > "contract-artifacts/$archive.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: projectatlas-${{ matrix.suffix }}
           path: release-assets/*
           if-no-files-found: error
 
       - name: Upload packaged contract runner
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts/*
@@ -494,14 +494,14 @@ jobs:
             Set-Content -LiteralPath (Join-Path "contract-artifacts" "$archive.sha256") -Encoding utf8
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: projectatlas-x86_64-pc-windows-msvc
           path: release-assets/*
           if-no-files-found: error
 
       - name: Upload packaged contract runner
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: packaged-contract-runner-x86_64-pc-windows-msvc
           path: contract-artifacts/*
@@ -535,13 +535,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download packaged runtime
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: projectatlas-${{ matrix.suffix }}
           path: release-assets
 
       - name: Download packaged contract runner
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: packaged-contract-runner-${{ matrix.suffix }}
           path: contract-artifacts
@@ -950,13 +950,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download packaged runtime
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: projectatlas-x86_64-pc-windows-msvc
           path: release-assets
 
       - name: Download packaged contract runner
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: packaged-contract-runner-x86_64-pc-windows-msvc
           path: contract-artifacts
@@ -1262,7 +1262,7 @@ jobs:
           echo "PARSER_PACK_RUN_SHA=$run_sha" >> "$GITHUB_ENV"
 
       - name: Download clean optional-parser handoff
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: optional-parser-pack-release-assets
           path: ${{ runner.temp }}/optional-parser-release-source
@@ -1282,7 +1282,7 @@ jobs:
             --cargo-lock Cargo.lock
 
       - name: Upload optional-parser release assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: projectatlas-parser-packs
           path: ${{ runner.temp }}/optional-parser-release-assets/*
@@ -1314,7 +1314,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-assets
           pattern: projectatlas-*

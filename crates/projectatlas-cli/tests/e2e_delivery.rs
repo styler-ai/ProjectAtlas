@@ -4497,7 +4497,7 @@ gate_status={gate_status}
         .ok_or_else(|| io::Error::other("ordinary CI omitted hosted PTY TUI upload"))?;
     for required in [
         "if: matrix.label != 'windows'",
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
         "name: token-tui-pty-${{ matrix.label }}",
         "if-no-files-found: error",
     ] {

@@ -28,11 +28,36 @@ Review each bot diff and upstream release evidence before applying its intended 
 
 Verify Action commits against their upstream release refs and update all retained invocations together. Retain least privilege, supported runners, exact source/artifact handoff and SHA pins. Old bot branches are superseded only after their reviewed changes are accepted, with truthful linked disposition.
 
+The selected Unicode identifier update advances the current XID profile from
+Unicode 17 to Unicode 18 without adding interpreter-version targeting or NFKC
+equivalence. Include the canonical crate's reported table version in the semantic
+fingerprint and advance its existing contract. Advance the extraction/publication
+contract for the Markdown fixes. Closed #722 artifacts retain their historical
+Unicode-17 contract; current documentation describes the newly accepted profile.
+Coordinate subsequent #731 contract changes against this accepted baseline.
+
+The upstream Markdown update fixes malformed-link panics and repeated-wikilink
+event amplification. Stable 0.5.0 reproduces the malformed-wikilink process panic
+in an isolated one-file project; a separate offset-iterator example does not
+panic under ProjectAtlas's actual `Options::all()` profile. Preserve that
+distinction and test through the real extraction wrapper instead of claiming all
+upstream examples fail here. Existing byte/fact/checkpoint bounds remain intact.
+
 ### Verify managed monitoring without another workflow engine
 
 Use GitHub's managed CodeQL configuration and existing Dependabot/secret protections. Preserve the existing branch gates. Verify initial analyses, retained languages, weekly schedule and later PR/push activation; record unsupported fixture-only languages rather than weakening successful source coverage or fabricating a build. Online Codex security settings are verified in their authenticated repository UI; do not substitute local review or assume a missing PR review means a setting is off.
 
 Import every initial alert with stable provenance and assess its actual source, control, sink, supported boundary and counterevidence. Test-only diagnostics, trusted operator paths and unreachable gadgets require evidence-backed disposition, not blanket dismissal. Fix confirmed failures at their owning boundary with broader RCA and independent review; new coherent fixes can receive direct #715 child issues, but all confirmed RC1 fixes remain required. Do not claim a clean repository merely because a job succeeded.
+
+The initial commit-marker complexity lead reaches only the local pre-push
+stdin validator; it does not establish remote product exploitability. Its
+unanchored malformed-marker expression can repeatedly scan overlapping suffixes.
+Exclude nested parentheses from that malformed-marker grammar, preserving the
+existing positive-reference expression, complete marker-count comparison and
+single-owner admission. Exercise rejection and long valid input through the real
+CLI with a fixed watchdog. The sibling repository-identity expression has
+disjoint repetitions separated by a slash outside both character classes and
+does not share this overlapping-suffix mechanism. Retain that distinction.
 
 ### Preserve intended product capabilities
 

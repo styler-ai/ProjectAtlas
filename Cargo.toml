@@ -102,7 +102,7 @@ proc-macro2 = { version = "1.0", features = ["span-locations"] }
 quick-xml = { version = "=0.42.0", default-features = false }
 predicates = "3.1"
 regex = "1.11"
-unicode-ident = "=1.0.24"
+unicode-ident = "=1.0.27"
 regex-syntax = { version = "0.8.11", default-features = false, features = ["std", "unicode-case"] }
 rayon = "1.10"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
@@ -122,7 +122,7 @@ tiktoken = "4.1.2"
 tokio = { version = "1.48", features = ["io-std", "macros", "rt-multi-thread", "time"] }
 toml = "1.1"
 toml_edit = "0.25"
-zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 toon-format = { version = "0.5.0", default-features = false, features = ["json_stream"] }
 tree-sitter = "=0.26.13"
 tree-sitter-c = "=0.24.2"
@@ -141,5 +141,5 @@ tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
 zstd = "=0.14.3"
 tree-sitter-zig = "=1.1.2"
-whichdisk = { version = "0.6.0", default-features = false, features = ["list"] }
+whichdisk = { version = "0.7.0", default-features = false, features = ["list"] }
 yaml-rust2 = "0.12"

@@ -29,6 +29,14 @@ Dependency and Action updates SHALL be reviewed against upstream provenance and 
 - **WHEN** a dependency changes extracted or resolved facts for unchanged source
 - **THEN** the existing owning fingerprint causes compatible indexes to repair without resetting identity or approved purposes, with subsequent no-op and compatible rollback behavior verified
 
+#### Scenario: Identifier table version advances
+- **WHEN** an accepted dependency update advances the Python normalizer's XID property tables
+- **THEN** the current profile and semantic fingerprint identify that table version, while exact source spelling, underscore support, hard-keyword rejection, join-control rejection and ordinary Unicode/ASCII aliases remain preserved
+
+#### Scenario: Malformed or repeated Markdown links
+- **WHEN** the Markdown parser receives the supported malformed-link or repeated-wikilink regression inputs
+- **THEN** extraction returns bounded facts without a process panic or duplicated exponential source occurrences, while ordinary Markdown navigation remains available
+
 #### Scenario: Updated filesystem or workflow dependency
 - **WHEN** an accepted update affects filesystem classification or artifact/package handoff
 - **THEN** the owning safety and platform checks still pass, uncertain state fails closed and prior unrelated proof is not misreported as current evidence

@@ -37,6 +37,10 @@ Every imported initial finding SHALL retain provenance and receive an evidence-b
 - **WHEN** source evidence confirms a reachable failure across a supported security boundary
 - **THEN** the owning fix and broader implications are tracked and repaired for RC1 with causal and legitimate-behavior coverage
 
+#### Scenario: Malformed local commit metadata
+- **WHEN** local pre-push ownership validation receives repeated nested issue markers
+- **THEN** it rejects the malformed subject without repeated overlapping suffix scans, while retaining the same single-owner grammar and accepting long legitimate subjects without a new length restriction
+
 ### Requirement: Security remediation preserves intended functionality
 Security fixes SHALL retain documented CLI/MCP, indexing, navigation, plugin, filesystem-selection and release capabilities. Legitimate positive workflows SHALL be verified alongside exploit/failure controls. Blanket restrictions or undocumented compatibility narrowing SHALL NOT substitute for a targeted repair.
 
