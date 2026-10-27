@@ -1176,41 +1176,42 @@ impl SourceObservationRegistry {
         // Mutation authority also starts from exact saved source under this lock.
         if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
             entry.invalidate();
-        }
-        let plan = ScanRuntimePlan::for_path_controlled(
-            entry.binding.config.as_deref(),
-            &entry.binding.root,
-            None,
-            control,
-        )
-        .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-        entry.changed_since_exact_verification(&plan.scan_options)?;
-        let contract_fingerprint = plan.publication_contract_fingerprint();
-        let policy_witness = source_policy_witness(&plan, control)?;
-        if let Some(epoch) = entry.current_epoch()?
-            && epoch.contract_fingerprint == contract_fingerprint
-            && epoch.policy_witness == policy_witness
-            && !entry.continuity_lost.load(Ordering::Acquire)
-        {
-            let store = open_atlas_store_read_only_for_project(
-                &entry.binding.database,
+        } else {
+            let plan = ScanRuntimePlan::for_path_controlled(
+                entry.binding.config.as_deref(),
                 &entry.binding.root,
-            )?;
-            let publication = store.index_publication()?.filter(|publication| {
-                publication.state == IndexPublicationState::Complete
-                    && publication.contract_fingerprint.as_deref()
-                        == Some(contract_fingerprint.as_str())
-            });
-            let captured = store.captured_project_binding()?;
-            work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-            if publication
-                .is_some_and(|publication| publication.generation == epoch.stamp.generation)
-                && captured.project_instance_id == epoch.stamp.project_instance_id
+                None,
+                control,
+            )
+            .map_err(|source| publication_input_error(&entry.binding.root, source))?;
+            entry.changed_since_exact_verification(&plan.scan_options)?;
+            let contract_fingerprint = plan.publication_contract_fingerprint();
+            let policy_witness = source_policy_witness(&plan, control)?;
+            if let Some(epoch) = entry.current_epoch()?
+                && epoch.contract_fingerprint == contract_fingerprint
+                && epoch.policy_witness == policy_witness
+                && !entry.continuity_lost.load(Ordering::Acquire)
             {
-                return Ok(SourceReadAdmission::Current(Some((store, epoch))));
+                let store = open_atlas_store_read_only_for_project(
+                    &entry.binding.database,
+                    &entry.binding.root,
+                )?;
+                let publication = store.index_publication()?.filter(|publication| {
+                    publication.state == IndexPublicationState::Complete
+                        && publication.contract_fingerprint.as_deref()
+                            == Some(contract_fingerprint.as_str())
+                });
+                let captured = store.captured_project_binding()?;
+                work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+                if publication
+                    .is_some_and(|publication| publication.generation == epoch.stamp.generation)
+                    && captured.project_instance_id == epoch.stamp.project_instance_id
+                {
+                    return Ok(SourceReadAdmission::Current(Some((store, epoch))));
+                }
+                entry.invalidate();
+                drop(store.finish_index_read_snapshot());
             }
-            entry.invalidate();
-            drop(store.finish_index_read_snapshot());
         }
 
         for _attempt in 0..VERIFIED_READ_ATTEMPTS {
@@ -1661,6 +1662,25 @@ mod tests {
         Ok((database, source))
     }
 
+    /// Keep a warmed epoch while preventing native callbacks from exposing later edits.
+    fn detach_native_delivery(
+        registry: &SourceObservationRegistry,
+        database: &Path,
+        root: &Path,
+    ) -> Result<(), Box<dyn Error>> {
+        let binding = SourceBinding::new(database, root, None)?;
+        let mut entries = registry
+            .entries
+            .lock()
+            .map_err(|_poisoned| lock_error(&binding.root, "test source observation registry"))?;
+        let entry = entries
+            .get_mut(&binding)
+            .and_then(Arc::get_mut)
+            .ok_or_else(|| std::io::Error::other("test observer is not exclusively owned"))?;
+        entry.watcher = notify::recommended_watcher(|_event| {})?;
+        Ok(())
+    }
+
     /// Build a bounded non-cancelled control for observer tests.
     fn test_control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)))
@@ -1823,17 +1843,7 @@ mod tests {
         let previous_text = writer.load_file_text("source.rs")?.map(|row| row.content);
         // Simulate an event still pending upstream: keep the accepted epoch but
         // detach native ingress before the source write. No callback can expose it.
-        {
-            let binding = SourceBinding::new(&database, temp.path(), None)?;
-            let mut entries = registry.entries.lock().map_err(|_poisoned| {
-                lock_error(&binding.root, "test source observation registry")
-            })?;
-            let entry = entries
-                .get_mut(&binding)
-                .and_then(Arc::get_mut)
-                .ok_or_else(|| std::io::Error::other("test observer is not exclusively owned"))?;
-            entry.watcher = notify::recommended_watcher(|_event| {})?;
-        }
+        detach_native_delivery(&registry, &database, temp.path())?;
         fs::write(&source, "fn changed_before_observation() {}\n")?;
         let admission = registry.with_verified_current_read(
             &database,
@@ -2438,6 +2448,7 @@ mod tests {
             &control,
             |store, _stamp| Ok(store.overview()?),
         )?;
+        detach_native_delivery(&registry, &database, temp.path())?;
         let revised = "fn revised_before_admission() {}\n";
         fs::write(&source, revised)?;
 
