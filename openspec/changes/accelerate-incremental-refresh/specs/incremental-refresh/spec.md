@@ -97,6 +97,11 @@ CLI and MCP SHALL use the explicitly selected project/worktree and its existing 
 - **WHEN** a valid selected project has no Git repository or Git is unavailable
 - **THEN** refresh retains its ordinary filesystem and index behavior without making Git a prerequisite
 
+#### Scenario: Dependency closure requires an explicit scan
+- **WHEN** a read refuses because the dependency-aware incremental closure exceeded its safe limit
+- **THEN** CLI JSON/TOON and MCP typed recovery select `scan` / `atlas_scan`, consistently with the human diagnostic, and preserve the exact project or registered worktree selector
+- **AND** source, path and policy changes that the ordinary one-shot refresh can reconcile continue to select `watch --once` / `atlas_watch_once`, including a full reconciliation scope
+
 ### Requirement: Default work budget fits planned work
 Without an explicit caller timeout, indexing/rebuilding/refresh SHALL select a documented bounded cooperative budget from reliable work estimates, including required discovery. Explicit limits SHALL take precedence. Cancellation and resource bounds SHALL remain effective; estimating work SHALL not add an unbudgeted full walk, and retries SHALL not reset the clock.
 

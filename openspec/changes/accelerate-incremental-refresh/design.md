@@ -37,6 +37,14 @@ This is the chosen starting architecture. Code investigation and these work guar
 
 ### Keep one refresh and publication owner
 
+Recovery adapters derive their next operation from the same closed refusal reason
+as the human diagnostic. A dependency-closure limit requires an explicit complete
+scan; blindly returning watch-once can repeat the refusal. Full scope alone does
+not require a scan: ordinary source, path and policy drift can be reconciled by
+watch-once. Preserve exact project/worktree routing and existing payload schemas.
+This repair belongs to task 2.4's retry and exact-fallback behavior; it changes no
+publication, closure limit or accepted performance target.
+
 CLI/MCP init, scan and symbol-build adapters keep their existing shared pipeline owners; one-shot and continuous watch keep the shared refresh owner. Improve their common filesystem, parsing, comparison and atomic-publication work rather than introducing separate fast implementations per adapter. Known changes describe additions, modifications, deletions and renames of any size. Include affected text, symbols, summaries, relations and configuration-dependent data; one changed file can affect many graph rows.
 
 Reuse `WatchChangeSet`, the existing source observer, source verification and store transaction boundaries. Do not add parallel adapter implementations or a second source-of-truth index. Keep native project/worktree identity captured throughout the operation.

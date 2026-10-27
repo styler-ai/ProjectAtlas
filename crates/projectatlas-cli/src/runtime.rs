@@ -491,6 +491,21 @@ impl IndexProjectMismatch {
     }
 }
 
+impl IndexRefreshRequired {
+    /// Whether ordinary watch-once recovery would repeat the bounded refusal.
+    ///
+    /// Full scope alone is insufficient: watch-once can reconcile source, path
+    /// and policy drift, but an exhausted dependency closure requires a scan.
+    pub(crate) const fn requires_explicit_scan(&self) -> bool {
+        match self.reason {
+            IndexRefreshReason::DependencyClosureLimit => true,
+            IndexRefreshReason::SourceChanged
+            | IndexRefreshReason::PathsChanged
+            | IndexRefreshReason::PolicyDrift => false,
+        }
+    }
+}
+
 impl fmt::Display for IndexRefreshRequired {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let recovery = self.worktree.as_ref().map_or_else(
@@ -503,7 +518,7 @@ impl fmt::Display for IndexRefreshRequired {
                 "refresh_required: derived index policy differs from the current project configuration; {recovery}"
             );
         }
-        if self.reason == IndexRefreshReason::DependencyClosureLimit {
+        if self.requires_explicit_scan() {
             let recovery = self.worktree.as_ref().map_or_else(
                 || "run a complete `projectatlas scan` or `atlas_scan` before retrying".to_string(),
                 |alias| format!("call `atlas_scan` with `worktree: {alias}` before retrying"),

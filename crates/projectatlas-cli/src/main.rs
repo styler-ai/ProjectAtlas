@@ -138,6 +138,8 @@ const SCHEMA_VERSION_MISMATCH_RECOVERY: &str = "Use a ProjectAtlas runtime that 
 const SCHEMA_MIGRATION_REQUIRED_RECOVERY: &str = "Apply the supported database-owned migration without changing the selected database: for CLI, use the `projectatlas init` action from the selected project root while preserving the same global `--db`/`--config` selection; for MCP, call `atlas_init` through the same MCP server/database binding. Do not reset or replace the database.";
 /// Existing CLI command that performs one bounded refresh pass.
 const CLI_REFRESH_COMMAND: &str = "watch";
+/// Existing CLI command that bypasses an exhausted incremental closure.
+const CLI_SCAN_COMMAND: &str = "scan";
 /// Existing CLI command that initializes one selected project root.
 const CLI_INIT_COMMAND: &str = "init";
 /// Portable fallback watcher mode.
@@ -3538,9 +3540,13 @@ fn render_cli_error(format: OutputFormat, error: &CliError) -> Result<String, se
             database_filesystem: None,
             search_capability: None,
             next: Some(CliNextCall {
-                command: CLI_REFRESH_COMMAND,
+                command: if report.requires_explicit_scan() {
+                    CLI_SCAN_COMMAND
+                } else {
+                    CLI_REFRESH_COMMAND
+                },
                 project_path: report.project_root.as_deref(),
-                once: Some(true),
+                once: (!report.requires_explicit_scan()).then_some(true),
             }),
         }),
         CliError::VerificationIncomplete(report) => Some(CliErrorPayload {
@@ -6327,6 +6333,64 @@ mod tests {
                     == Some(&Value::String(indexed_display)),
             "CLI TOON omitted lossless roots from a store mismatch",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn cli_refresh_recovery_matches_refusal_reason() -> Result<(), Box<dyn Error>> {
+        for reason in [
+            IndexRefreshReason::SourceChanged,
+            IndexRefreshReason::PathsChanged,
+            IndexRefreshReason::PolicyDrift,
+            IndexRefreshReason::DependencyClosureLimit,
+        ] {
+            // Full scope can still be repaired by watch-once; only a closure
+            // refusal requires an explicit scan.
+            let scan = reason == IndexRefreshReason::DependencyClosureLimit;
+            let error = CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                project_root: Some("/selected/project".to_string()),
+                worktree: None,
+                status: IndexReadStatus::RefreshRequired,
+                reason,
+                scope: IndexRefreshScope::Full,
+                changed: 1,
+                added: 0,
+                removed: 0,
+                modified: 1,
+                sample_paths: vec!["src/lib.rs".to_string()],
+            }));
+            for format in [OutputFormat::Json, OutputFormat::Toon] {
+                let rendered = render_cli_error(format, &error)?;
+                let value: Value = match format {
+                    OutputFormat::Json => serde_json::from_str(&rendered)?,
+                    OutputFormat::Toon => toon_format::decode_default(&rendered)?,
+                };
+                require_condition(
+                    value.pointer("/error/next/command").and_then(Value::as_str)
+                        == Some(if scan { "scan" } else { "watch" })
+                        && value.pointer("/error/next/once").and_then(Value::as_bool)
+                            == if scan { None } else { Some(true) }
+                        && value
+                            .pointer("/error/next/project_path")
+                            .and_then(Value::as_str)
+                            == Some("/selected/project"),
+                    "CLI refresh recovery disagrees with the refusal or loses its root",
+                )?;
+                require_condition(
+                    value
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| {
+                            message.contains(if scan {
+                                "`projectatlas scan`"
+                            } else {
+                                "`projectatlas watch --once`"
+                            })
+                        }),
+                    "CLI human recovery disagrees with the typed operation",
+                )?;
+            }
+        }
         Ok(())
     }
 

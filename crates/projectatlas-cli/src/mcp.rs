@@ -7703,7 +7703,11 @@ impl ProjectAtlasMcpServer {
                 None,
                 None,
                 Some(McpNextCall {
-                    tool: MCP_TOOL_ATLAS_WATCH_ONCE,
+                    tool: if report.requires_explicit_scan() {
+                        MCP_TOOL_ATLAS_SCAN
+                    } else {
+                        MCP_TOOL_ATLAS_WATCH_ONCE
+                    },
                     project_path: report
                         .worktree
                         .is_none()
@@ -11639,6 +11643,62 @@ mod tests {
             payload.contains(&selected_display) && payload.contains(&indexed_display),
             "MCP TOON did not retain lossless store roots",
         )
+    }
+
+    #[test]
+    fn mcp_refresh_recovery_matches_refusal_reason() -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            IndexRefreshReason::SourceChanged,
+            IndexRefreshReason::PathsChanged,
+            IndexRefreshReason::PolicyDrift,
+            IndexRefreshReason::DependencyClosureLimit,
+        ] {
+            let scan = reason == IndexRefreshReason::DependencyClosureLimit;
+            for worktree in [None, Some("issue-branch".to_string())] {
+                let error = CliError::RefreshRequired(Box::new(IndexRefreshRequired {
+                    project_root: Some("/selected/project".to_string()),
+                    worktree: worktree.clone(),
+                    status: IndexReadStatus::RefreshRequired,
+                    reason,
+                    scope: IndexRefreshScope::Full,
+                    changed: 1,
+                    added: 0,
+                    removed: 0,
+                    modified: 1,
+                    sample_paths: vec!["src/lib.rs".to_string()],
+                }));
+                let rendered = ProjectAtlasMcpServer::encode_error_payload(&error);
+                let value: serde_json::Value = toon_format::decode_default(&rendered)?;
+                let tool = if scan {
+                    "atlas_scan"
+                } else {
+                    "atlas_watch_once"
+                };
+                require(
+                    value
+                        .pointer("/error/next/tool")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(tool)
+                        && value
+                            .pointer("/error/message")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|message| message.contains(&format!("`{tool}`"))),
+                    "MCP typed and human recovery disagree with the refusal",
+                )?;
+                require(
+                    value
+                        .pointer("/error/next/worktree")
+                        .and_then(serde_json::Value::as_str)
+                        == worktree.as_deref()
+                        && value
+                            .pointer("/error/next/project_path")
+                            .and_then(serde_json::Value::as_str)
+                            == worktree.is_none().then_some("/selected/project"),
+                    "MCP refresh recovery lost its exclusive root selector",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
