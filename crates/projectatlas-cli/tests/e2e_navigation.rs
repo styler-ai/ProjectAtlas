@@ -3087,7 +3087,7 @@ fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(
         repo.join(SRC_DIR_NAME)
             .join("py")
             .join("named_alias_main.py"),
-        "from py.package.named_alias import run_py_named_alias as run_alias\n\n\ndef start_py_named_alias():\n    return run_alias()\n",
+        "from py.package.named_alias import (\n    run_py_named_alias as run_alias,\n)\n\n\ndef start_py_named_alias():\n    return run_alias()\n",
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME)
@@ -3194,6 +3194,194 @@ fn real_scan_resolves_import_alias_called_by_across_core_languages() -> Result<(
         "src/py/entry_main.py::start_py_entry",
     )?;
 
+    Ok(())
+}
+
+#[test]
+fn parenthesized_python_imports_resolve_and_converge_after_refresh() -> Result<(), Box<dyn Error>> {
+    let require = |condition: bool, message: &str| -> Result<(), io::Error> {
+        if condition {
+            Ok(())
+        } else {
+            Err(io::Error::other(message))
+        }
+    };
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    fs::create_dir_all(repo.join("example"))?;
+    fs::write(repo.join("example/__init__.py"), "")?;
+    fs::write(repo.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        repo.join("example/token_contract.py"),
+        "def validate_token():\n    return True\n\ndef persist_token():\n    return True\n",
+    )?;
+    fs::write(
+        repo.join("example/redaction.py"),
+        "def redact_token():\n    return '***'\n",
+    )?;
+    fs::write(
+        repo.join("example/unicode_helper.py"),
+        "def a\u{301}():\n    return True\n\ndef run():\n    return True\n",
+    )?;
+    let unicode_caller = "example/unicode_refresh.py";
+    fs::write(
+        repo.join(unicode_caller),
+        "from example.unicode_helper import a\u{301}, run\n\ndef refresh_unicode():\n    return a\u{301}(), run()\n",
+    )?;
+    let caller = "example/token_refresh.py";
+    let source = |imports: &str| {
+        format!(
+            "from example.token_contract import {imports}\nfrom example.redaction import redact_token\n\ndef refresh_token():\n    if check():\n        persist_token()\n    return redact_token()\n"
+        )
+    };
+    fs::write(
+        repo.join(caller),
+        source("validate_token as check, persist_token"),
+    )?;
+    let db = temp.path().join("python-imports.db");
+    run_scan(&repo, &db)?;
+    Command::new(mcp_contract_executable())
+        .current_dir(&repo)
+        .arg("--db")
+        .arg(&db)
+        .args([
+            "purpose",
+            "set",
+            caller,
+            "Refresh tokens using the local contract.",
+        ])
+        .assert()
+        .success();
+    let identity = AtlasStore::open_read_only(&db)?.project_instance_id()?;
+    let purposes = authored_purpose_paths(&db)?;
+    require(
+        purposes.contains(caller),
+        "Python authored purpose was not stored",
+    )?;
+    for (checkpoint, imports) in [
+        ("single-line", "(validate_token as check, persist_token)"),
+        (
+            "multiline",
+            "(\n    validate_token as check,\n    persist_token,\n)",
+        ),
+    ] {
+        fs::write(repo.join(caller), source(imports))?;
+        if checkpoint == "multiline" {
+            fs::write(
+                repo.join(unicode_caller),
+                "from example.unicode_helper import (\n    a\u{301} as r\u{301},\n    run,\n)\n\ndef refresh_unicode():\n    return r\u{301}(), run()\n",
+            )?;
+        }
+        run_watch_once_report(&repo, &db)?;
+        for (query_file, expected_targets) in [
+            (
+                caller,
+                BTreeSet::from([
+                    "example/token_contract.py".to_owned(),
+                    "example/redaction.py".to_owned(),
+                ]),
+            ),
+            (
+                unicode_caller,
+                BTreeSet::from(["example/unicode_helper.py".to_owned()]),
+            ),
+        ] {
+            let output = Command::new(mcp_contract_executable())
+                .current_dir(&repo)
+                .arg("--db")
+                .arg(&db)
+                .args([
+                    "--format",
+                    "json",
+                    "symbols",
+                    "relations",
+                    "--view",
+                    "detailed",
+                    "--file",
+                    query_file,
+                    "--relation",
+                    "imports",
+                    "--direction",
+                    "outbound",
+                    "--limit",
+                    "10",
+                ])
+                .output()?;
+            require(
+                output.status.success(),
+                &String::from_utf8_lossy(&output.stderr),
+            )?;
+            let report: Value = serde_json::from_slice(&output.stdout)?;
+            let rows = report["symbol_relations"]["rows"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("Python import rows missing"))?;
+            require(
+                rows.len() == expected_targets.len(),
+                "Python import count differs from the expected targets",
+            )?;
+            let mut targets = BTreeSet::new();
+            for row in rows {
+                require(
+                    row["relation"]["resolution"]["status"] == "resolved",
+                    "Python import remained unresolved",
+                )?;
+                let target = row["target"]["entity"]["selector"]["path"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("resolved Python target missing"))?;
+                targets.insert(target.to_owned());
+            }
+            require(
+                targets == expected_targets,
+                "Python imports resolved to wrong files",
+            )?;
+        }
+        for (file, function) in [
+            ("example/token_contract.py", "validate_token"),
+            ("example/token_contract.py", "persist_token"),
+            ("example/redaction.py", "redact_token"),
+        ] {
+            assert_summary_called_by(
+                &repo,
+                &db,
+                file,
+                function,
+                "example/token_refresh.py::refresh_token",
+            )?;
+        }
+        for function in ["a\u{301}", "run"] {
+            assert_summary_called_by(
+                &repo,
+                &db,
+                "example/unicode_helper.py",
+                function,
+                "example/unicode_refresh.py::refresh_unicode",
+            )?;
+        }
+        assert_clean_scan_convergence(&repo, &db, temp.path(), checkpoint)?;
+        let store = AtlasStore::open_read_only(&db)?;
+        require(
+            store.project_instance_id()? == identity,
+            "Python refresh changed project identity",
+        )?;
+        require(
+            authored_purpose_paths(&db)? == purposes,
+            "Python refresh changed authored purposes",
+        )?;
+        let generation = store
+            .index_publication()?
+            .ok_or_else(|| io::Error::other("Python publication missing"))?
+            .generation;
+        drop(store);
+        run_watch_once_report(&repo, &db)?;
+        require(
+            AtlasStore::open_read_only(&db)?
+                .index_publication()?
+                .ok_or_else(|| io::Error::other("Python publication missing after no-op"))?
+                .generation
+                == generation,
+            "Unchanged Python refresh created another publication",
+        )?;
+    }
     Ok(())
 }
 
@@ -9693,22 +9881,7 @@ fn assert_summary_called_by(
     function_name: &str,
     expected_caller: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let raw_summary = Command::cargo_bin("projectatlas")?
-        .current_dir(repo)
-        .arg("--format")
-        .arg("json")
-        .arg("--db")
-        .arg(db)
-        .args(["summary", file_path, "--limit", "10"])
-        .output()?;
-    if !raw_summary.status.success() {
-        return Err(io::Error::other(format!(
-            "summary command failed for {file_path}: {}",
-            String::from_utf8_lossy(&raw_summary.stderr)
-        ))
-        .into());
-    }
-    let summary_json: Value = serde_json::from_slice(&raw_summary.stdout)?;
+    let summary_json = json_summary_command(repo, db, file_path)?;
     let function = summary_json["functions"]
         .as_array()
         .and_then(|functions| {

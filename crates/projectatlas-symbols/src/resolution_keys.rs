@@ -17,7 +17,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 3;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 4;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -1242,7 +1242,7 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 3);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 4);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
@@ -1315,13 +1315,120 @@ mod tests {
             "import defaultValue, { read } from './reader';",
             "import { read, nested { broken } } from './reader';",
             "import { read as load as fetch } from './reader';",
-            "from package.reader import (read, close)",
             "from package.reader import read, broken as ",
             "import package.reader as reader as other",
         ] {
             assert!(
                 parse_import_references(malformed).is_empty(),
                 "unsupported syntax fabricated references: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_flat_parenthesized_python_imports_without_guessing() {
+        let expected = vec![
+            reference(
+                ImportSyntax::Python,
+                "package.reader",
+                Some("close"),
+                "close",
+            ),
+            reference(ImportSyntax::Python, "package.reader", Some("read"), "load"),
+        ];
+        for statement in [
+            "from package.reader import (read as load, close)",
+            "from package.reader import (read as load, close,)",
+            "from package.reader import (\n    read as load,\n    close,\n)",
+        ] {
+            assert_eq!(parse_import_references(statement), expected, "{statement}");
+        }
+        assert_eq!(
+            parse_import_references("from .reader import (read,)"),
+            vec![reference(
+                ImportSyntax::Python,
+                ".reader",
+                Some("read"),
+                "read"
+            )]
+        );
+        assert_eq!(
+            parse_import_references("from match.case import (type as match, case)"),
+            vec![
+                reference(ImportSyntax::Python, "match.case", Some("case"), "case"),
+                reference(ImportSyntax::Python, "match.case", Some("type"), "match"),
+            ]
+        );
+        for statement in [
+            "from package.reader import ()",
+            "from package.reader import (read",
+            "from package.reader import read)",
+            "from package.reader import ((read))",
+            "from package.reader import (read),",
+            "from package.reader import (read,,close)",
+            "from package.reader import (,read)",
+            "from package.reader import (read,,)",
+            "from package.reader import (read as)",
+            "from package.reader import (read as load as other)",
+            "from package.reader import (read.attr)",
+            "from package.reader import (read as load.attr)",
+            "from package.reader import (class)",
+            "from package.reader import (read as None)",
+            "from package.class import (read)",
+            "from package.reader import (read())",
+            "from package.reader import ([read])",
+            "from package.reader import ({read})",
+            "from package.reader import (*)",
+            "from package.reader import (read, # note\n close)",
+        ] {
+            assert!(parse_import_references(statement).is_empty(), "{statement}");
+        }
+    }
+
+    #[test]
+    fn preserves_unicode_python_import_names_and_aliases() {
+        let name = "a\u{301}";
+        let alias = "r\u{301}";
+        let module = "helper\u{301}.reader";
+        assert_eq!(
+            parse_import_references(&format!("from {module} import (run)")),
+            vec![reference(ImportSyntax::Python, module, Some("run"), "run")]
+        );
+        for list in [
+            format!("{name}, run"),
+            format!("({name}, run,)"),
+            format!("(\n{name},\nrun,\n)"),
+        ] {
+            assert_eq!(
+                parse_import_references(&format!("from helper import {list}")),
+                vec![
+                    reference(ImportSyntax::Python, "helper", Some(name), name),
+                    reference(ImportSyntax::Python, "helper", Some("run"), "run"),
+                ]
+            );
+        }
+        for list in [
+            format!("run as {alias}, {name}"),
+            format!("(run as {alias}, {name},)"),
+        ] {
+            assert_eq!(
+                parse_import_references(&format!("from helper import {list}")),
+                vec![
+                    reference(ImportSyntax::Python, "helper", Some(name), name),
+                    reference(ImportSyntax::Python, "helper", Some("run"), alias),
+                ]
+            );
+        }
+        for invalid in ["\u{301}a", "a\u{2022}", "a\u{b2}", "a\u{200c}", "a\u{200d}"] {
+            assert!(
+                parse_import_references(&format!("from helper import ({invalid}, run)")).is_empty()
+            );
+            assert!(
+                parse_import_references(&format!("from helper import (run as {invalid})"))
+                    .is_empty()
+            );
+            assert!(
+                parse_import_references(&format!("from {invalid}.reader import run")).is_empty()
             );
         }
     }
@@ -1809,7 +1916,7 @@ mod tests {
             (
                 "src/main.py",
                 "python",
-                "from package.reader import (read, close)\nread()\n",
+                "from package.reader import (read, # note\n close)\nread()\n",
             ),
         ] {
             let graph = extract_symbol_graph(path, Some(language), source);
