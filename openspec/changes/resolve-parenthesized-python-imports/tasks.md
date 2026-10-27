@@ -11,4 +11,4 @@
 
 ## 3. Accept the integrated fix
 
-- [ ] 3.1 Resolve independent and automated feedback, reconcile specification and architecture disposition, and pass required locked Rust, docs, OpenSpec, IssueOps and affected local/hosted gates before issue closure.
+- [x] 3.1 Resolve independent and automated feedback, reconcile specification and architecture disposition, and pass required locked Rust, docs, OpenSpec, IssueOps and affected local/hosted gates before issue closure.
