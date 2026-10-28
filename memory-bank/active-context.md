@@ -1,89 +1,68 @@
 # Active context
 
-## Objective and ownership
+Active goal: release and independently verify v0.5.1-rc1; Latest050 unchanged.
+Primary writes, existingLunaMax reviews read-only with customRust/database skills.
+No permission pending. This exact checkout issue-739 on fix/external-excludes-739
+starts acceptedmain1b953f1d; stable050Atlas init86055 PASS875files689parses.
+Never reset/copy a database; affected-only refresh as needed, no home/.codex index.
 
-Continue until v0.5.1-rc1 is released and independently verified. Preserve stable
-Latest; stable promotion needs later user instruction. Primary writes all fixes;
-independent GPT-6 Luna max reviews use custom Rust/database skills. Use stable0.5.0
-Codex plugin and CLI from each exact private-index worktree; incremental refresh
-only when indexed evidence is needed. Keep progress visible and calls bounded.
+#739 confirmedstable050 fullscan bugs: quoted global core.excludesFile path with
+space ignored; linkedworktree shared info/exclude ignored. Git check-ignore
+--no-index confirms both. Repeated native fullscan reproduces; sourcebytes/RCE
+notdemonstrated. Privateproof /tmp/projectatlas-738-external-ignore-oracle.json.
+Sharedmechanism: ignore's configregex cannot parsespace; require_git(false) hides
+Gitfiletype needed byengine's commondir resolution. Preserve no-Git behavior and
+local precedence/negations. Plan reconcile-external-git-excludes4tasks,1.1checked afterLunaapproval, strictOpenSpec
+andplannedIssueOps4/4/1PASS. Issue739ready/high/high, milestone37, soleparent715
+anddirectblocker verified. Native715children/blockersEXACT708718721722731732738739.
+Live715body/milestone37description andintegration715planinclude739. No code implemented.
+Use canonical bounded configparser, existingFS/policy/publication owners, no Git
+subprocess/customINI/jail. Audit broader currentcontracts and recordunsupported.
+CombinedDERmustexceed731contract10, semantic10 retained. Exactdependencycost and
+full/targeted/policyobserver/CLI/MCP/upgrades/platform/performance proofrequired.
 
-## Python #722
+731 source83b937c10/10 Lunaapproved, cleanoptimized10 actualold8->10 threecase
+andold7->10 fivecase repair/ALLpurposes/identity/noop/rollbackPASS. Fullmandatory
+nativepush10413 running ondc3bd90; do NOT compile siblingCLI until terminal because
+sharedtargetE2Es. Currentcost18samplesPASS roots20-23%slower/RSS19-23%higher,
+dense<1%faster/RSS10%higher, no708waiver. Allrawretained. Source7318/9taskschecked.
+738Docprefixguard prelimLunaapproved4unitPASS; CLI/MCP harnessoutputboundfixed,
+needsactualcompile/syscall/upgrade/platformproof after731native. This739owns newly
+found legitimateexternalpolicydefects, nottheDocprefixguard.
+708localguidancefix587ecbe stillneedsrealclosurefixture+combined4platformcampaign.
+715 integration4ownedplanning/memoryfiles preserved, acceptsfinalunion731/738/739,
+installedselector/runtime/source/inventory/contract/package/proof thenRCpublication.
+NoRCexists. 725userdeferred,720historicalunplannedmainintegrationauthority. Native
+715graphreadback is saved at /tmp/projectatlas-739-admission-readback.json.
 
-User requested English translation, analysis and RC1 inclusion if real. Installed
-stable0.5.0 reproduces parenthesized local import unresolved while ordinary resolves.
-Issue translated, normalized and assigned v0.5.1-00; native soleparent/blocker715
-verified. Plan resolve-parenthesized-python-imports, spec-driven. Tasks1.1/2.1/2.2
-checked; final3.1 and allfiveacceptanceunchecked. StrictOpenSpec and scopedIssueOps
-pass. No schema/publicroute/parserpack change. Comment-bearing lists remain safely
-unsupported because extraction loses line boundaries; no fullPython/NFKCequivalence
-or target-interpreter Unicodeversion claim.
+Execution: source /tmp/projectatlas-rc1-test-env.sh cleanPATH/filesystemTMPDIR,
+sharedtarget .worktrees/v0.5.1/target. No siblingCLI builds duringE2Es, no concurrent
+build/indexing duringbenchmarks, boundedtools/progress<60s, resumeprocesses. Normal
+hooks/protection/reviews, noforce/bypass; authenticatedgh. Stablepromotionoutofscope.
 
-Checkout issue722, branch fix/python-imports-722, publicPR#726 head3ce8d83 on9845364.
-Earlier source90efe7d + reviewedzstdsecuritypatchbc1ad64 + portablememory01114f6 +
-inventory3ce8d83 passed full normal nativehook. PRbody uses standalone Refs722.
-Initial PRrepository/prstate failures were inlineRefs ambiguity; currentprstate and
-localPRIssueOps pass afterbodyfix. Cannotrerunrepositoryjobwhileworkflowrunning
-(API403); nextfixpush willsupersedeoldhead. No reviewreply/threadresolutionmutations.
+## Accepted plan checkpoint
 
-## Implementation and Unicode review correction
+Lunaapprovedrevisedplan incllocal>common>global precedence/conflictingglobalnegation
+control andexactdirectsystem/env/XDG/home/default/lastvalue/nativepathsemantics.
+No includes/If/repo-runtimeoverrides/~user/installprefixclaim; documentexisting
+no-followboundary, canonicalparserisnotfullGitloading. Config1MiB/file4MiBaggregate,
+cacheperconstruction,cancellation/dependency/MSRV/license/costriskgated. Questions
+literalNone andPreMortemLikelyfailuremodes/Mitigationsbookkeepingfixed; strict and
+scoped4/4/1PASS. No dependencyselection/codeyet. FirstsourceAtlasnextafterplanning
+refused9changedpaths(fullscope9,nineplanninginputs,nextwatch), notCFL10001; no
+refreshperformed merelyfororientation. stderrJSON initiallynotcaptured bystdout
+harness, no productfailureclaim.
 
-Python owner borrows oneouterpair, rejects remaining delimiters/emptyitems/comments,
-normalizes flat comma/aliases and advances semanticcontract3->4 throughexisting
-fingerprint. RealCLI tests filetargets, importedcallers/aliases, incremental/full
-convergence, identity/purposes and unchangedgeneration. Initial267symboltests and
-ASCII/aliasE2E passed; installed0.5.0->localfix9checks passed.
+Ownerbranchmapskeepacceptedbase+ownauthority becausecandidateIssueOpsrejects
+unaccepted unrelatedOpenSpecowners. Fullnativegraphcurrentaboveisverified; before
+739PRpublication normalmerge then-currentacceptedmain731/738andunionmaps. Before
+publication releasegraphmustexactmatchallnativeclosedchildren. Reviewerfullmapnote
+is a recorded integrationrequirement, no copyofunacceptedsiblingplanforcosmetics.
 
-Automated review correctly found the first stricter imported-name guard rejected
-valid combining marks and dropped ASCII siblings. Reopened2.1/2.2 whilefixing.
-Current owned uncommitted correction uses alreadylocked unicode-ident1.0.24 directly;
-workspace/symbols dependencyedges and one locklist entry only, no newpackage/version.
-Predicate is '_'orXID_Start, XID_Continue excludingU200C/U200D, plusrawhardkeywords.
-Documented lockedUnicode17/exactspelling; no normalization of symbol/sourceidentity.
-CPython accepts fullwidthkeywordspellings asNAME and normalizes AST later, so do not
-reject all NFKC-to-keyword spellings. No newnormalizationlibrary/cache/parser.
-
-CausalUnicodeunit failedbeforefix; all21resolutiontests nowpass including combining
-names/aliases/ASCII siblings, dottedmodulecomponent, invalidstarts/punctuation and
-joincontrols. RealCLI regression expanded ordinaryUnicode ->parenthesizedUnicodealias
-with ASCII sibling, exactfiletargets/bothcallers/fullconvergence/ID/purpose/noopPASS.
-An initial test-refactor expected-set mistake was corrected. CLI sourceinventoryhash
-updated, count207 unchanged; focusedinventorypositivegatePASS. Luna reviewed source,
-dependency/profile/spec and requested modulecoverage, nowadded/passing; no blocker.
-
-Realinstalledstable0.5.0->currentUnicode-correcteddebugbinary12checksPASS, proving
-baselineordinaryUnicodeworks, fixedparentimportresolves, bothUnicode/ASCIIcallers
-survive, exactlyoneupgradepublication, allapprovedpurpose text/status andidentity
-survive, secondnoopnopub androllback preservation. Reports:
-/tmp/projectatlas-issue722-unicode-upgrade.json and -unicode-upgrade.log.
-This is not exactRC acceptance; #715 consumes the permanent installed harness on
-exactRCpackages. Rechecked2.1/2.2 after these affected proofs; finalnative/hosted gates
-and automatedreviewagainstcorrectedhead remainrequired. Commit currentfix first;
-mergeacceptedmainnormally into this already-publicbranch after724merges (no force).
-Then runmandatoryhook/push and finalacceptance. Preserve owned changes.
-
-## Other lanes and shared tooling
-
-#723 merged main9845364. #724f54a712 normalautomerge queued; Linux/Windows/ARMgreen,
-IntelMaclastpluginsmoke stillrunning. #708 budget/harness commits79660e3/0a574b1
-unpushed while awaitingaccepted721baseline; issue708memoryowns details. Useraccepted
-exactreconciliation andmeasuredgains, zero-workwarm deferredto unscheduled725.
-Permanent installedharnessPythonupgrade148functionalchecksPASS; optimizedfourplatform
-newmatrixstillpending. #715 plan reconciled/reviewapproved, integration old1fe2b86 has
-owned proposal/design/spec/memory changes to preserve duringrebase. NoRCexistsyet.
-
-Use filesystem TMPDIR under ~/.cache/projectatlas-test-tmp and sharedtarget
-.worktrees/v0.5.1/target, clean testPATH. No siblingCLI compilation duringE2E/hook.
-gh authenticated; requirednative andtrustedhostedgates, no bypass. Publiccommit
-identity ShaunTyler/noreply percommand. Retainedstashes alreadyrecovered; neverapply
-again. Goal remainsactive.
-
-## Accepted baseline integrated
-
-#724 merged normally into main612ce65 aftertrustedfourplatformverifypassed; #721
-closedreadbackconfirmed. This publicPythonbranch mergesacceptedmainnormally,
-preservinghistory/no forcepush. Resolved onlydeclaredmapunion721+722, selected
-issue722memory and regeneratedcombinedE2Esourcehashes/207testownershipinventory.
-Boundedrelationdefaults/compatibilityfromaccepted721retained. Unicodefix5650f07
-needsmandatorynativepushhook oncombinedbaseline, hostedchecks andcurrentautomated
-review before final722acceptance.
+731fullnativepush10413DONEPASS ondc3bd90, publicPR737currentheadverified. Four
+reviewthreads individuallyexamined/technicalreply/resolved oncurrentverifiedhead;
+lastreadbackpending47225. Hostedcurrentfourplatform+RustCIpending, noacceptanceyet.
+738current4DocunitandrealCLI/MCP/rootAlias/noop/identity/sentinelPASS; ClippyPASS
+thenstringsfoundexistingTEST_REPO_DIRconstantreuse needed; fixedanddigests, current
+strings/E2E/inventoryretry77232. No siblingCLIbuildsuntilterminal. Then738cleanopt/
+syscall/upgrade andLuna proofhandoff;739primaryimplementationcanproceedafterthat.
