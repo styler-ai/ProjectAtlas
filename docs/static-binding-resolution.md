@@ -36,6 +36,14 @@ remain unresolved. Cycles, ambiguity, parser trust and exhausted bounds never
 justify a guessed exact target. Publication failures roll back under the existing
 owner. Source scopes are not reconstructed from display strings at query time.
 
+ECMAScript `var name;` reserves a function-scoped name without writing a value.
+It preserves an existing function or initialized callable variable, including live
+exports and explicit alias chains. A new uninitialized local still shadows outer
+bindings. Actual initializers, assignments and `for-in`/`for-of` targets retain their
+write semantics; lexical declarations and other language owners are unchanged.
+Standalone JavaScript/TypeScript/TSX and admitted Vue/Svelte/HTML scripts share this
+rule. This is bounded lexical evidence rather than runtime control-flow inference.
+
 Python `global` and `nonlocal` select the module or actual enclosing function
 binding instead of reserving a function-local value. Reads before a write can
 retain their earlier declaration or import; later writes and ambiguously timed
@@ -116,8 +124,8 @@ An exhausted export-fact budget invalidates all export target proof, including
 previously captured slots; ordinal filtering and embedded-host remapping preserve
 this completeness boundary.
 
-Extraction derivation contract 7 and semantic resolution contract 7 invalidate
-older derived facts, including preceding development contracts 6/6, 5/6 and 4/5 and the
+Extraction derivation contract 9 and semantic resolution contract 9 invalidate
+older derived facts, including preceding development contracts 8/8, 7/7, 6/6, 5/6 and 4/5 and the
 published 0.5.0 contract 3/3. An ordinary refresh repairs unchanged source through
 the existing bounded full-publication owner. This first reconciliation may parse
 the complete admitted source; later current-contract operations reuse unaffected

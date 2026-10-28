@@ -13800,6 +13800,151 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
 }
 
 #[test]
+fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result<(), Box<dyn Error>>
+{
+    for extension in ["js", "ts"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let worker = format!("worker.{extension}");
+        let barrel = format!("barrel.{extension}");
+        let importer = format!("main.{extension}");
+        let local = format!("local.{extension}");
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(
+            root.join(&barrel),
+            format!("export {{run as launch}} from './{worker}';\n"),
+        )?;
+        fs::write(
+            root.join(&importer),
+            format!(
+                "import {{launch}} from './{barrel}'; import {{safe}} from './{worker}'; function caller(){{launch();}} function clean(){{safe();}}\n"
+            ),
+        )?;
+        fs::write(
+            root.join(&local),
+            "function run(){} var run; function caller(){run();}\n",
+        )?;
+        let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+        let executable = mcp_contract_executable();
+        fs::write(
+            root.join(&worker),
+            "export var run = () => {}; var run; export function safe(){}\n",
+        )?;
+        run_packaged_cli_json(&executable, root, &database, &["init"])?;
+        let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+        let mut session = McpContractSession::spawn(&executable, root, &database)?;
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            for (suffix, resolved) in [
+                ("var run;", true),
+                ("var run = unknown;", false),
+                ("var run; var run;", true),
+            ] {
+                fs::write(
+                    root.join(&worker),
+                    format!("export var run = () => {{}}; {suffix} export function safe(){{}}\n"),
+                )?;
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+                for rebuilt in [false, true] {
+                    if rebuilt {
+                        run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                    }
+                    for (file, caller, target_file, target, present) in [
+                        (
+                            importer.as_str(),
+                            "caller",
+                            worker.as_str(),
+                            "run",
+                            resolved,
+                        ),
+                        (importer.as_str(), "clean", worker.as_str(), "safe", true),
+                        (local.as_str(), "caller", local.as_str(), "run", true),
+                    ] {
+                        let cli = run_packaged_cli_json(
+                            &executable,
+                            root,
+                            &database,
+                            &[
+                                "symbols",
+                                "relations",
+                                "--view",
+                                "detailed",
+                                "--file",
+                                file,
+                                "--symbol",
+                                caller,
+                                "--relation",
+                                "calls",
+                                "--limit",
+                                "10",
+                            ],
+                        )?;
+                        let text = session.call_tool(
+                            "atlas_symbol_relations",
+                            &json!({
+                                "project_path": root, "view": "detailed", "file": file,
+                                "symbol": caller, "relation": "calls", "limit": 10,
+                            }),
+                        )?;
+                        let mcp: Value = toon_format::decode_default(&text)?;
+                        let expected = if present {
+                            BTreeSet::from([(target_file.to_string(), target.to_string())])
+                        } else {
+                            BTreeSet::new()
+                        };
+                        for response in [cli, mcp] {
+                            let rows = response
+                                .pointer("/symbol_relations/rows")
+                                .and_then(Value::as_array)
+                                .ok_or_else(|| io::Error::other("bare var caller rows missing"))?;
+                            rust_binding_equal(&rows.len(), &1)?;
+                            rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                        }
+                        let text = session.call_tool(
+                            "atlas_file_summary",
+                            &json!({
+                                "project_path": root, "file": target_file,
+                            }),
+                        )?;
+                        let summary: Value = toon_format::decode_default(&text)?;
+                        let callers = summary
+                            .pointer("/file_summary/functions")
+                            .and_then(Value::as_array)
+                            .and_then(|functions| {
+                                functions.iter().find(|function| function["name"] == target)
+                            })
+                            .and_then(|function| function["called_by"].as_array())
+                            .ok_or_else(|| io::Error::other("bare var summary callers missing"))?;
+                        rust_binding_equal(
+                            &callers
+                                .iter()
+                                .any(|value| value == &format!("{file}::{caller}")),
+                            &present,
+                        )?;
+                    }
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+            let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+            let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            rust_binding_equal(
+                &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+                &Some(0),
+            )?;
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.index_publication()?,
+                &before,
+            )?;
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(result, || session.shutdown())?;
+    }
+    Ok(())
+}
+
+#[test]
 fn lexical_capacity_preserves_navigation_and_repairs_after_source_reduction()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;

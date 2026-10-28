@@ -113,6 +113,11 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** a supported Python or ECMAScript deferred body references a unique later enclosing declaration or import
 - **THEN** its canonical call and summary caller retain that target, while immediate expressions, direct IIFEs, definition headers and a generator's first iterable retain source order and competing future writes remain unresolved
 
+#### Scenario: Bare ECMAScript var redeclarations preserve values
+- **WHEN** a bare var declaration repeats an existing function, parameter or initialized variable name, including a function-scoped block or ordinary for initializer
+- **THEN** it reserves the function-local name without replacing the existing value; canonical callers and explicit exported aliases retain proven callable targets
+- **AND** an otherwise uninitialized local still shadows outer bindings, while actual initializers, assignments and for-in/of writes retain their invalidation behavior in standalone and admitted embedded scripts
+
 #### Scenario: Bounded lexical state with fact-free syntax
 - **WHEN** parallel source files exhaust lexical scope/value capacity or native traversal depth without exhausting symbol or relation caps
 - **THEN** retention remains bounded, all binding/export authority is withdrawn, raw admitted evidence and proven prefix ownership remain navigable, and normal source reduction and refresh repair exact callers without losing project identity

@@ -79,6 +79,14 @@ writes link to actual lexical owners after declaration collection; captured writ
 with unknown execution timing invalidate both caller and exported-value authority.
 No execution or general control-flow analysis is introduced.
 
+ECMAScript bare var declarators reserve the existing function/module binding
+without appending a value transition. Existing function, parameter and initialized
+variable evidence stays authoritative; a previously absent name still shadows an
+outer binding. Ordinary for initializers share this rule, while for-in/of targets
+retain their actual write transitions. Lexical let/const and other language locals
+keep their existing declaration rules. Reuse the bounded NameBindings entry and
+existing AST fields rather than introducing another resolver or execution pass.
+
 Python global/nonlocal names are selected once from the same AST under the shared
 binding limit; a cheap source-keyword prefilter only skips that cooperative cursor
 pass and never authorizes a directive. Retain read-order markers only for actual
@@ -110,8 +118,8 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 8/8 additionally repairs Python
-directive ownership in unchanged private7/7 indexes, retaining earlier6/6 repair
+or per-call timeline scan is admitted. Contract 9/9 additionally repairs bare-var reservation in unchanged private8/8
+indexes, retaining the earlier Python directive and private7/7 and6/6 repairs
 without changing schema, wire shapes or authored state.
 
 Rust qualified paths use the type/module namespace independently of local values.

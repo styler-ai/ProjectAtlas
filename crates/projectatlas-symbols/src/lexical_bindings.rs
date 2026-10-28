@@ -2224,6 +2224,21 @@ impl LexicalCollector<'_> {
             }
             scope = self.function_scope(scope);
         }
+        // An uninitialized var reserves its function name but performs no write.
+        // Keep an earlier function, parameter or initialized variable's timeline.
+        if var && node.child_by_field_name("value").is_none() {
+            if let Some(name) = self.binding_name(pattern) {
+                if !self.admit_binding() {
+                    return Ok(());
+                }
+                self.scopes[scope]
+                    .bindings
+                    .entry(name)
+                    .or_default()
+                    .reserves_scope = true;
+            }
+            return Ok(());
+        }
         if python && node.kind() == "assignment" && node.child_by_field_name("type").is_some() {
             if let Some(name) = self.binding_name(pattern) {
                 if !self.admit_binding() {
@@ -5342,6 +5357,87 @@ function caller() { renamed(); tools.work(); }
             facts.calls[0].binding,
             SourceCallBinding::Imported { .. }
         ));
+    }
+
+    #[test]
+    fn ecmascript_bare_var_reserves_names_without_replacing_values() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("vue", "main.vue", true),
+            ("svelte", "main.svelte", true),
+            ("html", "main.html", true),
+        ] {
+            for (script, resolved) in [
+                ("function run() {} var run; run();", true),
+                ("var run; function run() {} run(); var run;", true),
+                ("var run = () => {}; var run; run();", true),
+                ("var run = function() {}; {var run;} run();", true),
+                ("function run() {} for (var run; false;) {} run();", true),
+                ("function run() {} function caller(){run();} var run;", true),
+                (
+                    "export var run = () => {}; var run; function caller(){run();}",
+                    true,
+                ),
+                (
+                    "function run() {} function caller(){run(); var run;}",
+                    false,
+                ),
+                (
+                    "function run() {} function caller(run){var run; run();}",
+                    false,
+                ),
+                ("function run() {} {let run; run();}", false),
+                ("var run = () => {}; var run = unknown; run();", false),
+                (
+                    "var run = () => {}; for (var run of values) {} run();",
+                    false,
+                ),
+                (
+                    "var run = () => {}; for (var run in object) {} run();",
+                    false,
+                ),
+            ] {
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script.to_string()
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else {
+                    return;
+                };
+                let (_, _, facts) = extracted.into_parts();
+                assert_eq!(facts.calls.len(), 1, "{language}: {script}");
+                assert_eq!(
+                    matches!(
+                        facts.calls[0].binding,
+                        SourceCallBinding::LocalDeclaration(_)
+                    ),
+                    resolved,
+                    "{language}: {script}: {:?}",
+                    facts.calls
+                );
+                if script.starts_with("export var") {
+                    assert!(
+                        facts.exports.iter().any(|slot| slot.name == "run"
+                            && matches!(
+                                slot.binding,
+                                crate::SourceExportBinding::LocalDeclaration(_)
+                            )),
+                        "{language}: {script}: {:?}",
+                        facts.exports
+                    );
+                }
+            }
+        }
     }
 
     #[test]
