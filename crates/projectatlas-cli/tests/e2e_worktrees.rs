@@ -2640,7 +2640,28 @@ fn configured_module_aliases_resolve_across_adapters_and_refresh_atomically()
     assert_detailed_resolution(&js_symbol, 1, "resolved")?;
     let js_outbound =
         detailed_relation_payload(&repo, &db, "js/src/js-page.js", Some("value"), "outbound")?;
-    assert_detailed_resolution(&js_outbound, 1, "resolved")?;
+    assert_detailed_resolution(&js_outbound, 0, "resolved")?;
+    let js_module_outbound =
+        detailed_relation_payload(&repo, &db, "js/src/js-page.js", None, "outbound")?;
+    assert_detailed_resolution(&js_module_outbound, 2, "resolved")?;
+    let module_call = js_module_outbound["symbol_relations"]["rows"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row.pointer("/relation/kind/value").and_then(Value::as_str) == Some("calls")
+            })
+        })
+        .ok_or_else(|| io::Error::other("configured module initializer call is missing"))?;
+    require_json_string(
+        module_call,
+        &["source", "entity", "selector", "kind"],
+        "file",
+    )?;
+    require_json_string(
+        module_call,
+        &["target", "entity", "selector", "symbol", "name"],
+        "useJsController",
+    )?;
 
     let impact = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -2917,7 +2938,7 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
     )?;
     fs::write(
         repo.join(SRC_DIR_NAME).join("caller.rs"),
-        "pub fn caller() { target(); }\n",
+        "use crate::target::target;\npub fn caller() { target(); }\n",
     )?;
     let target = repo.join(SRC_DIR_NAME).join("target.rs");
     let duplicate = repo.join(SRC_DIR_NAME).join(DUPLICATE_RS_FILE_NAME);
@@ -2932,9 +2953,22 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
         .success();
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
 
-    fs::write(&duplicate, "pub fn target() {}\n")?;
+    // Deliberately competing parser declarations must not select one target.
+    // This is an ambiguity/recovery input, not a compiler-valid overload.
+    fs::write(
+        &target,
+        "pub fn target() {}\npub fn target(value: bool) {}\n",
+    )?;
     refresh_summary_once(&repo, &db, "src/caller.rs")?;
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Ambiguous(2))?;
+
+    fs::write(&target, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
+
+    fs::write(&duplicate, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
 
     fs::remove_file(&duplicate)?;
     refresh_summary_once(&repo, &db, "src/caller.rs")?;
@@ -2945,6 +2979,10 @@ fn dependency_aware_refresh_re_resolves_unchanged_inbound_callers() -> Result<()
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Unresolved)?;
 
     fs::write(&duplicate, "pub fn target() {}\n")?;
+    refresh_summary_once(&repo, &db, "src/caller.rs")?;
+    assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Unresolved)?;
+
+    fs::write(&target, "pub fn target() {}\n")?;
     refresh_summary_once(&repo, &db, "src/caller.rs")?;
     assert_caller_call_resolution(&db, "src/caller.rs", ExpectedCallResolution::Resolved)?;
     Ok(())

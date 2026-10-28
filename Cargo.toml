@@ -93,6 +93,7 @@ nix = { version = "=0.31.3", default-features = false, features = [
 ] }
 notify = "8.2"
 object = { version = "=0.40.0", default-features = false, features = ["read"] }
+oxc_syntax = { version = "=0.156.0", default-features = false }
 pulldown-cmark = "0.13"
 lopdf = { version = "=0.44.0", default-features = false }
 wasmi = { version = "=2.0.0", default-features = false, features = ["stable", "std", "validate", "portable-dispatch"] }

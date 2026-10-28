@@ -1,5 +1,7 @@
 //! Normalize parser-owned symbol facts into one generation-bound repository graph.
 
+mod binding_resolution;
+
 use super::{
     CliError, INDEX_FRESHNESS_SAMPLE_LIMIT, IndexReadStatus, IndexRefreshReason,
     IndexRefreshRequired, IndexRefreshScope, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
@@ -34,7 +36,8 @@ use projectatlas_symbols::{
     ConfiguredModuleResolution, DOCUMENT_COVERAGE_SYMBOL, MAX_RESOLUTION_KEYS_PER_FACT,
     MarkdownFactCompleteness, MarkdownFactLimit, MarkdownFacts, ResolutionKeyProjection,
     ResolutionProjectionContext, ResolutionProjectionError, ResolutionProjectionFact,
-    derive_resolution_keys_with_context, extract_markdown_facts_controlled,
+    SourceCallBinding, SourceCallFact, SourceSemanticFacts, derive_resolution_keys_with_context,
+    extract_markdown_facts_controlled, extract_symbol_graph_with_semantics_controlled,
     parse_import_references,
 };
 use std::borrow::{Borrow, Cow};
@@ -44,6 +47,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, btree_map::Entry
 use std::fs::{self, File, OpenOptions};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
 /// Maximum canonical keys or distinct source paths admitted by one incremental closure.
@@ -115,6 +119,8 @@ const RELATION_FACT_INDEX_NAMESPACE: u64 = 2_u64 << 56;
 const DERIVED_RELATION_FACT_INDEX_NAMESPACE: u64 = 3_u64 << 56;
 /// Stable namespace for invalid Markdown selector parser facts.
 const MARKDOWN_FACT_INDEX_NAMESPACE: u64 = 4_u64 << 56;
+/// Stable namespace for invalid explicit export-slot identities.
+const EXPORT_FACT_INDEX_NAMESPACE: u64 = 5_u64 << 56;
 
 /// Build a deterministic internal identity without retaining parser text.
 fn parser_fact_index(namespace: u64, index: usize) -> u64 {
@@ -1349,6 +1355,8 @@ pub(super) enum RepositoryGraphMutation {
 
 /// Complete normalized graph and canonical-key rows waiting for publication.
 pub(super) struct StagedRepositoryGraph {
+    /// Actual required source parses performed while completing canonical evidence.
+    source_recovery: SourceRecoveryWork,
     /// Project identity owning every staged graph fact.
     project: ProjectInstanceId,
     /// Full or affected-path replacement selected by the staging caller.
@@ -1443,6 +1451,39 @@ impl Drop for StagedGraphDatabase {
 }
 
 impl StagedRepositoryGraph {
+    /// Include evidence recovery in existing parser counts instead of reporting reuse.
+    pub(super) fn account_source_recovery(
+        &self,
+        report: &mut super::SymbolBuildReport,
+    ) -> Result<(), CliError> {
+        report.unchanged = report
+            .unchanged
+            .checked_sub(self.source_recovery.previously_unchanged)
+            .ok_or_else(|| {
+                CliError::InvalidInput(
+                    "source recovery exceeded the unchanged parser count".to_string(),
+                )
+            })?;
+        report.parsed = report
+            .parsed
+            .checked_add(self.source_recovery.previously_unchanged)
+            .and_then(|count| count.checked_add(self.source_recovery.additional_candidates))
+            .ok_or_else(|| {
+                CliError::InvalidInput("source recovery parser count overflowed".to_string())
+            })?;
+        report.candidates = report
+            .candidates
+            .checked_add(self.source_recovery.additional_candidates)
+            .ok_or_else(|| {
+                CliError::InvalidInput("source recovery candidate count overflowed".to_string())
+            })?;
+        if self.source_recovery.previously_unchanged > 0
+            || self.source_recovery.additional_candidates > 0
+        {
+            report.max_workers = report.max_workers.max(1);
+        }
+        Ok(())
+    }
     /// Return conservative retained bytes counted toward the parent staging budget.
     pub(super) const fn retained_bytes(&self) -> u64 {
         self.retained_bytes
@@ -1554,7 +1595,8 @@ pub(super) fn stage_full_repository_graph(
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<BTreeSet<_>>();
-    let loaded_graphs = complete_symbol_graphs(store, &paths, symbols, control)?;
+    let mut sources = SourceBindingCache::new(root, nodes, None);
+    let loaded_graphs = complete_symbol_graphs(store, &paths, symbols, &mut sources, control)?;
     let (graphs, mut identity_admission) = admit_symbol_graphs(loaded_graphs, control)?;
     let changed_paths = symbols
         .changes
@@ -1612,7 +1654,7 @@ pub(super) fn stage_full_repository_graph(
         control,
     )?;
     ensure_admitted_resolution_projections(&graphs, &identity_admission.resolution_projections)?;
-    let entity_projection = build_entity_projection_with_config(
+    let mut entity_projection = build_entity_projection_with_config(
         project,
         generation,
         nodes,
@@ -1624,7 +1666,25 @@ pub(super) fn stage_full_repository_graph(
         control,
     )?;
     debug_assert!(identity_admission.resolution_projections.is_empty());
-    let candidates = resolution_registry_from_exports(&entity_projection, control)?;
+    let mut candidates = resolution_registry_from_exports(&entity_projection, control)?;
+    let (bindings, binding_bytes) = binding_resolution::resolve_source_bindings(
+        store,
+        project,
+        generation,
+        &graphs.iter().collect::<Vec<_>>(),
+        &packages,
+        &configured_modules,
+        &mut sources,
+        &entity_projection,
+        &mut candidates,
+        None,
+        &BTreeSet::new(),
+        control,
+    )?;
+    entity_projection.call_bindings = bindings;
+    entity_projection.retained_bytes = entity_projection
+        .retained_bytes
+        .saturating_add(binding_bytes);
     enforce_resolution_staging_budget(&entity_projection, &candidates)?;
     let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
     let graph_work_bytes = symbols
@@ -1633,8 +1693,9 @@ pub(super) fn stage_full_repository_graph(
         .saturating_add(entity_projection.retained_bytes)
         .saturating_add(candidates.retained_bytes)
         .saturating_add(document_fact_map_retained_bytes(&document_facts))
+        .saturating_add(sources.retained_bytes)
         .saturating_add(document_projection_bytes);
-    if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
+    let mut staged = if graph_work_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
         finish_projection_in_database_with_documents(
             root,
             nodes,
@@ -1663,7 +1724,9 @@ pub(super) fn stage_full_repository_graph(
             scan_policy,
             control,
         )
-    }
+    }?;
+    staged.source_recovery = sources.work;
+    Ok(staged)
 }
 
 /// Stage one bounded dependency-aware graph closure for an incremental publication.
@@ -1733,6 +1796,7 @@ fn stage_incremental_repository_graph_with_limit(
     let configured_modules =
         super::module_resolution::load_configured_module_resolution(root, expected_nodes, control)?;
     let direct_paths = direct_paths.iter().cloned().collect::<BTreeSet<_>>();
+    let mut sources = SourceBindingCache::new(root, expected_nodes, Some(&direct_paths));
     enforce_incremental_count(
         root,
         "direct source paths",
@@ -1761,20 +1825,21 @@ fn stage_incremental_repository_graph_with_limit(
         .cloned()
         .collect::<BTreeSet<_>>();
     let loaded_direct_graphs =
-        complete_symbol_graphs(store, &direct_graph_paths, symbols, control)?;
+        complete_symbol_graphs(store, &direct_graph_paths, symbols, &mut sources, control)?;
     let (direct_graphs, mut direct_identity_admission) =
         admit_symbol_graphs(loaded_direct_graphs, control)?;
     direct_identity_admission.merge(
         symbols.identity_admission.for_paths(&direct_graph_paths)?,
         control,
     )?;
-    let package_graphs = complete_symbol_graphs(store, &package_only_paths, symbols, control)?;
+    let package_graphs =
+        complete_symbol_graphs(store, &package_only_paths, symbols, &mut sources, control)?;
     let (package_graphs, _package_context_admission) =
         admit_symbol_graphs(package_graphs, control)?;
     let package_index_graphs = direct_graphs
         .iter()
-        .map(Cow::as_ref)
-        .chain(package_graphs.iter().map(Cow::as_ref))
+        .map(SourceGraph::graph)
+        .chain(package_graphs.iter().map(SourceGraph::graph))
         .collect::<Vec<_>>();
     let direct_packages = PackageIndex::from_graphs(&package_index_graphs)?;
     admit_resolution_key_failures(
@@ -1805,6 +1870,7 @@ fn stage_incremental_repository_graph_with_limit(
         changed_keys.insert(document_casefold_resolution_key(project, path)?);
     }
     for graph in &direct_graphs {
+        let graph = graph.graph();
         control.check(IndexWorkStage::SymbolParsing)?;
         let projection = direct_identity_admission
             .resolution_projection(&graph.path)
@@ -1815,6 +1881,9 @@ fn stage_incremental_repository_graph_with_limit(
                 ))
             })?;
         changed_keys.extend(projection.source_keys().iter().cloned());
+        for export in projection.export_keys() {
+            changed_keys.extend(export.keys().iter().cloned());
+        }
         for symbol in projection.symbol_keys() {
             changed_keys.extend(symbol.keys().iter().cloned());
         }
@@ -1868,8 +1937,13 @@ fn stage_incremental_repository_graph_with_limit(
         .difference(&direct_graph_paths)
         .cloned()
         .collect::<BTreeSet<_>>();
-    let loaded_affected_graphs =
-        complete_symbol_graphs(store, &newly_affected_graph_paths, symbols, control)?;
+    let loaded_affected_graphs = complete_symbol_graphs(
+        store,
+        &newly_affected_graph_paths,
+        symbols,
+        &mut sources,
+        control,
+    )?;
     let (newly_affected_graphs, mut affected_identity_admission) =
         admit_symbol_graphs(loaded_affected_graphs, control)?;
     hydrate_reused_identity_admission(
@@ -1897,9 +1971,9 @@ fn stage_incremental_repository_graph_with_limit(
     }
     let admitted_graphs = direct_graphs
         .iter()
-        .map(Cow::as_ref)
-        .chain(newly_affected_graphs.iter().map(Cow::as_ref))
-        .chain(package_graphs.iter().map(Cow::as_ref))
+        .map(SourceGraph::graph)
+        .chain(newly_affected_graphs.iter().map(SourceGraph::graph))
+        .chain(package_graphs.iter().map(SourceGraph::graph))
         .collect::<Vec<_>>();
     let packages = PackageIndex::from_graphs(&admitted_graphs)?;
     admit_resolution_key_failures(
@@ -1920,9 +1994,9 @@ fn stage_incremental_repository_graph_with_limit(
     )?;
     let affected_graphs = direct_graphs
         .iter()
-        .filter(|graph| affected_graph_paths.contains(&graph.path))
-        .map(Cow::as_ref)
-        .chain(newly_affected_graphs.iter().map(Cow::as_ref))
+        .filter(|graph| affected_graph_paths.contains(&graph.graph().path))
+        .map(SourceGraph::graph)
+        .chain(newly_affected_graphs.iter().map(SourceGraph::graph))
         .collect::<Vec<_>>();
     ensure_admitted_resolution_projections(
         &affected_graphs,
@@ -1941,7 +2015,7 @@ fn stage_incremental_repository_graph_with_limit(
         .filter(|node| affected_paths.contains(&node.path))
         .cloned()
         .collect::<Vec<_>>();
-    let entity_projection = build_entity_projection_with_config_limit(
+    let mut entity_projection = build_entity_projection_with_config_limit(
         project,
         generation,
         &affected_nodes,
@@ -1992,6 +2066,29 @@ fn stage_incremental_repository_graph_with_limit(
         resolution_registry_from_exports(&entity_projection, control)?,
         control,
     )?;
+    let binding_graphs = direct_graphs
+        .iter()
+        .filter(|graph| affected_graph_paths.contains(&graph.graph().path))
+        .chain(newly_affected_graphs.iter())
+        .collect::<Vec<_>>();
+    let (bindings, binding_bytes) = binding_resolution::resolve_source_bindings(
+        store,
+        project,
+        generation,
+        &binding_graphs,
+        &packages,
+        &configured_modules,
+        &mut sources,
+        &entity_projection,
+        &mut candidates,
+        Some(&dependency_keys),
+        &affected_paths,
+        control,
+    )?;
+    entity_projection.call_bindings = bindings;
+    entity_projection.retained_bytes = entity_projection
+        .retained_bytes
+        .saturating_add(binding_bytes);
     let document_projection_bytes = document_projection_retained_bytes(&document_facts, control)?;
     enforce_incremental_projection_budget(
         root,
@@ -2002,9 +2099,10 @@ fn stage_incremental_repository_graph_with_limit(
             .saturating_add(candidates.retained_bytes)
             .saturating_add(document_fact_map_retained_bytes(&document_facts))
             .saturating_add(document_projection_bytes)
+            .saturating_add(sources.retained_bytes)
             .saturating_add(direct_identity_admission.observed_fact_bytes),
     )?;
-    let staged = finish_projection_with_documents(
+    let mut staged = finish_projection_with_documents(
         project,
         generation,
         RepositoryGraphMutation::AffectedPaths(affected_paths.iter().cloned().collect()),
@@ -2019,6 +2117,7 @@ fn stage_incremental_repository_graph_with_limit(
         control,
     )?;
     enforce_incremental_projection_limits(root, &affected_paths, persisted_footprint, &staged)?;
+    staged.source_recovery = sources.work;
     Ok(staged)
 }
 
@@ -2032,6 +2131,8 @@ struct EntityProjection {
     keys_by_graph: BTreeMap<String, ResolutionKeyProjection>,
     /// Canonical resolution keys exported by staged entities.
     entity_exports: Vec<EntityResolutionKey>,
+    /// Independently resolved forwarding outcomes, separate from invalidation keys.
+    call_bindings: binding_resolution::CallBindings,
     /// Conservative bytes retained by entities and export keys.
     retained_bytes: u64,
     /// Test-visible peak of the map-plus-entity staging estimate.
@@ -2070,6 +2171,11 @@ fn php_file_include_context(context: &str) -> bool {
 
 /// Borrowed per-graph symbol lookup used by every relation in that file.
 struct GraphSymbolIndex<'graph> {
+    /// Explicit source policy, including an empty set that cannot authorize guesses.
+    source_calls: Option<BTreeMap<usize, &'graph SourceCallFact>>,
+    /// Source-proven Rust import ownership, including explicit non-toolchain rows.
+    rust_toolchain_imports:
+        Option<&'graph BTreeMap<usize, Option<projectatlas_symbols::ImportReference>>>,
     /// Parser symbol indices grouped by exact source name.
     indices_by_name: BTreeMap<&'graph str, Vec<usize>>,
     /// PHP call target indices grouped by their case-insensitive source name.
@@ -2160,12 +2266,44 @@ impl<'graph> GraphSymbolIndex<'graph> {
             }
         }
         Ok(Self {
+            source_calls: None,
+            rust_toolchain_imports: None,
             indices_by_name,
             php_call_indices_by_name,
             php_import_positions,
             php_namespace_start_lines,
             php_imports_have_unknown_scope,
         })
+    }
+
+    /// Index admitted call policies once per graph, with exact ordinal uniqueness.
+    fn with_source_calls(
+        mut self,
+        calls: Option<&'graph [SourceCallFact]>,
+        control: &IndexWorkControl,
+    ) -> Result<Self, CliError> {
+        if let Some(calls) = calls {
+            let mut indexed = BTreeMap::new();
+            for call in calls {
+                control.check(IndexWorkStage::SymbolParsing)?;
+                if indexed.insert(call.relation, call).is_some() {
+                    return Err(CliError::InvalidInput(
+                        "duplicate source call ordinal".to_string(),
+                    ));
+                }
+            }
+            self.source_calls = Some(indexed);
+        }
+        Ok(self)
+    }
+
+    /// Borrow the already validated Rust import policy without copying its index.
+    fn with_rust_toolchain_imports(
+        mut self,
+        imports: Option<&'graph BTreeMap<usize, Option<projectatlas_symbols::ImportReference>>>,
+    ) -> Self {
+        self.rust_toolchain_imports = imports;
+        self
     }
 
     /// Return exact parser symbol rows for one source name.
@@ -2262,10 +2400,15 @@ impl PackageIndex {
 
     /// Return the most-specific Cargo package owning one repository path.
     fn package_name(&self, path: &str) -> Option<&str> {
+        self.package_owner(path)
+            .map(|package| package.name.as_str())
+    }
+
+    /// Borrow the manifest identity and directory proving the most-specific owner.
+    fn package_owner(&self, path: &str) -> Option<&PackageOwner> {
         self.packages
             .iter()
             .find(|package| repository_path_belongs_to(path, &package.root))
-            .map(|package| package.name.as_str())
     }
 }
 
@@ -2535,12 +2678,7 @@ fn build_entity_projection_with_config_limit(
             projection_removals_before_entities.push(graph.path.clone());
             resolution
         } else {
-            resolution_projection_with_config(
-                project,
-                packages.package_name(&graph.path),
-                graph,
-                configured_modules,
-            )?
+            resolution_projection_with_config(project, packages, graph, configured_modules)?
         };
         let resolution_bytes = resolution_retained_bytes(&resolution);
         entity_bytes = entity_bytes.saturating_add(resolution_bytes);
@@ -2596,31 +2734,13 @@ fn build_entity_projection_with_config_limit(
                     )
                     .map_err(invalid_graph_contract)?,
                 ),
-                _ => Some(
-                    GraphEntity::new(
-                        project,
-                        EntitySelector::Symbol {
-                            symbol: SymbolSelector {
-                                file: RepositoryFilePath::new(Path::new(&graph.path))
-                                    .map_err(invalid_graph_contract)?,
-                                name: GraphIdentityText::new(symbol.name.clone())
-                                    .map_err(invalid_graph_contract)?,
-                                kind: symbol.kind,
-                                parent: qualified_parent,
-                                signature: GraphIdentityText::new(
-                                    if symbol.signature.trim().is_empty() {
-                                        symbol.name.clone()
-                                    } else {
-                                        symbol.signature.trim().to_string()
-                                    },
-                                )
-                                .map_err(invalid_graph_contract)?,
-                            },
-                        },
-                        generation,
-                    )
-                    .map_err(invalid_graph_contract)?,
-                ),
+                _ => Some(source_symbol_entity(
+                    project,
+                    generation,
+                    graph,
+                    symbol,
+                    qualified_parent,
+                )?),
             };
             let entity_digest = entity
                 .as_ref()
@@ -2654,6 +2774,15 @@ fn build_entity_projection_with_config_limit(
                     .map_err(invalid_graph_contract)?,
             );
             entity_bytes = entity_bytes.saturating_add(STAGED_GRAPH_ROW_BYTES);
+        }
+        for export in resolution.export_keys() {
+            for key in export.keys() {
+                entity_exports.push(
+                    EntityResolutionKey::new(file.key().clone(), key.clone())
+                        .map_err(invalid_graph_contract)?,
+                );
+                entity_bytes = entity_bytes.saturating_add(STAGED_GRAPH_ROW_BYTES);
+            }
         }
         for symbol_keys in resolution.symbol_keys() {
             let Some(entity) = symbol_digests
@@ -2714,12 +2843,44 @@ fn build_entity_projection_with_config_limit(
         owners_by_graph,
         keys_by_graph,
         entity_exports,
+        call_bindings: BTreeMap::new(),
         retained_bytes,
         #[cfg(test)]
         peak_retained_bytes,
         #[cfg(test)]
         projection_removals_before_entities,
     })
+}
+
+/// Construct an actual source declaration through the common canonical selector owner.
+fn source_symbol_entity(
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    graph: &SymbolGraph,
+    symbol: &CodeSymbol,
+    parent: Option<GraphIdentityText>,
+) -> Result<GraphEntity, CliError> {
+    GraphEntity::new(
+        project,
+        EntitySelector::Symbol {
+            symbol: SymbolSelector {
+                file: RepositoryFilePath::new(Path::new(&graph.path))
+                    .map_err(invalid_graph_contract)?,
+                name: GraphIdentityText::new(symbol.name.clone())
+                    .map_err(invalid_graph_contract)?,
+                kind: symbol.kind,
+                parent,
+                signature: GraphIdentityText::new(if symbol.signature.trim().is_empty() {
+                    symbol.name.clone()
+                } else {
+                    symbol.signature.trim().to_string()
+                })
+                .map_err(invalid_graph_contract)?,
+            },
+        },
+        generation,
+    )
+    .map_err(invalid_graph_contract)
 }
 
 /// Acquire the one project-local graph-staging lease without waiting.
@@ -3067,6 +3228,7 @@ fn finish_projection_in_database_with_documents(
         scan_policy: scan_policy.clone(),
         document_target_states,
         database: Some(database),
+        source_recovery: SourceRecoveryWork::default(),
         retained_bytes,
     })
 }
@@ -3239,6 +3401,7 @@ fn finish_projection_with_documents(
         scan_policy: scan_policy.clone(),
         document_target_states,
         database: None,
+        source_recovery: SourceRecoveryWork::default(),
         retained_bytes: entities
             .retained_bytes
             .saturating_add(identity_rejection_bytes),
@@ -3635,6 +3798,7 @@ fn resolve_document_candidate(
     if let Some(key) = heading_key.as_ref() {
         let matches = registry_resolution_matches(
             std::slice::from_ref(key),
+            ResolutionCandidateKind::Any,
             candidates,
             staged_entities,
             control,
@@ -3669,6 +3833,7 @@ fn resolve_document_candidate(
     }
     let matches = registry_resolution_matches(
         std::slice::from_ref(&file_key),
+        ResolutionCandidateKind::Any,
         candidates,
         staged_entities,
         control,
@@ -3829,7 +3994,13 @@ fn project_graph_rows(
         .keys_by_graph
         .remove(&graph.path)
         .ok_or_else(|| CliError::InvalidInput("graph keys were not staged".to_string()))?;
-    let symbol_index = GraphSymbolIndex::new(graph, control)?;
+    let call_bindings = entities
+        .call_bindings
+        .remove(&graph.path)
+        .unwrap_or_default();
+    let symbol_index = GraphSymbolIndex::new(graph, control)?
+        .with_source_calls(resolution_keys.source_calls(), control)?
+        .with_rust_toolchain_imports(resolution_keys.rust_toolchain_imports());
     let keys_by_relation = resolution_keys
         .relation_keys()
         .iter()
@@ -3849,26 +4020,35 @@ fn project_graph_rows(
             graph,
             &symbol_index,
             source_relation,
+            Some(relation_index),
             control,
         )?;
         let dependency_keys = keys_by_relation
             .get(&relation_index)
             .copied()
             .unwrap_or(&[]);
-        let resolution = relation_resolution(
-            project,
-            generation,
-            source_relation,
-            Some(relation_index),
-            &owners,
-            graph,
-            &symbol_index,
-            dependency_keys,
-            candidates,
-            &entities.entity_by_digest,
-            &mut external_entities,
-            control,
-        )?;
+        let binding = call_bindings.get(&relation_index);
+        let resolution = if let Some(binding) = binding {
+            if let Some(target) = binding.external_target() {
+                insert_entity(&mut external_entities, target.clone())?;
+            }
+            binding.resolution(source_relation)?
+        } else {
+            relation_resolution(
+                project,
+                generation,
+                source_relation,
+                Some(relation_index),
+                &owners,
+                graph,
+                &symbol_index,
+                dependency_keys,
+                candidates,
+                &entities.entity_by_digest,
+                &mut external_entities,
+                control,
+            )?
+        };
         let relation = LogicalRelation::new(
             source,
             GraphRelationKind::from_legacy(source_relation.kind),
@@ -3885,26 +4065,36 @@ fn project_graph_rows(
             "logical",
             relation_index,
         )?;
-        let line = u32::try_from(source_relation.line).map_err(|error| {
-            CliError::InvalidInput(format!("relation source line exceeds graph range: {error}"))
-        })?;
-        let end_column =
-            u32::try_from(source_relation.context.chars().count()).map_err(|error| {
-                CliError::InvalidInput(format!(
-                    "relation source context exceeds graph range: {error}"
-                ))
+        let occurrence_span = if let Some(span) = resolution_keys.source_span(relation_index) {
+            span
+        } else {
+            let line = u32::try_from(source_relation.line).map_err(|error| {
+                CliError::InvalidInput(format!("relation source line exceeds graph range: {error}"))
             })?;
+            let end_column =
+                u32::try_from(source_relation.context.chars().count()).map_err(|error| {
+                    CliError::InvalidInput(format!(
+                        "relation source context exceeds graph range: {error}"
+                    ))
+                })?;
+            SourceSpan::new(line.max(1), 0, line.max(1), end_column)
+                .map_err(invalid_graph_contract)?
+        };
         occurrences.push(
             RelationOccurrence::new(
                 &relation,
                 RepositoryFilePath::new(Path::new(&graph.path)).map_err(invalid_graph_contract)?,
-                SourceSpan::new(line.max(1), 0, line.max(1), end_column)
-                    .map_err(invalid_graph_contract)?,
+                occurrence_span,
                 generation,
             )
             .map_err(invalid_graph_contract)?,
         );
-        for key in dependency_keys {
+        for key in dependency_keys.iter().chain(
+            binding
+                .into_iter()
+                .flat_map(|binding| binding.dependencies())
+                .filter(|key| dependency_keys.binary_search(key).is_err()),
+        ) {
             relation_dependencies.push(
                 RelationDependencyKey::new(relation.key().clone(), key.clone())
                     .map_err(invalid_graph_contract)?,
@@ -3954,6 +4144,7 @@ fn project_graph_rows(
             graph,
             &symbol_index,
             &fact.relation,
+            None,
             control,
         )?;
         let resolution = derived_relation_resolution(
@@ -4133,6 +4324,8 @@ struct ProjectResolutionRegistry {
     supplemental_entities_by_digest: BTreeMap<String, GraphEntity>,
     /// Canonical keys mapped only to sorted, deduplicated entity digests.
     candidate_digests_by_key: BTreeMap<CanonicalResolutionKey, BTreeSet<String>>,
+    /// Compact hint for file-owned declaration lookup markers; witnesses remain in the key map.
+    forwarding_key_digests: BTreeSet<[u8; 32]>,
     /// Conservative peak bytes retained by this temporary resolution registry.
     retained_bytes: u64,
 }
@@ -4160,6 +4353,7 @@ impl ProjectResolutionRegistry {
                 entry.insert(entity.clone());
             }
         }
+        self.record_forwarding_key(key, entity)?;
         self.insert_candidate_binding(key, digest)
     }
 
@@ -4169,7 +4363,27 @@ impl ProjectResolutionRegistry {
         key: &CanonicalResolutionKey,
         entity: &GraphEntity,
     ) -> Result<(), CliError> {
+        self.record_forwarding_key(key, entity)?;
         self.insert_candidate_binding(key, entity.key().digest().to_string())
+    }
+
+    /// Index marker presence without walking every declaration candidate on the fast path.
+    fn record_forwarding_key(
+        &mut self,
+        key: &CanonicalResolutionKey,
+        entity: &GraphEntity,
+    ) -> Result<(), CliError> {
+        if key.domain() == ResolutionKeyDomain::Declaration
+            && matches!(entity.selector(), EntitySelector::File { .. })
+            && self.forwarding_key_digests.insert(key.digest_bytes())
+        {
+            self.retained_bytes = self
+                .retained_bytes
+                .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                .saturating_add(key.digest_bytes().len() as u64);
+            enforce_resolution_registry_budget(self.retained_bytes)?;
+        }
+        Ok(())
     }
 
     /// Insert one canonical-key binding for an entity owned by either registry.
@@ -4314,6 +4528,7 @@ fn merge_resolution_registries(
     let ProjectResolutionRegistry {
         supplemental_entities_by_digest,
         candidate_digests_by_key,
+        forwarding_key_digests,
         retained_bytes: _retained_bytes,
     } = source;
     for entity in supplemental_entities_by_digest.into_values() {
@@ -4333,6 +4548,15 @@ fn merge_resolution_registries(
                     .saturating_add(digest.len() as u64);
                 entry.insert(entity);
             }
+        }
+    }
+    for digest in forwarding_key_digests {
+        if target.forwarding_key_digests.insert(digest) {
+            target.retained_bytes = target
+                .retained_bytes
+                .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                .saturating_add(digest.len() as u64);
+            enforce_resolution_registry_budget(target.retained_bytes)?;
         }
     }
     let mut bindings = 0_usize;
@@ -4798,6 +5022,7 @@ fn relation_source<'a>(
     graph: &SymbolGraph,
     symbol_index: &GraphSymbolIndex<'_>,
     relation: &SymbolRelation,
+    relation_index: Option<usize>,
     control: &IndexWorkControl,
 ) -> Result<&'a GraphEntity, CliError> {
     let file = entities.get(&owners.file_digest).ok_or_else(|| {
@@ -4813,6 +5038,19 @@ fn relation_source<'a>(
             .language
             .as_deref()
             .is_some_and(|language| language.eq_ignore_ascii_case("php"));
+    if relation.kind == RelationKind::Calls
+        && !is_php_call
+        && let Some(index) = relation_index
+        && let Some(calls) = &symbol_index.source_calls
+    {
+        return Ok(calls
+            .get(&index)
+            .and_then(|call| call.owner)
+            .and_then(|owner| owners.symbol_digests.get(owner))
+            .and_then(Option::as_ref)
+            .and_then(|digest| entities.get(digest))
+            .unwrap_or(file));
+    }
     let php_source = if is_php_call {
         unique_php_call_source(
             graph,
@@ -4886,28 +5124,99 @@ fn relation_resolution<'a>(
             control,
         )?,
         RelationKind::Calls => {
-            let local = local_relation_matches(
-                relation,
-                relation_index,
-                owners,
-                graph,
-                symbol_index,
-                staged_entities,
-                control,
-            )?;
-            if local.count == 0 {
-                registry_resolution_matches(dependency_keys, candidates, staged_entities, control)?
+            let source_policy = relation_index.and_then(|index| {
+                symbol_index
+                    .source_calls
+                    .as_ref()
+                    .map(|calls| calls.get(&index).copied())
+            });
+            if let Some(policy) = source_policy {
+                match policy.map(|call| &call.binding) {
+                    Some(SourceCallBinding::LocalDeclaration(symbol)) => source_local_call_matches(
+                        std::slice::from_ref(symbol),
+                        owners,
+                        staged_entities,
+                        control,
+                    )?,
+                    Some(SourceCallBinding::LocalDeclarations(symbols)) => {
+                        source_local_call_matches(symbols, owners, staged_entities, control)?
+                    }
+                    Some(
+                        SourceCallBinding::Imported { .. }
+                        | SourceCallBinding::Qualified(_)
+                        | SourceCallBinding::RustPath(_),
+                    ) => registry_resolution_matches(
+                        dependency_keys,
+                        ResolutionCandidateKind::Declaration,
+                        candidates,
+                        staged_entities,
+                        control,
+                    )?,
+                    Some(SourceCallBinding::Shadowed | SourceCallBinding::Unresolved) | None => {
+                        ResolutionMatches {
+                            first: None,
+                            count: 0,
+                        }
+                    }
+                    Some(SourceCallBinding::PhpNamespace) => {
+                        let local = local_relation_matches(
+                            relation,
+                            relation_index,
+                            owners,
+                            graph,
+                            symbol_index,
+                            staged_entities,
+                            control,
+                        )?;
+                        if local.count == 0 {
+                            registry_resolution_matches(
+                                dependency_keys,
+                                ResolutionCandidateKind::Declaration,
+                                candidates,
+                                staged_entities,
+                                control,
+                            )?
+                        } else {
+                            local
+                        }
+                    }
+                }
             } else {
-                local
+                let local = local_relation_matches(
+                    relation,
+                    relation_index,
+                    owners,
+                    graph,
+                    symbol_index,
+                    staged_entities,
+                    control,
+                )?;
+                if local.count == 0 {
+                    registry_resolution_matches(
+                        dependency_keys,
+                        ResolutionCandidateKind::Declaration,
+                        candidates,
+                        staged_entities,
+                        control,
+                    )?
+                } else {
+                    local
+                }
             }
         }
-        RelationKind::Imports | RelationKind::DependsOn => {
-            registry_resolution_matches(dependency_keys, candidates, staged_entities, control)?
-        }
+        RelationKind::Imports | RelationKind::DependsOn => registry_resolution_matches(
+            dependency_keys,
+            ResolutionCandidateKind::Any,
+            candidates,
+            staged_entities,
+            control,
+        )?,
     };
     match matches.count {
         0 => {
-            if let Some(external) = explicit_external_selector(graph, relation)? {
+            if let Some(external) =
+                source_external_selector(graph, relation, relation_index, symbol_index)?
+            {
                 let entity =
                     GraphEntity::new(project, EntitySelector::External { external }, generation)
                         .map_err(invalid_graph_contract)?;
@@ -4935,6 +5244,37 @@ fn relation_resolution<'a>(
             })?,
         }),
     }
+}
+
+/// Resolve every surviving proven declaration without narrowing a lost overload set.
+fn source_local_call_matches<'a>(
+    symbols: &[usize],
+    owners: &GraphOwners,
+    entities: &'a BTreeMap<String, GraphEntity>,
+    control: &IndexWorkControl,
+) -> Result<ResolutionMatches<'a>, CliError> {
+    let mut targets = BTreeMap::new();
+    for symbol in symbols {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        let Some(target) = owners
+            .symbol_digests
+            .get(*symbol)
+            .and_then(Option::as_ref)
+            .and_then(|digest| entities.get(digest))
+        else {
+            return Ok(ResolutionMatches {
+                first: None,
+                count: 0,
+            });
+        };
+        targets.insert(target.key().digest(), target);
+    }
+    Ok(ResolutionMatches {
+        first: targets.first_key_value().map(|(_, entity)| *entity),
+        count: u32::try_from(targets.len()).map_err(|error| {
+            CliError::InvalidInput(format!("source call candidate count overflowed: {error}"))
+        })?,
+    })
 }
 
 /// Resolve exact declarations owned by the relation's source file.
@@ -5494,9 +5834,19 @@ fn unique_php_call_source(
     }
 }
 
+/// Entity role admitted by a canonical candidate lookup.
+#[derive(Clone, Copy)]
+enum ResolutionCandidateKind {
+    /// Imports, packages and document lookups retain their existing entity roles.
+    Any,
+    /// Calls require declaration entities; file export markers are lookup evidence.
+    Declaration,
+}
+
 /// Merge sorted candidate streams without materializing their full union.
 fn registry_resolution_matches<'a>(
     dependency_keys: &[CanonicalResolutionKey],
+    kind: ResolutionCandidateKind,
     candidates: &'a ProjectResolutionRegistry,
     staged_entities: &'a BTreeMap<String, GraphEntity>,
     control: &IndexWorkControl,
@@ -5518,6 +5868,7 @@ fn registry_resolution_matches<'a>(
     let mut last_digest = None;
     let mut count = 0_u32;
     let mut visited = 0_usize;
+    let mut forwarding_marker = false;
     while let Some(Reverse((digest, stream_index))) = frontier.pop() {
         check_graph_work(control, visited)?;
         visited = visited.saturating_add(1);
@@ -5530,20 +5881,33 @@ fn registry_resolution_matches<'a>(
                         "resolution candidate entity was not registered".to_string(),
                     )
                 })?;
-            first.get_or_insert(entity);
-            count = count.checked_add(1).ok_or_else(|| {
-                IndexWorkFailure::resource_limit(
-                    IndexWorkStage::SymbolParsing,
-                    IndexWorkResource::RelationRows,
-                    u64::from(u32::MAX),
-                    u64::from(u32::MAX) + 1,
-                )
-            })?;
+            forwarding_marker |= matches!(entity.selector(), EntitySelector::File { .. });
+            if matches!(kind, ResolutionCandidateKind::Any)
+                || matches!(entity.selector(), EntitySelector::Symbol { .. })
+            {
+                first.get_or_insert(entity);
+                count = count.checked_add(1).ok_or_else(|| {
+                    IndexWorkFailure::resource_limit(
+                        IndexWorkStage::SymbolParsing,
+                        IndexWorkResource::RelationRows,
+                        u64::from(u32::MAX),
+                        u64::from(u32::MAX) + 1,
+                    )
+                })?;
+            }
             last_digest = Some(digest);
         }
         if let Some(next) = streams[stream_index].next() {
             frontier.push(Reverse((next.as_str(), stream_index)));
         }
+    }
+    if forwarding_marker && matches!(kind, ResolutionCandidateKind::Declaration) {
+        // A competing forwarding slot cannot be silently dropped to make an
+        // unrelated declaration appear unique. Its typed evidence must be followed.
+        return Ok(ResolutionMatches {
+            first: None,
+            count: 0,
+        });
     }
     Ok(ResolutionMatches { first, count })
 }
@@ -5611,6 +5975,52 @@ fn explicit_external_selector(
             })
         })
         .transpose()
+}
+
+/// Respect native binding ownership before considering an external spelling.
+fn source_external_selector(
+    graph: &SymbolGraph,
+    relation: &SymbolRelation,
+    relation_index: Option<usize>,
+    index: &GraphSymbolIndex<'_>,
+) -> Result<Option<ExternalSelector>, CliError> {
+    let rust = graph
+        .language
+        .as_deref()
+        .and_then(language_capability)
+        .and_then(|capability| capability.effective_semantic_provider())
+        == Some(SemanticProviderOwner::Rust);
+    if rust {
+        let reference = match relation.kind {
+            RelationKind::Calls if index.source_calls.is_some() => {
+                match relation_index
+                    .and_then(|ordinal| index.source_calls.as_ref()?.get(&ordinal).copied())
+                    .map(|call| &call.binding)
+                {
+                    Some(SourceCallBinding::Qualified(reference)) => Some(reference),
+                    Some(SourceCallBinding::Imported { rust_toolchain, .. }) => {
+                        rust_toolchain.as_deref()
+                    }
+                    _ => None,
+                }
+            }
+            RelationKind::Imports if index.rust_toolchain_imports.is_some() => relation_index
+                .and_then(|ordinal| index.rust_toolchain_imports?.get(&ordinal))
+                .and_then(Option::as_ref),
+            _ => return explicit_external_selector(graph, relation),
+        };
+        return reference
+            .and_then(rust_import_identity)
+            .map(|identity| {
+                Ok(ExternalSelector {
+                    system: GraphIdentityText::new(RUST_TOOLCHAIN_SYSTEM)
+                        .map_err(invalid_graph_contract)?,
+                    identity: GraphIdentityText::new(identity).map_err(invalid_graph_contract)?,
+                })
+            })
+            .transpose();
+    }
+    explicit_external_selector(graph, relation)
 }
 
 /// Normalize one explicit non-empty external reference.
@@ -6107,26 +6517,317 @@ fn hydrate_reused_identity_admission(
     Ok(())
 }
 
-/// Overlay staged symbol changes on persisted graphs for exact selected paths.
+/// One admitted captured source, shared across repeated bounded projection requests.
+struct CapturedSourceGraph {
+    /// Actual parser ordering, independent of persisted row presentation order.
+    graph: SymbolGraph,
+    /// Source identity and ordinal-owned lexical evidence.
+    semantics: SourceSemanticFacts,
+    /// Identity rejection details produced by the same raw admission boundary.
+    admission: GraphIdentityAdmission,
+}
+
+/// Graph ownership retains its corresponding source proof through projection.
+enum SourceGraph<'a> {
+    /// Already-admitted fresh parser output, borrowed without another parse/copy.
+    Staged {
+        /// Raw graph in its actual parser ordering.
+        graph: &'a SymbolGraph,
+        /// Corresponding source proof when the native parser produced it.
+        semantics: Option<&'a SourceSemanticFacts>,
+    },
+    /// Required unchanged source recovered once from verified captured bytes.
+    Captured(Arc<CapturedSourceGraph>),
+    /// A graph whose parser contract does not require lexical source evidence.
+    Persisted(SymbolGraph),
+}
+
+impl SourceGraph<'_> {
+    /// Borrow the exact graph whose ordinals own this source proof.
+    fn graph(&self) -> &SymbolGraph {
+        match self {
+            Self::Staged { graph, .. } => graph,
+            Self::Captured(source) => &source.graph,
+            Self::Persisted(graph) => graph,
+        }
+    }
+
+    /// Borrow source evidence without reconstructing it from stored display text.
+    fn semantics(&self) -> Option<&SourceSemanticFacts> {
+        match self {
+            Self::Staged { semantics, .. } => *semantics,
+            Self::Captured(source) => Some(&source.semantics),
+            Self::Persisted(_) => None,
+        }
+    }
+}
+
+impl Borrow<SymbolGraph> for SourceGraph<'_> {
+    fn borrow(&self) -> &SymbolGraph {
+        self.graph()
+    }
+}
+
+impl AsRef<SymbolGraph> for SourceGraph<'_> {
+    fn as_ref(&self) -> &SymbolGraph {
+        self.graph()
+    }
+}
+
+impl<'a> From<Cow<'a, SymbolGraph>> for SourceGraph<'a> {
+    fn from(graph: Cow<'a, SymbolGraph>) -> Self {
+        match graph {
+            Cow::Borrowed(graph) => Self::Staged {
+                graph,
+                semantics: None,
+            },
+            Cow::Owned(graph) => Self::Persisted(graph),
+        }
+    }
+}
+
+/// Additional source parses charged to the existing public work report.
+#[derive(Clone, Copy, Debug, Default)]
+struct SourceRecoveryWork {
+    /// Considered sources whose raw graph had otherwise been reused.
+    previously_unchanged: usize,
+    /// Required closure/context sources outside the original direct candidate set.
+    additional_candidates: usize,
+}
+
+/// Per-operation captured source cache, limited to requested projection/context paths.
+struct SourceBindingCache<'a> {
+    /// Exact selected checkout.
+    root: &'a Path,
+    /// Captured file inventory, used to reject changed or unindexed source.
+    nodes: BTreeMap<&'a str, &'a Node>,
+    /// Direct paths for incremental work; absence means a full candidate set.
+    direct_paths: Option<BTreeSet<&'a str>>,
+    /// One immutable parse per required unchanged path.
+    captured: BTreeMap<String, Arc<CapturedSourceGraph>>,
+    /// Additional actual parser work, separate from reused fresh sidecars.
+    work: SourceRecoveryWork,
+    /// Bounded owned source graphs/evidence retained during projection.
+    retained_bytes: u64,
+}
+
+impl<'a> SourceBindingCache<'a> {
+    /// Index captured metadata once without reading any source file.
+    fn new(root: &'a Path, nodes: &'a [Node], direct_paths: Option<&BTreeSet<String>>) -> Self {
+        Self {
+            root,
+            nodes: nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::File)
+                .map(|node| (node.path.as_str(), node))
+                .collect(),
+            direct_paths: direct_paths.map(|direct| {
+                nodes
+                    .iter()
+                    .filter(|node| direct.contains(&node.path))
+                    .map(|node| node.path.as_str())
+                    .collect()
+            }),
+            captured: BTreeMap::new(),
+            work: SourceRecoveryWork::default(),
+            retained_bytes: (nodes.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES),
+        }
+    }
+
+    /// Recover only an explicitly requested source, preserving its original parser order.
+    fn capture(
+        &mut self,
+        path: &str,
+        control: &IndexWorkControl,
+    ) -> Result<Arc<CapturedSourceGraph>, CliError> {
+        if let Some(source) = self.captured.get(path) {
+            return Ok(Arc::clone(source));
+        }
+        control.check(IndexWorkStage::SymbolParsing)?;
+        let node = self
+            .nodes
+            .get(path)
+            .ok_or_else(|| source_changed_during_derivation(self.root, path))?;
+        let native_path = self.root.join(Path::new(path));
+        let bytes = match read_source_bytes_controlled(
+            &native_path,
+            MAX_SYMBOL_FILE_BYTES,
+            IndexWorkStage::SymbolParsing,
+            control,
+        ) {
+            Ok(bytes) => bytes,
+            Err(SourceReadFailure::IndexWork(failure)) => return Err(failure.into()),
+            Err(SourceReadFailure::LimitExceeded { .. }) => {
+                return Err(source_changed_during_derivation(self.root, path));
+            }
+            Err(SourceReadFailure::Io(source)) => {
+                return Err(CliError::Io {
+                    path: native_path,
+                    source,
+                });
+            }
+        };
+        if node
+            .content_hash
+            .as_deref()
+            .is_none_or(|expected| blake3::hash(&bytes).to_hex().as_str() != expected)
+        {
+            return Err(source_changed_during_derivation(self.root, path));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|_source| source_changed_during_derivation(self.root, path))?;
+        let (_, graph, mut semantics) = extract_symbol_graph_with_semantics_controlled(
+            path,
+            node.language.as_deref(),
+            &content,
+            control,
+        )?
+        .into_parts();
+        let (graph, admission) =
+            admit_symbol_graph_with_semantics(Cow::Owned(graph), Some(&mut semantics), control)?;
+        let graph = graph.into_owned();
+        let bytes = source_graph_retained_bytes(&graph)
+            .saturating_add(semantics.retained_bytes())
+            .saturating_add(admission.observed_fact_bytes)
+            .saturating_add(STAGED_GRAPH_ROW_BYTES)
+            .saturating_add(path.len() as u64);
+        enforce_resolution_registry_budget(self.retained_bytes.saturating_add(bytes))?;
+        let source = Arc::new(CapturedSourceGraph {
+            graph,
+            semantics,
+            admission,
+        });
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        if self
+            .direct_paths
+            .as_ref()
+            .is_none_or(|direct| direct.contains(path))
+        {
+            self.work.previously_unchanged += 1;
+        } else {
+            self.work.additional_candidates += 1;
+        }
+        self.captured.insert(path.to_string(), Arc::clone(&source));
+        control.check(IndexWorkStage::SymbolParsing)?;
+        Ok(source)
+    }
+}
+
+/// Account owned graph capacities without serializing or copying parser output.
+fn source_graph_retained_bytes(graph: &SymbolGraph) -> u64 {
+    let mut bytes = (std::mem::size_of::<SymbolGraph>() as u64)
+        .saturating_add(graph.path.capacity() as u64)
+        .saturating_add(graph.language.as_ref().map_or(0, String::capacity) as u64)
+        .saturating_add(
+            (graph.symbols.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<CodeSymbol>() as u64),
+        )
+        .saturating_add(
+            (graph.relations.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<SymbolRelation>() as u64),
+        );
+    for symbol in &graph.symbols {
+        for text in [&symbol.path, &symbol.name, &symbol.signature] {
+            bytes = bytes.saturating_add(text.capacity() as u64);
+        }
+        for text in [
+            &symbol.language,
+            &symbol.documentation,
+            &symbol.parent,
+            &symbol.detail,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes.saturating_add(text.capacity() as u64);
+        }
+    }
+    for relation in &graph.relations {
+        for text in [
+            &relation.path,
+            &relation.source_name,
+            &relation.target_name,
+            &relation.context,
+        ] {
+            bytes = bytes.saturating_add(text.capacity() as u64);
+        }
+    }
+    bytes
+}
+
+/// Recover source only when the current projection consumes binding evidence.
+fn graph_requires_source_bindings(graph: &SymbolGraph) -> bool {
+    if graph
+        .relations
+        .iter()
+        .any(|relation| relation.kind == RelationKind::Calls)
+    {
+        return true;
+    }
+    let provider = graph
+        .language
+        .as_deref()
+        .and_then(language_capability)
+        .and_then(|capability| capability.effective_semantic_provider());
+    let embedded = graph
+        .language
+        .as_deref()
+        .and_then(language_capability)
+        .is_some_and(|capability| capability.embedded_language.is_some());
+    match provider {
+        Some(SemanticProviderOwner::Rust | SemanticProviderOwner::Python) => graph
+            .relations
+            .iter()
+            .any(|relation| relation.kind == RelationKind::Imports),
+        Some(SemanticProviderOwner::EcmaScript) => {
+            graph
+                .relations
+                .iter()
+                .any(|relation| relation.kind == RelationKind::Imports)
+                || graph.symbols.iter().any(|symbol| {
+                    symbol.parent.is_none()
+                        && (symbol.exported || embedded)
+                        && !matches!(
+                            symbol.kind,
+                            SymbolKind::Import
+                                | SymbolKind::Dependency
+                                | SymbolKind::Package
+                                | SymbolKind::Workspace
+                                | SymbolKind::Heading
+                        )
+                })
+        }
+        Some(SemanticProviderOwner::Cargo | SemanticProviderOwner::Unavailable) | None => false,
+    }
+}
+
+/// Overlay staged output and recover required unchanged source before ordinal use.
 fn complete_symbol_graphs<'a>(
     store: &AtlasStore,
     paths: &BTreeSet<String>,
     symbols: &'a SymbolBuildStage,
+    sources: &mut SourceBindingCache<'_>,
     control: &IndexWorkControl,
-) -> Result<Vec<Cow<'a, SymbolGraph>>, CliError> {
+) -> Result<Vec<SourceGraph<'a>>, CliError> {
     let paths = paths.iter().cloned().collect::<Vec<_>>();
     let mut graphs = BTreeMap::new();
     for chunk in paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
         control.check(IndexWorkStage::SymbolParsing)?;
         for graph in store.load_symbol_graphs_for_paths(chunk)? {
-            graphs.insert(graph.path.clone(), Cow::Owned(graph));
+            graphs.insert(graph.path.clone(), SourceGraph::Persisted(graph));
         }
     }
     for (index, change) in symbols.changes.iter().enumerate() {
         check_graph_work(control, index)?;
         match change {
             SymbolProjectionChange::Parsed(parsed) if paths.binary_search(&parsed.path).is_ok() => {
-                graphs.insert(parsed.path.clone(), Cow::Borrowed(&parsed.graph));
+                graphs.insert(
+                    parsed.path.clone(),
+                    SourceGraph::Staged {
+                        graph: &parsed.graph,
+                        semantics: parsed.source_semantics.as_deref(),
+                    },
+                );
             }
             SymbolProjectionChange::Clear { path, .. } if paths.binary_search(path).is_ok() => {
                 graphs.remove(path);
@@ -6135,19 +6836,60 @@ fn complete_symbol_graphs<'a>(
         }
     }
     graphs.retain(|path, _graph| paths.binary_search(path).is_ok());
+    for (path, graph) in &mut graphs {
+        control.check(IndexWorkStage::SymbolParsing)?;
+        if matches!(graph, SourceGraph::Persisted(_))
+            && graph_requires_source_bindings(graph.graph())
+        {
+            *graph = SourceGraph::Captured(sources.capture(path, control)?);
+        }
+    }
     Ok(graphs.into_values().collect())
 }
 
 /// Admit parser graphs at one shared boundary before any strict graph object is built.
 fn admit_symbol_graphs<'a>(
-    graphs: Vec<Cow<'a, SymbolGraph>>,
+    graphs: Vec<impl Into<SourceGraph<'a>>>,
     control: &IndexWorkControl,
-) -> Result<(Vec<Cow<'a, SymbolGraph>>, GraphIdentityAdmission), CliError> {
+) -> Result<(Vec<SourceGraph<'a>>, GraphIdentityAdmission), CliError> {
     let mut admitted = Vec::with_capacity(graphs.len());
     let mut report = GraphIdentityAdmission::default();
     for (index, graph) in graphs.into_iter().enumerate() {
         check_graph_work(control, index)?;
-        let (graph, graph_report) = admit_symbol_graph(graph, control)?;
+        let (graph, graph_report) = match graph.into() {
+            SourceGraph::Captured(source) => {
+                let report = source.admission.clone();
+                (SourceGraph::Captured(source), report)
+            }
+            SourceGraph::Staged {
+                graph,
+                semantics: Some(semantics),
+            } => {
+                if !semantics.matches_graph(graph) {
+                    return Err(CliError::InvalidInput(
+                        "fresh source binding evidence does not match its graph".to_string(),
+                    ));
+                }
+                (
+                    SourceGraph::Staged {
+                        graph,
+                        semantics: Some(semantics),
+                    },
+                    GraphIdentityAdmission::default(),
+                )
+            }
+            SourceGraph::Staged {
+                graph,
+                semantics: None,
+            } => {
+                let (graph, report) = admit_symbol_graph(Cow::Borrowed(graph), control)?;
+                (graph.into(), report)
+            }
+            SourceGraph::Persisted(graph) => {
+                let (graph, report) = admit_symbol_graph(Cow::Owned(graph), control)?;
+                (graph.into(), report)
+            }
+        };
         report.merge(graph_report, control)?;
         admitted.push(graph);
     }
@@ -6159,6 +6901,23 @@ fn admit_symbol_graph<'a>(
     graph: Cow<'a, SymbolGraph>,
     control: &IndexWorkControl,
 ) -> Result<(Cow<'a, SymbolGraph>, GraphIdentityAdmission), CliError> {
+    admit_symbol_graph_with_semantics(graph, None, control)
+}
+
+/// Filter raw graph identities and source-owned ordinals through the same masks.
+fn admit_symbol_graph_with_semantics<'a>(
+    graph: Cow<'a, SymbolGraph>,
+    semantics: Option<&mut projectatlas_symbols::SourceSemanticFacts>,
+    control: &IndexWorkControl,
+) -> Result<(Cow<'a, SymbolGraph>, GraphIdentityAdmission), CliError> {
+    if semantics
+        .as_ref()
+        .is_some_and(|facts| !facts.matches_graph(&graph))
+    {
+        return Err(CliError::InvalidInput(
+            "source binding evidence does not match the admitted graph".to_string(),
+        ));
+    }
     let mut report = GraphIdentityAdmission::default();
     let paired_import_relations = paired_import_relations(&graph, control)?;
     #[cfg(test)]
@@ -6234,24 +6993,41 @@ fn admit_symbol_graph<'a>(
         return Ok((graph, report));
     }
     let mut graph = graph.into_owned();
-    graph.symbols = graph
-        .symbols
-        .into_iter()
+    let relation_fact_indices = rejected_relations
+        .iter()
         .enumerate()
-        .filter_map(|(index, symbol)| (!rejected_symbols[index]).then_some(symbol))
-        .collect();
-    let mut relation_fact_indices = Vec::with_capacity(graph.relations.len());
-    graph.relations = graph
-        .relations
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, relation)| {
-            (!rejected_relations[index]).then(|| {
-                relation_fact_indices.push(index);
-                relation
-            })
-        })
-        .collect();
+        .filter_map(|(index, rejected)| (!rejected).then_some(index))
+        .collect::<Vec<_>>();
+    if let Some(semantics) = semantics {
+        semantics
+            .retain_graph_facts(
+                &mut graph,
+                &rejected_symbols
+                    .iter()
+                    .map(|rejected| !rejected)
+                    .collect::<Vec<_>>(),
+                &rejected_relations
+                    .iter()
+                    .map(|rejected| !rejected)
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| {
+                CliError::InvalidInput(format!("source binding admission failed: {error}"))
+            })?;
+    } else {
+        graph.symbols = graph
+            .symbols
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| (!rejected_symbols[index]).then_some(symbol))
+            .collect();
+        graph.relations = graph
+            .relations
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, relation)| (!rejected_relations[index]).then_some(relation))
+            .collect();
+    }
     if rejected_relations.iter().any(|rejected| *rejected) && !relation_fact_indices.is_empty() {
         report
             .relation_fact_indices
@@ -6279,7 +7055,11 @@ pub(super) fn admit_symbol_build_stage(
             relations: Vec::new(),
         };
         let graph = std::mem::replace(&mut parsed.graph, placeholder);
-        let (admitted, graph_report) = admit_symbol_graph(Cow::Owned(graph), control)?;
+        let (admitted, graph_report) = admit_symbol_graph_with_semantics(
+            Cow::Owned(graph),
+            parsed.source_semantics.as_deref_mut(),
+            control,
+        )?;
         parsed.graph = admitted.into_owned();
         if let Some(markdown) = parsed.markdown_facts.as_deref_mut() {
             admit_markdown_fact_batch(
@@ -6351,14 +7131,15 @@ fn source_symbol_identity_error(value: &str) -> Result<(), GraphContractError> {
 fn admit_resolution_key_failures(
     project: ProjectInstanceId,
     generation: IndexGeneration,
-    graphs: &[impl Borrow<SymbolGraph>],
+    graphs: &[SourceGraph<'_>],
     packages: &PackageIndex,
     configured_modules: &ConfiguredModuleResolution,
     report: &mut GraphIdentityAdmission,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
     for (index, graph) in graphs.iter().enumerate() {
-        let graph = graph.borrow();
+        let semantics = graph.semantics();
+        let graph = graph.graph();
         check_graph_work(control, index)?;
         #[cfg(not(test))]
         let _ = generation;
@@ -6369,13 +7150,21 @@ fn admit_resolution_key_failures(
         }
         #[cfg(test)]
         report.record_resolution_derivation(&graph.path, generation);
-        let context = ResolutionProjectionContext::with_configured_modules(configured_modules);
+        let mut context = resolution_projection_context(&graph.path, packages, configured_modules);
+        if let Some(semantics) = semantics {
+            context = context.with_source_semantics(semantics);
+        }
         match derive_resolution_keys_with_context(
             project,
             packages.package_name(&graph.path),
             graph,
             context,
         ) {
+            Err(ResolutionProjectionError::SourceEvidenceMismatch) => {
+                return Err(CliError::InvalidInput(
+                    "source semantic evidence changed before key projection".to_string(),
+                ));
+            }
             Ok(projection) => {
                 report
                     .resolution_projections
@@ -6389,7 +7178,7 @@ fn admit_resolution_key_failures(
                 for failure in &failures {
                     report.record(
                         &graph.path,
-                        resolution_projection_span(graph, failure.fact()),
+                        resolution_projection_span(graph, semantics, failure.fact()),
                         graph.parser,
                         resolution_projection_fact_index(report, &graph.path, failure.fact()),
                         &[(
@@ -6438,6 +7227,9 @@ fn resolution_projection_fact_index(
 ) -> u64 {
     match fact {
         ResolutionProjectionFact::Source => 0,
+        ResolutionProjectionFact::Export(index) => {
+            parser_fact_index(EXPORT_FACT_INDEX_NAMESPACE, index)
+        }
         ResolutionProjectionFact::Symbol(index) => {
             parser_fact_index(SYMBOL_FACT_INDEX_NAMESPACE, index)
         }
@@ -6449,9 +7241,24 @@ fn resolution_projection_fact_index(
 }
 
 /// Select the narrowest parser span available for one rejected derived key.
-fn resolution_projection_span(graph: &SymbolGraph, fact: ResolutionProjectionFact) -> IdentitySpan {
+fn resolution_projection_span(
+    graph: &SymbolGraph,
+    semantics: Option<&SourceSemanticFacts>,
+    fact: ResolutionProjectionFact,
+) -> IdentitySpan {
     match fact {
         ResolutionProjectionFact::Source => graph_identity_span(graph),
+        ResolutionProjectionFact::Export(index) => semantics
+            .and_then(|facts| facts.exports().get(index))
+            .map_or_else(
+                || graph_identity_span(graph),
+                |fact| IdentitySpan {
+                    start_line: fact.line.max(1),
+                    start_column: 0,
+                    end_line: fact.line.max(1),
+                    end_column: 0,
+                },
+            ),
         ResolutionProjectionFact::Symbol(index) => graph.symbols.get(index).map_or_else(
             || graph_identity_span(graph),
             |symbol| IdentitySpan {
@@ -6895,12 +7702,20 @@ fn document_dependency_keys(
 /// Derive canonical resolution keys with repository compiler configuration.
 fn resolution_projection_with_config(
     project: ProjectInstanceId,
-    package: Option<&str>,
+    packages: &PackageIndex,
     graph: &SymbolGraph,
     configured_modules: &ConfiguredModuleResolution,
 ) -> Result<ResolutionKeyProjection, CliError> {
-    let context = ResolutionProjectionContext::with_configured_modules(configured_modules);
-    match derive_resolution_keys_with_context(project, package, graph, context) {
+    let context = resolution_projection_context(&graph.path, packages, configured_modules);
+    match derive_resolution_keys_with_context(
+        project,
+        packages.package_name(&graph.path),
+        graph,
+        context,
+    ) {
+        Err(ResolutionProjectionError::SourceEvidenceMismatch) => Err(CliError::InvalidInput(
+            "source semantic evidence does not match the graph".to_string(),
+        )),
         Ok(projection) => Ok(projection),
         Err(ResolutionProjectionError::KeyLimit { requested, .. }) => {
             Err(resolution_key_limit_failure(requested))
@@ -6916,6 +7731,19 @@ fn resolution_projection_with_config(
             Err(invalid_graph_contract(error))
         }
     }
+}
+
+/// Share exact package and configured-module context across fresh and recovered graphs.
+fn resolution_projection_context<'a>(
+    path: &str,
+    packages: &'a PackageIndex,
+    configured: &'a ConfiguredModuleResolution,
+) -> ResolutionProjectionContext<'a> {
+    let mut context = ResolutionProjectionContext::with_configured_modules(configured);
+    if let Some(package) = packages.package_owner(path) {
+        context = context.with_rust_package(&package.manifest, &package.root);
+    }
+    context
 }
 
 /// Preserve resource-limit failures while admitting contract-invalid key facts.
@@ -7146,6 +7974,12 @@ fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
         )
         .chain(
             projection
+                .export_keys()
+                .iter()
+                .flat_map(projectatlas_symbols::ExportResolutionKeys::keys),
+        )
+        .chain(
+            projection
                 .relation_keys()
                 .iter()
                 .flat_map(projectatlas_symbols::RelationResolutionKeys::keys),
@@ -7155,6 +7989,10 @@ fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
                 .saturating_add(32)
                 .saturating_add(key.canonical_identity().len() as u64)
         })
+        .saturating_add(projection.source_calls_retained_bytes())
+        .saturating_add(projection.source_spans_retained_bytes())
+        .saturating_add(projection.rust_toolchain_imports_retained_bytes())
+        .saturating_add(projection.export_lookup_vector_bytes())
 }
 
 /// Count one admitted projection entry while it remains in the source map.
@@ -7186,10 +8024,10 @@ mod tests {
         GraphOwners, GraphSymbolIndex, MAX_IN_MEMORY_GRAPH_WORK_BYTES, MAX_INCREMENTAL_GRAPH_BYTES,
         MAX_INCREMENTAL_GRAPH_ROWS, PARTIAL_COVERAGE_REASON, PackageIndex,
         ProjectResolutionRegistry, QUALIFIED_SYMBOL_SCOPE_PREFIX, RepositoryGraphMutation,
-        StagedRepositoryGraph, build_entity_projection, build_entity_projection_with_config,
-        build_entity_projection_with_config_limit, cleanup_abandoned_graph_staging,
-        coverage_for_graph, document_casefold_resolution_key, document_coverage,
-        document_fact_map_retained_bytes, document_projection_retained_bytes,
+        SourceGraph, SourceRecoveryWork, StagedRepositoryGraph, build_entity_projection,
+        build_entity_projection_with_config, build_entity_projection_with_config_limit,
+        cleanup_abandoned_graph_staging, coverage_for_graph, document_casefold_resolution_key,
+        document_coverage, document_fact_map_retained_bytes, document_projection_retained_bytes,
         enforce_incremental_projection_budget, enforce_incremental_projection_limits,
         enforce_resolution_staging_budget, explicit_external_selector, finish_projection,
         finish_projection_in_database, finish_projection_in_database_with_documents,
@@ -8832,7 +9670,7 @@ mod tests {
             manifest.as_ref().symbols.is_empty(),
             "invalid recovered package identity reached package context",
         )?;
-        let admitted_graphs = admitted.iter().map(Cow::as_ref).collect::<Vec<_>>();
+        let admitted_graphs = admitted.iter().map(SourceGraph::graph).collect::<Vec<_>>();
         let packages = PackageIndex::from_graphs(&admitted_graphs)?;
         require_eq(
             &packages.package_name("src/lib.rs"),
@@ -8887,6 +9725,35 @@ mod tests {
     #[cfg(windows)]
     fn create_file_link(target: &Path, link: &Path) -> io::Result<()> {
         std::os::windows::fs::symlink_file(target, link)
+    }
+
+    #[test]
+    fn cargo_lock_dependencies_do_not_own_repository_sources() -> Result<(), Box<dyn Error>> {
+        let manifest = extract_symbol_graph(
+            "Cargo.toml",
+            Some("cargo-manifest"),
+            "[package]\nname='root-package'\nversion='0.1.0'\nedition='2024'\n",
+        );
+        let lock = extract_symbol_graph(
+            "Cargo.lock",
+            Some("cargo-lock"),
+            "version=4\n[[package]]\nname='aaa-dependency'\nversion='1.0.0'\n[[package]]\nname='root-package'\nversion='0.1.0'\n",
+        );
+        let packages = PackageIndex::from_graphs(&[manifest, lock.clone()])?;
+        for path in ["src/lib.rs", "src/controller.ts", "src/module.py"] {
+            require_eq(
+                &packages.package_name(path),
+                &Some("root-package"),
+                "manifest-only package authority",
+            )?;
+        }
+        let lock_only = PackageIndex::from_graphs(&[lock])?;
+        require_eq(
+            &lock_only.package_name("src/lib.rs"),
+            &None,
+            "lockfile-only ownership abstention",
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -9167,12 +10034,13 @@ mod tests {
         fs::write(root.join(root_module_path), root_module_source)?;
         fs::write(root.join(direct_path), direct_source)?;
         fs::write(root.join(inbound_path), inbound_source)?;
-        let nodes = vec![
+        let mut nodes = vec![
             test_file_node(manifest_path, "cargo-manifest"),
             test_file_node(root_module_path, "rust"),
             test_file_node(direct_path, "rust"),
             test_file_node(inbound_path, "rust"),
         ];
+        capture_test_file_hashes(&root, &mut nodes)?;
         let graphs = vec![
             extract_symbol_graph(manifest_path, Some("cargo-manifest"), manifest_source),
             extract_symbol_graph(root_module_path, Some("rust"), root_module_source),
@@ -9405,6 +10273,7 @@ mod tests {
             scan_policy: RootScanPolicy::discover(root, &ScanOptions::default(), &control)?,
             document_target_states: Vec::new(),
             database: None,
+            source_recovery: SourceRecoveryWork::default(),
             retained_bytes: 0,
         };
         let error =
@@ -9651,6 +10520,7 @@ mod tests {
                 path,
                 graph,
                 markdown_facts: Some(Box::new(template.clone())),
+                source_semantics: None,
                 source_parser: ParserKind::Structural,
                 summary: String::new(),
                 summary_is_structural: true,
@@ -10995,6 +11865,68 @@ mod tests {
     }
 
     #[test]
+    fn native_rust_external_identity_follows_the_binding_instead_of_its_spelling()
+    -> Result<(), Box<dyn Error>> {
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let project = ProjectInstanceId::from_bytes([40; 16])?;
+        for (source, expected) in [
+            ("mod std {} fn caller(){std::fs::read(\"x\");}", None),
+            (
+                "mod fake {} use crate::fake as std; fn caller(){std::fs::read(\"x\");}",
+                None,
+            ),
+            (
+                "use std; fn caller(){std::fs::read(\"x\");}",
+                Some("std::fs::read"),
+            ),
+            (
+                "use std::mem::drop as dispose; fn caller(){dispose(1);}",
+                Some("std::mem::drop"),
+            ),
+            (
+                "use core::mem as std; fn caller(){std::drop(1);}",
+                Some("core::mem::drop"),
+            ),
+            (
+                "use std::mem::drop as dispose; fn caller(dispose:fn(u8)){dispose(1);}",
+                None,
+            ),
+        ] {
+            let extracted = projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                "src/lib.rs",
+                Some("rust"),
+                source,
+                &control,
+            )?;
+            let graph = extracted.graph();
+            let facts = extracted.semantics();
+            let projection = projectatlas_symbols::derive_resolution_keys_with_context(
+                project,
+                None,
+                graph,
+                projectatlas_symbols::ResolutionProjectionContext::default()
+                    .with_source_semantics(facts),
+            )?;
+            let index = super::GraphSymbolIndex::new(graph, &control)?
+                .with_source_calls(projection.source_calls(), &control)?
+                .with_rust_toolchain_imports(projection.rust_toolchain_imports());
+            let call = facts.calls().last().ok_or("fixture call missing")?;
+            let external = super::source_external_selector(
+                graph,
+                &graph.relations[call.relation],
+                Some(call.relation),
+                &index,
+            )?;
+            require_eq(
+                &external.as_ref().map(|external| external.identity.as_str()),
+                &expected,
+                source,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn grouped_rust_imports_use_only_their_common_external_module() -> Result<(), Box<dyn Error>> {
         let grouped = resolution_case("rust", RelationKind::Imports, "use std::{fs, io};", &[]);
         require_eq(
@@ -11023,6 +11955,461 @@ mod tests {
     }
 
     #[test]
+    fn explicit_export_forwarding_tracks_actual_targets_and_intermediate_changes()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let sources = [
+            ("worker.js", "export function work() {}"),
+            ("other.js", "export function other() {}"),
+            ("inner.js", "export {work as launch} from './worker.js';"),
+            (
+                "barrel.js",
+                "export {launch as entry} from './inner.js'; export * as tools from './worker.js'; export {work as collision} from './worker.js'; export {other as collision} from './other.js';",
+            ),
+            ("loopA.js", "export {cycle} from './loopB.js';"),
+            ("loopB.js", "export {cycle} from './loopC.js';"),
+            ("loopC.js", "export {cycle} from './loopA.js';"),
+            ("route1.js", "export {cycle} from './route2.js';"),
+            ("route2.js", "export {cycle} from './loopC.js';"),
+            (
+                "second.js",
+                "import {cycle} from './route1.js'; function second() {cycle();}",
+            ),
+            ("wild.js", "export * from './worker.js';"),
+            (
+                "caller.js",
+                "import {entry, tools, collision} from './barrel.js'; import {cycle} from './loopA.js'; import {work} from './wild.js'; function clean() {entry(); tools.work();} function blocked() {collision(); cycle(); work();} function shadow(entry) {entry();}",
+            ),
+        ];
+        let mut nodes = Vec::new();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let make_parsed =
+            |path: &str, content: &str| -> Result<SymbolParseSuccess, Box<dyn Error>> {
+                let (_, graph, semantics) =
+                    projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                        path,
+                        Some("javascript"),
+                        content,
+                        &control,
+                    )?
+                    .into_parts();
+                Ok(SymbolParseSuccess {
+                    path: path.to_string(),
+                    source_parser: graph.parser,
+                    graph,
+                    source_semantics: Some(Box::new(semantics)),
+                    markdown_facts: None,
+                    summary: "static export source".to_string(),
+                    summary_is_structural: false,
+                    purpose_suggestion: None,
+                })
+            };
+        let mut symbols = empty_symbol_build_stage();
+        for (path, content) in sources {
+            fs::write(root.join(path), content)?;
+            nodes.push(test_file_node(path, "javascript"));
+            symbols
+                .changes
+                .push(SymbolProjectionChange::Parsed(make_parsed(path, content)?));
+        }
+        capture_test_file_hashes(root, &mut nodes)?;
+        symbols.report.candidates = nodes.len();
+        symbols.report.parsed = nodes.len();
+        symbols.identity_admission = super::admit_symbol_build_stage(&mut symbols, &control)?;
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let mut store =
+            AtlasStore::open_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        let project = store.project_instance_id()?.ok_or("missing project")?;
+        let policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+        let full = stage_full_repository_graph(
+            &store,
+            root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &policy,
+            &symbols,
+            &control,
+        )?;
+        let resolved_targets = |stage: &StagedRepositoryGraph| {
+            stage
+                .relations
+                .iter()
+                .filter_map(|relation| {
+                    if relation.kind() != GraphRelationKind::Legacy(RelationKind::Calls) {
+                        return None;
+                    }
+                    match relation.resolution() {
+                        RelationResolution::Resolved {
+                            selector: ReusableTargetSelector::Symbol { symbol },
+                            ..
+                        } => Some((
+                            symbol.file.as_str().to_string(),
+                            symbol.name.as_str().to_string(),
+                        )),
+                        _ => None,
+                    }
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        require_eq(
+            &resolved_targets(&full),
+            &BTreeSet::from([("worker.js".to_string(), "work".to_string())]),
+            "forwarded source target",
+        )?;
+        let unresolved_calls = |stage: &StagedRepositoryGraph| {
+            stage
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.kind() == GraphRelationKind::Legacy(RelationKind::Calls)
+                        && matches!(relation.resolution(), RelationResolution::Unresolved { .. })
+                })
+                .count()
+        };
+        require_eq(
+            &unresolved_calls(&full),
+            &5,
+            "duplicate, cycle, wildcard and shadow calls must abstain",
+        )?;
+        require_eq(
+            &full.source_recovery.previously_unchanged,
+            &0,
+            "fresh source was reparsed during forwarding",
+        )?;
+        let inner_cause = super::document_file_resolution_key(project, "inner.js")?;
+        require(
+            full.relation_dependencies
+                .iter()
+                .any(|binding| binding.key() == &inner_cause),
+            "call lost intermediate file invalidation cause",
+        )?;
+        publish_full_staged_graph(&mut store, &nodes, &full, &control, "forwarding initial")?;
+        for change in &symbols.changes {
+            if let SymbolProjectionChange::Parsed(parsed) = change {
+                store.replace_symbol_graph(&parsed.graph)?;
+            }
+        }
+        let base = store
+            .repository_graph_generation()?
+            .ok_or("missing graph generation")?;
+        let content = "export {other as launch} from './other.js';";
+        fs::write(root.join("inner.js"), content)?;
+        capture_test_file_hashes(root, &mut nodes)?;
+        let mut changed = empty_symbol_build_stage();
+        changed
+            .changes
+            .push(SymbolProjectionChange::Parsed(make_parsed(
+                "inner.js", content,
+            )?));
+        changed.identity_admission = super::admit_symbol_build_stage(&mut changed, &control)?;
+        let incremental = stage_incremental_repository_graph(
+            &store,
+            root,
+            base,
+            &nodes,
+            &["inner.js".to_string()],
+            &policy,
+            &changed,
+            &control,
+        )?;
+        require_eq(
+            &resolved_targets(&incremental),
+            &BTreeSet::from([
+                ("worker.js".to_string(), "work".to_string()),
+                ("other.js".to_string(), "other".to_string()),
+            ]),
+            "unchanged caller after forwarding source change",
+        )?;
+        require(
+            incremental.source_recovery.additional_candidates > 0,
+            "extra unchanged context source parsing was not accounted",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &incremental,
+            &control,
+            "forwarding changed intermediate",
+        )?;
+        store.replace_symbol_graph(&make_parsed("inner.js", content)?.graph)?;
+        let base = store
+            .repository_graph_generation()?
+            .ok_or("missing changed generation")?;
+        let content = "export {work as cycle} from './worker.js';";
+        fs::write(root.join("loopB.js"), content)?;
+        capture_test_file_hashes(root, &mut nodes)?;
+        let mut changed = empty_symbol_build_stage();
+        changed
+            .changes
+            .push(SymbolProjectionChange::Parsed(make_parsed(
+                "loopB.js", content,
+            )?));
+        changed.identity_admission = super::admit_symbol_build_stage(&mut changed, &control)?;
+        let repaired = stage_incremental_repository_graph(
+            &store,
+            root,
+            base,
+            &nodes,
+            &["loopB.js".to_string()],
+            &policy,
+            &changed,
+            &control,
+        )?;
+        require(
+            matches!(&repaired.mutation, RepositoryGraphMutation::AffectedPaths(paths) if paths.iter().any(|path| path == "second.js")),
+            "cached cycle suffix lost the file whose edit breaks the cycle",
+        )?;
+        require_eq(
+            &unresolved_calls(&repaired),
+            &3,
+            "broken cycle did not repair both unchanged consumers",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn forwarding_query_cache_preserves_the_remaining_depth_budget() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut files = vec![(
+            "worker.js".to_string(),
+            "export function work() {}".to_string(),
+        )];
+        for index in 0..70 {
+            files.push((
+                format!("long{index:02}.js"),
+                if index == 69 {
+                    "export {work as entry} from './worker.js';".to_string()
+                } else {
+                    format!("export {{entry}} from './long{:02}.js';", index + 1)
+                },
+            ));
+        }
+        files.push(("caller.js".to_string(), "import {entry as short} from './long10.js'; import {entry as long} from './long00.js'; function short_call() {short();} function long_call() {long();}".to_string()));
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let mut nodes = Vec::new();
+        let mut symbols = empty_symbol_build_stage();
+        for (path, content) in files {
+            fs::write(root.join(&path), &content)?;
+            nodes.push(test_file_node(&path, "javascript"));
+            let (_, graph, semantics) =
+                projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                    &path,
+                    Some("javascript"),
+                    &content,
+                    &control,
+                )?
+                .into_parts();
+            symbols
+                .changes
+                .push(SymbolProjectionChange::Parsed(SymbolParseSuccess {
+                    path,
+                    source_parser: graph.parser,
+                    graph,
+                    source_semantics: Some(Box::new(semantics)),
+                    markdown_facts: None,
+                    summary: "bounded forwarding source".to_string(),
+                    summary_is_structural: false,
+                    purpose_suggestion: None,
+                }));
+        }
+        capture_test_file_hashes(root, &mut nodes)?;
+        symbols.identity_admission = super::admit_symbol_build_stage(&mut symbols, &control)?;
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let store =
+            AtlasStore::open_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        let policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+        let full = stage_full_repository_graph(
+            &store,
+            root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &policy,
+            &symbols,
+            &control,
+        )?;
+        let owners = full
+            .entities
+            .iter()
+            .map(|entity| (entity.key().digest(), entity))
+            .collect::<BTreeMap<_, _>>();
+        let mut outcomes = BTreeMap::new();
+        for relation in &full.relations {
+            if relation.kind() != GraphRelationKind::Legacy(RelationKind::Calls) {
+                continue;
+            }
+            let owner = owners
+                .get(relation.source().digest())
+                .ok_or("missing depth fixture owner")?;
+            let EntitySelector::Symbol { symbol } = owner.selector() else {
+                return Err("depth call lost symbol owner".into());
+            };
+            outcomes.insert(symbol.name.as_str(), relation.resolution());
+        }
+        require(
+            matches!(
+                outcomes.get("short_call"),
+                Some(RelationResolution::Resolved { .. })
+            ),
+            "supported shorter chain did not resolve",
+        )?;
+        require(
+            matches!(
+                outcomes.get("long_call"),
+                Some(RelationResolution::Unresolved { .. })
+            ),
+            "cached target bypassed the longer query's depth bound",
+        )?;
+        require_eq(
+            &full.source_recovery.previously_unchanged,
+            &0,
+            "forwarding parsed fresh targets again",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn no_forwarding_preflight_preserves_fast_return_and_observes_cancellation()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let content = "function local() {} function caller() {local();}";
+        fs::write(root.join("caller.js"), content)?;
+        let mut nodes = vec![test_file_node("caller.js", "javascript")];
+        capture_test_file_hashes(root, &mut nodes)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let (_, graph, facts) =
+            projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                "caller.js",
+                Some("javascript"),
+                content,
+                &control,
+            )?
+            .into_parts();
+        let source = super::SourceGraph::Staged {
+            graph: &graph,
+            semantics: Some(&facts),
+        };
+        fs::create_dir_all(root.join(".projectatlas"))?;
+        let store =
+            AtlasStore::open_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("missing preflight project")?;
+        let packages = PackageIndex::from_graphs(&[&graph])?;
+        let configured = projectatlas_symbols::ConfiguredModuleResolution::default();
+        let entities = super::build_entity_projection_with_config(
+            project,
+            IndexGeneration::new(1),
+            &nodes,
+            &[&graph],
+            &packages,
+            &configured,
+            None,
+            true,
+            &control,
+        )?;
+        let mut candidates = super::resolution_registry_from_exports(&entities, &control)?;
+        let mut cache = super::SourceBindingCache::new(root, &nodes, None);
+        let (bindings, bytes) = super::binding_resolution::resolve_source_bindings(
+            &store,
+            project,
+            IndexGeneration::new(1),
+            &[&source],
+            &packages,
+            &configured,
+            &mut cache,
+            &entities,
+            &mut candidates,
+            None,
+            &BTreeSet::new(),
+            &control,
+        )?;
+        require(
+            bindings.is_empty() && bytes == 0,
+            "ordinary calls allocated forwarding state",
+        )?;
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let canceled = IndexWorkControl::new(cancellation, None);
+        let result = super::binding_resolution::resolve_source_bindings(
+            &store,
+            project,
+            IndexGeneration::new(1),
+            &[&source],
+            &packages,
+            &configured,
+            &mut cache,
+            &entities,
+            &mut candidates,
+            None,
+            &BTreeSet::new(),
+            &canceled,
+        );
+        require(
+            matches!(
+                result,
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+            ),
+            "no-forwarding preflight ignored cancellation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn forwarding_file_markers_never_become_or_narrow_callable_targets()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([46; 16])?;
+        let generation = IndexGeneration::new(1);
+        let key = test_resolution_key(project, "forwarding-slot")?;
+        let file = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("src/barrel.ts"))?,
+            },
+            generation,
+        )?;
+        let declaration = test_symbol_entity(project, generation, "src/direct.ts", "work")?;
+        let mut registry = ProjectResolutionRegistry::default();
+        registry.insert_candidate(&key, &file)?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let staged = BTreeMap::new();
+        let calls = registry_resolution_matches(
+            std::slice::from_ref(&key),
+            super::ResolutionCandidateKind::Declaration,
+            &registry,
+            &staged,
+            &control,
+        )?;
+        require(
+            calls.count == 0 && calls.first.is_none(),
+            "file marker became a callable target",
+        )?;
+        registry.insert_candidate(&key, &declaration)?;
+        let calls = registry_resolution_matches(
+            std::slice::from_ref(&key),
+            super::ResolutionCandidateKind::Declaration,
+            &registry,
+            &staged,
+            &control,
+        )?;
+        require(
+            calls.count == 0 && calls.first.is_none(),
+            "dropping a competing forwarding marker narrowed an unrelated declaration",
+        )?;
+        let ordinary = registry_resolution_matches(
+            std::slice::from_ref(&key),
+            super::ResolutionCandidateKind::Any,
+            &registry,
+            &staged,
+            &control,
+        )?;
+        require_eq(&ordinary.count, &2, "non-call lookup lost file evidence")?;
+        Ok(())
+    }
+
+    #[test]
     fn registry_candidate_merge_deduplicates_exactly_and_observes_cancellation()
     -> Result<(), Box<dyn Error>> {
         let project = ProjectInstanceId::from_bytes([6; 16])?;
@@ -11039,6 +12426,7 @@ mod tests {
         let staged_entities = BTreeMap::new();
         let matches = registry_resolution_matches(
             &[first_key.clone(), second_key.clone()],
+            super::ResolutionCandidateKind::Any,
             &registry,
             &staged_entities,
             &control,
@@ -11060,6 +12448,7 @@ mod tests {
         require(
             registry_resolution_matches(
                 &[first_key, second_key],
+                super::ResolutionCandidateKind::Any,
                 &registry,
                 &staged_entities,
                 &canceled_control,
@@ -12742,7 +14131,8 @@ function helper() {}
             }
         }
         for expected in [
-            ("rust-toolchain".to_string(), "std".to_string()),
+            ("rust-toolchain".to_string(), "std::fs".to_string()),
+            ("rust-toolchain".to_string(), "std::io".to_string()),
             ("node".to_string(), "path".to_string()),
             ("node".to_string(), "fs".to_string()),
             ("node".to_string(), "url".to_string()),
@@ -12937,6 +14327,7 @@ function helper() {}
             scan_policy,
             document_target_states: Vec::new(),
             database: None,
+            source_recovery: SourceRecoveryWork::default(),
             retained_bytes: 0,
         };
         {
@@ -13569,6 +14960,7 @@ function helper() {}
                 path: "docs/guide.md".to_string(),
                 graph: source_graph.clone(),
                 markdown_facts: Some(Box::new(source_facts)),
+                source_semantics: None,
                 source_parser: ParserKind::Structural,
                 summary: "Guide".to_string(),
                 summary_is_structural: true,
@@ -13578,6 +14970,7 @@ function helper() {}
                 path: "docs/target.md".to_string(),
                 graph: target_graph.clone(),
                 markdown_facts: Some(Box::new(target_facts)),
+                source_semantics: None,
                 source_parser: ParserKind::Structural,
                 summary: "Target".to_string(),
                 summary_is_structural: true,
@@ -14224,6 +15617,7 @@ function helper() {}
             scan_policy,
             document_target_states,
             database: None,
+            source_recovery: SourceRecoveryWork::default(),
             retained_bytes: 0,
         };
         require(
@@ -14233,6 +15627,16 @@ function helper() {}
             ),
             "changed non-indexed target state reached publication",
         )?;
+        Ok(())
+    }
+
+    /// Give filesystem-backed recovery fixtures the actual captured byte identity.
+    fn capture_test_file_hashes(root: &Path, nodes: &mut [Node]) -> Result<(), Box<dyn Error>> {
+        for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::File) {
+            let bytes = fs::read(root.join(&node.path))?;
+            node.content_hash = Some(blake3::hash(&bytes).to_hex().to_string());
+            node.size_bytes = Some(u64::try_from(bytes.len())?);
+        }
         Ok(())
     }
 
@@ -15757,7 +17161,8 @@ function helper() {}
             .project_instance_id()?
             .ok_or("full reuse project identity is missing")?;
         let path = "src/reused.rs";
-        let nodes = vec![test_file_node(path, "rust")];
+        let mut nodes = vec![test_file_node(path, "rust")];
+        capture_test_file_hashes(&root, &mut nodes)?;
         let graph = identity_sibling_graph(path, GraphIdentityField::RelationTarget);
         let first_control = IndexWorkControl::new(IndexCancellation::new(), None);
         let first_policy =
@@ -16030,7 +17435,8 @@ function helper() {}
             .project_instance_id()?
             .ok_or("fallback reuse project identity is missing")?;
         let path = "src/reused.rs";
-        let nodes = vec![test_file_node(path, "rust")];
+        let mut nodes = vec![test_file_node(path, "rust")];
+        capture_test_file_hashes(&root, &mut nodes)?;
         let mut graph = identity_sibling_graph(path, GraphIdentityField::RelationTarget);
         graph.parser = ParserKind::Fallback;
         for symbol in &mut graph.symbols {
@@ -16174,10 +17580,11 @@ function helper() {}
             .ok_or("incremental dependent project identity is missing")?;
         let provider_path = "src/provider.rs";
         let consumer_path = "src/consumer.rs";
-        let nodes = vec![
+        let mut nodes = vec![
             test_file_node(provider_path, "rust"),
             test_file_node(consumer_path, "rust"),
         ];
+        capture_test_file_hashes(&root, &mut nodes)?;
         let provider = extract_symbol_graph(provider_path, Some("rust"), "pub fn changed() {}\n");
         let mut consumer = extract_symbol_graph(
             consumer_path,
@@ -16324,7 +17731,10 @@ function helper() {}
         )?;
         let guide_source = "[invalid](<../src/worker.rs#bad\u{1}>)\n[worker](../src/worker.rs)\n";
         fs::write(root.join("src/worker.rs"), "pub fn worker() {}\n")?;
-        fs::write(root.join(&semantic_path), "use crate::worker;\n")?;
+        fs::write(
+            root.join(&semantic_path),
+            semantic_resolution_key_source(&semantic_path, true),
+        )?;
         fs::write(root.join("docs/guide.md"), guide_source)?;
         let database = root.join(".projectatlas/projectatlas.db");
         fs::create_dir_all(root.join(".projectatlas"))?;
@@ -16337,6 +17747,7 @@ function helper() {}
             test_file_node(&semantic_path, "rust"),
             test_file_node("docs/guide.md", "markdown"),
         ];
+        capture_test_file_hashes(&root, &mut nodes)?;
         let worker_graph =
             extract_symbol_graph("src/worker.rs", Some("rust"), "pub fn worker() {}\n");
         let semantic_graph = semantic_resolution_key_graph(&semantic_path, true);
@@ -16355,6 +17766,7 @@ function helper() {}
                 path: "docs/guide.md".to_string(),
                 graph: guide_graph,
                 markdown_facts: Some(Box::new(guide_facts)),
+                source_semantics: None,
                 source_parser: ParserKind::Structural,
                 summary: "combined reuse Markdown fixture".to_string(),
                 summary_is_structural: true,
@@ -16726,6 +18138,7 @@ function helper() {}
         stage.report.summaries = 1;
         stage.changes = vec![SymbolProjectionChange::Parsed(SymbolParseSuccess {
             path: graph.path.clone(),
+            source_semantics: None,
             source_parser: ParserKind::Structural,
             graph,
             markdown_facts: Some(Box::new(markdown_facts)),
@@ -16751,6 +18164,7 @@ function helper() {}
                     path,
                     graph,
                     markdown_facts: None,
+                    source_semantics: None,
                     source_parser,
                     summary: "identity admission fixture".to_string(),
                     summary_is_structural: false,
@@ -16788,6 +18202,15 @@ function helper() {}
     }
 
     fn semantic_resolution_key_graph(path: &str, include_invalid: bool) -> SymbolGraph {
+        extract_symbol_graph(
+            path,
+            Some("rust"),
+            &semantic_resolution_key_source(path, include_invalid),
+        )
+    }
+
+    /// Keep recovered source bytes identical to the graph used by the fixture.
+    fn semantic_resolution_key_source(path: &str, include_invalid: bool) -> String {
         let helper = if path.contains("sibling") {
             "sibling_helper"
         } else {
@@ -16801,13 +18224,260 @@ function helper() {}
         } else {
             String::new()
         };
-        extract_symbol_graph(
-            path,
-            Some("rust"),
-            &format!(
-                "use crate::worker;\n{invalid_methods}pub fn caller() {{ {helper}(); worker(); }}\npub fn {helper}() {{}}\n"
-            ),
+        format!(
+            "use crate::worker;\n{invalid_methods}pub fn caller() {{ {helper}(); worker(); }}\npub fn {helper}() {{}}\n"
         )
+    }
+
+    #[test]
+    fn source_recovery_preserves_parser_ordinals_counts_and_hash_guards()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("src"))?;
+        let path = "src/main.rs";
+        let content = "use crate::worker as handler; fn zeta() {} fn alpha() {} fn caller(zeta: fn(), std: Value) { zeta(); std::fs::read(\"x\"); } fn clean() { alpha(); zeta(); std::fs::read(\"x\"); true.then(handler::health_response); }";
+        fs::write(root.join(path), content)?;
+        let mut store = AtlasStore::open_for_project(&root.join("atlas.db"), root)?;
+        let worker = "src/worker.rs";
+        let worker_content = "pub fn health_response() {}";
+        fs::write(root.join(worker), worker_content)?;
+        let mut nodes = vec![test_file_node(path, "rust"), test_file_node(worker, "rust")];
+        capture_test_file_hashes(root, &mut nodes)?;
+        store.replace_scan(&nodes)?;
+        let original = extract_symbol_graph(path, Some("rust"), content);
+        store.replace_symbol_graph(&original)?;
+        store.replace_symbol_graph(&extract_symbol_graph(worker, Some("rust"), worker_content))?;
+        let loaded = store.load_symbol_graphs_for_paths(&[path.to_string()])?;
+        require(
+            original.symbols != loaded[0].symbols,
+            "fixture did not reorder SQLite symbols",
+        )?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+        let mut reused = empty_symbol_build_stage();
+        reused.report.candidates = 2;
+        reused.report.unchanged = 2;
+        let staged = stage_full_repository_graph(
+            &store,
+            root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &policy,
+            &reused,
+            &control,
+        )?;
+        require_eq(
+            &staged.source_recovery.previously_unchanged,
+            &1,
+            "full recovered source count",
+        )?;
+        let verify = |stage: &StagedRepositoryGraph| -> Result<(), Box<dyn Error>> {
+            let entities = stage
+                .entities
+                .iter()
+                .map(|entity| (entity.key().digest(), entity))
+                .collect::<BTreeMap<_, _>>();
+            let mut resolved = Vec::new();
+            let mut shadowed = 0;
+            let mut external = 0;
+            for relation in &stage.relations {
+                if relation.kind() != GraphRelationKind::Legacy(RelationKind::Calls) {
+                    continue;
+                }
+                let source = entities
+                    .get(relation.source().digest())
+                    .ok_or("missing source")?;
+                let EntitySelector::Symbol { symbol } = source.selector() else {
+                    return Err("call lost exact source owner".into());
+                };
+                match relation.resolution() {
+                    RelationResolution::Resolved { selector, .. } => {
+                        let ReusableTargetSelector::Symbol { symbol: target } = selector else {
+                            return Err("wrong target kind".into());
+                        };
+                        resolved.push((
+                            symbol.name.as_str().to_string(),
+                            target.name.as_str().to_string(),
+                        ));
+                    }
+                    RelationResolution::Unresolved { .. } if symbol.name.as_str() == "caller" => {
+                        shadowed += 1;
+                    }
+                    RelationResolution::Unresolved { reference }
+                        if symbol.name.as_str() == "clean" && reference.as_str() == "true.then" => {
+                    }
+                    RelationResolution::External { .. }
+                        if matches!(symbol.name.as_str(), "clean" | "caller") =>
+                    {
+                        external += 1;
+                    }
+                    other => {
+                        return Err(
+                            format!("unexpected source-owned call: {symbol:?} {other:?}").into(),
+                        );
+                    }
+                }
+            }
+            resolved.sort();
+            require_eq(
+                &resolved,
+                &vec![
+                    ("clean".to_string(), "alpha".to_string()),
+                    ("clean".to_string(), "health_response".to_string()),
+                    ("clean".to_string(), "zeta".to_string()),
+                ],
+                "source-owned resolved targets",
+            )?;
+            require_eq(&shadowed, &1, "shadowed value call")?;
+            require_eq(
+                &external,
+                &2,
+                "toolchain namespace calls ignore value parameters",
+            )?;
+            Ok(())
+        };
+        verify(&staged)?;
+        let mut report = empty_symbol_build_stage().report;
+        report.candidates = 2;
+        report.unchanged = 2;
+        staged.account_source_recovery(&mut report)?;
+        require_eq(
+            &(report.candidates, report.parsed, report.unchanged),
+            &(2, 1, 1),
+            "actual recovery accounting",
+        )?;
+        publish_full_staged_graph(
+            &mut store,
+            &nodes,
+            &staged,
+            &control,
+            "source recovery full",
+        )?;
+        let base = store
+            .repository_graph_generation()?
+            .ok_or("no full generation")?;
+        let incremental = stage_incremental_repository_graph(
+            &store,
+            root,
+            base,
+            &nodes,
+            &[path.to_string()],
+            &policy,
+            &reused,
+            &control,
+        )?;
+        verify(&incremental)?;
+        require_eq(
+            &incremental.source_recovery.previously_unchanged,
+            &1,
+            "incremental one parse",
+        )?;
+        require_eq(
+            &incremental.source_recovery.additional_candidates,
+            &0,
+            "direct source not double counted",
+        )?;
+        let updated_worker = format!("{worker_content} // changed");
+        fs::write(root.join(worker), &updated_worker)?;
+        let mut updated_nodes = nodes.clone();
+        capture_test_file_hashes(root, &mut updated_nodes)?;
+        let changed = symbol_build_stage_for_graphs(vec![extract_symbol_graph(
+            worker,
+            Some("rust"),
+            &updated_worker,
+        )]);
+        let inbound = stage_incremental_repository_graph(
+            &store,
+            root,
+            base,
+            &updated_nodes,
+            &[worker.to_string()],
+            &policy,
+            &changed,
+            &control,
+        )?;
+        verify(&inbound)?;
+        require_eq(
+            &inbound.source_recovery.previously_unchanged,
+            &0,
+            "fresh direct output was not reparsed",
+        )?;
+        require_eq(
+            &inbound.source_recovery.additional_candidates,
+            &1,
+            "unchanged inbound source recovered once",
+        )?;
+        let mut report = empty_symbol_build_stage().report;
+        report.candidates = 1;
+        report.parsed = 1;
+        inbound.account_source_recovery(&mut report)?;
+        require_eq(
+            &(report.candidates, report.parsed, report.unchanged),
+            &(2, 2, 0),
+            "actual inbound recovery accounting",
+        )?;
+        let mut cache = super::SourceBindingCache::new(root, &nodes, None);
+        let first = cache.capture(path, &control)?;
+        let second = cache.capture(path, &control)?;
+        require(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "capture reparsed a repeated path",
+        )?;
+        require_eq(
+            &cache.work.previously_unchanged,
+            &1,
+            "cache actual parse count",
+        )?;
+        fs::write(root.join(path), format!("{content} // changed"))?;
+        let mut cache = super::SourceBindingCache::new(root, &nodes, None);
+        require(
+            cache.capture(path, &control).is_err(),
+            "changed captured hash admitted",
+        )?;
+        require_eq(
+            &store.repository_graph_generation()?,
+            &Some(base),
+            "failed capture preserved publication",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn source_recovery_follows_the_consumed_import_and_export_contract() {
+        for language in ["rust", "python", "javascript", "typescript", "tsx"] {
+            let mut graph = function_graph("declarations", 1);
+            graph.language = Some(language.to_string());
+            graph.relations.clear();
+            assert_eq!(
+                super::graph_requires_source_bindings(&graph),
+                matches!(language, "javascript" | "typescript" | "tsx"),
+                "{language}: exports need source roles only for ECMAScript"
+            );
+            graph.symbols[0].exported = false;
+            assert!(
+                !super::graph_requires_source_bindings(&graph),
+                "{language}: unexported declarations need no missing export evidence"
+            );
+            graph.relations.push(SymbolRelation {
+                path: graph.path.clone(),
+                source_name: "<module>".to_string(),
+                target_name: "module".to_string(),
+                kind: RelationKind::Imports,
+                line: 1,
+                context: String::new(),
+                parser: ParserKind::TreeSitter,
+            });
+            assert!(super::graph_requires_source_bindings(&graph), "{language}");
+            graph.relations[0].kind = RelationKind::Calls;
+            assert!(super::graph_requires_source_bindings(&graph), "{language}");
+            graph.relations.clear();
+            graph.symbols.clear();
+            assert!(
+                !super::graph_requires_source_bindings(&graph),
+                "{language}: empty graph needs no export proof"
+            );
+        }
     }
 
     fn empty_symbol_build_stage() -> SymbolBuildStage {

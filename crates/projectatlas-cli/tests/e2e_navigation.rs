@@ -11326,7 +11326,7 @@ fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Er
     fs::create_dir_all(repo.join(SOURCE_DIR))?;
     fs::create_dir_all(repo.join("docs"))?;
     fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
-    fs::write(repo.join("src/lib.rs"), "pub fn still_indexed() {}\n")?;
+    fs::write(repo.join(RUST_LIBRARY_PATH), "pub fn still_indexed() {}\n")?;
     fs::write(
         repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n",
@@ -13082,5 +13082,528 @@ fn relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries()
     if AtlasStore::open_read_only(&database)?.index_publication()? != publication {
         return Err(io::Error::other("relation reads mutated publication").into());
     }
+    Ok(())
+}
+
+/// Conventional library path shared by the Rust navigation fixtures.
+const RUST_LIBRARY_PATH: &str = "src/lib.rs";
+/// Worker module used by the Rust binding fixtures.
+const RUST_BINDING_WORKER_PATH: &str = "src/worker.rs";
+/// Source declaration behind Rust forwarding aliases.
+const RUST_BINDING_TARGET_PATH: &str = "src/target.rs";
+/// Intermediate Rust forwarding module edited to repair a cycle.
+const RUST_FORWARDING_MODULE_PATH: &str = "src/b.rs";
+/// Added automatic Cargo test target used to prove membership invalidation.
+const RUST_ADDED_TEST_TARGET_PATH: &str = "tests/two.rs";
+
+/// Run the real command without telemetry and retain its public JSON response.
+fn rust_binding_atlas(root: &Path, args: &[&str]) -> Result<Value, Box<dyn Error>> {
+    let output = Command::new(mcp_contract_executable())
+        .current_dir(root)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json"])
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    Ok(serde_json::from_slice(&output)?)
+}
+
+/// Create only the fixture's project-owned configuration and authored source root.
+fn rust_binding_project(root: &Path, edition: &str) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[package]\nname='binding-proof'\nversion='0.1.0'\nedition='{edition}'\n"),
+    )?;
+    Ok(())
+}
+
+/// Read bounded call outcomes for one exact source declaration.
+fn rust_binding_calls(root: &Path, file: &str, symbol: &str) -> Result<Vec<Value>, Box<dyn Error>> {
+    let response = rust_binding_atlas(
+        root,
+        &[
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            file,
+            "--symbol",
+            symbol,
+            "--relation",
+            "calls",
+            "--limit",
+            "30",
+        ],
+    )?;
+    Ok(response
+        .pointer("/symbol_relations/rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("call rows missing"))?
+        .clone())
+}
+
+/// Exact canonical target files and names, independent from result ordering.
+fn rust_binding_targets(rows: &[Value]) -> BTreeSet<(String, String)> {
+    rows.iter()
+        .filter_map(|row| {
+            let symbol = row.pointer("/target/entity/selector/symbol")?;
+            Some((
+                symbol.get("file")?.as_str()?.to_string(),
+                symbol.get("name")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Preserve the honest unresolved state rather than accepting an empty result.
+fn rust_binding_unresolved(rows: &[Value]) {
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|row| row
+            .pointer("/relation/resolution/status")
+            .and_then(Value::as_str)
+            == Some("unresolved")),
+        "{rows:?}"
+    );
+}
+
+/// Report exact actual and expected values through the test's fallible boundary.
+fn rust_binding_equal<T: std::fmt::Debug + PartialEq>(
+    actual: &T,
+    expected: &T,
+) -> Result<(), Box<dyn Error>> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("expected {expected:?}, observed {actual:?}")).into())
+    }
+}
+
+/// Keep fallible test functions free of panicking assertions.
+fn rust_binding_require(condition: bool, detail: &str) -> Result<(), Box<dyn Error>> {
+    if condition {
+        Ok(())
+    } else {
+        Err(io::Error::other(detail.to_string()).into())
+    }
+}
+
+#[test]
+fn rust_root_aliases_follow_manifest_and_module_changes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    let source = "pub fn run() {} fn private_run() {} pub mod run {pub fn child(){}} mod worker; pub mod target; pub use crate::target::work as forwarded; pub mod api {mod hidden {pub fn exposed(){}} pub use self::hidden::exposed as public;}";
+    fs::write(root.join(RUST_LIBRARY_PATH), source)?;
+    fs::write(root.join("src/api.rs"), source)?;
+    fs::write(root.join(RUST_BINDING_TARGET_PATH), "pub fn work() {}")?;
+    fs::write(
+        root.join(RUST_BINDING_WORKER_PATH),
+        "use crate::run as launch; use crate::{run as grouped}; use crate::private_run as local; use crate::forwarded as via; use crate::api::public as visible; fn root_calls(){launch(); grouped(); local();} fn namespace(){launch::child();} fn forwarded(){via();} fn public_alias(){visible();} fn shadow(launch:fn()){launch();}",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    for file in ["src/lib.rs", "src/api.rs"] {
+        if file == "src/api.rs" {
+            let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("{manifest}\n[lib]\npath='src/api.rs'\n"),
+            )?;
+            rust_binding_atlas(root, &["watch", "--once"])?;
+        }
+        let db = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+        assert_summary_called_by(root, &db, file, "run", "src/worker.rs::root_calls")?;
+        assert_summary_called_by(
+            root,
+            &db,
+            "src/target.rs",
+            "work",
+            "src/worker.rs::forwarded",
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "root_calls")?)),
+            &([
+                (file.to_string(), "run".to_string()),
+                (file.to_string(), "private_run".to_string()),
+            ]
+            .into()),
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "namespace")?)),
+            &([(file.to_string(), "child".to_string())].into()),
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "public_alias")?)),
+            &([(file.to_string(), "exposed".to_string())].into()),
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "forwarded")?)),
+            &([("src/target.rs".to_string(), "work".to_string())].into()),
+        )?;
+        rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "shadow")?);
+    }
+    rust_binding_require(
+        root.join(RUST_LIBRARY_PATH).is_file(),
+        "Rust CLI contract failed",
+    )?;
+    fs::remove_file(root.join(RUST_BINDING_TARGET_PATH))?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "forwarded")?);
+    fs::write(root.join(RUST_BINDING_TARGET_PATH), "pub fn work() {}")?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "forwarded")?)),
+        &([("src/target.rs".to_string(), "work".to_string())].into()),
+    )?;
+    let noop = rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &(noop.pointer("/last_symbols/parsed").and_then(Value::as_u64)),
+        &(Some(0)),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn rust_namespace_aliases_keep_values_types_and_toolchain_identity() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        "mod worker; mod namespace {pub fn run(){}} fn tool(){} use crate::tool as namespace; fn module_and_value(){namespace::run(); namespace();} fn value(){} mod onlymodule {} use crate::onlymodule as value; fn inverse(){value();} pub use std::mem as memory; pub use std::mem::drop as discard; pub struct Service; impl Service {pub fn work(){}} pub struct Public(pub u8); pub mod types {pub struct Private(u8); pub struct Exposed(pub u8);} mod m {pub struct Foo {} impl Foo {pub fn bar(){}}} fn foo(){} use crate::m::Foo; use crate::foo as Foo; fn split_imports(){Foo::bar(); Foo();} fn local_imports(){use crate::m::Foo; use crate::foo as Foo; Foo::bar(); Foo();} fn local_duplicates(){use crate::foo as Alias; use crate::tool as Alias; Alias();} fn local_shadow(){use crate::m::Foo; use crate::foo as Foo; let Foo = || {}; Foo();} fn local_declaration(){use crate::m::Foo; fn Foo(){} Foo(); Foo::bar();} pub struct T; impl T {pub fn work(){}} fn local_impl(){struct T; impl T {pub fn work(_value: bool){}}} fn actual_owner(){crate::T::work();}",
+    )?;
+    fs::write(
+        root.join(RUST_BINDING_WORKER_PATH),
+        "use crate::Service; use crate::memory as ns; use crate::discard as dispose; use ::std::mem::drop as absolute; use crate::Public; use crate::types::{Private,Exposed}; fn external(){dispose(1); ns::drop(1); absolute(1); ::std::mem::drop(1);} fn associated(){Service::work();} fn constructors(){Public(1); Private(1); Exposed(1);}",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "module_and_value")?)),
+        &([
+            ("src/lib.rs".to_string(), "run".to_string()),
+            ("src/lib.rs".to_string(), "tool".to_string()),
+        ]
+        .into()),
+    )?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "inverse")?)),
+        &([("src/lib.rs".to_string(), "value".to_string())].into()),
+    )?;
+    rust_binding_equal(
+        &rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "split_imports")?),
+        &[
+            ("src/lib.rs".to_string(), "bar".to_string()),
+            ("src/lib.rs".to_string(), "foo".to_string()),
+        ]
+        .into(),
+    )?;
+    rust_binding_equal(
+        &rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "local_imports")?),
+        &[
+            ("src/lib.rs".to_string(), "bar".to_string()),
+            ("src/lib.rs".to_string(), "foo".to_string()),
+        ]
+        .into(),
+    )?;
+    let duplicates = rust_binding_calls(root, "src/lib.rs", "local_duplicates")?;
+    rust_binding_require(
+        !duplicates.is_empty()
+            && duplicates.iter().all(|row| {
+                row.pointer("/relation/resolution/status")
+                    .and_then(Value::as_str)
+                    == Some("ambiguous")
+            }),
+        "local same-value import candidates lost ambiguity",
+    )?;
+    rust_binding_unresolved(&rust_binding_calls(root, "src/lib.rs", "local_shadow")?);
+    rust_binding_equal(
+        &rust_binding_targets(&rust_binding_calls(
+            root,
+            "src/lib.rs",
+            "local_declaration",
+        )?),
+        &[
+            ("src/lib.rs".to_string(), "bar".to_string()),
+            ("src/lib.rs".to_string(), "Foo".to_string()),
+        ]
+        .into(),
+    )?;
+    let actual_owner = rust_binding_calls(root, "src/lib.rs", "actual_owner")?;
+    rust_binding_equal(
+        &rust_binding_targets(&actual_owner),
+        &[("src/lib.rs".to_string(), "work".to_string())].into(),
+    )?;
+    rust_binding_require(
+        actual_owner.iter().all(|row| {
+            row.pointer("/target/entity/selector/symbol/parent")
+                .and_then(Value::as_str)
+                == Some("T")
+        }),
+        "associated method lost its actual nominal owner",
+    )?;
+    let external = rust_binding_calls(root, "src/worker.rs", "external")?;
+    rust_binding_require(!external.is_empty(), "Rust CLI contract failed")?;
+    rust_binding_require(
+        external.iter().all(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("external")
+                && row
+                    .pointer("/target/entity/selector/external/identity")
+                    .and_then(Value::as_str)
+                    == Some("std::mem::drop")
+        }),
+        &format!("{external:?}"),
+    )?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "associated")?)),
+        &([("src/lib.rs".to_string(), "work".to_string())].into()),
+    )?;
+    let constructors = rust_binding_calls(root, "src/worker.rs", "constructors")?;
+    rust_binding_equal(
+        &(rust_binding_targets(&constructors)),
+        &([
+            ("src/lib.rs".to_string(), "Public".to_string()),
+            ("src/lib.rs".to_string(), "Exposed".to_string()),
+        ]
+        .into()),
+    )?;
+    rust_binding_require(
+        constructors.iter().any(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("unresolved")
+        }),
+        "Rust CLI contract failed",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn rust_absolute_and_bare_use_paths_follow_the_owning_edition() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2015")?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        "mod std {pub mod mem {pub fn drop(_v:u8){}}} mod foo {pub fn run(){}} mod nested {use foo::run as launch; use ::std::mem::drop as absolute; pub fn caller(){launch(); absolute(1); ::std::mem::drop(1);}}",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "caller")?)),
+        &([
+            ("src/lib.rs".to_string(), "run".to_string()),
+            ("src/lib.rs".to_string(), "drop".to_string()),
+        ]
+        .into()),
+    )?;
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    fs::write(root.join("Cargo.toml"), manifest.replace("2015", "2024"))?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    let rows = rust_binding_calls(root, "src/lib.rs", "caller")?;
+    rust_binding_require(rust_binding_targets(&rows).is_empty(), &format!("{rows:?}"))?;
+    rust_binding_require(
+        rows.iter().any(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("external")
+        }),
+        "Rust CLI contract failed",
+    )?;
+    rust_binding_require(
+        rows.iter().any(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("unresolved")
+        }),
+        "Rust CLI contract failed",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    fs::create_dir_all(root.join("tests/shared"))?;
+    fs::write(root.join("tests/one.rs"), "mod shared; pub fn run(){}")?;
+    fs::write(
+        root.join("tests/shared/mod.rs"),
+        "use crate::run as launch; fn caller(){launch();}",
+    )?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        "mod worker; pub mod a; pub mod b;",
+    )?;
+    fs::write(
+        root.join(RUST_BINDING_WORKER_PATH),
+        "use crate::a::run as cycle; fn caller(){cycle();}",
+    )?;
+    fs::write(root.join("src/a.rs"), "pub use crate::b::run;")?;
+    fs::write(
+        root.join(RUST_FORWARDING_MODULE_PATH),
+        "pub use crate::a::run;",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "tests/shared/mod.rs", "caller")?)),
+        &([("tests/one.rs".to_string(), "run".to_string())].into()),
+    )?;
+    rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "caller")?);
+    fs::write(
+        root.join(RUST_ADDED_TEST_TARGET_PATH),
+        "mod shared; pub fn run(){}",
+    )?;
+    fs::write(root.join(RUST_FORWARDING_MODULE_PATH), "pub fn run(){}")?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_unresolved(&rust_binding_calls(root, "tests/shared/mod.rs", "caller")?);
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "caller")?)),
+        &([("src/b.rs".to_string(), "run".to_string())].into()),
+    )?;
+    fs::remove_file(root.join(RUST_ADDED_TEST_TARGET_PATH))?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "tests/shared/mod.rs", "caller")?)),
+        &([("tests/one.rs".to_string(), "run".to_string())].into()),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild()
+-> Result<(), Box<dyn Error>> {
+    /// Read the deduplicated call edge while retaining each admitted source site.
+    fn occurrences(root: &Path) -> Result<Vec<Value>, Box<dyn Error>> {
+        let response = rust_binding_atlas(
+            root,
+            &[
+                "symbols",
+                "relations",
+                "--view",
+                "detailed",
+                "--file",
+                RUST_LIBRARY_PATH,
+                "--symbol",
+                "caller",
+                "--relation",
+                "calls",
+                "--include-occurrences",
+                "--occurrence-limit",
+                "300",
+                "--occurrence-total-limit",
+                "300",
+                "--output-bytes",
+                "1048576",
+                "--limit",
+                "10",
+            ],
+        )?;
+        let rows = response
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("missing occurrence rows"))?;
+        rust_binding_require(
+            rows.len() == 1,
+            "same-target calls lost logical deduplication",
+        )?;
+        let row = &rows[0];
+        rust_binding_require(
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("resolved")
+                && row
+                    .pointer("/target/entity/selector/symbol/name")
+                    .and_then(Value::as_str)
+                    == Some("target")
+                && row.get("occurrences_truncated").and_then(Value::as_bool) == Some(false),
+            &format!("{row:?}"),
+        )?;
+        Ok(row
+            .get("occurrences")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("missing source occurrences"))?
+            .clone())
+    }
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    let mut source = "pub fn target() {}\n".to_string();
+    for alias in 0..256 {
+        writeln!(source, "use crate::target as alias{alias};")?;
+    }
+    let mut caller = "fn caller(){let _=\"💡π\";target();".to_string();
+    for alias in 0..256 {
+        write!(caller, "alias{alias}();")?;
+    }
+    caller.push_str("}\n");
+    let first_column = caller[..caller
+        .find("target();")
+        .ok_or_else(|| io::Error::other("missing first call fixture"))?]
+        .chars()
+        .count();
+    source.push_str(&caller);
+    fs::write(root.join(RUST_LIBRARY_PATH), &source)?;
+    rust_binding_atlas(root, &["init"])?;
+    let initial = occurrences(root)?;
+    rust_binding_equal(&initial.len(), &257)?;
+    rust_binding_equal(
+        &initial[0]
+            .pointer("/span/start_column")
+            .and_then(Value::as_u64),
+        &Some(first_column as u64),
+    )?;
+    rust_binding_require(
+        initial.windows(2).all(|pair| {
+            pair[0]
+                .pointer("/span/start_column")
+                .and_then(Value::as_u64)
+                < pair[1]
+                    .pointer("/span/start_column")
+                    .and_then(Value::as_u64)
+        }),
+        "distinct same-line sites lost source order",
+    )?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        source.replace("💡π", "💡π追加"),
+    )?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    let incremental = occurrences(root)?;
+    rust_binding_equal(&incremental.len(), &257)?;
+    rust_binding_equal(
+        &incremental[0]
+            .pointer("/span/start_column")
+            .and_then(Value::as_u64),
+        &Some(first_column as u64 + 2),
+    )?;
+    rust_binding_atlas(root, &["symbols", "build"])?;
+    let rebuilt = occurrences(root)?;
+    let spans = |rows: &[Value]| {
+        rows.iter()
+            .map(|row| row.get("span").cloned())
+            .collect::<Vec<_>>()
+    };
+    rust_binding_equal(&spans(&incremental), &spans(&rebuilt))?;
+    let db = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    assert_summary_called_by(root, &db, RUST_LIBRARY_PATH, "target", "src/lib.rs::caller")?;
+    let before_noop = AtlasStore::open_read_only(&db)?.index_publication()?;
+    let noop = rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+        &Some(0),
+    )?;
+    rust_binding_equal(
+        &AtlasStore::open_read_only(&db)?.index_publication()?,
+        &before_noop,
+    )?;
     Ok(())
 }

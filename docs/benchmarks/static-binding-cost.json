@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-28",
+  "source_commit": "6d31ed0",
+  "derivation_contract": 6,
+  "semantic_contract": 6,
+  "baseline_version": "0.5.0",
+  "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
+  "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
+  "candidate_binary_sha256": "62d48ea0371ee76c305e1a287301dd086b30176875215094caa4e6166a23a3c9",
+  "host": {
+    "os": "Linux 7.0.0-38-generic",
+    "cpu": "AMD Ryzen 7 5700U",
+    "architecture": "x86_64"
+  },
+  "protocol": {
+    "fresh_process": true,
+    "fresh_fixture_per_sample": true,
+    "rounds": 3,
+    "paired_order": "baseline/candidate, candidate/baseline, baseline/candidate",
+    "telemetry": false,
+    "peak_rss": "per-process KiB from GNU time",
+    "wall_clock": "Python perf_counter around GNU time child execution",
+    "caches": "ordinary warm filesystem/page caches; not cold disk",
+    "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance"
+  },
+  "cases": {
+    "roots-4": {
+      "fixture_digest": "3c176b522c3ceada470c54767b5802467ecf05b6d84b9cd879125d0208e75286",
+      "authored_files": 262,
+      "authored_bytes": 17525,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.2872506060084561,
+          "peak_rss_kib": 28704,
+          "work": {
+            "candidates": 261,
+            "parsed": 261,
+            "unchanged": 0,
+            "symbols": 777,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.34956889900786337,
+          "peak_rss_kib": 33636,
+          "work": {
+            "candidates": 261,
+            "parsed": 261,
+            "unchanged": 0,
+            "symbols": 777,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "roots-64": {
+      "fixture_digest": "ff6c927263c0d7fce703691a2787fe66f1c5080f2092af6dee0082b1286769c8",
+      "authored_files": 322,
+      "authored_bytes": 22037,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.3297138820053078,
+          "peak_rss_kib": 29564,
+          "work": {
+            "candidates": 321,
+            "parsed": 321,
+            "unchanged": 0,
+            "symbols": 897,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.3934825180040207,
+          "peak_rss_kib": 35348,
+          "work": {
+            "candidates": 321,
+            "parsed": 321,
+            "unchanged": 0,
+            "symbols": 897,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "dense-comment-nested": {
+      "fixture_digest": "5d948180e65addc8bbdc8747325cdc12e14a83a20af502854d1a2262bb26b4e2",
+      "authored_files": 3,
+      "authored_bytes": 294421,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.16935752698918805,
+          "peak_rss_kib": 27780,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 272,
+            "relations": 526
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.16435886500403285,
+          "peak_rss_kib": 29284,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 272,
+            "relations": 526
+          },
+          "noop_parsed": 0
+        }
+      }
+    }
+  },
+  "correctness": {
+    "cargo_root_selected_caller_baseline": "unresolved",
+    "cargo_root_selected_caller_candidate": "resolved to targets/t0/main.rs::run",
+    "dense_candidate_resolved_occurrences": 257,
+    "all_candidate_samples_checked": true,
+    "raw_failed_pre_fix_measurement": "retained separately; excluded from these results",
+    "timing_sample_root_assertion": "resolved status",
+    "exact_target_and_baseline_assertion": "separate post-measurement probe; supplemented by permanent exact-target root E2Es"
+  }
+}
