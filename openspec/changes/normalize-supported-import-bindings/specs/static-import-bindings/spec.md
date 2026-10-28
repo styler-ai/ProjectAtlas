@@ -122,6 +122,11 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** separate functions import the same alias from different modules or a sibling function calls an alias imported only inside another function
 - **THEN** each in-scope call retains its independent binding and the out-of-scope call does not resolve through the unrelated import
 
+#### Scenario: Python directives select actual binding owners
+- **WHEN** Python uses global or nonlocal declarations with assignment, deletion, iteration, context/exception/match captures, imports or nested declarations
+- **THEN** lookup follows the declared module or enclosing function owner, reads before a write retain valid targets, and later or ambiguously timed captured writes cannot fabricate callers
+- **AND** named expressions use their grammar-owned name field and ordinary function-local reservation remains intact, including comprehension bindings and class namespace exclusions
+
 #### Scenario: Root declarations and namespace bindings
 - **WHEN** Rust imports a root function through `use crate::run as launch` or a namespace through an anchored use path
 - **THEN** static declaration and namespace evidence determine the dependency and caller targets without classifying the binding solely from its path length

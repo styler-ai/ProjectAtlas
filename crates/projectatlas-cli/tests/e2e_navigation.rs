@@ -13566,6 +13566,239 @@ fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
 }
 
 #[test]
+fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join("worker.py"),
+        "def run(): pass\ndef safe(): pass\n",
+    )?;
+    for (file, source) in [
+        (
+            "global.py",
+            "def run(): pass\ndef caller():\n global run\n run = run()\n run()\n",
+        ),
+        (
+            "nonlocal.py",
+            "def outer():\n def run(): pass\n def caller():\n  nonlocal run\n  run = run()\n  run()\n",
+        ),
+        (
+            "imported.py",
+            "def caller():\n global launch\n from worker import run as launch\n launch()\n launch = unknown\n launch()\ndef clean():\n from worker import safe\n safe()\n",
+        ),
+    ] {
+        fs::write(root.join(file), source)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for refreshed in [false, true] {
+            if refreshed {
+                fs::write(
+                    root.join("worker.py"),
+                    "def run():\n return 1\ndef safe(): pass\n",
+                )?;
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            }
+            for (file, target_file) in [
+                ("global.py", "global.py"),
+                ("nonlocal.py", "nonlocal.py"),
+                ("imported.py", "worker.py"),
+            ] {
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    root,
+                    &database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--symbol",
+                        "caller",
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ],
+                )?;
+                let text = session.call_tool(
+                    "atlas_symbol_relations",
+                    &json!({
+                        "project_path": root, "view": "detailed", "file": file,
+                        "symbol": "caller", "relation": "calls", "limit": 10,
+                    }),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                for response in [cli, mcp] {
+                    let rows = response
+                        .pointer("/symbol_relations/rows")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| io::Error::other("Python directive caller rows missing"))?;
+                    rust_binding_equal(&rows.len(), &2)?;
+                    rust_binding_equal(
+                        &rust_binding_targets(rows),
+                        &BTreeSet::from([(target_file.to_string(), "run".to_string())]),
+                    )?;
+                    rust_binding_equal(
+                        &rows
+                            .iter()
+                            .filter(|row| {
+                                row.pointer("/relation/resolution/status")
+                                    .and_then(Value::as_str)
+                                    == Some("resolved")
+                            })
+                            .count(),
+                        &1,
+                    )?;
+                }
+                assert_summary_called_by(
+                    root,
+                    &database,
+                    target_file,
+                    "run",
+                    &format!("{file}::caller"),
+                )?;
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path": root, "file": target_file}),
+                )?;
+                let summary: Value = toon_format::decode_default(&text)?;
+                let callers = summary
+                    .pointer("/file_summary/functions")
+                    .and_then(Value::as_array)
+                    .and_then(|functions| {
+                        functions.iter().find(|function| function["name"] == "run")
+                    })
+                    .and_then(|function| function["called_by"].as_array())
+                    .ok_or_else(|| io::Error::other("Python directive summary callers missing"))?;
+                rust_binding_require(
+                    callers
+                        .iter()
+                        .any(|caller| caller == &format!("{file}::caller")),
+                    "MCP omitted Python directive caller",
+                )?;
+            }
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+        }
+        for (suffix, resolved) in [
+            ("def mutate():\n global run\n run = unknown\n", false),
+            ("run = unknown\n", false),
+            ("", true),
+        ] {
+            fs::write(
+                root.join("worker.py"),
+                format!("def run(): pass\ndef safe(): pass\n{suffix}"),
+            )?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuilt in [false, true] {
+                if rebuilt {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                for (caller, expected, expected_rows) in [
+                    (
+                        "caller",
+                        if resolved {
+                            BTreeSet::from([("worker.py".to_string(), "run".to_string())])
+                        } else {
+                            BTreeSet::new()
+                        },
+                        if resolved { 2 } else { 1 },
+                    ),
+                    (
+                        "clean",
+                        BTreeSet::from([("worker.py".to_string(), "safe".to_string())]),
+                        1,
+                    ),
+                ] {
+                    let cli = run_packaged_cli_json(
+                        &executable,
+                        root,
+                        &database,
+                        &[
+                            "symbols",
+                            "relations",
+                            "--view",
+                            "detailed",
+                            "--file",
+                            "imported.py",
+                            "--symbol",
+                            caller,
+                            "--relation",
+                            "calls",
+                            "--limit",
+                            "10",
+                        ],
+                    )?;
+                    let text = session.call_tool(
+                        "atlas_symbol_relations",
+                        &json!({
+                            "project_path": root, "view": "detailed", "file": "imported.py",
+                            "symbol": caller, "relation": "calls", "limit": 10,
+                        }),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    for response in [cli, mcp] {
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| {
+                                io::Error::other("Python export repair caller rows missing")
+                            })?;
+                        rust_binding_equal(&rows.len(), &expected_rows)?;
+                        rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                    }
+                }
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path": root, "file": "worker.py"}),
+                )?;
+                let summary: Value = toon_format::decode_default(&text)?;
+                for (name, caller, present) in [
+                    ("run", "imported.py::caller", resolved),
+                    ("safe", "imported.py::clean", true),
+                ] {
+                    let callers = summary
+                        .pointer("/file_summary/functions")
+                        .and_then(Value::as_array)
+                        .and_then(|functions| {
+                            functions.iter().find(|function| function["name"] == name)
+                        })
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| io::Error::other("Python export repair summary missing"))?;
+                    rust_binding_equal(&callers.iter().any(|value| value == caller), &present)?;
+                }
+            }
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
 fn lexical_capacity_preserves_navigation_and_repairs_after_source_reduction()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;

@@ -6775,10 +6775,28 @@ fn graph_requires_source_bindings(graph: &SymbolGraph) -> bool {
         .and_then(language_capability)
         .is_some_and(|capability| capability.embedded_language.is_some());
     match provider {
-        Some(SemanticProviderOwner::Rust | SemanticProviderOwner::Python) => graph
+        Some(SemanticProviderOwner::Rust) => graph
             .relations
             .iter()
             .any(|relation| relation.kind == RelationKind::Imports),
+        Some(SemanticProviderOwner::Python) => {
+            graph
+                .relations
+                .iter()
+                .any(|relation| relation.kind == RelationKind::Imports)
+                || graph.symbols.iter().any(|symbol| {
+                    symbol.parent.is_none()
+                        && !symbol.name.starts_with('_')
+                        && !matches!(
+                            symbol.kind,
+                            SymbolKind::Import
+                                | SymbolKind::Dependency
+                                | SymbolKind::Package
+                                | SymbolKind::Workspace
+                                | SymbolKind::Heading
+                        )
+                })
+        }
         Some(SemanticProviderOwner::EcmaScript) => {
             graph
                 .relations
@@ -18451,13 +18469,13 @@ function helper() {}
             graph.relations.clear();
             assert_eq!(
                 super::graph_requires_source_bindings(&graph),
-                matches!(language, "javascript" | "typescript" | "tsx"),
-                "{language}: exports need source roles only for ECMAScript"
+                matches!(language, "python" | "javascript" | "typescript" | "tsx"),
+                "{language}: module export authority needs source binding roles"
             );
             graph.symbols[0].exported = false;
             assert!(
-                !super::graph_requires_source_bindings(&graph),
-                "{language}: unexported declarations need no missing export evidence"
+                super::graph_requires_source_bindings(&graph) == (language == "python"),
+                "{language}: Python module exports do not depend on the display exported flag"
             );
             graph.relations.push(SymbolRelation {
                 path: graph.path.clone(),

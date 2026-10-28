@@ -18,7 +18,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 7;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 8;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -882,7 +882,12 @@ pub fn derive_resolution_keys_with_context(
 
     let explicit_export_names = context
         .source_semantics
-        .filter(|_| provider_owner == SemanticProviderOwner::EcmaScript)
+        .filter(|_| {
+            matches!(
+                provider_owner,
+                SemanticProviderOwner::EcmaScript | SemanticProviderOwner::Python
+            )
+        })
         .map(|facts| {
             let mut names = BTreeMap::<usize, Vec<&str>>::new();
             if !facts.exports_complete() {
@@ -968,7 +973,7 @@ pub fn derive_resolution_keys_with_context(
                         .iter()
                         .map(|name| std::borrow::Cow::Borrowed(*name))
                         .collect::<Vec<_>>(),
-                    None => vec![if explicit_export_names.is_some() {
+                    None => vec![if provider_owner == SemanticProviderOwner::EcmaScript {
                         semantic::ecmascript_identifier_value(&symbol.name).map_or(
                             std::borrow::Cow::Borrowed(symbol.name.as_str()),
                             std::borrow::Cow::Owned,
@@ -2085,6 +2090,51 @@ mod tests {
     }
 
     #[test]
+    fn python_rebound_module_names_withhold_only_their_export_keys() -> Result<(), Box<dyn Error>> {
+        let project = project_id(93)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        for (suffix, rebound) in [
+            ("def mutate():\n global run\n run = unknown\n", true),
+            ("run = unknown\n", true),
+            (
+                "def invalid():\n run()\n global run\n run = unknown\n",
+                false,
+            ),
+        ] {
+            let source =
+                format!("def run(): pass\ndef safe(): pass\ndef _private(): pass\n{suffix}");
+            let extracted = crate::extract_symbol_graph_with_semantics_controlled(
+                "worker.py",
+                Some("python"),
+                &source,
+                &control,
+            )?;
+            let keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                extracted.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(extracted.semantics()),
+            )?;
+            require(
+                symbol_keys(extracted.graph(), &keys, "run").is_empty() == rebound,
+                "Python export authority disagreed with valid writer evidence",
+            )?;
+            require(
+                symbol_keys(extracted.graph(), &keys, "_private").is_empty(),
+                "source export roles exposed a private Python declaration",
+            )?;
+            require(
+                !symbol_keys(extracted.graph(), &keys, "safe").is_empty(),
+                "unrelated Python export lost its callable keys",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn type_and_ordinary_value_exports_do_not_supply_callable_keys() -> Result<(), Box<dyn Error>> {
         let project = project_id(90)?;
         let control = projectatlas_core::IndexWorkControl::new(
@@ -2386,7 +2436,7 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 7);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 8);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());

@@ -41,6 +41,8 @@ enum BindingTarget {
         /// Actual declarations in that same scope, without unknown blockers.
         declarations: Arc<[usize]>,
     },
+    /// Python global/nonlocal lookup redirects to its actual enclosing environment.
+    PythonOwner(usize),
     /// A value whose runtime callable identity is unknown.
     Shadow,
     /// Competing binding categories do not establish one static meaning.
@@ -56,6 +58,17 @@ enum BindingNamespace {
     Namespace,
     /// Java implicit methods, separate from expression values.
     Method,
+}
+
+/// Python directives select an environment rather than declaring a local value.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PythonDirective {
+    /// The selected module environment, skipping enclosing function locals.
+    Global,
+    /// The nearest actual enclosing function binding, skipping class namespaces.
+    Nonlocal,
+    /// Conflicting directives cannot establish a valid binding owner.
+    Invalid,
 }
 
 /// A binding's visibility point and its pre-initialization shadow policy.
@@ -77,6 +90,10 @@ struct NameBindings {
     stable_tail: usize,
     /// A nested callable can write this captured binding at an unknown runtime phase.
     runtime_mutated: bool,
+    /// A sole Python directive writer may read its prior value before its own write.
+    python_writer: Option<usize>,
+    /// An annotation declares a local but cannot be combined with a scope directive.
+    python_annotated: bool,
 }
 
 impl NameBindings {
@@ -119,6 +136,7 @@ impl NameBindings {
                         | BindingTarget::RustNamespaceLookup(_)
                         | BindingTarget::RustValueLookup(_)
                         | BindingTarget::Declarations(_)
+                        | BindingTarget::PythonOwner(_)
                         | BindingTarget::Unresolved => only_declarations = false,
                     }
                     if entries.peek().is_none_or(|next| next.from != binding.from) {
@@ -254,6 +272,10 @@ struct Scope {
     owner: Option<usize>,
     /// Names mapped to ordered visibility transitions.
     bindings: BTreeMap<String, NameBindings>,
+    /// Native global/nonlocal declarations and their latest source boundary.
+    python_directives: BTreeMap<String, (PythonDirective, usize)>,
+    /// Earliest value read per name, for Python's use-before-directive early error.
+    python_reads: BTreeMap<String, usize>,
     /// Java method names occupy a separate namespace from expression names.
     methods: BTreeMap<String, NameBindings>,
     /// Rust module names and C++ constructor types are separate from value names.
@@ -302,6 +324,8 @@ struct LexicalCollector<'a> {
     scopes: Vec<Scope>,
     /// Admitted value, method and namespace transitions, including pending writes.
     binding_count: usize,
+    /// Only names actually declared by Python global/nonlocal need read-order evidence.
+    python_directive_names: BTreeSet<String>,
     /// Exhaustion suppresses all binding authority, including earlier decisions.
     incomplete: bool,
     /// ECMAScript writes linked to their actual lexical owner after declarations exist.
@@ -380,6 +404,7 @@ pub(super) fn bind_calls<E>(
             ..Scope::default()
         }],
         binding_count: 0,
+        python_directive_names: BTreeSet::new(),
         incomplete: false,
         mutations: Vec::new(),
         imports: BTreeMap::new(),
@@ -433,7 +458,9 @@ pub(super) fn bind_calls<E>(
             .and_modify(|ordinals| ordinals.insert(index, graph))
             .or_insert(DeclarationOrdinals::Unique(index));
     }
+    collector.collect_python_directive_names(root, check)?;
     collector.visit(root, 0, check)?;
+    collector.link_python_directives(check)?;
     collector.apply_mutations(check)?;
     if collector.incomplete {
         if let Some(rust) = &mut collector.rust {
@@ -619,6 +646,154 @@ pub(super) fn bind_calls<E>(
 }
 
 impl LexicalCollector<'_> {
+    /// Select directive names once from the captured AST, never from literal matches alone.
+    fn collect_python_directive_names<E>(
+        &mut self,
+        root: Node<'_>,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.language != "python"
+            || !(self.content.contains("global") || self.content.contains("nonlocal"))
+        {
+            return Ok(());
+        }
+        let mut cursor = root.walk();
+        loop {
+            check()?;
+            let node = cursor.node();
+            if matches!(node.kind(), "global_statement" | "nonlocal_statement") {
+                let mut owner = node.parent();
+                while let Some(parent) = owner {
+                    check()?;
+                    if matches!(parent.kind(), "function_definition" | "class_definition") {
+                        break;
+                    }
+                    owner = parent.parent();
+                }
+                // Module-global declarations are no-ops and need no local read state.
+                if owner.is_some() {
+                    let mut names = node.walk();
+                    for child in node.named_children(&mut names) {
+                        check()?;
+                        if let Some(name) = self.identifier(child)
+                            && !self.python_directive_names.contains(&name)
+                        {
+                            if !self.admit_binding() {
+                                return Ok(());
+                            }
+                            self.python_directive_names.insert(name);
+                        }
+                    }
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Link directives after all enclosing declarations exist, without another AST walk.
+    fn link_python_directives<E>(
+        &mut self,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        if self.language != "python" {
+            return Ok(());
+        }
+        for scope in 1..self.scopes.len() {
+            for (name, (directive, at)) in std::mem::take(&mut self.scopes[scope].python_directives)
+            {
+                check()?;
+                if self.incomplete {
+                    return Ok(());
+                }
+                let mut owner = None;
+                if directive == PythonDirective::Global {
+                    owner = Some(0);
+                } else if directive == PythonDirective::Nonlocal {
+                    let mut parent = self.scopes[scope].parent;
+                    while let Some(enclosing) = parent {
+                        check()?;
+                        if self.scopes[enclosing].function
+                            && let Some(bindings) = self.scopes[enclosing].bindings.get(&name)
+                        {
+                            // A global declaration blocks nonlocal lookup through this function.
+                            match bindings.transitions.first().map(|binding| &binding.target) {
+                                Some(BindingTarget::PythonOwner(0)) => break,
+                                Some(BindingTarget::PythonOwner(target)) => {
+                                    owner = Some(*target);
+                                    break;
+                                }
+                                Some(_) => {
+                                    owner = Some(enclosing);
+                                    break;
+                                }
+                                None => {}
+                            }
+                        }
+                        parent = self.scopes[enclosing].parent;
+                    }
+                }
+                let names = &mut self.scopes[scope].bindings;
+                let writes = names
+                    .get(&name)
+                    .is_some_and(|bindings| !bindings.transitions.is_empty());
+                let invalid = names.get(&name).is_some_and(|bindings| {
+                    bindings.python_annotated
+                        || bindings.transitions.iter().any(|binding| binding.from < at)
+                }) || self.scopes[scope]
+                    .python_reads
+                    .get(&name)
+                    .is_some_and(|read| *read < at);
+                let names = &mut self.scopes[scope].bindings;
+                if let Some(bindings) = names.get_mut(&name) {
+                    bindings.reserves_scope = false;
+                    if invalid || owner.is_none() {
+                        for binding in &mut bindings.transitions {
+                            binding.target = BindingTarget::Unresolved;
+                        }
+                    }
+                }
+                let target = if invalid {
+                    BindingTarget::Unresolved
+                } else {
+                    owner.map_or(BindingTarget::Unresolved, BindingTarget::PythonOwner)
+                };
+                // Insert at the front before finishing, so child directives see the owner.
+                if !self.admit_binding() {
+                    return Ok(());
+                }
+                self.scopes[scope]
+                    .bindings
+                    .entry(name.clone())
+                    .or_default()
+                    .transitions
+                    .insert(0, Binding { from: 0, target });
+                if !invalid
+                    && writes
+                    && let Some(owner) = owner
+                {
+                    if !self.scopes[owner].bindings.contains_key(&name) && !self.admit_binding() {
+                        return Ok(());
+                    }
+                    let binding = self.scopes[owner].bindings.entry(name).or_default();
+                    binding.python_writer = if binding.runtime_mutated {
+                        binding.python_writer.filter(|writer| *writer == scope)
+                    } else {
+                        Some(scope)
+                    };
+                    binding.runtime_mutated = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Charge either a retained transition or a pending write before inserting it.
     fn admit_binding(&mut self) -> bool {
         if self.incomplete || self.binding_count >= MAX_LEXICAL_BINDINGS {
@@ -874,6 +1049,50 @@ impl LexicalCollector<'_> {
         if self.incomplete {
             return Ok(());
         }
+        if self.language == "python"
+            && matches!(node.kind(), "global_statement" | "nonlocal_statement")
+        {
+            if scope == 0 {
+                return Ok(());
+            }
+            let directive = if node.kind() == "global_statement" {
+                PythonDirective::Global
+            } else {
+                PythonDirective::Nonlocal
+            };
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                check()?;
+                if let Some(name) = self.identifier(child) {
+                    if let Some((existing, at)) =
+                        self.scopes[scope].python_directives.get_mut(&name)
+                    {
+                        if *existing != directive {
+                            *existing = PythonDirective::Invalid;
+                        }
+                        *at = (*at).max(node.end_byte());
+                    } else if self.admit_binding() {
+                        self.scopes[scope]
+                            .python_directives
+                            .insert(name, (directive, node.end_byte()));
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if self.language == "python"
+            && !self.python_directive_names.is_empty()
+            && node.kind() == "identifier"
+            && let Some(name) = self.identifier(node)
+            && self.python_directive_names.contains(&name)
+            && python_identifier_is_read(node)
+            && !self.scopes[scope].python_reads.contains_key(&name)
+            && self.admit_binding()
+        {
+            self.scopes[scope]
+                .python_reads
+                .insert(name, node.start_byte());
+        }
         if self.ecmascript() && scope == 0 && node.kind() == "export_statement" {
             self.direct_export(node, check)?;
         }
@@ -1005,6 +1224,17 @@ impl LexicalCollector<'_> {
             .flatten()
         });
         if let Some(symbol) = declaration {
+            if self.language == "python"
+                && scope == 0
+                && !self.graph.symbols[symbol].name.starts_with('_')
+            {
+                self.export_slot(
+                    self.graph.symbols[symbol].name.clone(),
+                    node,
+                    crate::SourceExportBinding::LocalDeclaration(symbol),
+                    crate::SourceExportNamespace::Value,
+                );
+            }
             let fact = &self.graph.symbols[symbol];
             if self.language == "java" && fact.kind == SymbolKind::Method {
                 self.bind_in(
@@ -1906,10 +2136,7 @@ impl LexicalCollector<'_> {
         }
         let field = match (self.language, node.kind()) {
             ("rust", "let_declaration" | "match_arm") => Some("pattern"),
-            (
-                "python",
-                "assignment" | "augmented_assignment" | "named_expression" | "for_statement",
-            )
+            ("python", "assignment" | "augmented_assignment" | "for_statement")
             | ("go", "short_var_declaration")
             | ("cpp", "lambda_capture_initializer")
             | ("csharp" | "c_sharp", "foreach_statement") => Some("left"),
@@ -1924,7 +2151,8 @@ impl LexicalCollector<'_> {
                 "declaration_pattern" | "var_pattern" | "recursive_pattern" | "catch_declaration",
             )
             | ("zig", "variable_declaration")
-            | ("rust", "const_item" | "static_item" | "const_parameter") => Some("name"),
+            | ("rust", "const_item" | "static_item" | "const_parameter")
+            | ("python", "named_expression") => Some("name"),
             ("c" | "cpp" | "objective-c", "declaration" | "init_declarator")
             | ("cpp", "for_range_loop") => Some("declarator"),
             ("go", "range_clause" | "receive_statement") => {
@@ -1995,6 +2223,21 @@ impl LexicalCollector<'_> {
                 }
             }
             scope = self.function_scope(scope);
+        }
+        if python && node.kind() == "assignment" && node.child_by_field_name("type").is_some() {
+            if let Some(name) = self.binding_name(pattern) {
+                if !self.admit_binding() {
+                    return Ok(());
+                }
+                let reserves = self.scopes[scope].function;
+                let binding = self.scopes[scope].bindings.entry(name).or_default();
+                binding.python_annotated = true;
+                binding.reserves_scope |= reserves;
+            }
+            // A bare annotation does not write a value or replace an existing callable.
+            if node.child_by_field_name("right").is_none() {
+                return Ok(());
+            }
         }
         if self.ecmascript()
             && let Some(parent) = node.parent()
@@ -2213,12 +2456,12 @@ impl LexicalCollector<'_> {
                 && let Some(name) = self.identifier(child)
                 && name != "_"
             {
-                self.bind(scope, name, 0, true, BindingTarget::Shadow);
+                self.bind(scope, name, node.end_byte(), true, BindingTarget::Shadow);
             }
             return Ok(());
         }
         if let Some(alias) = node.child_by_field_name("alias") {
-            self.pattern_names(alias, scope, 0, true, check)?;
+            self.pattern_names(alias, scope, node.end_byte(), true, check)?;
         }
         if !matches!(
             node.kind(),
@@ -2578,6 +2821,7 @@ impl LexicalCollector<'_> {
                         crate::SourceExportBinding::ReExport,
                     ),
                 BindingTarget::Shadow
+                | BindingTarget::PythonOwner(_)
                 | BindingTarget::RustModule(_)
                 | BindingTarget::RustNamespaceLookup(_)
                 | BindingTarget::RustValueLookup(_)
@@ -2815,7 +3059,8 @@ impl LexicalCollector<'_> {
         let mut current = Some(site.scope);
         let mut offset = site.offset;
         let mut deferred = false;
-        while let Some(scope) = current {
+        let mut python_writer = None;
+        'lookup: while let Some(scope) = current {
             check()?;
             let bindings = if site.method_name {
                 self.scopes[scope].methods.get(name)
@@ -2828,7 +3073,9 @@ impl LexicalCollector<'_> {
                 .then(|| self.scopes[scope].namespaces.get(name))
                 .flatten();
             for bindings in bindings.into_iter().chain(constructor) {
-                if bindings.runtime_mutated {
+                if bindings.runtime_mutated
+                    && (python_writer.is_none() || python_writer != bindings.python_writer)
+                {
                     return Ok(SourceCallBinding::Unresolved);
                 }
                 let mut end = bindings
@@ -2846,6 +3093,14 @@ impl LexicalCollector<'_> {
                     }
                 } else {
                     let target = &bindings.transitions[end - 1].target;
+                    if let BindingTarget::PythonOwner(owner) = target {
+                        python_writer = Some(scope);
+                        let floor = self.scopes[scope].enclosing_visibility_floor;
+                        offset = offset.max(floor);
+                        deferred |= floor != 0;
+                        current = Some(*owner);
+                        continue 'lookup;
+                    }
                     if self.language == "cpp"
                         && let Some((first, last)) = self.cpp_value_visibility(target)
                     {
@@ -2911,6 +3166,7 @@ impl LexicalCollector<'_> {
                         BindingTarget::Shadow => SourceCallBinding::Shadowed,
                         BindingTarget::Declaration(_)
                         | BindingTarget::Declarations(_)
+                        | BindingTarget::PythonOwner(_)
                         | BindingTarget::RustModule(_)
                         | BindingTarget::RustNamespaceLookup(_)
                         | BindingTarget::RustValueLookup(_)
@@ -2962,6 +3218,70 @@ impl LexicalCollector<'_> {
 fn call_target(node: Node<'_>) -> Option<Node<'_>> {
     node.child_by_field_name("function")
         .or_else(|| crate::first_named_child(node))
+}
+
+/// Identify Python value reads without treating parameter/import/member labels as uses.
+/// Native traversal already bounds ancestry depth; this never parses source again.
+fn python_identifier_is_read(mut node: Node<'_>) -> bool {
+    let mut qualified_pattern = false;
+    while let Some(parent) = node.parent() {
+        let field_is = |field| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|child| child.id() == node.id())
+        };
+        match parent.kind() {
+            "global_statement"
+            | "nonlocal_statement"
+            | "import_statement"
+            | "import_from_statement"
+            | "aliased_import"
+            | "parameters"
+            | "lambda_parameters"
+            | "type" => return false,
+            "function_definition"
+            | "class_definition"
+            | "keyword_argument"
+            | "named_expression"
+                if field_is("name") =>
+            {
+                return false;
+            }
+            "attribute" => return !field_is("attribute"),
+            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause"
+                if field_is("left") =>
+            {
+                return false;
+            }
+            "default_parameter" | "typed_default_parameter" if field_is("value") => return true,
+            "as_pattern" if field_is("alias") => return false,
+            "class_pattern" => {
+                return parent
+                    .named_child(0)
+                    .is_some_and(|child| child.id() == node.id());
+            }
+            "keyword_pattern"
+                if parent
+                    .named_child(0)
+                    .is_some_and(|child| child.id() == node.id()) =>
+            {
+                return false;
+            }
+            "case_pattern" => return qualified_pattern,
+            "dotted_name" => {
+                let mut cursor = parent.walk();
+                let mut names = parent.named_children(&mut cursor);
+                if names.next().is_some_and(|first| first.id() != node.id()) {
+                    return false;
+                }
+                qualified_pattern |= names.next().is_some();
+            }
+            "block" | "module" => return true,
+            _ => {}
+        }
+        node = parent;
+    }
+    true
 }
 
 /// Direct IIFEs execute at their source position, including transparent syntax wrappers.
@@ -4401,6 +4721,371 @@ function caller() { renamed(); tools.work(); }
                 "{content}"
             );
         }
+    }
+
+    #[test]
+    fn python_scope_directives_preserve_read_before_write_owners() {
+        for statement in [
+            "run = run()\nrun()",
+            "run += run()\nrun()",
+            "for run in run():\n run()",
+            "with run() as run:\n run()",
+            "run()\ndel run\nrun()",
+            "try:\n run()\nexcept Exception as run:\n run()",
+            "(run := run())\nrun()",
+            "run()\nmatch value:\n case run:\n  run()",
+            "[(run := run()) for _ in [1]]\nrun()",
+        ] {
+            for (header, indent, directive) in [
+                ("def run(): pass\ndef caller():\n", " ", "global"),
+                (
+                    "def outer():\n def run(): pass\n def caller():\n",
+                    "  ",
+                    "nonlocal",
+                ),
+            ] {
+                let content = format!(
+                    "{header}{indent}{directive} run\n{indent}{}\n",
+                    statement.replace('\n', &format!("\n{indent}"))
+                );
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    "main.py",
+                    Some("python"),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{extracted:?}");
+                let Ok(extracted) = extracted else {
+                    return;
+                };
+                let (_, graph, facts) = extracted.into_parts();
+                let calls = facts
+                    .calls
+                    .iter()
+                    .filter(|call| graph.relations[call.relation].target_name == "run")
+                    .collect::<Vec<_>>();
+                assert_eq!(calls.len(), 2, "{content}: {:?}", facts.calls);
+                assert!(
+                    matches!(calls[0].binding, SourceCallBinding::LocalDeclaration(_)),
+                    "{content}: {:?}",
+                    facts.calls
+                );
+                if let SourceCallBinding::LocalDeclaration(target) = calls[0].binding {
+                    assert_eq!(graph.symbols[target].name, "run");
+                }
+                assert!(
+                    matches!(
+                        calls[1].binding,
+                        SourceCallBinding::Shadowed | SourceCallBinding::Unresolved
+                    ),
+                    "{content}: {:?}",
+                    facts.calls
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn python_directives_keep_actual_owners_and_captured_writes_conservative() {
+        for (content, expected_lines) in [
+            (
+                "def run(): pass\ndef invalid():\n run()\n global run\n run = unknown\ndef valid(): run()\n",
+                vec![None, Some(1)],
+            ),
+            (
+                "def outer():\n def run(): pass\n def invalid():\n  run()\n  nonlocal run\n  run = unknown\n def valid(): run()\n",
+                vec![None, Some(2)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n def nested(value: run): pass\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n def nested(value: run = 1): pass\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n def nested() -> run(): pass\n global run\n run()\n",
+                vec![Some(1), Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n value: run\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n def nested(run): pass\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n from worker import run as other\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n value = obj.run\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n other(run=1)\n global run\n run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def run(): pass\ndef outer():\n def run(): pass\n def caller():\n  global run\n  run()\n",
+                vec![Some(1)],
+            ),
+            (
+                "def outer():\n def run(): pass\n def middle():\n  global run\n  def caller():\n   nonlocal run\n   run()\n",
+                vec![None],
+            ),
+            (
+                "def outer():\n def caller():\n  nonlocal run\n  run()\n def run(): pass\n",
+                vec![Some(5)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n global run\n from worker import run\n run()\n",
+                vec![None],
+            ),
+            (
+                "def run(): pass\ndef mutate():\n global run\n run = unknown\ndef caller(): run()\n",
+                vec![None],
+            ),
+            (
+                "def outer():\n def run(): pass\n def mutate():\n  nonlocal run\n  run = unknown\n def caller(): run()\n",
+                vec![None],
+            ),
+            (
+                "def run(): pass\ndef first():\n global run\n run = unknown\ndef second():\n global run\n run = run()\n",
+                vec![None],
+            ),
+            (
+                "def run(): pass\ndef caller():\n global run\n def later(): return run()\n run = unknown\n",
+                vec![None],
+            ),
+            (
+                "def run(): pass\ndef caller():\n (run := run())\n run()\n",
+                vec![None, None],
+            ),
+            (
+                "def run(): pass\nclass Api:\n global run\n run = run()\n run()\n",
+                vec![Some(1), None],
+            ),
+            (
+                "def run(): pass\ndef caller():\n global run\n def run(): pass\n run()\n",
+                vec![Some(4)],
+            ),
+            (
+                "def outer():\n def run(): pass\n def caller():\n  nonlocal run\n  def run(): pass\n  run()\n",
+                vec![Some(5)],
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.py",
+                Some("python"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, graph, facts) = extracted.into_parts();
+            let actual = facts
+                .calls
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .map(|call| match call.binding {
+                    SourceCallBinding::LocalDeclaration(target) => {
+                        Some(graph.symbols[target].line_start)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected_lines, "{content}: {:?}", facts.calls);
+            if content.contains(" from worker import run\n") {
+                assert!(matches!(
+                    facts.calls[0].binding,
+                    SourceCallBinding::Imported { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn python_reads_before_directives_cannot_authorize_calls() {
+        for (prefix, directive) in [
+            ("def run(): pass\ndef caller():\n", "global"),
+            (
+                "def outer():\n def run(): pass\n def caller():\n",
+                "nonlocal",
+            ),
+        ] {
+            let indent = if directive == "global" { " " } else { "  " };
+            let repeated = format!("{directive} run\nrun()");
+            for read in [
+                "run()",
+                "saved = run",
+                "saved = run.value",
+                "def nested(value=run): pass",
+                repeated.as_str(),
+            ] {
+                let content = format!(
+                    "{prefix}{indent}{}\n{indent}{directive} run\n{indent}run()\n",
+                    read.replace('\n', &format!("\n{indent}"))
+                );
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    "main.py",
+                    Some("python"),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{extracted:?}");
+                let Ok(extracted) = extracted else {
+                    return;
+                };
+                let (_, graph, facts) = extracted.into_parts();
+                assert!(
+                    facts
+                        .calls
+                        .iter()
+                        .filter(|call| graph.relations[call.relation].target_name == "run")
+                        .all(|call| matches!(
+                            call.binding,
+                            SourceCallBinding::Unresolved | SourceCallBinding::Shadowed
+                        )),
+                    "{content}: {:?}",
+                    facts.calls
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn python_annotations_preserve_values_and_function_local_reservations() {
+        for (content, expected) in [
+            ("def run(): pass\nrun: object\nrun()\n", vec![Some(1)]),
+            (
+                "def caller():\n def run(): pass\n run: object\n run()\n",
+                vec![Some(2)],
+            ),
+            (
+                "def run(): pass\ndef caller():\n run: object\n run()\n",
+                vec![None],
+            ),
+            (
+                "def run(): pass\ndef caller():\n global run\n run: object\n run()\n",
+                vec![None],
+            ),
+            (
+                "def outer():\n def run(): pass\n def caller():\n  nonlocal run\n  run: object\n  run()\n",
+                vec![None],
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.py",
+                Some("python"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, graph, facts) = extracted.into_parts();
+            let actual = facts
+                .calls
+                .iter()
+                .map(|call| match call.binding {
+                    SourceCallBinding::LocalDeclaration(target) => {
+                        Some(graph.symbols[target].line_start)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{content}: {:?}", facts.calls);
+        }
+    }
+
+    #[test]
+    fn python_files_without_directives_do_not_retain_read_order_state() {
+        use std::fmt::Write as _;
+        for comment in ["", "# global nonlocal in comments are not directives\n"] {
+            let mut content = format!("{comment}def run(): pass\n");
+            for index in 0..=super::MAX_LEXICAL_BINDINGS {
+                assert!(writeln!(content, "value_{index}").is_ok());
+            }
+            content.push_str("run()\n");
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.py",
+                Some("python"),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, _, facts) = extracted.into_parts();
+            assert!(!facts.bindings_incomplete);
+            assert_eq!(facts.calls.len(), 1);
+            assert!(matches!(
+                facts.calls[0].binding,
+                SourceCallBinding::LocalDeclaration(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn python_module_global_directives_do_not_consume_local_binding_state() {
+        use std::fmt::Write as _;
+        let mut content = String::from("def run(): pass\n");
+        for index in 0..=super::MAX_LEXICAL_BINDINGS {
+            assert!(writeln!(content, "global value_{index}").is_ok());
+        }
+        content.push_str("run()\n");
+        let extracted = extract_symbol_graph_with_semantics_controlled(
+            "main.py",
+            Some("python"),
+            &content,
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(extracted.is_ok(), "{extracted:?}");
+        let Ok(extracted) = extracted else {
+            return;
+        };
+        let (_, _, facts) = extracted.into_parts();
+        assert!(!facts.bindings_incomplete);
+        assert_eq!(facts.calls.len(), 1);
+        assert!(matches!(
+            facts.calls[0].binding,
+            SourceCallBinding::LocalDeclaration(_)
+        ));
+    }
+
+    #[test]
+    fn python_directives_share_the_lexical_retention_limit() {
+        use std::fmt::Write as _;
+        let mut content = String::from("def caller():\n");
+        for index in 0..=super::MAX_LEXICAL_BINDINGS {
+            assert!(writeln!(content, " global value_{index}").is_ok());
+        }
+        content.push_str(" run()\n");
+        let extracted = extract_symbol_graph_with_semantics_controlled(
+            "main.py",
+            Some("python"),
+            &content,
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(extracted.is_ok(), "{extracted:?}");
+        let Ok(extracted) = extracted else {
+            return;
+        };
+        let (_, _, facts) = extracted.into_parts();
+        assert!(facts.bindings_incomplete);
+        assert!(
+            facts
+                .calls
+                .iter()
+                .all(|call| matches!(call.binding, SourceCallBinding::Unresolved))
+        );
     }
 
     #[test]

@@ -36,6 +36,33 @@ remain unresolved. Cycles, ambiguity, parser trust and exhausted bounds never
 justify a guessed exact target. Publication failures roll back under the existing
 owner. Source scopes are not reconstructed from display strings at query time.
 
+Python `global` and `nonlocal` select the module or actual enclosing function
+binding instead of reserving a function-local value. Reads before a write can
+retain their earlier declaration or import; later writes and ambiguously timed
+captured mutations cannot establish an exact callable. Assignment expressions,
+iteration, deletion, imports, declarations and context/exception/match captures
+share this owner policy. Directive state counts against the lexical retention
+limit. Read-order state is retained only for actual directive names; comments and
+files without directives do not consume that capacity. Parameter/import/member
+labels and annotation scopes are distinct from ordinary value reads. Bare
+annotations preserve existing values while reserving function-local names.
+Class namespaces do not become closure cells; an intervening function's global
+declaration blocks nonlocal lookup. This adds no Python execution or control-flow
+inference.
+
+The directive-name catalogue is shared by the file. Same-name reads in unrelated
+scopes can also consume its bounded read-marker capacity; very dense files can
+therefore lose exact binding proof conservatively while retaining raw navigation.
+This is covered by the lexical limit rather than a claim of full Python execution
+or compiler validation.
+
+The same source-owned export evidence withholds callable keys for module names
+that have been rebound, including writes through valid global directives. Importers
+and canonical caller summaries follow that result while unrelated public exports
+remain available. Recover required public declaration-only Python sources once
+from the captured inventory before projecting their export keys; the existing
+cache, remapping, cancellation and resource accounting remain authoritative.
+
 Captured call and import byte ranges also own persisted source occurrences.
 After lexical refinement and host remapping, one bounded traversal maps requested
 boundaries against original source lines and Unicode-scalar columns. Projection

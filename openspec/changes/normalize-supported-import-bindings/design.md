@@ -79,6 +79,30 @@ writes link to actual lexical owners after declaration collection; captured writ
 with unknown execution timing invalidate both caller and exported-value authority.
 No execution or general control-flow analysis is introduced.
 
+Python global/nonlocal names are selected once from the same AST under the shared
+binding limit; a cheap source-keyword prefilter only skips that cooperative cursor
+pass and never authorizes a directive. Retain read-order markers only for actual
+directive names, so files without directives consume no read-marker capacity.
+Link directive owners after enclosing declarations exist. A typed owner redirect
+preserves current-scope evaluation order without reserving a false function local.
+Actual enclosing mutation invalidates unrelated/deferred readers; one directive
+writer may still read its own prior value before its write. Multiple writers stay
+conservative. Nonlocal lookup skips class environments and stops at an intervening
+function's global declaration. Prior value reads invalidate an illegal late
+directive, while annotation scopes and parameter/import/member labels do not.
+Bare annotations reserve function locals without overwriting existing values;
+annotating the directive's own name is invalid and cannot authorize calls.
+Named-expression and match-capture transitions use their grammar-owned target and
+actual binding position. This is bounded lexical evidence, not execution analysis.
+
+The same source-owned module export facts withhold Python callable keys for
+rebound declarations, including valid global writers and ordinary module writes.
+Keep unrelated public exports and the existing private-name policy intact. Reuse
+the existing unresolved-declaration marker, remapping and budget owners. Public
+Python declaration-only graphs therefore need captured-source recovery when their
+export evidence is consumed; cache each required source once and retain actual
+parse/work accounting. This does not add Python runtime re-export inference.
+
 Bound native traversal depth at 256 before recursive refinement. Bound retained
 lexical environments and binding transitions/pending writes across all namespaces independently at 16,384
 per file, since empty blocks and un-emitted locals need not consume symbol or
@@ -86,8 +110,9 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 7/7 repairs the preceding private
-6/6 source without changing schema, wire shapes or authored state.
+or per-call timeline scan is admitted. Contract 8/8 additionally repairs Python
+directive ownership in unchanged private7/7 indexes, retaining earlier6/6 repair
+without changing schema, wire shapes or authored state.
 
 Rust qualified paths use the type/module namespace independently of local values.
 Register imported paths and module/type declarations in that environment; type

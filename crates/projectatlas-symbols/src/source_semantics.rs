@@ -93,12 +93,12 @@ pub struct SourceImportFact {
     pub rust_toolchain: Option<Box<ImportReference>>,
 }
 
-/// Static declaration or forwarding source of one explicit module export slot.
+/// Static declaration or forwarding source of one source-owned module export slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceExportBinding {
     /// Export syntax exists but does not prove a declaration or forwarding target.
     Unresolved,
-    /// An explicit declaration in the exporting source owns this slot.
+    /// A declaration in the exporting source owns this slot.
     LocalDeclaration(usize),
     /// Indistinguishable declaration metadata cannot establish one export target.
     AmbiguousDeclarations(Arc<[usize]>),
@@ -123,13 +123,16 @@ pub enum SourceExportNamespace {
 }
 
 /// One parser-owned exported name without a synthesized declaration.
+///
+/// Includes Python's public module declarations, whose lexical writes can
+/// withdraw export authority without changing the declaration's display metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceExportFact {
     /// Namespace governing competing slots and callable-target eligibility.
     pub namespace: SourceExportNamespace,
     /// Cooked exported slot, including the explicit default slot.
     pub name: String,
-    /// Exact original source extent of the export syntax.
+    /// Exact original source extent of the export or its owning declaration.
     pub span: SourceByteSpan,
     /// One-based start line for identity-admission diagnostics.
     pub line: usize,

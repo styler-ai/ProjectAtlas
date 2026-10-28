@@ -1,5 +1,49 @@
 # Active context
 
+## Current Python directive and export correction (2026-10-28)
+
+The milestone audit is complete: native715 children/blockers exactly708/718/721/
+722/731/732/738, milestone37 v0.5.1-00 targetsRC1first, owner715hasnoparent.
+738 isready/mapped/planreviewapproved, strict/planned4/4/1PASS; codefixstillpending
+inissue738. 715currentsecurity/reviewassessment explicitlybelongs existingtask2.2;
+releaseplanLunaapproved, strict/planned6/6/1PASS. No scannerlead blindly dismissed.
+
+Current731 publicHEAD remainscbc9161; mandatorynative/hostedfourplatformgatePASS
+for that source. Latestautomatedfinding4397898914 exposed global/nonlocal false
+functionlocal reservations. Primary corrected sharedPythonowner/read/write/export
+paths; currentdirty derivation8/semantic8 replacesprivate7/7. Actualold7negative
+nativefixturesreproduce5cases (global/nonlocalRHS, module/globalexportwrite and
+bareannotation). New8nativeupgrade proof andfinalLunareview areinprogress.
+
+Use nativeASTdirectivecatalog once, relevant-name readmarkers only; allmetadata
+charges16ksharedadmission. No-directive/read-only/commentkeyword positive and
+actualdirectivecapacitynegativePASS. Directiveslinkactualmodule/enclosingfunction,
+nonlocal stopsatinterveningglobal, invalidscopesdonotmutaterealowners. Value reads
+beforelate directiveinvalidateproof; annotations andparameter/import/member labels
+remainpositive. Bareannotationsreservelocalswithoutoverwritingexistingvalues.
+Reuse SourceExportFacts/UnresolvedDeclarations for publicPythonmoduledeclarations:
+actualmodule/capturedwriteswithholdonlyaffectedexportkeys; private/unrelatedexports
+staycorrect. Declaration-only recovery predicate nowcoversconsumedPythonexports.
+No newparser/schema/publicwire orquery-timeparse.
+
+Currentproof: all388symboltestsPASS/1existingignored; expanded18PythonfocusedPASS;
+alltarget/allfeatureClippyPASS; actualpermanentCLI/MCP E2EPASS localdirectives plus
+importedalias/globalworkerwrite→ordinarymodulewrite→restore, unchangedconsumer,
+canonicalsummary/safesibling, fullrebuild, identity/noop. Recoverypredicate1PASS;
+inventory3positive/tamperPASS, count215. Freshdebugbuild/immutable8upgrade proof
+active: session10863, logs /tmp/projectatlas-731-python-directives-*. Native7→8
+stagingrepairunitPASS. Newselectedtest python_directive_calls_agree_across_cli_mcp_and_refresh
+nowin8-selector715handoffpatch (regenerateagainstfinalacceptedcombinedsource).
+
+FinalPython source and duplicate-directive correction Lunaapproved; terminal19
+Pythonfocused andClippyPASS. Task2.4rechecked afterthatproof;2.6/2.7 stillopen
+forcleanoptimized8 upgrade/cost/handoff completion;6/9, allacceptanceunchecked. Do not
+recheckuntilcurrentreview+requiredbehavior/upgrade/cost/handoffproofcomplete.
+Code8source isreadyforcommit; no correctedpushyet. Costreportstillhonestlybindsolderclean1a27268/7;
+remeasurecurrentcleanoptimized8 beforehandoff. Finalcombined738derivationMUSTbe
+strictlynewerthantheaccepted731contract(now8); semantic8retainedfordocument-onlyfix.
+NoRCversion/tag/publication; workcontinuesuntilRC1releasedandverified.
+
 ## Release objective
 
 Continue until v0.5.1-rc1 is published and independently verified. No RC exists yet;
