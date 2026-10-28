@@ -20,6 +20,22 @@ Historical720 protected-dev metadata report remains unplanned; main is integrati
 
 ## Current #731 correction
 
+Current clean production83b937c has immutable optimized10:
+~/.cache/projectatlas-benchmarks/binding-731-83b937c-contract10-20261028/projectatlas.
+Fresh18paired cost samples PASS with no concurrent build/index/bench, exact-root
+postprobePASS. Medians roots4 .281221122->.344702295s/RSS27952->33204KiB; roots64
+.326954193->.393456090/RSS28616->35140; dense .164662759->.163240066/RSS26648->29328.
+Roots20-23%slower/RSS19-23%higher, dense<1%faster/RSS~10%higher; no708SLOwaiver.
+Publicreport now source83b937c10/10 and9installedselectors. Historical8raw retained.
+Actual old8->10 three function/arrow/function-export unchangedfixtures/full/identity/
+ALLapprovedpurposes/noop/rollback PASS; old7->10 all5Pythoncases+rollback PASS.
+Initial bare-var harness compared JSONlists with SQLtuples; fixed normalization and
+explicit old8 reconciliation before fresh snapshots. Not a product defect.
+Tasks2.4/2.5/2.6/2.7 rechecked local/live8/9 after finalproof; final3.1 and all5
+acceptance remainopen. Current scopedIssueOpsPASS9/9/8. SourceLunaapproved, final
+nativepush/currenthosted/readiness stillrequired; no release exists.
+
+
 Latest source additionally fixes malformed initializer recovery, Luna approved.
 Tree-sitter can swallow a following function as an errored initializer, or place
 ERROR '=' after a bare identifier. Shared declarator_has_recovery_error rejects
