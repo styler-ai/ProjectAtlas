@@ -71,6 +71,24 @@ At each call site, select language-valid visible lexical bindings before same-fi
 
 Binding identity also needs static module/declaration evidence: Rust path length alone does not distinguish a root function from a namespace. Preserve root-function aliases and namespace-qualified calls using the same explicit source/module evidence; ambiguous crate/module ownership must not become a guessed target.
 
+Deferred Python/ECMAScript bodies admit a unique later enclosing binding, using a
+precomputed stable suffix of the owning visibility timeline rather than scanning
+future transitions for every call. Immediate calls, direct IIFEs, Python definition
+headers and the first generator iterable retain source order. Pending ECMAScript
+writes link to actual lexical owners after declaration collection; captured writes
+with unknown execution timing invalidate both caller and exported-value authority.
+No execution or general control-flow analysis is introduced.
+
+Bound native traversal depth at 256 before recursive refinement. Bound retained
+lexical environments and binding transitions/pending writes across all namespaces independently at 16,384
+per file, since empty blocks and un-emitted locals need not consume symbol or
+relation capacity. Other correspondence maps remain bounded by admitted facts.
+On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
+and export authority, and allow normal navigation, reduction and refresh repair.
+Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
+or per-call timeline scan is admitted. Contract 7/7 repairs the preceding private
+6/6 source without changing schema, wire shapes or authored state.
+
 Rust qualified paths use the type/module namespace independently of local values.
 Register imported paths and module/type declarations in that environment; type
 parameters block incompatible fallback while value parameters do not. Keep direct

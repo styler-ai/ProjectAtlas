@@ -20,16 +20,54 @@ positive product workflows when handling security findings.
 
 The remaining release issues are #731, #708 and #715 in `v0.5.1-00`.
 #725's zero-source-work warm optimization is user-deferred and unscheduled.
-#731 implementation and local affected proof are complete through task 2.7;
-local/live checklists have eight of nine implementation tasks checked. Task 3.1
-and all five acceptance tasks remain open for final native/hosted verification
-and complete issue review. No #731 PR or hosted source acceptance exists yet.
+#731 public source is PR737, `fix/static-bindings-731`, head `74a18eb`.
+Its mandatory native push gate passed the complete locked workspace, E2E,
+documentation, dependency/source policy and Atlas checks. Hosted Rust passed;
+platform jobs and final acceptance are pending. This is not RC readiness.
 
-The source checkout is `.worktrees/issue-731`. Preserve its original unpublished
-implementation history before preparing a clean same-owner candidate from accepted
-main. Reuse this checkout and its database; a branch change does not require a
-new index. Preserve owned local continuity outside the checkout during clean gates.
-Do not force public history or bypass native push, IssueOps or branch protection.
+Automated review found two reproduced defects: deferred Python/ECMAScript lookup
+missed later enclosing declarations/imports; fact-free blocks retained uncapped
+lexical environments. Local/live tasks 2.4, 2.6 and 2.7 are reopened (5/9 checked),
+with all acceptance tasks unchecked. Primary has uncommitted review fixes in this
+checkout; preserve them. Existing original history remains on
+`fix/import-normalization-731`; public history must not be rewritten or bypass gates.
+
+The fix uses a precomputed stable timeline suffix for deferred bodies, preserves
+immediate/IIFE/header/first-iterable order, and accounts for ECMAScript assignment,
+destructuring and captured writes in both calls and live exports. Native traversal
+is capped at 256 AST levels; environments and binding transitions/pending writes across all namespaces
+have independent 16,384-per-file caps. On exhaustion, retain raw source/facts and
+proven prefix ownership, withdraw binding/export authority and allow normal repair.
+Contracts are now 7/7, repairing the prior private 6/6 candidate too. The focused
+negative tests failed before the fix; 42 lexical tests (within 381 passing symbol tests / one existing ignored) and the permanent
+four-file real CLI/MCP resource/identity/no-op recovery test passed. Current native7/7 repair, extended root MCP, resource CLI/MCP, all three inventory
+checks and warning-clean all-target/all-feature Clippy passed. Independent Luna
+review of the corrected shared namespace admission and loop writes is active; do not
+count the earlier native/source approval as proof of these uncommitted changes.
+
+The new installed resource selector is
+`lexical_capacity_preserves_navigation_and_repairs_after_source_reduction`.
+The existing Rust root selector now checks imported callers and summaries through
+real MCP at both manifest-root checkpoints. Inventory is 214 tests in five binaries.
+`/tmp/projectatlas-715-installed-binding-handoff.patch` is a reviewed-preparation
+handoff with seven selectors; regenerate its delivery SHA against accepted combined
+source before applying. New proof still needs installed-platform acceptance.
+
+New CodeQL intake found 368 main alerts, all at accepted main `1b953f1d`; 152
+locations are verified test-only, other per-input trust-boundary triage remains
+pending in `/tmp/projectatlas-codeql-normalized-items.json`. These are scanner
+leads, not 368 confirmed vulnerabilities. PR737's CodeQL check reports 11 moved
+path-operation alerts in existing graph-stage cleanup/absent-path inspection;
+inspect ownership, symlink and canonical-root guards before disposition. No alert
+has been dismissed. Both automatic code/security findings must be verified and
+resolved against the corrected head before acceptance.
+
+Use this checkout's private database. The native gate refreshed it with contract6;
+installed stable Atlas now returns `policy_drift`, recorded in the bounded
+`deferred-atlas-next` log. Do not downgrade/reset/reindex merely for orientation.
+The earlier paired binding-cost report is retained historical contract6 evidence;
+repeat its affected measurements on the final optimized contract7 source and keep
+#708's fresh combined four-platform SLO proof mandatory. No RC exists.
 
 ## Static binding repair
 
@@ -58,8 +96,8 @@ maps original bytes to scalar columns, reusing Markdown's coordinate helper;
 missing evidence retains existing fallback trust. Logical edges remain deduplicated
 independently of their source occurrences. Added storage is budgeted.
 
-Derivation contract 6 repairs the older private 5/semantic-6 occurrence projection;
-semantic contract 6 is unchanged by the coordinate fix. Earlier 4/5 and published
+The occurrence repair used derivation/semantic 6/6. Current 7/7 additionally repairs
+deferred lookup and bounded lexical admission, including unchanged private 6/6 indexes. Earlier 4/5 and published
 0.5.0 3/3 contracts also reconcile. The first compatible repair can require a full
 bounded parse; later current-contract work reuses unaffected facts. Identity,
 approved-purpose status, last-valid publication and compatible rollback survive.
@@ -86,7 +124,7 @@ approved-purpose status, last-valid publication and compatible rollback survive.
   approved the implementation slices, upgrade proof, measured-cost report and
   installed-runtime selector helper. Final complete candidate gates remain pending.
 
-The test inventory contains 213 mapped tests in the existing five CLI E2E binaries.
+The test inventory contains 214 mapped tests in the existing five CLI E2E binaries.
 Historical baseline, symbol/facet and shared-support identities remain unchanged.
 Installed selectors now honor the explicit packaged-runtime override throughout;
 a canary verified every new Rust/dense command reaches the selected runtime.

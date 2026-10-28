@@ -109,6 +109,15 @@ Normalization SHALL reuse bounded indexing work and preserve cancellation, parse
 ### Requirement: Call resolution respects lexical bindings
 Resolved callers SHALL require binding evidence valid at the call site. A local import SHALL NOT create a binding outside its language-defined scope. Parameters and local bindings SHALL shadow imported or same-name file declarations only in the language-defined namespace they occupy. Unknown dynamic targets SHALL remain unresolved rather than become false exact links. Detailed graph navigation and summary caller output SHALL agree.
 
+#### Scenario: Deferred enclosing bindings and immediate evaluation
+- **WHEN** a supported Python or ECMAScript deferred body references a unique later enclosing declaration or import
+- **THEN** its canonical call and summary caller retain that target, while immediate expressions, direct IIFEs, definition headers and a generator's first iterable retain source order and competing future writes remain unresolved
+
+#### Scenario: Bounded lexical state with fact-free syntax
+- **WHEN** parallel source files exhaust lexical scope/value capacity or native traversal depth without exhausting symbol or relation caps
+- **THEN** retention remains bounded, all binding/export authority is withdrawn, raw admitted evidence and proven prefix ownership remain navigable, and normal source reduction and refresh repair exact callers without losing project identity
+
+
 #### Scenario: Scoped imports and independent aliases
 - **WHEN** separate functions import the same alias from different modules or a sibling function calls an alias imported only inside another function
 - **THEN** each in-scope call retains its independent binding and the out-of-scope call does not resolve through the unrelated import

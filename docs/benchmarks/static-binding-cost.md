@@ -6,6 +6,10 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
+This recorded comparison is historical contract6/6 evidence, predating the
+deferred-body and lexical-retention corrections. Replace it with final contract7/7
+measurements before accepting task2.7; it is not current release acceptance.
+
 Three paired rounds alternate baseline/candidate order. Each sample initializes
 a fresh non-Git fixture in a fresh process; filesystem/page caches remain warm.
 Telemetry is disabled. Wall time includes the GNU time wrapper; peak RSS is the
@@ -49,6 +53,12 @@ candidate package on Linux, Windows, macOS Intel and macOS ARM:
 - `e2e_navigation::rust_absolute_and_bare_use_paths_follow_the_owning_edition`
 - `e2e_navigation::rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers`
 - `e2e_navigation::same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild`
+- `e2e_navigation::lexical_capacity_preserves_navigation_and_repairs_after_source_reduction`
+
+The root-alias selector queries persisted imported callers and canonical summaries
+through real MCP at both manifest-root checkpoints. The lexical-capacity selector
+indexes four fact-free stress files, retains exact source navigation and unresolved
+raw caller evidence, then proves normal CLI refresh/MCP repair, identity and no-op.
 
 The source unit matrix separately checks all 14 native grammar families, the Rust
 build-script alias, admitted HTML/Vue/Svelte mappings, Unicode and CRLF coordinates,
@@ -72,8 +82,8 @@ not exceptions to those release targets.
 #715 must include these installed selectors in its existing candidate package
 matrix and fixture inventory, preserve the public CLI/MCP/plugin/host routes, and
 exercise stable 0.5.0 plus preceding development-contract repair, identity,
-approved-purpose status, no-op and rollback. Derivation contract 6 repairs the
-older private 5/semantic6 occurrence projection; semantic contract 6 is unchanged
-by the coordinate fix. Keep the separate 0.4.5 schema-upgrade proof. Reconcile the
+approved-purpose status, no-op and rollback. Derivation and semantic contracts7/7
+repair preceding private6/6 deferred-binding facts as well as the earlier5/6
+occurrence projection. Keep the separate0.4.5 schema-upgrade proof. Reconcile the
 complete installed surface, clean parser-pack build, exact RC version/pins,
 checksums and prerelease/Latest classification before publication acceptance.

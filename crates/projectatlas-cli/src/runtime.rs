@@ -268,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "6";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "7";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -12690,6 +12690,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             text_index_options(plan.config.as_ref(), None),
             #[cfg(feature = "optional-parser-supervisor")]
             &plan.optional_parser_selection,
+            "6",
+            PRE_OCCURRENCE_PROJECTION_DIGEST,
+        );
+        let occurrence_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
             "5",
             PRE_OCCURRENCE_PROJECTION_DIGEST,
         );
@@ -12726,6 +12734,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             STABLE_050_SEMANTIC_DIGEST,
         );
         if prior_projection_fingerprint == current_fingerprint
+            || occurrence_projection_fingerprint == current_fingerprint
             || binding_projection_fingerprint == current_fingerprint
             || prior_semantic_fingerprint == current_fingerprint
             || binding_semantic_fingerprint == current_fingerprint

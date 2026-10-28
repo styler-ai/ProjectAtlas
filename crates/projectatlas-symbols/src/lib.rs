@@ -85,6 +85,8 @@ use tree_sitter::{Language, Node, ParseOptions, Parser, Tree};
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
 /// Maximum relations kept from one file to bound call-heavy sources.
 const MAX_RELATIONS_PER_FILE: usize = 8_000;
+/// Bound native traversal stacks before lexical and language-specific refinement.
+const MAX_TREE_SITTER_AST_DEPTH: usize = 256;
 /// Maximum text length stored for symbol names, signatures, and relation context.
 const MAX_SNIPPET_CHARS: usize = 240;
 /// Maximum text length stored for extracted documentation.
@@ -1235,6 +1237,7 @@ fn extract_tree_sitter_graph<E>(
     };
     let traversal = visit_node(
         root,
+        0,
         content,
         &mut graph,
         check,
@@ -1708,6 +1711,7 @@ fn is_php_compiler_halt(node: Node<'_>, content: &str) -> bool {
 /// Recursively inspect one tree-sitter node.
 fn visit_node<E>(
     node: Node<'_>,
+    depth: usize,
     content: &str,
     graph: &mut SymbolGraph,
     check: &mut impl FnMut() -> Result<(), E>,
@@ -1716,6 +1720,13 @@ fn visit_node<E>(
     mut semantics: Option<&mut SourceSemanticFacts>,
 ) -> Result<ControlFlow<()>, E> {
     check()?;
+    if depth >= MAX_TREE_SITTER_AST_DEPTH {
+        *incomplete = true;
+        if let Some(facts) = semantics.as_deref_mut() {
+            facts.bindings_incomplete = true;
+        }
+        return Ok(ControlFlow::Continue(()));
+    }
     if is_php_language(graph.language.as_deref()) && is_php_compiler_halt(node, content) {
         return Ok(ControlFlow::Break(()));
     }
@@ -1845,6 +1856,7 @@ fn visit_node<E>(
     for child in node.named_children(&mut cursor) {
         if visit_node(
             child,
+            depth + 1,
             content,
             graph,
             check,

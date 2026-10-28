@@ -9,8 +9,13 @@ use tree_sitter::Node;
 
 use crate::{SourceCallBinding, SourceSemanticFacts, declaration_kind, node_name};
 
+/// Bound environments even when syntax produces no capped symbols or relations.
+const MAX_LEXICAL_SCOPES: usize = 16_384;
+/// Bound transitions in every lexical namespace, including pending writes.
+const MAX_LEXICAL_BINDINGS: usize = 16_384;
+
 /// Binding meaning, independent of a presentation name or a source line guess.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 enum BindingTarget {
     /// Ordinal of an actual emitted declaration.
     Declaration(usize),
@@ -42,6 +47,17 @@ enum BindingTarget {
     Unresolved,
 }
 
+/// The three closed lexical namespaces share the same retention admission.
+#[derive(Clone, Copy)]
+enum BindingNamespace {
+    /// Ordinary expression values and imported names.
+    Value,
+    /// Rust type/module and C++ constructor names.
+    Namespace,
+    /// Java implicit methods, separate from expression values.
+    Method,
+}
+
 /// A binding's visibility point and its pre-initialization shadow policy.
 struct Binding {
     /// First source offset at which this target is initialized.
@@ -57,6 +73,10 @@ struct NameBindings {
     reserves_scope: bool,
     /// One grouped target for each ordered visibility transition.
     transitions: Vec<Binding>,
+    /// Earliest transition sharing the final target; earlier suffixes are ambiguous.
+    stable_tail: usize,
+    /// A nested callable can write this captured binding at an unknown runtime phase.
+    runtime_mutated: bool,
 }
 
 impl NameBindings {
@@ -134,6 +154,16 @@ impl NameBindings {
                 };
             }
             self.transitions.push(binding);
+        }
+        self.stable_tail = self.transitions.len().saturating_sub(1);
+        while self.stable_tail > 0 {
+            check()?;
+            if self.transitions[self.stable_tail - 1].target
+                != self.transitions[self.stable_tail].target
+            {
+                break;
+            }
+            self.stable_tail -= 1;
         }
         check()
     }
@@ -218,7 +248,7 @@ struct Scope {
     class: bool,
     /// Python iteration variables stay inside their comprehension environment.
     comprehension: bool,
-    /// A deferred function body starts after its own definition/initializer exists.
+    /// Earliest enclosing lookup phase for a deferred body; zero keeps immediate order.
     enclosing_visibility_floor: usize,
     /// Exact enclosing callable declaration, independent of its display name.
     owner: Option<usize>,
@@ -270,6 +300,12 @@ struct LexicalCollector<'a> {
     facts: &'a SourceSemanticFacts,
     /// Source-owned environment tree, addressed by ordinal.
     scopes: Vec<Scope>,
+    /// Admitted value, method and namespace transitions, including pending writes.
+    binding_count: usize,
+    /// Exhaustion suppresses all binding authority, including earlier decisions.
+    incomplete: bool,
+    /// ECMAScript writes linked to their actual lexical owner after declarations exist.
+    mutations: Vec<(usize, String, usize)>,
     /// Actual import extents mapped to independent import evidence.
     imports: BTreeMap<(usize, usize), Vec<usize>>,
     /// Actual call extents mapped to admitted call evidence.
@@ -343,6 +379,9 @@ pub(super) fn bind_calls<E>(
             },
             ..Scope::default()
         }],
+        binding_count: 0,
+        incomplete: false,
+        mutations: Vec::new(),
         imports: BTreeMap::new(),
         calls: BTreeMap::new(),
         declarations: BTreeMap::new(),
@@ -395,6 +434,29 @@ pub(super) fn bind_calls<E>(
             .or_insert(DeclarationOrdinals::Unique(index));
     }
     collector.visit(root, 0, check)?;
+    collector.apply_mutations(check)?;
+    if collector.incomplete {
+        if let Some(rust) = &mut collector.rust {
+            rust.complete = false;
+        }
+        let rust = collector.rust.take();
+        let sites = std::mem::take(&mut collector.sites);
+        drop(collector);
+        facts.bindings_incomplete = true;
+        facts.exports_incomplete = true;
+        facts.exports.clear();
+        facts.rust = rust;
+        for call in &mut facts.calls {
+            check()?;
+            call.binding = SourceCallBinding::Unresolved;
+        }
+        for site in sites {
+            check()?;
+            facts.calls[site.fact].owner = site.owner;
+            facts.calls[site.fact].span = site.span;
+        }
+        return Ok(());
+    }
     let mut unsupported_imports = Vec::new();
     for scope in &mut collector.scopes {
         check()?;
@@ -557,6 +619,92 @@ pub(super) fn bind_calls<E>(
 }
 
 impl LexicalCollector<'_> {
+    /// Charge either a retained transition or a pending write before inserting it.
+    fn admit_binding(&mut self) -> bool {
+        if self.incomplete || self.binding_count >= MAX_LEXICAL_BINDINGS {
+            self.incomplete = true;
+            return false;
+        }
+        self.binding_count += 1;
+        true
+    }
+
+    /// Resolve writes without inventing function-local declarations for captured variables.
+    fn apply_mutations<E>(&mut self, check: &mut impl FnMut() -> Result<(), E>) -> Result<(), E> {
+        for (mut scope, name, from) in std::mem::take(&mut self.mutations) {
+            check()?;
+            let mut captured = false;
+            while !self.scopes[scope].bindings.contains_key(&name) {
+                check()?;
+                let Some(parent) = self.scopes[scope].parent else {
+                    break;
+                };
+                captured |= self.scopes[scope].function;
+                scope = parent;
+            }
+            let binding = self.scopes[scope].bindings.entry(name).or_default();
+            if captured {
+                binding.runtime_mutated = true;
+            } else {
+                binding.transitions.push(Binding {
+                    from,
+                    target: BindingTarget::Shadow,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Capture only assignment targets; member writes do not rebind their object.
+    fn mutation_names<E>(
+        &mut self,
+        node: Node<'_>,
+        scope: usize,
+        from: usize,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        check()?;
+        if self.incomplete {
+            return Ok(());
+        }
+        if matches!(
+            node.kind(),
+            "identifier" | "shorthand_property_identifier_pattern"
+        ) {
+            if let Some(name) = self.binding_name(node)
+                && self.admit_binding()
+            {
+                self.mutations.push((scope, name, from));
+            }
+        } else if matches!(
+            node.kind(),
+            "assignment_pattern" | "object_assignment_pattern" | "pair_pattern" | "rest_pattern"
+        ) {
+            if let Some(target) = node
+                .child_by_field_name("left")
+                .or_else(|| node.child_by_field_name("value"))
+                .or_else(|| crate::first_named_child(node))
+            {
+                self.mutation_names(target, scope, from, check)?;
+            }
+        } else if matches!(node.kind(), "object_pattern" | "array_pattern") {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                self.mutation_names(child, scope, from, check)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Admit an environment before retaining its maps or assigning its ordinal.
+    fn admit_scope(&mut self) -> bool {
+        if self.incomplete || self.scopes.len() >= MAX_LEXICAL_SCOPES {
+            self.incomplete = true;
+            return false;
+        }
+        true
+    }
+
     /// ECMAScript's module and lexical environments share canonical cooked names.
     fn ecmascript(&self) -> bool {
         matches!(self.language, "javascript" | "typescript" | "tsx")
@@ -657,7 +805,36 @@ impl LexicalCollector<'_> {
         reserves_scope: bool,
         target: BindingTarget,
     ) {
-        let bindings = self.scopes[scope].bindings.entry(name).or_default();
+        self.bind_in(
+            scope,
+            name,
+            from,
+            reserves_scope,
+            target,
+            BindingNamespace::Value,
+        );
+    }
+
+    /// Admit all value, method and namespace transitions through one bounded owner.
+    fn bind_in(
+        &mut self,
+        scope: usize,
+        name: String,
+        from: usize,
+        reserves_scope: bool,
+        target: BindingTarget,
+        namespace: BindingNamespace,
+    ) {
+        if !self.admit_binding() {
+            return;
+        }
+        let scope = &mut self.scopes[scope];
+        let names = match namespace {
+            BindingNamespace::Value => &mut scope.bindings,
+            BindingNamespace::Namespace => &mut scope.namespaces,
+            BindingNamespace::Method => &mut scope.methods,
+        };
+        let bindings = names.entry(name).or_default();
         bindings.reserves_scope |= reserves_scope;
         bindings.transitions.push(Binding { from, target });
     }
@@ -694,6 +871,9 @@ impl LexicalCollector<'_> {
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
         check()?;
+        if self.incomplete {
+            return Ok(());
+        }
         if self.ecmascript() && scope == 0 && node.kind() == "export_statement" {
             self.direct_export(node, check)?;
         }
@@ -762,15 +942,14 @@ impl LexicalCollector<'_> {
             && crate::should_emit_declaration_symbol(node, self.content)
             && let Some(name) = node_name(node, self.content)
         {
-            self.scopes[scope]
-                .namespaces
-                .entry(name)
-                .or_default()
-                .transitions
-                .push(Binding {
-                    from: Self::cpp_declaration_visibility(node),
-                    target: BindingTarget::Unresolved,
-                });
+            self.bind_in(
+                scope,
+                name,
+                Self::cpp_declaration_visibility(node),
+                false,
+                BindingTarget::Unresolved,
+                BindingNamespace::Namespace,
+            );
         }
         if self.language == "cpp"
             && declaration.is_none()
@@ -812,12 +991,7 @@ impl LexicalCollector<'_> {
             } else {
                 BindingTarget::Unresolved
             };
-            self.scopes[scope]
-                .namespaces
-                .entry(name)
-                .or_default()
-                .transitions
-                .push(Binding { from: 0, target });
+            self.bind_in(scope, name, 0, false, target, BindingNamespace::Namespace);
         }
         let callable_owner = declaration.or_else(|| {
             if !function {
@@ -833,15 +1007,14 @@ impl LexicalCollector<'_> {
         if let Some(symbol) = declaration {
             let fact = &self.graph.symbols[symbol];
             if self.language == "java" && fact.kind == SymbolKind::Method {
-                self.scopes[scope]
-                    .methods
-                    .entry(fact.name.clone())
-                    .or_default()
-                    .transitions
-                    .push(Binding {
-                        from: 0,
-                        target: BindingTarget::Declaration(symbol),
-                    });
+                self.bind_in(
+                    scope,
+                    fact.name.clone(),
+                    0,
+                    false,
+                    BindingTarget::Declaration(symbol),
+                    BindingNamespace::Method,
+                );
             }
             if matches!(
                 fact.kind,
@@ -870,15 +1043,14 @@ impl LexicalCollector<'_> {
                         && matches!(fact.kind, SymbolKind::Class | SymbolKind::Struct)
                     {
                         let from = Self::cpp_declaration_visibility(node);
-                        self.scopes[scope]
-                            .namespaces
-                            .entry(name)
-                            .or_default()
-                            .transitions
-                            .push(Binding {
-                                from,
-                                target: BindingTarget::Declaration(symbol),
-                            });
+                        self.bind_in(
+                            scope,
+                            name,
+                            from,
+                            false,
+                            BindingTarget::Declaration(symbol),
+                            BindingNamespace::Namespace,
+                        );
                     } else {
                         if self.language == "cpp" && fact.kind == SymbolKind::Function {
                             self.cpp_function_visibility
@@ -931,6 +1103,9 @@ impl LexicalCollector<'_> {
                 ))
             || (self.language == "kotlin" && node.kind() == "catch_block");
         if function || class || block {
+            if !self.admit_scope() {
+                return Ok(());
+            }
             let mut parent = scope;
             if (function || class) && self.language == "python" {
                 parent = self.python_closure_parent(parent);
@@ -973,6 +1148,7 @@ impl LexicalCollector<'_> {
                 class,
                 enclosing_visibility_floor: if function
                     && (self.language == "python" || self.ecmascript())
+                    && !immediately_invoked_function(node)
                 {
                     node.end_byte()
                 } else {
@@ -1055,19 +1231,18 @@ impl LexicalCollector<'_> {
                                 .as_ref()
                                 .is_none_or(|binding| !binding.supported);
                     if self.language == "rust" {
-                        self.scopes[scope]
-                            .namespaces
-                            .entry(binding.local().to_string())
-                            .or_default()
-                            .transitions
-                            .push(Binding {
-                                from: 0,
-                                target: if conditional {
-                                    BindingTarget::Shadow
-                                } else {
-                                    BindingTarget::Import { import, reference }
-                                },
-                            });
+                        self.bind_in(
+                            scope,
+                            binding.local().to_string(),
+                            0,
+                            false,
+                            if conditional {
+                                BindingTarget::Shadow
+                            } else {
+                                BindingTarget::Import { import, reference }
+                            },
+                            BindingNamespace::Namespace,
+                        );
                     }
                     self.bind(
                         scope,
@@ -1089,15 +1264,14 @@ impl LexicalCollector<'_> {
                 .child_by_field_name("name")
                 .and_then(|name| self.identifier(name))
         {
-            self.scopes[scope]
-                .namespaces
-                .entry(name)
-                .or_default()
-                .transitions
-                .push(Binding {
-                    from: 0,
-                    target: BindingTarget::Shadow,
-                });
+            self.bind_in(
+                scope,
+                name,
+                0,
+                false,
+                BindingTarget::Shadow,
+                BindingNamespace::Namespace,
+            );
         }
         self.local_bindings(node, scope, check)?;
         if self.language == "python"
@@ -1698,6 +1872,38 @@ impl LexicalCollector<'_> {
         mut scope: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.ecmascript() && node.kind() == "for_in_statement" {
+            if let Some(pattern) = node.child_by_field_name("left") {
+                let from = node
+                    .child_by_field_name("right")
+                    .map_or(pattern.end_byte(), |right| right.end_byte());
+                if let Some(kind) = node.child_by_field_name("kind") {
+                    let owner = if kind.kind() == "var" {
+                        self.function_scope(scope)
+                    } else {
+                        scope
+                    };
+                    self.pattern_names(pattern, owner, from, true, check)?;
+                } else {
+                    self.mutation_names(pattern, scope, from, check)?;
+                }
+            }
+            return Ok(());
+        }
+        if self.ecmascript()
+            && matches!(
+                node.kind(),
+                "assignment_expression" | "augmented_assignment_expression" | "update_expression"
+            )
+        {
+            if let Some(target) = node
+                .child_by_field_name("left")
+                .or_else(|| node.child_by_field_name("argument"))
+            {
+                self.mutation_names(target, scope, node.end_byte(), check)?;
+            }
+            return Ok(());
+        }
         let field = match (self.language, node.kind()) {
             ("rust", "let_declaration" | "match_arm") => Some("pattern"),
             (
@@ -1853,6 +2059,9 @@ impl LexicalCollector<'_> {
                 scope = parent;
             }
             if child.kind() == "payload" {
+                if !self.admit_scope() {
+                    return Ok(());
+                }
                 scope = self.scopes.len();
                 self.scopes.push(Scope {
                     parent: Some(parent),
@@ -1892,12 +2101,20 @@ impl LexicalCollector<'_> {
                 continue;
             }
             let previous = scope;
+            if !self.admit_scope() {
+                return Ok(());
+            }
             scope = self.scopes.len();
             let lookup_parent = self.python_closure_parent(previous);
             self.scopes.push(Scope {
                 parent: Some(lookup_parent),
                 function: true,
                 comprehension: true,
+                enclosing_visibility_floor: if node.kind() == "generator_expression" {
+                    node.end_byte()
+                } else {
+                    0
+                },
                 owner: self.scopes[previous].owner,
                 ..Scope::default()
             });
@@ -1925,6 +2142,9 @@ impl LexicalCollector<'_> {
         parent: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        if !self.admit_scope() {
+            return Ok(());
+        }
         let scope = self.scopes.len();
         self.scopes.push(Scope {
             parent: Some(parent),
@@ -2331,11 +2551,13 @@ impl LexicalCollector<'_> {
     ) -> Result<(), E> {
         for (export, name) in &self.local_exports {
             check()?;
-            let Some(binding) = self.scopes[0]
-                .bindings
-                .get(name)
-                .and_then(|bindings| bindings.transitions.last())
-            else {
+            let Some(bindings) = self.scopes[0].bindings.get(name) else {
+                continue;
+            };
+            if bindings.runtime_mutated {
+                continue;
+            }
+            let Some(binding) = bindings.transitions.last() else {
                 continue;
             };
             self.exports[*export].binding = match &binding.target {
@@ -2362,6 +2584,26 @@ impl LexicalCollector<'_> {
                 | BindingTarget::Unresolved
                 | BindingTarget::Imports { .. } => continue,
             };
+        }
+        for export in 0..self.exports.len() {
+            check()?;
+            let crate::SourceExportBinding::LocalDeclaration(symbol) = self.exports[export].binding
+            else {
+                continue;
+            };
+            let Some(name) = self.declaration_binding_name(symbol) else {
+                continue;
+            };
+            if self.scopes[0].bindings.get(&name).is_some_and(|bindings| {
+                bindings.runtime_mutated
+                    || bindings
+                        .transitions
+                        .last()
+                        .is_some_and(|binding| binding.target != BindingTarget::Declaration(symbol))
+            }) {
+                self.exports[export].binding =
+                    crate::SourceExportBinding::UnresolvedDeclarations(vec![symbol].into());
+            }
         }
         Ok(())
     }
@@ -2572,6 +2814,7 @@ impl LexicalCollector<'_> {
         };
         let mut current = Some(site.scope);
         let mut offset = site.offset;
+        let mut deferred = false;
         while let Some(scope) = current {
             check()?;
             let bindings = if site.method_name {
@@ -2585,9 +2828,18 @@ impl LexicalCollector<'_> {
                 .then(|| self.scopes[scope].namespaces.get(name))
                 .flatten();
             for bindings in bindings.into_iter().chain(constructor) {
-                let end = bindings
+                if bindings.runtime_mutated {
+                    return Ok(SourceCallBinding::Unresolved);
+                }
+                let mut end = bindings
                     .transitions
                     .partition_point(|binding| binding.from <= offset);
+                if deferred {
+                    if end.saturating_sub(1) < bindings.stable_tail {
+                        return Ok(SourceCallBinding::Unresolved);
+                    }
+                    end = bindings.transitions.len();
+                }
                 if end == 0 {
                     if bindings.reserves_scope {
                         return Ok(SourceCallBinding::Shadowed);
@@ -2667,7 +2919,9 @@ impl LexicalCollector<'_> {
                     });
                 }
             }
-            offset = offset.max(self.scopes[scope].enclosing_visibility_floor);
+            let floor = self.scopes[scope].enclosing_visibility_floor;
+            offset = offset.max(floor);
+            deferred |= floor != 0;
             if self.language == "rust"
                 && matches!(
                     self.scopes[scope].rust_item_owner,
@@ -2708,6 +2962,24 @@ impl LexicalCollector<'_> {
 fn call_target(node: Node<'_>) -> Option<Node<'_>> {
     node.child_by_field_name("function")
         .or_else(|| crate::first_named_child(node))
+}
+
+/// Direct IIFEs execute at their source position, including transparent syntax wrappers.
+fn immediately_invoked_function(mut node: Node<'_>) -> bool {
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "parenthesized_expression"
+            | "as_expression"
+            | "satisfies_expression"
+            | "non_null_expression"
+            | "type_assertion" => node = parent,
+            "call" | "call_expression" | "new_expression" => {
+                return call_target(parent).is_some_and(|callee| callee.id() == node.id());
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Function environments include anonymous functions and language-owned lambdas.
@@ -4223,6 +4495,464 @@ function caller() { renamed(); tools.work(); }
         });
         assert_eq!(result, Err("cancelled"));
         assert_eq!(checks, 100);
+    }
+
+    #[test]
+    fn deferred_bodies_resolve_unique_later_enclosing_bindings() {
+        for (path, language, content) in [
+            (
+                "main.py",
+                "python",
+                "def caller(): return run()\ndef run(): pass\n",
+            ),
+            (
+                "main.py",
+                "python",
+                "def outer():\n def caller(): return run()\n def run(): pass\n",
+            ),
+            (
+                "main.py",
+                "python",
+                "class Api:\n def caller(self): return run()\ndef run(): pass\n",
+            ),
+            (
+                "main.js",
+                "javascript",
+                "const caller = () => run(); const run = () => {};",
+            ),
+            (
+                "main.js",
+                "javascript",
+                "function outer(){const caller = () => run(); const run = () => {}; }",
+            ),
+            (
+                "main.js",
+                "javascript",
+                "class Api { caller(){run();} } const run = () => {};",
+            ),
+            (
+                "main.ts",
+                "typescript",
+                "const caller = (): void => run(); const run = (): void => {};",
+            ),
+            (
+                "main.tsx",
+                "tsx",
+                "const caller = (): void => run(); const run = (): void => {};",
+            ),
+            (
+                "main.py",
+                "python",
+                "pending = (run() for _ in [1])\ndef run(): pass\n",
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                path,
+                Some(language),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{language}: {result:?}");
+            let Ok(extracted) = result else {
+                return;
+            };
+            let (_, graph, facts) = extracted.into_parts();
+            assert_eq!(facts.calls.len(), 1, "{language}: {content}");
+            assert!(
+                matches!(
+                    facts.calls[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                "{language}: {content}: {:?}",
+                facts.calls[0].binding
+            );
+            let SourceCallBinding::LocalDeclaration(target) = facts.calls[0].binding else {
+                return;
+            };
+            assert_eq!(graph.symbols[target].name, "run", "{language}: {content}");
+        }
+    }
+
+    #[test]
+    fn deferred_lookup_keeps_immediate_evaluation_and_future_competitors_conservative() {
+        for (path, language, content) in [
+            ("main.py", "python", "run()\ndef run(): pass\n"),
+            ("main.py", "python", "(lambda: run())()\ndef run(): pass\n"),
+            (
+                "main.py",
+                "python",
+                "pending = [run() for _ in [1]]\ndef run(): pass\n",
+            ),
+            (
+                "main.py",
+                "python",
+                "pending = (0 for _ in run())\ndef run(): pass\n",
+            ),
+            (
+                "main.py",
+                "python",
+                "def run(): pass\ndef caller(): run()\nrun = unknown\n",
+            ),
+            (
+                "main.py",
+                "python",
+                "def caller(value=run()): pass\ndef run(): pass\n",
+            ),
+            ("main.js", "javascript", "run(); const run = () => {};"),
+            (
+                "main.js",
+                "javascript",
+                "(() => run())(); const run = () => {};",
+            ),
+            (
+                "main.ts",
+                "typescript",
+                "((() => run()) as unknown as () => void)(); const run = () => {};",
+            ),
+            (
+                "main.js",
+                "javascript",
+                "const run = () => {}; function caller(){run();} run = unknown;",
+            ),
+            (
+                "main.js",
+                "javascript",
+                "function caller(){run();} const run = () => {}; run = unknown;",
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                path,
+                Some(language),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, _, facts) = extracted.into_parts();
+            assert!(!facts.calls.is_empty(), "{language}: {content}");
+            assert!(
+                facts.calls.iter().all(|call| matches!(
+                    call.binding,
+                    SourceCallBinding::Unresolved | SourceCallBinding::Shadowed
+                )),
+                "{language}: {content}: {:?}",
+                facts.calls
+            );
+        }
+        let extracted = extract_symbol_graph_with_semantics_controlled(
+            "main.py",
+            Some("python"),
+            "def caller(): run()\nfrom worker import run\n",
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(extracted.is_ok(), "{extracted:?}");
+        let Ok(extracted) = extracted else {
+            return;
+        };
+        let (_, _, facts) = extracted.into_parts();
+        assert_eq!(facts.calls.len(), 1);
+        assert!(matches!(
+            facts.calls[0].binding,
+            SourceCallBinding::Imported { .. }
+        ));
+    }
+
+    #[test]
+    fn ecmascript_writes_invalidate_actual_bindings_and_live_exports_only() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("vue", "main.vue", true),
+            ("svelte", "main.svelte", true),
+            ("html", "main.html", true),
+        ] {
+            for (suffix, resolved) in [
+                ("run = unknown;", false),
+                ("run += unknown;", false),
+                ("run++;", false),
+                ("({run} = unknown);", false),
+                ("[run] = unknown;", false),
+                ("for (run of values) {}", false),
+                ("for (run in object) {}", false),
+                ("for ({run} of values) {}", false),
+                ("for (let run of values) {}", true),
+                ("function mutate(){run = unknown;}", false),
+                ("function mutate(){let run; run = unknown;}", true),
+                ("const object = {}; object.run = unknown;", true),
+            ] {
+                let script = format!(
+                    "export let run = () => {{}}; function caller(){{run();}} export {{run as launch}}; {suffix}"
+                );
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else {
+                    return;
+                };
+                let (_, _, facts) = extracted.into_parts();
+                assert_eq!(facts.calls.len(), 1, "{language}: {suffix}");
+                assert_eq!(
+                    matches!(
+                        facts.calls[0].binding,
+                        SourceCallBinding::LocalDeclaration(_)
+                    ),
+                    resolved,
+                    "{language}: {suffix}: {:?}",
+                    facts.calls
+                );
+                for name in ["run", "launch"] {
+                    let slot = facts.exports.iter().find(|slot| slot.name == name);
+                    assert!(slot.is_some(), "{language}: {suffix}: {:?}", facts.exports);
+                    assert_eq!(
+                        slot.is_some_and(|slot| matches!(
+                            slot.binding,
+                            crate::SourceExportBinding::LocalDeclaration(_)
+                        )),
+                        resolved,
+                        "{language}: {suffix}: {:?}",
+                        facts.exports
+                    );
+                }
+            }
+        }
+        for content in [
+            "export function run(){} run = unknown;",
+            "export default function run(){} function mutate(){run = unknown;}",
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.js",
+                Some("javascript"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, _, facts) = extracted.into_parts();
+            assert!(
+                facts.exports.iter().all(|slot| !matches!(
+                    slot.binding,
+                    crate::SourceExportBinding::LocalDeclaration(_)
+                )),
+                "{content}: {:?}",
+                facts.exports
+            );
+        }
+    }
+
+    #[test]
+    fn loop_writes_follow_iterable_evaluation_and_declaration_ownership() {
+        for (content, expected) in [
+            (
+                "let run = () => []; for (run of run()) {run();}",
+                vec![true, false],
+            ),
+            (
+                "let run = () => ({}); for (run in run()) {run();}",
+                vec![true, false],
+            ),
+            (
+                "let run = () => []; for ({run} of run()) {run();}",
+                vec![true, false],
+            ),
+            (
+                "let run = () => []; for (let run of run()) {run();}",
+                vec![false, false],
+            ),
+            (
+                "var run = () => []; for (var run of run()) {run();}",
+                vec![true, false],
+            ),
+            (
+                "let run = () => {}; for (let run of values) {run();} run();",
+                vec![false, true],
+            ),
+            (
+                "let run = () => {}; function mutate(){for (run of values) {}} function caller(){run();}",
+                vec![false],
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.js",
+                Some("javascript"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, _, facts) = extracted.into_parts();
+            let resolved: Vec<_> = facts
+                .calls
+                .iter()
+                .map(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_)))
+                .collect();
+            assert_eq!(resolved, expected, "{content}: {:?}", facts.calls);
+        }
+    }
+
+    #[test]
+    fn ordinary_fact_free_syntax_retains_exact_callers_under_lexical_limits() {
+        let content = format!(
+            "function run() {{}} function caller() {{run(); {} }}",
+            "{} ".repeat(1_024)
+        );
+        let extracted = extract_symbol_graph_with_semantics_controlled(
+            "main.js",
+            Some("javascript"),
+            &content,
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(extracted.is_ok(), "{extracted:?}");
+        let Ok(extracted) = extracted else {
+            return;
+        };
+        let (_, _, facts) = extracted.into_parts();
+        assert!(!facts.bindings_incomplete);
+        assert_eq!(facts.calls.len(), 1);
+        assert!(matches!(
+            facts.calls[0].binding,
+            SourceCallBinding::LocalDeclaration(_)
+        ));
+    }
+
+    #[test]
+    fn native_binding_limits_cover_scope_adapters_values_and_deep_syntax() {
+        for (path, language, content) in [
+            (
+                "main.rs",
+                "rust",
+                format!(
+                    "fn run() {{}} fn caller<{}>() {{run();}}",
+                    (0..20_000)
+                        .map(|index| format!("T{index}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            ),
+            (
+                "main.rs",
+                "rust",
+                format!(
+                    "fn run() {{}} fn caller() {{ run(); {} }}",
+                    "{} ".repeat(20_000)
+                ),
+            ),
+            (
+                "main.zig",
+                "zig",
+                format!(
+                    "fn run() void {{}} fn caller() void {{ run(); {} }}",
+                    "{} ".repeat(20_000)
+                ),
+            ),
+            (
+                "main.py",
+                "python",
+                format!(
+                    "def run(): pass\ndef caller(): run()\n{}",
+                    "[x for x in ()]\n".repeat(20_000)
+                ),
+            ),
+            (
+                "main.rs",
+                "rust",
+                format!(
+                    "fn run() {{}} fn caller() {{ run(); {} }}",
+                    "let run = unknown;".repeat(20_000)
+                ),
+            ),
+            (
+                "main.js",
+                "javascript",
+                format!(
+                    "function run() {{}} function caller() {{run(); {}0{} }}",
+                    "{".repeat(512),
+                    "}".repeat(512)
+                ),
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                path,
+                Some(language),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else {
+                return;
+            };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(
+                facts.bindings_incomplete,
+                "{language}: binding state escaped its bound"
+            );
+            assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
+            assert!(
+                !facts.calls.is_empty(),
+                "{language}: raw prefix call was lost"
+            );
+            assert!(
+                facts
+                    .calls
+                    .iter()
+                    .all(|call| call.binding == SourceCallBinding::Unresolved)
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_fact_free_syntax_exhausts_binding_capacity_without_losing_raw_evidence() {
+        std::thread::scope(|threads| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    threads.spawn(|| {
+                        let content = format!(
+                            "function run() {{}} function caller() {{run();}} {}",
+                            "{} ".repeat(50_000)
+                        );
+                        let result = extract_symbol_graph_with_semantics_controlled(
+                            "main.js",
+                            Some("javascript"),
+                            &content,
+                            &IndexWorkControl::new(
+                                projectatlas_core::IndexCancellation::new(),
+                                None,
+                            ),
+                        );
+                        assert!(result.is_ok(), "{result:?}");
+                        let Ok(extracted) = result else {
+                            return;
+                        };
+                        let (_, graph, facts) = extracted.into_parts();
+                        assert!(
+                            facts.bindings_incomplete,
+                            "fact-free scopes escaped the binding budget"
+                        );
+                        assert_eq!(facts.calls.len(), 1);
+                        assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
+                        assert_eq!(facts.calls[0].binding, SourceCallBinding::Unresolved);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                assert!(handle.join().is_ok());
+            }
+        });
     }
 
     #[test]

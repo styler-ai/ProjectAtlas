@@ -13194,6 +13194,92 @@ fn rust_binding_require(condition: bool, detail: &str) -> Result<(), Box<dyn Err
     }
 }
 
+/// Compare persisted aliased callers and canonical summaries through the installed MCP runtime.
+fn assert_rust_binding_mcp_callers(root: &Path, library: &str) -> Result<(), Box<dyn Error>> {
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let before = mcp_database_snapshot(&database)?;
+    let mut session = McpContractSession::spawn(&mcp_contract_executable(), root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for (caller, expected) in [
+            (
+                "root_calls",
+                BTreeSet::from([
+                    (library.to_string(), "run".to_string()),
+                    (library.to_string(), "private_run".to_string()),
+                ]),
+            ),
+            (
+                "forwarded",
+                BTreeSet::from([("src/target.rs".to_string(), "work".to_string())]),
+            ),
+            ("shadow", BTreeSet::new()),
+        ] {
+            let text = session.call_tool(
+                "atlas_symbol_relations",
+                &json!({
+                    "project_path": root,
+                    "view": "detailed",
+                    "file": "src/worker.rs",
+                    "symbol": caller,
+                    "relation": "calls",
+                    "limit": 30
+                }),
+            )?;
+            let response: Value = toon_format::decode_default(&text)?;
+            let rows = response
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("MCP imported caller rows missing"))?;
+            rust_binding_require(!rows.is_empty(), "MCP lost raw caller evidence")?;
+            rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+            if caller == "shadow" {
+                rust_binding_unresolved(rows);
+            }
+        }
+        for (file, function, expected, excluded) in [
+            (
+                library,
+                "run",
+                "src/worker.rs::root_calls",
+                "src/worker.rs::shadow",
+            ),
+            (
+                "src/target.rs",
+                "work",
+                "src/worker.rs::forwarded",
+                "src/worker.rs::shadow",
+            ),
+        ] {
+            let text = session.call_tool(
+                "atlas_file_summary",
+                &json!({"project_path": root, "file": file}),
+            )?;
+            let response: Value = toon_format::decode_default(&text)?;
+            let functions = response
+                .pointer("/file_summary/functions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("MCP canonical summary functions missing"))?;
+            let function = functions
+                .iter()
+                .find(|item| item["name"] == function)
+                .ok_or_else(|| io::Error::other("MCP canonical target function missing"))?;
+            let callers = function["called_by"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("MCP canonical target callers missing"))?;
+            rust_binding_require(
+                callers.iter().any(|caller| caller == expected),
+                "MCP omitted imported caller",
+            )?;
+            rust_binding_require(
+                !callers.iter().any(|caller| caller == excluded),
+                "MCP admitted shadowed caller",
+            )?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())?;
+    rust_binding_equal(&mcp_database_snapshot(&database)?, &before)
+}
 #[test]
 fn rust_root_aliases_follow_manifest_and_module_changes() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -13247,6 +13333,7 @@ fn rust_root_aliases_follow_manifest_and_module_changes() -> Result<(), Box<dyn 
             &([("src/target.rs".to_string(), "work".to_string())].into()),
         )?;
         rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "shadow")?);
+        assert_rust_binding_mcp_callers(root, file)?;
     }
     rust_binding_require(
         root.join(RUST_LIBRARY_PATH).is_file(),
@@ -13476,6 +13563,85 @@ fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
         &([("tests/one.rs".to_string(), "run".to_string())].into()),
     )?;
     Ok(())
+}
+
+#[test]
+fn lexical_capacity_preserves_navigation_and_repairs_after_source_reduction()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(root.join("worker.js"), "export function run() {}\n")?;
+    let source = "import {run as launch} from './worker.js'; function caller(){launch();}\n";
+    for index in 0..4 {
+        fs::write(
+            root.join(format!("main_{index}.js")),
+            format!("{source}{}", "{} ".repeat(50_000)),
+        )?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for reduced in [false, true] {
+            if reduced {
+                for index in 0..4 {
+                    fs::write(root.join(format!("main_{index}.js")), source)?;
+                }
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            }
+            let slice = run_packaged_cli_json(
+                &executable,
+                root,
+                &database,
+                &["slice", "main_0.js", "--start-line", "1", "--end-line", "1"],
+            )?;
+            rust_binding_require(
+                slice.to_string().contains("function caller"),
+                "capacity refusal lost exact source navigation",
+            )?;
+            let text = session.call_tool(
+                "atlas_symbol_relations",
+                &json!({
+                    "project_path": root, "view": "detailed", "file": "main_0.js",
+                    "symbol": "caller", "relation": "calls", "limit": 10
+                }),
+            )?;
+            let response: Value = toon_format::decode_default(&text)?;
+            let rows = response
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("capacity regression omitted raw MCP call rows"))?;
+            rust_binding_equal(&rows.len(), &1)?;
+            if reduced {
+                rust_binding_equal(
+                    &rust_binding_targets(rows),
+                    &BTreeSet::from([("worker.js".to_string(), "run".to_string())]),
+                )?;
+                assert_summary_called_by(root, &database, "worker.js", "run", "main_0.js::caller")?;
+            } else {
+                rust_binding_unresolved(rows);
+            }
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
 }
 
 #[test]

@@ -89,14 +89,30 @@ An exhausted export-fact budget invalidates all export target proof, including
 previously captured slots; ordinal filtering and embedded-host remapping preserve
 this completeness boundary.
 
-Extraction derivation contract 6 and semantic resolution contract 6 invalidate
-older derived facts, including the preceding development contracts 5/6 and 4/5 and the
+Extraction derivation contract 7 and semantic resolution contract 7 invalidate
+older derived facts, including preceding development contracts 6/6, 5/6 and 4/5 and the
 published 0.5.0 contract 3/3. An ordinary refresh repairs unchanged source through
 the existing bounded full-publication owner. This first reconciliation may parse
 the complete admitted source; later current-contract operations reuse unaffected
 facts. No database reset, schema change or authored-state migration is required.
 Cancelled repair staging and failed source validation preserve the last publication;
 compatible prior runtimes may reconcile their own derived contract on rollback.
+
+Python and ECMAScript deferred bodies can use a unique later binding in an
+enclosing environment. Immediate expressions, direct IIFEs, Python definition
+headers and a generator's first iterable retain source-order lookup. A precomputed
+stable timeline suffix prevents a deferred body from guessing between future
+targets. Observed ECMAScript writes invalidate mutable call/export identities;
+writes by a nested callable to a captured binding have unknown execution timing.
+This does not add runtime execution or general control-flow inference.
+
+Native traversal stops at 256 AST levels. Lexical refinement retains at most
+16,384 environments and 16,384 binding transitions across value, method and type/module namespaces or pending writes per file,
+independently of symbol/import/call caps. Exceeding these bounds removes binding
+and export authority while preserving raw admitted evidence, source navigation
+and already captured caller ownership. Unvisited ownership stays unproved.
+Ordinary source reduction and refresh restore exact bindings without resetting
+the project. These per-file bounds also apply when parsing runs concurrently.
 
 Named arrow and function initializers reuse their existing emitted function
 declarations, including `const`, `let` and `var`. Ordinary values, destructuring
