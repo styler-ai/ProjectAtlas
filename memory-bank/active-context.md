@@ -1,5 +1,55 @@
 # Active context
 
+## Current checkpoint: reviewed contract 11 ready for native push
+
+Source commit d0b08e77bc9ac1388e10534944d3a525b56ff581 is independently approved
+by Luna Max for Rust/shared workspace accounting and ECMAScript environments.
+Its clean optimized binary is at
+~/.cache/projectatlas-benchmarks/binding-731-d0b08e7-contract11-20261028/projectatlas;
+SHA256 b3d15be02b59e233eac15f8fb6d74eacdefaba4e69d3a47b57cbe87087166f61.
+The adjacent candidate-binding.json records the clean source tree and build.
+
+All affected gates pass: workspace check/Clippy/strings, 394 symbol tests with one
+existing ignore, 371 runtime tests, four Rust CLI/MCP tests, the expanded environment
+CLI/MCP test, three inventory checks, doctests and warning-strict workspace docs.
+The optimized artifact also passes four Rust CLI/MCP selectors (1.54s) and the
+expanded environment selector (7.22s) via the real executable override.
+
+All six current native upgrade stages pass: stable 0.5.0 and development contracts
+5, 6, 7, 8 and 10. They prove expected targets/occurrences, convergence, identity,
+approved purposes, no-op and rollback or refusal controls as applicable. The
+contract10 function-environment cases include body/default/static/TS namespace.
+Reports: /tmp/projectatlas-731-contract11-native-proofs.json and its per-stage logs;
+/tmp/projectatlas-731-contract11-optimized-cli-mcp.json. Prior reports were preserved.
+
+The fresh 18-sample cost report is bound to d0b08e7 and published in
+ docs/benchmarks/static-binding-cost.json/md. Root4: .288079->.343755s and
+27692->32572KiB; root64: .329160->.387520s and 28556->33816KiB;
+dense: .168379->.161495s and 26788->28500KiB. Root cases cost 18–19% more time and
+about18% more RSS than stable; dense is about4% faster with6% more RSS. No general
+speedup, #708 SLO waiver or final #715 acceptance is claimed. All three candidate
+cases retain exact expected caller occurrences; separate exact-root target probes
+pass. Raw: /tmp/projectatlas-731-binding-cost-contract11.json and
+/tmp/projectatlas-731-contract11-exact-target-probe.json. Luna approved this evidence.
+
+Tasks2.4–2.7 now pass and are checked locally/live: IssueOps9/9/8 PASS in
+/tmp/projectatlas-731-contract11-issueops-retry.log. First read request hit the
+checker's own120-second gh timeout and exited; retry passed. No live request remains.
+Task3.1 and all five final acceptance rows remain open. Strict OpenSpec passes.
+Source commit is followed by a bookkeeping commit for cost/task/memory updates;
+these do not change the tested production source or immutable binary.
+
+NEXT: mandatory native push, exact new-head hosted checks and current review-thread
+readback/replies. Resolve the three new threads only after the corrected head and
+required proof are public; do not reuse old dc3bd90 hosted results as current.
+After readiness review and acceptance, merge/close731 through normal protected
+workflow. Then implement739, complete738 combined shared-exclusion proof, finish708
+combined performance/guidance and715 exact RC packaging/publication. Main remains
+1b953f1d at latest readback; GitHub Latest verified stable v0.5.0. No RC is published.
+Do not edit this checkout while its native pre-push exact-clean gate is running.
+Keep its live process handle/log externally, resume it, and update memory after it
+finishes. Older detailed notes below are historical where this checkpoint differs.
+
 ## Objective and working agreement
 
 Continue until v0.5.1-rc1 is published and independently verified; v0.5.0 stays
@@ -8,8 +58,8 @@ Primary implements; existing Luna Max reviewer is read-only and loads the same
 custom Rust/database skills and accepted spec. No permission pending. Keep progress
 visible, calls bounded and resume live sessions rather than restarting on timeout.
 
-Worktree issue-731 / fix/static-bindings-731, PR737; committed/public HEAD dc3bd90
-(contract10), accepted main last1b953f1d. Current source is dirty contract11/11.
+Worktree issue-731 / fix/static-bindings-731, PR737; reviewed source HEAD d0b08e7 (contract11); public HEAD is still dc3bd90
+(contract10) until native push. Accepted main is1b953f1d.
 Use installed stable0.5.0 Atlas plugin/CLI, exact private root. The MCP brief
 returns policy_drift after candidate gates; preserve that DB, do not reset/downgrade
 or fullrefresh merely for orientation. Manager has no atlas intentionally. Read
