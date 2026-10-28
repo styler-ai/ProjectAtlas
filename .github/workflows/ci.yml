@@ -1227,6 +1227,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::graph_projection::tests::document_policy_probes_admit_prefixes_before_ignore_reads -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation document_target_prefixes_preserve_cli_mcp_and_operator_roots -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation observed_mcp_reconciles_document_only_target_changes -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture

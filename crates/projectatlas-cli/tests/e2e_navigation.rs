@@ -3960,6 +3960,182 @@ fn publish_cli_navigation_graph(db: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn document_target_prefixes_preserve_cli_mcp_and_operator_roots() -> Result<(), Box<dyn Error>> {
+    /// Exercise native directory links; unsupported Windows privilege uses a junction.
+    fn directory_link(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            match std::os::windows::fs::symlink_dir(target, link) {
+                Ok(()) => Ok(()),
+                Err(source) if source.raw_os_error() == Some(1314) => {
+                    let output = StdCommand::new("cmd")
+                        .args(["/d", "/c", "mklink", "/J"])
+                        .arg(link)
+                        .arg(target)
+                        .output()?;
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other(format!(
+                            "document fixture junction failed: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        )))
+                    }
+                }
+                Err(source) => Err(source),
+            }
+        }
+    }
+    /// Compare the existing closed document reasons without losing raw references.
+    fn check_rows(response: &Value) -> Result<(), Box<dyn Error>> {
+        let rows = response
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("document prefix relation rows missing"))?;
+        let mut reasons = BTreeMap::<&str, usize>::new();
+        for row in rows {
+            let reason = row
+                .get("document_unresolved_reason")
+                .and_then(Value::as_str);
+            let status = row
+                .pointer("/relation/resolution/status")
+                .and_then(Value::as_str);
+            if reason.is_some() {
+                if status != Some("unresolved") {
+                    return Err(io::Error::other(format!(
+                        "document refusal retained an exact target: {row:?}"
+                    ))
+                    .into());
+                }
+            } else if status != Some("resolved")
+                || row
+                    .pointer("/target/entity/selector/path")
+                    .and_then(Value::as_str)
+                    != Some("real/target.md")
+            {
+                return Err(io::Error::other(format!(
+                    "ordinary document target lost its exact identity: {row:?}"
+                ))
+                .into());
+            }
+            *reasons.entry(reason.unwrap_or("resolved")).or_default() += 1;
+        }
+        let expected = BTreeMap::from([
+            ("outside_root", 3),
+            ("ignored", 1),
+            ("missing", 1),
+            ("unsupported", 1),
+            ("resolved", 1),
+        ]);
+        if reasons != expected {
+            return Err(io::Error::other(format!(
+                "document prefix outcomes differ: {reasons:?}; rows={rows:?}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+    const GUIDE: &str = "guide.md";
+    const IGNORE: &str = ".ignore";
+    const TARGET: &str = "target.md";
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join(TEST_REPO_DIR);
+    let real = root.join("real");
+    let outside = temp.path().join("other");
+    let selected = temp.path().join("selected");
+    fs::create_dir_all(&real)?;
+    fs::create_dir_all(&outside)?;
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(root.join(IGNORE), "ignored.md\n")?;
+    fs::write(root.join("ignored.md"), "# Ignored\n")?;
+    fs::write(real.join(TARGET), "# Admitted\n")?;
+    fs::write(outside.join(IGNORE), "target.md\n")?;
+    fs::write(outside.join(TARGET), "# Outside sentinel\n")?;
+    directory_link(&outside, &root.join("link"))?;
+    directory_link(&real, &outside.join("back"))?;
+    directory_link(&real, &root.join("alias"))?;
+    directory_link(&root, &selected)?;
+    fs::write(
+        root.join(GUIDE),
+        concat!(
+            "# Guide\n\n",
+            "[outside](link/target.md)\n",
+            "[outside missing](link/missing.md)\n",
+            "[leave and return](link/back/target.md)\n",
+            "[ordinary](real/target.md)\n",
+            "[ignored](ignored.md)\n",
+            "[missing](missing.md)\n",
+            "[inside alias](alias/target.md)\n",
+        ),
+    )?;
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, &root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+    let mut session = McpContractSession::spawn(&executable, &root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for changed in [false, true] {
+            if changed {
+                fs::write(outside.join(IGNORE), "other.md\n")?;
+                let noop =
+                    run_packaged_cli_json(&executable, &root, &database, &["watch", "--once"])?;
+                require_json_usize(&noop, &["last_symbols", "parsed"], 0)?;
+            }
+            for selected_root in [&root, &selected] {
+                let selected_database = selected_root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    selected_root,
+                    &selected_database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        GUIDE,
+                        "--relation",
+                        "documents",
+                        "--output-bytes",
+                        "262144",
+                        "--limit",
+                        "20",
+                    ],
+                )?;
+                check_rows(&cli)?;
+                let text = session.call_tool(
+                    "atlas_symbol_relations",
+                    &json!({
+                        "project_path": selected_root, "view": "detailed", "file": GUIDE,
+                        "relation": "documents", "limit": 20, "output_bytes": 262_144,
+                    }),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                check_rows(&mcp)?;
+            }
+            if AtlasStore::open_read_only(&database)?.project_instance_id()? != identity
+                || AtlasStore::open_read_only(&database)?.index_publication()? != before
+            {
+                return Err(io::Error::other(
+                    "document queries or outside policy edit changed project state",
+                )
+                .into());
+            }
+        }
+        if fs::read_to_string(outside.join(TARGET))? != "# Outside sentinel\n" {
+            return Err(io::Error::other("outside document sentinel changed").into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
 fn classified_document_navigation_agrees_across_cli_and_mcp() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     let temp = tempfile::tempdir_in("/var/tmp")?;
