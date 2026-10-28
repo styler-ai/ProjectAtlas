@@ -101,7 +101,7 @@ Before wave 1, the planning PR publishes the shared OpenSpec and architecture so
 3. #342 follows #488; #476 follows #481; #486 follows #482/#483.
 4. #358 and #465 follow #476/#480/#488; #484 follows #476/#481.
 5. #339 and #384 follow #477; #456 follows #358/#465/#477/#484; #485 follows #484/#486.
-6. #490 follows #339/#342/#358/#384/#464/#465/#489.
+6. #490 was deferred to v0.6.0; its current direct prerequisites are #310 and #563. Earlier v0.5 prerequisites are historical baseline context, not current dependency edges.
 7. #492 follows every child issue, runs RC remediation and independent readback, hands unperformed stable promotion to #602, and closes last.
 
 Each dependent worktree refreshes/rebases onto accepted predecessors on `main` and reruns affected proof. Independent, disjoint lanes remain parallel.
@@ -115,3 +115,17 @@ Database-first transitions apply to #481, #476, #484 only if its own storage inv
 ## Open Questions
 
 None.
+
+## Deferred v0.6 evaluation planning (#490)
+
+### Ownership and dependency reconciliation
+
+Moving the milestone did not move the issue body, native graph or task contract. Preserve the deliberately scheduled v0.6 target and the accepted shared owner table: #490 retains its sole 24.1–24.4 task slice, updated in place for v0.6, with every row unchecked. All other owner mappings, task text and completion states remain unchanged; Git retains the previous v0.5 wording. #493 is its sole parent and is directly blocked by it. #310 and #563 are genuine current prerequisites because final execution uses the settled agent interface and language-navigation scenarios. Planning can proceed in parallel; no artificial #314/#388 dependency or RC1 dependency is added. The issue, graph and release-owner scope must match before readiness.
+
+### Evaluation and safety contract
+
+Before either arm runs, freeze representative tasks from accepted v0.6 behavior, repositories, exact baseline/candidate/runtime/tool identities, equivalent prompts and capabilities, success and stop rules, cold/warm conditions, rotated order, repeats, metrics, uncertainty, privacy and output bounds. Retain success, failure, timeout, invalid/setup trace, uncertainty and self-audit outcomes. Report preregistered exclusions explicitly; publish only bounded sanitized results and distinguish observed correctness, time, calls, wrong-file work and context from modeled token estimates. Null, negative or no-product-code outcomes are acceptable. Changed candidate inputs invalidate affected proof. Existing explicit root selection and initialization contracts apply; no ambient indexing, unsafe publication or implicit mutation is permitted.
+
+Audit and reuse the existing equal-arm harness and published evaluation first, correcting only demonstrated gaps with causal and positive compatibility proof and applicable locked Rust/database/workspace checks. Architecture disposition: N/A: evaluation ownership and the existing equal-arm, offline, bounded artifact pipeline are unchanged; planning introduces no runtime, database, host or protocol architecture. #493 consumes the reviewed result before final release acceptance without duplicating the experiment. No evaluation execution or completion is claimed by this reconciliation.
+
+Risks are stale planning authority, selection after observing results, omitted unfavorable outcomes and unsafe artifact publication. Mitigations are exact task/issue/native graph synchronization, preregistration before observation, retention of every outcome class, and independent metric/sanitization/bounds review. Rollback affects only planning metadata and cannot change product indexes, approved purposes or releases. No unresolved design question or schema migration applies.

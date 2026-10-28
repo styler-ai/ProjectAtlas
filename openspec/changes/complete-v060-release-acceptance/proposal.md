@@ -40,4 +40,4 @@ Issue #563 remains a required direct child for ABAP, COBOL, Fortran, Ruby, and S
 
 ## Observed evaluation scope
 
-Issue #490 remains in v0.6.0 under its September roadmap disposition and now has current task authority in `reconcile-v060-agent-evaluation`. It is a direct #493 child and blocker, with #310 and #563 as its genuine direct prerequisites. #490 owns preregistration, equivalent-arm execution and bounded sanitized observed results; #493 consumes that accepted result without duplicating the experiment. No evaluation execution is claimed, and #490 is outside v0.5.1-rc1.
+Issue #490 remains in v0.6.0 under its September roadmap disposition and now has current task authority in the existing #490 slice in `complete-v050-release-readiness`. It is a direct #493 child and blocker, with #310 and #563 as its genuine direct prerequisites. #490 owns preregistration, equivalent-arm execution and bounded sanitized observed results; #493 consumes that accepted result without duplicating the experiment. No evaluation execution is claimed, and #490 is outside v0.5.1-rc1.

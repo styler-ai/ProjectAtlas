@@ -16,18 +16,18 @@ threads resolved. CodeQL aggregate is FAILURE despite successful analyzers;
 evaluate actual alerts under715/owning738 rather than blindly dismissing or
 claiming final readiness. Read issue739 and v0.5.1 memory for source continuity.
 
-#490 was deliberately scheduled for0.6 in the Sept12roadmap comment, but retained
-v050body/tasks and no493parent/currentgraph. LunaMax independently approved the
-current planning reconciliation. Currentchange reconcile-v060-agent-evaluation
-is now its sole task authority. Old v05024rows are unchanged deferred history.
-Direct blockers310(interface) and563(languages), parent493, directlyblocks493;
-314/388remainindependent. Root493nativechildren/blockers EXACT310/314/388/490/563,
-all41; prior closedv050dependenciesremoved from490. Live493body and41summary updated.
-Native readback /tmp/projectatlas-490-native-readback.json. Exact490taskmirror5/5,
-planning1.1checked, other4execution/reviewtasksandall5acceptanceunchecked; strictnew
-change and493PASS; scopedplannedIssueOpsPASS. No evaluation result/completionclaim.
-Current localfuturegraph andnewownermap must be integrated throughnormalreviewedPR;
-then sibling RC1branches consume acceptedmapbeforepublishing. Do not close490.
+#490 deliberately remains in0.6. Native493children/blockers EXACT310/314/388/490/563,
+490soleparent493/directblockers310/563,all41. Live493body+41summaryupdated; old
+closedv050blockersremoved. Initialnewtaskremapping was correctlyrejected bynormal
+candidategate (sharedownerstable/gapfree). No bypass. Revisedminimalplan preserves
+the establishedowner table andonlyrescopesthe490slice24.1–24.4 forv0.6,all4unchecked.
+Currentcapabilityspec+design/proposalsliveunderthatsharedchange; newduplicatechange
+removed. Otherownertasksunchanged. Live490/493/41authorityreferences corrected; plannedIssueOps4/4/0checkedPASS,
+all4executionand5acceptanceunchecked. Lunaapprovedcorrectedexistingcapability
+repository-quality-evaluation. Strict493PASS; strictlegacychange hasexactly6
+acceptedbasewarningswithnoneadded(errorcode1onboth); no unrelatedspecrewrite.
+FinalreadbackprovesallownerarraysandallunrelatedtaskbytesUNCHANGED. Normalnative
+push/hostedplanningPRremainpublicationboundary. No experimentrun.
 
 StableAtlas050privateinit correctlyrefused concurrentplanningwrites while it was
 indexing; this was a sourcechange refusal, not a newlyconfirmedproductbug. DB was
