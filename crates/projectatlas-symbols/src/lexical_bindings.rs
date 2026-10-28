@@ -71,6 +71,15 @@ enum PythonDirective {
     Invalid,
 }
 
+/// Declaration reservation and assignment act on different ECMAScript owners.
+#[derive(Clone, Copy)]
+enum EcmaPatternEffect {
+    /// Hoist the name without assigning a value.
+    Reserve,
+    /// Link a value write at its actual evaluation boundary.
+    Write(usize),
+}
+
 /// A binding's visibility point and its pre-initialization shadow policy.
 struct Binding {
     /// First source offset at which this target is initialized.
@@ -255,13 +264,25 @@ impl<'a> DeclarationOrdinals<'a> {
     }
 }
 
+/// Whether ECMAScript var declarations belong here or in an enclosing body.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum EcmascriptVarEnvironment {
+    /// Blocks and parameters do not own function-body var declarations.
+    #[default]
+    Enclosing,
+    /// Function, static-initializer and namespace bodies own their var declarations.
+    Local,
+}
+
 /// A grammar-owned lexical environment, including parameter and block owners.
 #[derive(Default)]
 struct Scope {
     /// Lexical lookup parent, independent from class presentation ownership.
     parent: Option<usize>,
-    /// Whether function-wide locals belong to this environment.
+    /// Whether lookup crosses a callable boundary; also Python's local owner.
     function: bool,
+    /// ECMAScript body/static/namespace vars stay separate from parameter evaluation.
+    ecma_var_environment: EcmascriptVarEnvironment,
     /// Whether Python function lookup must skip this class body.
     class: bool,
     /// Python iteration variables stay inside their comprehension environment.
@@ -838,6 +859,17 @@ impl LexicalCollector<'_> {
         from: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        self.ecmascript_pattern_bindings(node, scope, EcmaPatternEffect::Write(from), check)
+    }
+
+    /// Reuse the same admitted pattern leaves for hoisting and lexical writes.
+    fn ecmascript_pattern_bindings<E>(
+        &mut self,
+        node: Node<'_>,
+        scope: usize,
+        effect: EcmaPatternEffect,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
         check()?;
         if self.incomplete {
             return Ok(());
@@ -849,7 +881,16 @@ impl LexicalCollector<'_> {
             if let Some(name) = self.binding_name(node)
                 && self.admit_binding()
             {
-                self.mutations.push((scope, name, from));
+                match effect {
+                    EcmaPatternEffect::Reserve => {
+                        self.scopes[scope]
+                            .bindings
+                            .entry(name)
+                            .or_default()
+                            .reserves_scope = true;
+                    }
+                    EcmaPatternEffect::Write(from) => self.mutations.push((scope, name, from)),
+                }
             }
         } else if matches!(
             node.kind(),
@@ -860,12 +901,12 @@ impl LexicalCollector<'_> {
                 .or_else(|| node.child_by_field_name("value"))
                 .or_else(|| crate::first_named_child(node))
             {
-                self.mutation_names(target, scope, from, check)?;
+                self.ecmascript_pattern_bindings(target, scope, effect, check)?;
             }
         } else if matches!(node.kind(), "object_pattern" | "array_pattern") {
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                self.mutation_names(child, scope, from, check)?;
+                self.ecmascript_pattern_bindings(child, scope, effect, check)?;
             }
         }
         Ok(())
@@ -1014,10 +1055,13 @@ impl LexicalCollector<'_> {
         bindings.transitions.push(Binding { from, target });
     }
 
-    /// Find the closest function environment for Python locals and ECMAScript var.
-    fn function_scope(&self, mut scope: usize) -> usize {
-        while !(self.scopes[scope].function
-            || self.language == "python" && self.scopes[scope].class)
+    /// Find the owning local environment without exposing body vars to parameters.
+    fn value_declaration_scope(&self, mut scope: usize) -> usize {
+        while !((if self.ecmascript() {
+            self.scopes[scope].ecma_var_environment == EcmascriptVarEnvironment::Local
+        } else {
+            self.scopes[scope].function
+        }) || self.language == "python" && self.scopes[scope].class)
         {
             let Some(parent) = self.scopes[scope].parent else {
                 break;
@@ -1375,6 +1419,21 @@ impl LexicalCollector<'_> {
             self.scopes.push(Scope {
                 parent: Some(parent),
                 function,
+                ecma_var_environment: if self.ecmascript()
+                    && node.parent().is_some_and(|owner| {
+                        (is_function(owner.kind())
+                            || matches!(
+                                owner.kind(),
+                                "class_static_block" | "internal_module" | "module"
+                            ))
+                            && owner
+                                .child_by_field_name("body")
+                                .is_some_and(|body| body.id() == node.id())
+                    }) {
+                    EcmascriptVarEnvironment::Local
+                } else {
+                    EcmascriptVarEnvironment::Enclosing
+                },
                 class,
                 enclosing_visibility_floor: if function
                     && (self.language == "python" || self.ecmascript())
@@ -1510,7 +1569,7 @@ impl LexicalCollector<'_> {
                 .parent()
                 .is_some_and(|parent| parent.kind() == "case_clause")
         {
-            self.python_match_bindings(node, self.function_scope(scope), check)?;
+            self.python_match_bindings(node, self.value_declaration_scope(scope), check)?;
         }
         if let Some(calls) = self
             .calls
@@ -2109,11 +2168,21 @@ impl LexicalCollector<'_> {
                     .map_or(pattern.end_byte(), |right| right.end_byte());
                 if let Some(kind) = node.child_by_field_name("kind") {
                     let owner = if kind.kind() == "var" {
-                        self.function_scope(scope)
+                        self.value_declaration_scope(scope)
                     } else {
                         scope
                     };
-                    self.pattern_names(pattern, owner, from, true, check)?;
+                    if kind.kind() == "var" {
+                        self.ecmascript_pattern_bindings(
+                            pattern,
+                            owner,
+                            EcmaPatternEffect::Reserve,
+                            check,
+                        )?;
+                        self.mutation_names(pattern, scope, from, check)?;
+                    } else {
+                        self.pattern_names(pattern, owner, from, true, check)?;
+                    }
                 } else {
                     self.mutation_names(pattern, scope, from, check)?;
                 }
@@ -2170,7 +2239,7 @@ impl LexicalCollector<'_> {
             _ => None,
         };
         if self.language == "python" && node.kind() == "delete_statement" {
-            let binding_scope = self.function_scope(scope);
+            let binding_scope = self.value_declaration_scope(scope);
             let mut cursor = node.walk();
             for target in node.named_children(&mut cursor) {
                 self.pattern_names(
@@ -2208,6 +2277,7 @@ impl LexicalCollector<'_> {
         {
             return Ok(());
         }
+        let evaluation_scope = scope;
         let python = self.language == "python";
         let var = self.ecmascript()
             && node
@@ -2222,25 +2292,16 @@ impl LexicalCollector<'_> {
                     scope = parent;
                 }
             }
-            scope = self.function_scope(scope);
+            scope = self.value_declaration_scope(scope);
         }
-        // An uninitialized var reserves its function name but performs no write.
-        // Keep an earlier function, parameter or initialized variable's timeline.
-        if var
-            && !crate::declarator_has_recovery_error(node)
-            && node.child_by_field_name("value").is_none()
-        {
-            if let Some(name) = self.binding_name(pattern) {
-                if !self.admit_binding() {
-                    return Ok(());
-                }
-                self.scopes[scope]
-                    .bindings
-                    .entry(name)
-                    .or_default()
-                    .reserves_scope = true;
+        if var {
+            self.ecmascript_pattern_bindings(pattern, scope, EcmaPatternEffect::Reserve, check)?;
+            // A valid bare declaration does not perform a lexical value write.
+            if !crate::declarator_has_recovery_error(node)
+                && node.child_by_field_name("value").is_none()
+            {
+                return Ok(());
             }
-            return Ok(());
         }
         if python && node.kind() == "assignment" && node.child_by_field_name("type").is_some() {
             if let Some(name) = self.binding_name(pattern) {
@@ -2264,13 +2325,24 @@ impl LexicalCollector<'_> {
             && let Some(name) = self.identifier(pattern)
             && self.declaration_binding_name(symbol).as_ref() == Some(&name)
         {
+            let mut write_scope = if var { evaluation_scope } else { scope };
+            while var && !self.scopes[write_scope].bindings.contains_key(&name) {
+                let Some(parent) = self.scopes[write_scope].parent else {
+                    break;
+                };
+                write_scope = parent;
+            }
             self.bind(
-                scope,
+                write_scope,
                 name,
                 node.end_byte(),
                 true,
                 BindingTarget::Declaration(symbol),
             );
+            return Ok(());
+        }
+        if var {
+            self.mutation_names(pattern, evaluation_scope, node.end_byte(), check)?;
             return Ok(());
         }
         let from = if matches!(self.language, "c" | "cpp" | "objective-c")
@@ -5360,6 +5432,221 @@ function caller() { renamed(); tools.work(); }
             facts.calls[0].binding,
             SourceCallBinding::Imported { .. }
         ));
+    }
+
+    #[test]
+    fn ecmascript_function_body_writes_own_their_var_bindings() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("vue", "main.vue", true),
+            ("svelte", "main.svelte", true),
+            ("html", "main.html", true),
+        ] {
+            for (script, resolved) in [
+                (
+                    "function caller(replacement){function run(){} var run=replacement; run();}",
+                    false,
+                ),
+                ("function caller(){function run(){} var run; run();}", true),
+                (
+                    "function caller(replacement){var run=replacement; {function run(){} run();}}",
+                    true,
+                ),
+                (
+                    "function caller(replacement){function run(){} run=replacement; run();}",
+                    false,
+                ),
+                (
+                    "function caller(values){function run(){} for(var run of values){} run();}",
+                    false,
+                ),
+                (
+                    "function run(){} class Example{static{var run=null;}} function caller(){run();}",
+                    true,
+                ),
+                (
+                    "function caller(replacement){function run(){} try{}catch(run){var run=replacement;} run();}",
+                    true,
+                ),
+                (
+                    "function caller(values){function run(){} try{}catch(run){for(var run of values){}} run();}",
+                    true,
+                ),
+                (
+                    "function run(){} function caller(replacement){try{}catch(run){var run=replacement;} run();}",
+                    false,
+                ),
+                (
+                    "function caller(replacement){function run(){} try{}catch(run){var [run]=replacement;} run();}",
+                    true,
+                ),
+                (
+                    "function caller(replacement){function run(){} try{}catch(run){var {value:run}=replacement;} run();}",
+                    true,
+                ),
+                (
+                    "function caller(values){function run(){} try{}catch(run){for(var {value:run} of values){}} run();}",
+                    true,
+                ),
+            ] {
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script.to_string()
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (_, graph, facts) = extracted.into_parts();
+                let calls = facts
+                    .calls
+                    .iter()
+                    .filter(|call| graph.relations[call.relation].target_name == "run")
+                    .collect::<Vec<_>>();
+                assert!(!calls.is_empty(), "{language}: {script}: missing raw call");
+                for call in calls {
+                    let target = match call.binding {
+                        SourceCallBinding::LocalDeclaration(symbol) => Some(&graph.symbols[symbol]),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        target.is_some(),
+                        resolved,
+                        "{language}: {script}: {:?}",
+                        facts.calls
+                    );
+                    if let Some(target) = target {
+                        assert_eq!(target.name, "run", "{language}: {script}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typescript_namespace_vars_keep_their_own_environment() {
+        for (language, path) in [("typescript", "main.ts"), ("tsx", "main.tsx")] {
+            for (content, resolved) in [
+                (
+                    "function run(){} namespace N{var run=null;} function caller(){run();}",
+                    true,
+                ),
+                (
+                    "namespace N{function run(){} var run=null; function caller(){run();}}",
+                    false,
+                ),
+                (
+                    "namespace N{function run(){} function caller(value=run()){var run=null;}}",
+                    true,
+                ),
+            ] {
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (_, graph, facts) = extracted.into_parts();
+                assert_eq!(facts.calls.len(), 1, "{language}: {content}");
+                match facts.calls[0].binding {
+                    SourceCallBinding::LocalDeclaration(symbol) => {
+                        assert!(resolved, "{language}: {content}");
+                        assert_eq!(graph.symbols[symbol].name, "run");
+                    }
+                    _ => assert!(!resolved, "{language}: {content}: {:?}", facts.calls),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ecmascript_parameter_initializers_exclude_body_bindings() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("vue", "main.vue", true),
+            ("svelte", "main.svelte", true),
+            ("html", "main.html", true),
+        ] {
+            for (script, resolved) in [
+                (
+                    "function run(){} function caller(value=run()){var run=null;}",
+                    true,
+                ),
+                (
+                    "function run(){} function caller(value=run()){function run(){}}",
+                    true,
+                ),
+                (
+                    "function run(){} class Example{caller(value=run()){var run=null;}}",
+                    true,
+                ),
+                (
+                    "function run(){} const caller=(value=run())=>{var run=null;};",
+                    true,
+                ),
+                ("function run(){} function caller(run=run()){}", false),
+                (
+                    "function run(){} function caller(value=run(),run=null){}",
+                    false,
+                ),
+                (
+                    "function run(){} function caller(value=run()){let run=null;}",
+                    true,
+                ),
+                (
+                    "function run(){} function* caller(value=run()){var run=null;}",
+                    true,
+                ),
+            ] {
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script.to_string()
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (_, graph, facts) = extracted.into_parts();
+                let calls = facts
+                    .calls
+                    .iter()
+                    .filter(|call| graph.relations[call.relation].target_name == "run")
+                    .collect::<Vec<_>>();
+                assert!(!calls.is_empty(), "{language}: {script}: missing raw call");
+                for call in calls {
+                    let target = match call.binding {
+                        SourceCallBinding::LocalDeclaration(symbol) => Some(&graph.symbols[symbol]),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        target.is_some(),
+                        resolved,
+                        "{language}: {script}: {:?}",
+                        facts.calls
+                    );
+                    if let Some(target) = target {
+                        assert_eq!(target.name, "run", "{language}: {script}");
+                        assert!(target.parent.is_none(), "{language}: {script}: {target:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

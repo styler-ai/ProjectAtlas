@@ -18,7 +18,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 10;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 11;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -2436,7 +2436,7 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 10);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 11);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());

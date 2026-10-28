@@ -86,6 +86,14 @@ outer binding. Ordinary for initializers share this rule, while for-in/of target
 retain their actual write transitions. Lexical let/const and other language locals
 keep their existing declaration rules. Reuse the bounded NameBindings entry and
 existing AST fields rather than introducing another resolver or execution pass.
+Function body declarations share the body's var environment; parameter defaults
+use their distinct parameter environment and cannot see body locals. Static class
+blocks and admitted TypeScript namespaces own their vars. A var declaration
+reserves its body owner separately from its lexical initializer/iteration write,
+so a valid catch parameter receives that write without replacing an outer value.
+Ordinary nested block functions remain block-owned. Reuse admitted AST scope and
+pattern leaves; no additional parse or source pass is needed.
+
 Malformed declarators cannot supply no-write or direct-callable initializer proof.
 Check both their own recovery errors and an immediately following error/missing
 node after comments; this catches a recovered equals sign outside the declarator
@@ -124,9 +132,10 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 10/10 additionally repairs bare-var reservation and malformed initializer
-admission in unchanged private9/9 and8/8 indexes, retaining the earlier Python
-directive and private7/7 and6/6 repairs
+or per-call timeline scan is admitted. Contract 11/11 additionally repairs function
+body/parameter/static/namespace environments in unchanged private10/10 indexes,
+retaining bare-var reservation, malformed initializer, Python directive and earlier
+private9/9,8/8,7/7 and6/6 repairs
 without changing schema, wire shapes or authored state.
 
 Rust qualified paths use the type/module namespace independently of local values.
@@ -139,6 +148,21 @@ namespace scopes, never additionally at the unparented source root.
 ### Static re-exports use bounded explicit alias chains
 
 Retain explicit Rust pub-use and ECMAScript export-from alias facts in the sidecar. Resolve a consumer's binding through a bounded module/export chain to an existing declaration, retaining module dependencies for every required step. Do not synthesize declarations or attach alias exports to unrelated stable entity owners. Preserve ambiguity and detect cycles using bounded visited identities; no unbounded fixed-point pass or global display-name relinking. Sidecar lookup is cached once per exact captured source file and limited by the existing indexing work budget.
+
+Both Rust and ECMAScript forwarding use the existing operation staging byte ceiling
+and 10,000-row dependency limit. Reserve each unique cause before cloning it and
+check the row limit before insertion; duplicate keys need no new reservation.
+Scoped construction releases its bytes on cancellation/error and transfers them
+once into a completed cached owner. Rust frames account both query copies; root,
+slot and candidate-call indexes admit growth before insertion. Shared source
+inventory uses one immutable Arc, not a second map. Generic forwarding borrows
+cached module keys, admits missing lookup keys before database access and retains
+them once in loaded state. Generic cycle suffixes add causes directly to their
+parent workspace, avoiding an uncached result whose charge outlives that result.
+Visited query copies are admitted before insertion and removed on every exit.
+Preserve completed child caches when a parent refuses. Fixed per-entry estimates
+are conservative accounting, not an exact allocator/RSS limit; single requests,
+validated paths and per-source derivation retain existing source/identity bounds.
 
 ### Persist canonical outcomes and query them consistently
 

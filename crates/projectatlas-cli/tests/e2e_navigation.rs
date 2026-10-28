@@ -13824,6 +13824,33 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
             root.join(&local),
             "function run(){} var run; function caller(){run();}\n",
         )?;
+        let mut environments = vec![
+            (
+                format!("body.{extension}"),
+                "function caller(replacement){function run(){} var run=replacement; run();}\n",
+                false,
+            ),
+            (
+                format!("parameters.{extension}"),
+                "function run(){} function caller(value=run()){var run=null;}\n",
+                true,
+            ),
+            (
+                format!("static.{extension}"),
+                "function run(){} class Example{static{var run=null;}} function caller(){run();}\n",
+                true,
+            ),
+        ];
+        if extension == "ts" {
+            environments.push((
+                format!("namespace.{extension}"),
+                "function run(){} namespace N{var run=null;} function caller(){run();}\n",
+                true,
+            ));
+        }
+        for (file, content, _) in &environments {
+            fs::write(root.join(file), content)?;
+        }
         let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
         let executable = mcp_contract_executable();
         fs::write(
@@ -13848,7 +13875,7 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                     if rebuilt {
                         run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
                     }
-                    for (file, caller, target_file, target, present) in [
+                    let mut checks = vec![
                         (
                             importer.as_str(),
                             "caller",
@@ -13858,7 +13885,11 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                         ),
                         (importer.as_str(), "clean", worker.as_str(), "safe", true),
                         (local.as_str(), "caller", local.as_str(), "run", true),
-                    ] {
+                    ];
+                    checks.extend(environments.iter().map(|(file, _, present)| {
+                        (file.as_str(), "caller", file.as_str(), "run", *present)
+                    }));
+                    for (file, caller, target_file, target, present) in checks {
                         let cli = run_packaged_cli_json(
                             &executable,
                             root,
@@ -13898,6 +13929,10 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                                 .ok_or_else(|| io::Error::other("bare var caller rows missing"))?;
                             rust_binding_equal(&rows.len(), &1)?;
                             rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                        }
+                        // Nested body declarations are proved by exact graph targets above.
+                        if file.starts_with("body.") {
+                            continue;
                         }
                         let text = session.call_tool(
                             "atlas_file_summary",

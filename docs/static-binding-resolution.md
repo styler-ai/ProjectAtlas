@@ -130,8 +130,8 @@ An exhausted export-fact budget invalidates all export target proof, including
 previously captured slots; ordinal filtering and embedded-host remapping preserve
 this completeness boundary.
 
-Extraction derivation contract 10 and semantic resolution contract 10 invalidate
-older derived facts, including preceding development contracts 9/9, 8/8, 7/7, 6/6, 5/6 and 4/5 and the
+Extraction derivation contract 11 and semantic resolution contract 11 invalidate
+older derived facts, including preceding development contracts 10/10, 9/9, 8/8, 7/7, 6/6, 5/6 and 4/5 and the
 published 0.5.0 contract 3/3. An ordinary refresh repairs unchanged source through
 the existing bounded full-publication owner. This first reconciliation may parse
 the complete admitted source; later current-contract operations reuse unaffected
@@ -146,6 +146,12 @@ stable timeline suffix prevents a deferred body from guessing between future
 targets. Observed ECMAScript writes invalidate mutable call/export identities;
 writes by a nested callable to a captured binding have unknown execution timing.
 This does not add runtime execution or general control-flow inference.
+
+ECMAScript function bodies own body var and function declarations separately from
+parameter evaluation. Parameter defaults retain outer bindings even when the body
+has a same-name declaration. Class static blocks and admitted TypeScript namespaces
+keep their own vars. Declaration reservation and actual lexical writes remain
+separate, including writes through a valid catch binding.
 
 Native traversal stops at 256 AST levels. Lexical refinement retains at most
 16,384 environments and 16,384 binding transitions across value, method and type/module namespaces or pending writes per file,
@@ -170,6 +176,15 @@ deletion repair unchanged consumers. Required source is captured and hash-checke
 once per operation; identical queries and declaration hydration share bounded
 caches. Traversal stops after 64 steps; ambiguity, unsupported slots and exhausted
 proof abstain. Existing direct declaration lookup keeps its fast path.
+
+Forwarding dependency sets share the existing 10,000-row and operation staging
+ceilings. Unique key copies, recursive query copies and lookup-map growth are
+admitted before insertion; cancellation/refusal releases temporary ownership.
+Completed caches retain their actual owner once, while cycle suffixes add file
+causes directly to the active parent's workspace. A refused parent keeps accepted
+child caches and the previous publication. These are conservative byte estimates;
+single source/request construction remains subject to existing source/identity
+limits rather than an exact allocator or RSS guarantee.
 
 Rust source facts retain complete use paths and their item, grouped-self or
 wildcard roles before classifying the final segment. Runtime selects Cargo roots

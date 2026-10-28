@@ -1,145 +1,164 @@
 # Active context
 
-Continue autonomously until v0.5.1-rc1 is published and independently verified.
-Latest stays v0.5.0; stable promotion is outside the goal. Primary implements;
-existing Luna Max reviewer is read-only and loads the same custom Rust/database
-skills. No permission pending. Use exact private stable0.5.0 Atlas state, never
-reset/downgrade a newer private index for orientation. Current stable Atlas brief
-returns policy_drift after native candidate gates; reuse verified source evidence.
+## Objective and working agreement
 
-## Milestone and release graph (2026-10-28)
+Continue until v0.5.1-rc1 is published and independently verified; v0.5.0 stays
+Latest. Stable promotion, #715 task3.2 and milestone closure need later instruction.
+Primary implements; existing Luna Max reviewer is read-only and loads the same
+custom Rust/database skills and accepted spec. No permission pending. Keep progress
+visible, calls bounded and resume live sessions rather than restarting on timeout.
 
-Live milestone37 v0.5.1-00 targets RC1 first. Native release owner715 has no parent,
-and children AND direct blockers exactly708/718/721/722/731/732/738. Closed718/721/
-722/732, open708/731/738. PR737/728 are in37. Milestone description and715plan/live
-body explicitly include all current fixes and scanner/automated-review assessment
-under existing715task2.2. No blind scanner dismissal. Deferred725 stays unscheduled.
-Historical720 protected-dev metadata report remains unplanned; main is integration.
-715local graph is still accepted-baseline-only; final integrated map must union
-731/732/738. Closed42 cachedcount1 has no actual open REST member.
+Worktree issue-731 / fix/static-bindings-731, PR737; committed/public HEAD dc3bd90
+(contract10), accepted main last1b953f1d. Current source is dirty contract11/11.
+Use installed stable0.5.0 Atlas plugin/CLI, exact private root. The MCP brief
+returns policy_drift after candidate gates; preserve that DB, do not reset/downgrade
+or fullrefresh merely for orientation. Manager has no atlas intentionally. Read
+installed Atlas skill, memoryREADME and this file after compaction.
 
-## Current #731 correction
+## Current implementation (2026-10-28)
 
-Current clean production83b937c has immutable optimized10:
+Three review threads remain open: xSmDC body functions/var owner, xSmDH parameter
+initializer/body isolation, xSpgU Rust frame accounting. Original4 threads were
+answered and resolved against publicdc3bd90 after native proof. Local/live tasks
+2.4/2.5/2.6/2.7 reopened;4/9 checked, task3.1+all5acceptance unchecked. Issue731
+WhatChanges now includes these broader corrections and removes obsolete task2.3
+reopening prose. Live exactreadback and scopedIssueOps9/9/4PASS; milestone37 retained.
+/tmp/projectatlas-731-contract11-issue-readback.json /-body.md /-issueops.log.
+
+ECMA lexical source now distinguishes function-body var ownership from parameter
+evaluation through EcmascriptVarEnvironment enum. Body fn/var share owner; genuine
+nestedblock functions remainseparate; classstatic andTSnamespace bodies ownvars.
+Var reservation and actual lexical writes are separate, preserving valid catch
+binding writes including destructuring/iteration, let/const ownscope unchanged.
+No extra parse/ASTpass/scopes/publicschema. Existing perfile16k budgets retained.
+Prior17ecma+TSnamespace focusedPASS; current allsymbols394PASS/1existingignore.
+Causal native public10 failures body/default/static/namespace4cases retained at
+/tmp/projectatlas-731-function-environment-native-proof.py/json and -native-negative.log.
+Current11optimized upgrade/full/ALLpurposes/identity/noop/rollback not yet run.
+
+Rust select reserves both querycopies+BTree bookkeeping BEFORE clone/visitedinsert,
+releases exact checked reservation on cycle/success/error; no saturation masking.
+Shared resolver private retained_limit defaults to existing2GiB staging cap; tests
+inject perinstance, no newpubliclimit. Retained staging includes entities,
+candidates, captured sources and resolver caches. Old alert512MiB was inaccurate.
+
+Broader confirmed late-accounting repairs: shared ResolverScratch/CauseWorkspace
+admit each uniquekey beforeclone/insertion, rowcap10k beforegrowth, duplicatefree,
+cleanup on failure/cancellation and transfer once to completedcache. Rust root,
+override, Slots and candidatecall indices reserve beforegrowth, outputrows before
+insert. SourceBindingCache.nodes shares immutable Arc map, no secondinventorycopy.
+Generic ECMAScript forwarding borrows cached modulekeys, reserves local+visited
+querycopies, cleansvisited onErr; sole reexport recursion caller inserts cycle
+suffix causes directly into parentworkspace (no uncachedresult charge leak).
+module_file admits/dedups missingkeys beforeDBread and transfers once toloaded.
+Accepted child/source caches survive parentrefusal. Single bounded request/path
+and per-source derivation construction still use existing source/identity limits;
+conservative byte model is not exact allocator/RSS/everytransientprecharge claim.
+
+Ten focused realresolver component testsPASS .55s: byte/rowrefusal, dedup,
+cancellation, framecycle/errorcleanup, cachedchildpreservation, exactselfreexport
+onecompletedowner charge+sameArc retry, missing-source cleanup, loadedkey refusal
+beforeDB/read and positive/reuse. Initial synthetic direct-cycle test was replaced
+by actual native selfreexport facts, registryentity and cache. Helpers return typed
+errors ratherthanpanic in Result; explicit reborrow fixes satisfy Clippy.
+/tmp/projectatlas-731-shared-workspace-unit.log.
+Causal pairs restored by try/finally:
+- /tmp/projectatlas-731-causal-scratch.json/log: originalunreservedframe, missing
+cause reservation, missingrowcap, missingroot reservation allFAIL; fixed7PASS.
+- /tmp/projectatlas-731-causal-shared.json/log: missing sharedcause reservation,
+onequerycopy, HEADoldlate-loaded-copy allFAIL; injected old-equivalent uncached
+cycle charge FAILS exactaccount test; fixed10PASS. Generalaliasrefusal test alone
+also passes lateadmission (externallysamefailure), so do notcallit allocationcausal;
+sharedhelper/loaded/frame/exactcounter controls establish narrower causal proof.
+
+Luna approved the Rust-specific slice, final shared-alias scratch fixes and the
+separate ECMAScript environment delta. These source approvals are component
+reviews; final #731 acceptance still needs current upgrade, cost and hosted proof.
+
+## Current validation and next action
+
+Actual expanded bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh
+PASS20.10s: JS/TS bodynegative, default/static/TSnamespacepositives plus existing
+aliases, summaries, write/restore, unchangedimporter, incremental/full/identity/noop.
+Existing selector expanded (no testcountchange), source digests updated in inventory
+and support/source_contract.rs. It needs rerun after latestgeneric changes (active).
+StrictOpenSpecPASS currentdesign/spec/docs11; scopedIssueOpsPASS9/9/4.
+
+Affected gate runner session50449 completed successfully. Current fmt, workspace
+all-target/all-feature check, Clippy and strict strings pass; symbols394PASS with
+one existing ignored test, runtime371PASS, four Rust CLI/MCP testsPASS3.95s, expanded
+ECMA CLI/MCP testPASS and three inventory checksPASS. Progress JSON:
+/tmp/projectatlas-731-contract11-affected-gates.json; per-stage logs
+/tmp/projectatlas-731-contract11-{stage}.log. The earlier47772 test reborrow lint
+failure is superseded. Current doctests and warning-strict workspace docs also PASS.
+No live build remains at this checkpoint.
+
+Next: finish currentgates, act on finalECMA source review, meaningfulcleancommit,
+immutable optimized11 artifact, actualpublic10->11 native upgrade/full/ALLpurposes/
+identity/noop/compatiblerollback, retained earlier9/8/7/050repairtests, representative
+cleanpairedcost measurement. Then proofLuna review, tasks appropriatecurrentproof,
+mandatorynativepush+exacthosted/currentfeedback beforeclosure. 738/739 finalcombined
+DER strictlygreater than FINAL73111, semantic11 retained. No current performancewaiver.
+
+## Verified earlier proof to reuse
+
+Typed AST source sidecar preserves import/export/call identity, module namespaces,
+exact occurrence ranges including257sameline sites, canonical summarycallers,
+Python directives/annotations/readwrite/exports and declaration-only recovery,
+deferred stable enclosingtimeline/captured writes, barevar and malformedinitializer
+recovery. Native ASTdepth256, lexical names/scopes independently16k. Python directive
+readcatalogue conservativelyoverapproximates filewide undercap; documented accepted,
+not fullcompiler semantics. No public schema/wire/provider/querytimeparse added.
+
+Publicdc3bd90 complete mandatory nativepushPASS session10413, logcontract10-native-push;
+source83b937c cleanoptimized10:
 ~/.cache/projectatlas-benchmarks/binding-731-83b937c-contract10-20261028/projectatlas.
-Fresh18paired cost samples PASS with no concurrent build/index/bench, exact-root
-postprobePASS. Medians roots4 .281221122->.344702295s/RSS27952->33204KiB; roots64
-.326954193->.393456090/RSS28616->35140; dense .164662759->.163240066/RSS26648->29328.
-Roots20-23%slower/RSS19-23%higher, dense<1%faster/RSS~10%higher; no708SLOwaiver.
-Publicreport now source83b937c10/10 and9installedselectors. Historical8raw retained.
-Actual old8->10 three function/arrow/function-export unchangedfixtures/full/identity/
-ALLapprovedpurposes/noop/rollback PASS; old7->10 all5Pythoncases+rollback PASS.
-Initial bare-var harness compared JSONlists with SQLtuples; fixed normalization and
-explicit old8 reconciliation before fresh snapshots. Not a product defect.
-Tasks2.4/2.5/2.6/2.7 rechecked local/live8/9 after finalproof; final3.1 and all5
-acceptance remainopen. Current scopedIssueOpsPASS9/9/8. SourceLunaapproved, final
-nativepush/currenthosted/readiness stillrequired; no release exists.
+Actualold8->10 threevarcases+old7->10 fivePythoncases withfull/identity/ALLpurposes/
+noop/rollbackPASS. Fresh18pairedcost samples no competingwork: roots4 .281221122
+->.344702295s/RSS27952->33204KiB; roots64 .326954193->.393456090/28616->35140;
+dense .164662759->.163240066/26648->29328. Root20-23%slower/RSS19-23%higher,
+dense<1%faster/RSS~10%higher. Historical10proof doesnotcertifydirty11. Publicreport
+still10 untilrebound. Allrawretained. Contract10semanticdigest a1d3ff14480c0efd0dc36ab9abe78ea6ac9423b62ef2ce52b36996436e06b421,
+/tmp/projectatlas-731-contract10-semantic-digest.txt; currentrepairunitadds10seed.
 
+## Milestones and sibling lanes
 
-Latest source additionally fixes malformed initializer recovery, Luna approved.
-Tree-sitter can swallow a following function as an errored initializer, or place
-ERROR '=' after a bare identifier. Shared declarator_has_recovery_error rejects
-nested/adjacent recovery (skipping comments) for no-write and callable-initializer
-proof, preserves valid comma-delimited siblings and nonempty raw recovered calls.
-Six variants x6 recovery casesPASS, varpositive6x13PASS; realCLI/MCP final10 testPASS
-10.94s, native repairunit1PASS, alltarget/allfeatureClippy+stringsPASS. Contracts now
-10/10, repairing prior9 using captured9digest7ebce4c0ac31d1a9bb12313ae7777133d6f7c3c712ec3a147a244b2cc0edf7de
-and retaining8/7/050 seeds. TemporaryASTdiagnostic removed, no placeholder retained.
-Clean optimized9 artifact4401383 is superseded for acceptance; optimized10 and fresh
-cost/native old8->10 proof pending. 738 combined derivation MUST exceed10.
+Live37 v0.5.1-00 targetsRC1first. Owner715 no parent; children AND directblockers
+EXACT708/718/721/722/731/732/738/739, all37. Closed718/721/722/732, open708/731/738/739;
+PR728/737 also37. Actual37membership7open(5issues+2PRs)/13closed; APIcounter6open
+is stale. Closed42counter1open hasnoactualopenmember. Do notchurnmembership or
+inventscope to forcecounts. Audit/tmp/projectatlas-milestone-live-audit-20261028.json.
+725 userdeferredunscheduled;720 historicallyprotecteddev reportvalidbutcurrentmain
+soleintegration supportedboundary explicitlydispositioned. Routine734/735 proposals
+assessed under715task2.2, not automaticallyvulns. AllconfirmedcurrentproductbugsRC1.
+Eachcandidate map remains acceptedbase+ownowner; finalintegration mustunion accepted
+731/732/738/739 maps/tasks, notclaimoldintegration maprelease-ready.
 
-
-Worktree issue-731, fix/static-bindings-731, PR737 public88c7862. Acceptedmain1b953f1d.
-All mandatory native88 gates PASSED and push completed; hosted88 Rust/Linux passed,
-remaining platforms ongoing at latest readback. CodeQL11 moved existing main path
-alerts, including confirmed738 owner; no dismissals/bypass. Current source changes
-supersede88 proof, require current native/hosted acceptance.
-
-Fourth automated review thread PRRT_kwDOQyFgJ86xREaG exposed bare var redeclarations
-adding Shadow writes over existing function/initialized callable bindings. Shared
-faulty assumption: name reservation equals value initialization. Fixed local_bindings
-at ECMA var owner: reserve bounded NameBindings entry with no transition; earlier
-function, parameter, initialized variable timelines survive. New locals still block
-outer fallback; lexical let/const and actual initializers/assignments/for-in/of retain
-write behavior. No parser/schema/wire/new execution model. Six standalone/host
-variants JS/TS/TSX/Vue/Svelte/HTML x13 causal controls PASS; old code failed original
-function example. Five actual Node script/module controls PASS. Explicit valid ESM
-export uses export var rather than invalid module function/var redeclaration.
-
-New permanent bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh
-fails immutable8 and PASSES corrected debug9 (11s): JS/TS local and explicit barrel
-alias, unchanged importer, real write/restore, safe sibling, CLI+MCP graph+summary,
-incremental/full, identity and zero-parse/no-publication no-op. Inventory216 in5
-binaries, three inventory/tamper tests PASS. All symbols390PASS/1existingignore.
-Workspace alltarget/allfeature Clippy and strictstrings PASS. Current native contract
-repair test1PASS including staged cancellation and atomic repair; initial --lib
---exact selected0, corrected --bin projectatlas filter selected1. No zero-test claim.
-
-Contracts derivation9/semantic9 repair unchanged private8. Captured8semanticdigest
-is a5fd0cc0717afd6c733563637f6f24ba86f08ec447422edc319f26d480f24267, prior7 and
-stable050 seeds retained. Temporary digest-capture assertion was removed. Native
-old8 failing fixtures3 seeded at /tmp/projectatlas-731-bare-var-native-upgrade.json;
-clean optimized9 upgrade/full/ALLapprovedpurposes/noop/rollback remains pending.
-Tasks2.4/2.5/2.6/2.7 reopened local/live; task3.1+allacceptanceunchecked. Strict
-OpenSpec PASS; scoped IssueOps running89039. Luna delta review requested; no claimed
-approval yet. Prepared715 installed handoff now9 selectors; regenerate after final
-combined source and include738 selector. No current performance waiver.
-
-## Previously verified source retained
-
-Typed parser-owned sidecar preserves AST imports/lexical/export evidence, exact
-byte spans, explicit alias chains and canonical summary callers, without public
-SymbolGraph/schema change or query-time parse. Registry-derived native languages
-and admitted hosts covered; unsupported dynamic/wildcard/typeflow remain bounded.
-Rust Cargo-root/namespace/toolchain identities and same-line257occurrence repair
-have causal/full/upgrade proof. Traversal256, lexical names/scopes independently16k;
-capacity exhaustion withdraws proof but keeps raw navigation and normal recovery.
-Python directives link real module/nonlocal owners, account read/write timing,
-invalid directives, annotation reservations and public module export mutations.
-Declaration-only public Python recovery caches required capturedsource once.
-Luna approved those prior source slices; reuse evidence rather than redo reviews.
-File-wide Python directive-name read catalogue deliberately overapproximates scopes
-under16kcap, conservatively loses proof with raw navigation retained; documented
-and independently accepted, not full Python compiler semantics.
-
-Clean optimized8 sourceb135952 artifact:
-~/.cache/projectatlas-benchmarks/binding-731-b135952-contract8-20261028/projectatlas.
-Five actual old7->8 Python upgrade/full/ALLapprovedpurpose/identity/noop and compatible
-rollback cases PASS. Fresh18paired measurements, no concurrent build/index/bench:
-root4 baseline.279575163s/30248KiB ->8 .348819552/33036; root64 .328215892/30636 ->
-.397766970/34316; dense257 .166896510/29224 ->.160305544/29180. Roots21-25%slower,
-RSS9-12%higher, dense~4%faster/RSSunchanged. Public report honestly binds8; remeasure
-or explicitly retain historical scope when handing9 to708. All prior raw retained.
-
-## Other lanes and release path
-
-738 private prefixguard before ignore-policy reads, parent cooperative control,
-causalunit oldIgnored/newOutsideRoot and4focused tests PASS, preliminaryLunaapproved.
-Its permanent CLI/MCP test firstfailed because 32768-byte output ceiling returned4
-of7 with explicit continuation/output_bytes limit; this was correct refusal, not
-missingprojection. Fixed harness explicitly requests262144, needs compiled test.
-Nativeproof global/shared-Git results understable050 need exact-current candidate
-verification; current shared debug binary was replaced by731 compilation and is
-NOT738 evidence. Do not infer a bug or successful guard from mislabeled binary.
-Final combined738 derivation MUST exceed accepted7319 (semantic9 preserved).
-
-708 publicPR728 c65dfed, local587ecbe guidancefix needs actual closureCLI/MCP proof.
-Preserve failed full120sample warm1.127 and partialfocused1.031526; no SLO waiver.
-Fresh combined fourplatform latency/RSS and all required failure/state proof remain.
-715 integration checkoutrelease/0.5.1 e54939ec has4owned dirty planning/memoryfiles;
-preserve beforeupdate. Finalmap/counter/inventory/installedselector union required,
-exactRC1pins/package/cleanparser/CLI/MCP/plugin/hooks/allhosts/upgrades, release
-publication and independent downloads/assets/checksums/Latest readback remain.
-No RC version/tag/release exists. Do not close715/milestone atRC1; stabletask3.2
-needslaterinstruction. All current scanner leads evaluated under7152.2, preserve
-operator root/DB/config/state/global/sharedGit capabilities while fixing confirmed
-boundaries. No scanner lead automatically becomes a vulnerability.
+738 source8814d6d optimizedstandalone5 in~/.cache/projectatlas-benchmarks/document-738-8814d6d-contract5-20261028/projectatlas.
+OptimizedCLI/MCP+3native stable050upgrade/full/state/ALLpurposes/noop/rollback and
+strace no outsideignorecontentread PASS, /tmp/projectatlas-738-document-upgrade-proof.json/log.
+Luna approvescomponent but7382.1+acceptance wait739sharedlinkedpositive. Doc5projection
+contractunit/combinedcounter>FINAL73111/currenthosted/platformproof remain. NoPR/pushyet.
+739 plan c411202 localready/high/high, Luna+strict+IssueOps4/4/1PASS; nocodeyet.
+Owns stable050 quotedglobalpathwithspaces andlinkedcommoninfo/exclude failures,
+provedGitcheck-ignore+explicitfullrescan. CanonicalGitconfigparser requirement,
+existingFS/policyowner, scopedconfig/precedence/capture/cancel/cost guards inaccepted
+reconcile-external-git-excludes plan. MustimplementforRC1, neededfor738positive.
+708 publicPR728 c65dfed local587ecbe correctedCFL guidance; actualCLI/MCPclosureproof
+stillpending. Seed/readsamebinary toavoidpolicy_drift fixtureerror. Thencombined
+accepted source andfresh4platformperformance; failed120samplewarm1.127 retained,
+focused1.031526partial notSLOwaiver. 715 integrationold e54939ec +4ownedplanning/memory
+filespreservebeforeupdate. ExactRC1pins/package/parser/installedallCLI/MCP/plugin/
+hooks/hosts/upgradesincl045schema/isolation/recovery/concurrency/cost/release/download/
+checksums/Latestreadback remain. NoRCversion/tag/releaseexists. 715securitytask2.2
+owns currentCodeQL/Dependabot/online-review triage, no blinddisabling/dismissal.
 
 ## Execution
 
-source /tmp/projectatlas-rc1-test-env.sh supplies cleanPATH/filesystemTMPDIR and
-shared .worktrees/v0.5.1/target. Never compile siblingCLI during E2Es using thattarget;
-immutable copied executables are safe. No parallel builds/indexing in measurements.
-Mandatory hooks/requiredhostedchecks, noforce/bypass. gh authenticated; explicit
-ShaunTyler/noreply identity. Resume sessions, boundedcalls, progress<60s. Older
-history at /tmp/projectatlas-731-memory-before-var-repair.md and owning proof logs.
+source /tmp/projectatlas-rc1-test-env.sh supplies cleanPATH, filesystemTMPDIR and
+shared .worktrees/v0.5.1/target. No siblingCLIbuilds duringE2Es; no concurrentbuild/
+index/bench duringmeasurements. Default/tmp tmpfs is correctlyrefusedbyWALprofile,
+notproductbug. Runtime tests --bin projectatlas, notzero-test --lib --exact. Normal
+mandatoryhooks/protectedchecks, noforce/bypass. gh authenticated; explicitShaunTyler
+noreplycommitidentity percommand. Longerpriorhistory archivedoutsidecheckout at
+/tmp/projectatlas-731-memory-before-contract11-workspace.md.

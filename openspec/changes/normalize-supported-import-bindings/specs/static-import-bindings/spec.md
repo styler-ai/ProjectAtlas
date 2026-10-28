@@ -106,12 +106,22 @@ Normalization SHALL reuse bounded indexing work and preserve cancellation, parse
 - **WHEN** a native declaration, import or source-bearing re-export is omitted at a capture resource ceiling
 - **THEN** retained facts cannot establish exact call or exported-target authority from the incomplete environment, while raw navigation and module dependency evidence remains available
 
+#### Scenario: Forwarding workspaces share the existing staging boundary
+- **WHEN** Rust or ECMAScript forwarding copies dependency causes, grows lookup indexes, enters a recursive frame or loads additional canonical lookup keys
+- **THEN** each new retained dependency and query copy is admitted before growth under the existing operation ceiling, unique dependency sets reject excess rows before insertion, duplicate keys do not consume another reservation, and failures/cancellation release temporary ownership without erasing completed caches
+- **AND** cycles retain their exact file causes without leaking uncached-result charges, successful caches account completed owners once, and ordinary Rust/module/export navigation remains available
+
 ### Requirement: Call resolution respects lexical bindings
 Resolved callers SHALL require binding evidence valid at the call site. A local import SHALL NOT create a binding outside its language-defined scope. Parameters and local bindings SHALL shadow imported or same-name file declarations only in the language-defined namespace they occupy. Unknown dynamic targets SHALL remain unresolved rather than become false exact links. Detailed graph navigation and summary caller output SHALL agree.
 
 #### Scenario: Deferred enclosing bindings and immediate evaluation
 - **WHEN** a supported Python or ECMAScript deferred body references a unique later enclosing declaration or import
 - **THEN** its canonical call and summary caller retain that target, while immediate expressions, direct IIFEs, definition headers and a generator's first iterable retain source order and competing future writes remain unresolved
+
+#### Scenario: ECMAScript parameter and body environments retain their owners
+- **WHEN** body function declarations are reassigned by var initializers or iteration, or parameter initializers reference names also declared in the body
+- **THEN** body function declarations share the body var environment, parameter evaluation retains parameter bindings without seeing body locals, and genuine nested block declarations remain distinct
+- **AND** static class blocks and admitted TypeScript namespaces retain their own var environments, while var declarations reserve their owner separately from lexical writes through a valid catch binding, including destructuring and iteration
 
 #### Scenario: Bare ECMAScript var redeclarations preserve values
 - **WHEN** a bare var declaration repeats an existing function, parameter or initialized variable name, including a function-scoped block or ordinary for initializer

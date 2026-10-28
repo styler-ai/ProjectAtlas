@@ -6600,7 +6600,7 @@ struct SourceBindingCache<'a> {
     /// Exact selected checkout.
     root: &'a Path,
     /// Captured file inventory, used to reject changed or unindexed source.
-    nodes: BTreeMap<&'a str, &'a Node>,
+    nodes: Arc<BTreeMap<&'a str, &'a Node>>,
     /// Direct paths for incremental work; absence means a full candidate set.
     direct_paths: Option<BTreeSet<&'a str>>,
     /// One immutable parse per required unchanged path.
@@ -6616,11 +6616,13 @@ impl<'a> SourceBindingCache<'a> {
     fn new(root: &'a Path, nodes: &'a [Node], direct_paths: Option<&BTreeSet<String>>) -> Self {
         Self {
             root,
-            nodes: nodes
-                .iter()
-                .filter(|node| node.kind == NodeKind::File)
-                .map(|node| (node.path.as_str(), node))
-                .collect(),
+            nodes: Arc::new(
+                nodes
+                    .iter()
+                    .filter(|node| node.kind == NodeKind::File)
+                    .map(|node| (node.path.as_str(), node))
+                    .collect(),
+            ),
             direct_paths: direct_paths.map(|direct| {
                 nodes
                     .iter()

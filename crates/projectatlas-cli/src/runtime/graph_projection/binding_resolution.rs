@@ -6,7 +6,7 @@ use super::{
     CliError, EntityProjection, MAX_INCREMENTAL_RESOLUTION_ITEMS, PackageIndex,
     ProjectResolutionRegistry, ResolutionCandidateKind, STAGED_GRAPH_ROW_BYTES, SourceBindingCache,
     SourceGraph, dependency_closure_limit, document_file_resolution_key,
-    enforce_resolution_registry_budget, entity_retained_bytes, invalid_graph_contract,
+    enforce_resolution_registry_budget_with_limit, entity_retained_bytes, invalid_graph_contract,
     merge_resolution_registries, qualified_symbol_parents, registry_resolution_matches,
     relation_reference, resolution_key_limit_failure, resolution_registry_from_persisted,
     resolution_retained_bytes, source_symbol_entity,
@@ -97,6 +97,44 @@ impl CallBindingResolution {
                     .saturating_add(key.canonical_identity().len() as u64)
             })
             .saturating_add(self.target.as_ref().map_or(0, entity_retained_bytes))
+    }
+}
+
+/// Bytes temporarily reserved while constructing one retained resolver value.
+#[derive(Default)]
+struct ResolverScratch {
+    /// Reservations released or transferred when the operation returns.
+    retained_bytes: u64,
+}
+
+impl ResolverScratch {
+    /// Refuse growth before retaining another owned entry.
+    fn reserve(
+        &mut self,
+        shared: &mut BindingResolver<'_, '_, '_>,
+        bytes: u64,
+    ) -> Result<(), CliError> {
+        shared.reserve_scratch(bytes)?;
+        self.retained_bytes = self.retained_bytes.saturating_add(bytes);
+        Ok(())
+    }
+}
+
+/// A query-owned cause set whose unique key copies are reserved before insertion.
+struct CauseWorkspace<'a> {
+    /// Exact deduplicated invalidation keys being constructed.
+    keys: BTreeSet<CanonicalResolutionKey>,
+    /// Construction owner that transfers these bytes into the completed value.
+    scratch: &'a mut ResolverScratch,
+}
+
+impl<'a> CauseWorkspace<'a> {
+    /// Start without allocating or borrowing a cached dependency set.
+    fn new(scratch: &'a mut ResolverScratch) -> Self {
+        Self {
+            keys: BTreeSet::new(),
+            scratch,
+        }
     }
 }
 
@@ -229,6 +267,8 @@ struct BindingResolver<'a, 'g, 'n> {
     queries: BTreeMap<BindingQuery, BTreeMap<usize, Arc<CallBindingResolution>>>,
     /// Conservative bytes owned by this resolver's additional indexes and outcomes.
     retained_bytes: u64,
+    /// Existing staging ceiling, injectable per owner for deterministic boundary tests.
+    retained_limit: u64,
     /// Shared indexing deadline, cancellation and work budget.
     control: &'a IndexWorkControl,
 }
@@ -322,6 +362,7 @@ pub(super) fn resolve_source_bindings<'g>(
                 })
             })),
         control,
+        retained_limit: super::super::MAX_PUBLICATION_STAGING_BYTES,
     };
     resolver.check_budget()?;
     let mut bindings = CallBindings::new();
@@ -402,13 +443,74 @@ impl<'g> BindingResolver<'_, 'g, '_> {
     /// Include every simultaneously live owner in the staging memory boundary.
     fn check_budget(&self) -> Result<(), CliError> {
         self.control.check(IndexWorkStage::SymbolParsing)?;
-        enforce_resolution_registry_budget(
-            self.entities
-                .retained_bytes
-                .saturating_add(self.candidates.retained_bytes)
-                .saturating_add(self.sources.retained_bytes)
-                .saturating_add(self.retained_bytes),
+        enforce_resolution_registry_budget_with_limit(
+            self.retained_staging_bytes(),
+            self.retained_limit,
         )
+    }
+
+    /// Sum accounted owners without changing their reservation state.
+    fn retained_staging_bytes(&self) -> u64 {
+        self.entities
+            .retained_bytes
+            .saturating_add(self.candidates.retained_bytes)
+            .saturating_add(self.sources.retained_bytes)
+            .saturating_add(self.retained_bytes)
+    }
+
+    /// Admit a temporary owner before allocating, retaining prior accounting on refusal.
+    fn reserve_scratch(&mut self, bytes: u64) -> Result<(), CliError> {
+        let before = self.retained_bytes;
+        self.retained_bytes = before.saturating_add(bytes);
+        if let Err(error) = self.check_budget() {
+            self.retained_bytes = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Release exactly one admitted temporary owner without erasing persistent state.
+    fn release_scratch(&mut self, bytes: u64) -> Result<(), CliError> {
+        self.retained_bytes = self.retained_bytes.checked_sub(bytes).ok_or_else(|| {
+            CliError::InvalidInput("resolution workspace accounting is unbalanced".to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Release temporary construction on every exit and retain the completed owner once.
+    fn with_scratch<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, &mut ResolverScratch) -> Result<(T, u64), CliError>,
+    ) -> Result<T, CliError> {
+        let mut scratch = ResolverScratch::default();
+        let result = operation(self, &mut scratch);
+        self.release_scratch(scratch.retained_bytes)?;
+        let (value, retained_bytes) = result?;
+        self.reserve_scratch(retained_bytes)?;
+        Ok(value)
+    }
+
+    /// Retain only a new key, checking both row and byte admission before cloning.
+    fn insert_cause(
+        &mut self,
+        causes: &mut CauseWorkspace<'_>,
+        key: &CanonicalResolutionKey,
+    ) -> Result<(), CliError> {
+        self.check_budget()?;
+        if causes.keys.contains(key) {
+            return Ok(());
+        }
+        if causes.keys.len() >= GraphLimits::MAX_ROWS as usize {
+            return Err(resolution_key_limit_failure(
+                causes.keys.len().saturating_add(1),
+            ));
+        }
+        causes.scratch.reserve(
+            self,
+            STAGED_GRAPH_ROW_BYTES.saturating_add(key.canonical_identity().len() as u64),
+        )?;
+        causes.keys.insert(key.clone());
+        Ok(())
     }
 
     /// Load one explicitly needed source, reusing fresh facts and captured bytes.
@@ -530,42 +632,50 @@ impl<'g> BindingResolver<'_, 'g, '_> {
 
     /// Fetch each additional canonical lookup once under the existing bounded API.
     fn module_file(&mut self, keys: &[CanonicalResolutionKey]) -> Result<Option<String>, CliError> {
-        if let Some(loaded) = &mut self.loaded {
-            let needed = keys
-                .iter()
-                .filter(|key| !loaded.contains(*key))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !needed.is_empty() {
-                self.control.check(IndexWorkStage::SymbolParsing)?;
-                let candidates = self.store.repository_resolution_candidates_for_keys(
-                    self.project,
-                    &needed,
-                    MAX_INCREMENTAL_RESOLUTION_ITEMS,
-                )?;
-                if candidates.truncated {
-                    return Err(dependency_closure_limit(
-                        self.sources.root,
-                        std::iter::empty(),
-                        GraphLimits::MAX_ROWS as usize + 1,
-                    ));
+        if self.loaded.is_some() {
+            let needed = self.with_scratch(|this, scratch| {
+                let mut needed = CauseWorkspace::new(scratch);
+                for key in keys {
+                    if !this
+                        .loaded
+                        .as_ref()
+                        .is_some_and(|loaded| loaded.contains(key))
+                    {
+                        this.insert_cause(&mut needed, key)?;
+                    }
                 }
-                merge_resolution_registries(
-                    self.candidates,
-                    resolution_registry_from_persisted(
-                        self.project,
-                        self.generation,
-                        candidates.rows,
-                        self.replaced,
-                        self.control,
-                    )?,
-                    self.control,
-                )?;
-                self.retained_bytes = needed.iter().fold(self.retained_bytes, |bytes, key| {
-                    bytes
-                        .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                        .saturating_add(key.canonical_identity().len() as u64)
-                });
+                let needed = needed.keys.into_iter().collect::<Vec<_>>();
+                if !needed.is_empty() {
+                    this.control.check(IndexWorkStage::SymbolParsing)?;
+                    let candidates = this.store.repository_resolution_candidates_for_keys(
+                        this.project,
+                        &needed,
+                        MAX_INCREMENTAL_RESOLUTION_ITEMS,
+                    )?;
+                    if candidates.truncated {
+                        return Err(dependency_closure_limit(
+                            this.sources.root,
+                            std::iter::empty(),
+                            GraphLimits::MAX_ROWS as usize + 1,
+                        ));
+                    }
+                    merge_resolution_registries(
+                        this.candidates,
+                        resolution_registry_from_persisted(
+                            this.project,
+                            this.generation,
+                            candidates.rows,
+                            this.replaced,
+                            this.control,
+                        )?,
+                        this.control,
+                    )?;
+                    this.check_budget()?;
+                }
+                let bytes = scratch.retained_bytes;
+                Ok((needed, bytes))
+            })?;
+            if let Some(loaded) = &mut self.loaded {
                 loaded.extend(needed);
             }
         }
@@ -603,94 +713,101 @@ impl<'g> BindingResolver<'_, 'g, '_> {
         {
             return Ok(Arc::clone(outcome));
         }
-        let mut outcome = CallBindingResolution::default();
         if depth >= MAX_FORWARDING_DEPTH {
-            return Ok(Arc::new(outcome));
+            return Ok(Arc::new(CallBindingResolution::default()));
         }
-        if let Some(first) = visited.get(&query).copied() {
-            // Retain the complete cycle's file causes even for a cached suffix.
-            // Otherwise a later root could reuse an unresolved result that omitted
-            // the file whose edit breaks that cycle.
-            for (cycle, _position) in visited.iter().filter(|(_, position)| **position >= first) {
-                self.control.check(IndexWorkStage::SymbolParsing)?;
-                outcome
-                    .dependencies
-                    .insert(document_file_resolution_key(self.project, &cycle.source)?);
-            }
-            return Ok(Arc::new(outcome));
-        }
-        visited.insert(query.clone(), depth);
-        let source = self.source(&query.source)?;
-        let keys = source
-            .modules
-            .get(&query.module)
-            .cloned()
-            .unwrap_or_default();
-        outcome.dependencies.extend(keys.iter().cloned());
-        outcome
-            .dependencies
-            .insert(document_file_resolution_key(self.project, &query.source)?);
-        if let Some(path) = self.module_file(&keys)? {
-            let path = path.as_str();
-            outcome
-                .dependencies
-                .insert(document_file_resolution_key(self.project, path)?);
-            let target = self.source(path)?;
-            let selected = if let Some(name) = &query.imported {
-                Some((name.as_str(), query.member.as_deref()))
-            } else {
-                query.member.as_deref().map(|member| {
-                    member
-                        .split_once('.')
-                        .map_or((member, None), |(name, member)| (name, Some(member)))
-                })
-            };
-            if let Some((name, member)) = selected
-                && let Some(indices) = target.slots.get(name)
-                && indices.len() == 1
-                && let Some(fact) = target
-                    .source
-                    .semantics()
-                    .and_then(|facts| facts.exports().get(indices[0]))
-            {
-                outcome.followed_export = true;
-                match &fact.binding {
-                    SourceExportBinding::LocalDeclaration(index) if member.is_none() => {
-                        outcome.target = self.target(&target, *index)?;
-                    }
-                    SourceExportBinding::ReExport(reference) => {
-                        let forwarded = self.resolve(
-                            BindingQuery::new(path, reference, member),
-                            visited,
-                            depth + 1,
-                        )?;
-                        outcome.target.clone_from(&forwarded.target);
-                        outcome
-                            .dependencies
-                            .extend(forwarded.dependencies.iter().cloned());
-                    }
-                    SourceExportBinding::LocalDeclaration(_)
-                    | SourceExportBinding::RustReExport(_)
-                    | SourceExportBinding::AmbiguousDeclarations(_)
-                    | SourceExportBinding::UnresolvedDeclarations(_)
-                    | SourceExportBinding::Unresolved => {}
+        let outcome = self.with_scratch(|this, scratch| {
+            let mut outcome = CallBindingResolution::default();
+            let mut causes = CauseWorkspace::new(scratch);
+            causes
+                .scratch
+                .reserve(this, query.retained_bytes().saturating_mul(2))?;
+            visited.insert(query.clone(), depth);
+            let result: Result<(), CliError> = (|| {
+                let source = this.source(&query.source)?;
+                let keys = source
+                    .modules
+                    .get(&query.module)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                for key in keys {
+                    this.insert_cause(&mut causes, key)?;
                 }
-            }
-        }
-        visited.remove(&query);
-        if outcome.dependencies.len() > GraphLimits::MAX_ROWS as usize {
-            return Err(resolution_key_limit_failure(outcome.dependencies.len()));
-        }
+                let key = document_file_resolution_key(this.project, &query.source)?;
+                this.insert_cause(&mut causes, &key)?;
+                if let Some(path) = this.module_file(keys)? {
+                    let path = path.as_str();
+                    let key = document_file_resolution_key(this.project, path)?;
+                    this.insert_cause(&mut causes, &key)?;
+                    let target = this.source(path)?;
+                    let selected = if let Some(name) = &query.imported {
+                        Some((name.as_str(), query.member.as_deref()))
+                    } else {
+                        query.member.as_deref().map(|member| {
+                            member
+                                .split_once('.')
+                                .map_or((member, None), |(name, member)| (name, Some(member)))
+                        })
+                    };
+                    if let Some((name, member)) = selected
+                        && let Some(indices) = target.slots.get(name)
+                        && indices.len() == 1
+                        && let Some(fact) = target
+                            .source
+                            .semantics()
+                            .and_then(|facts| facts.exports().get(indices[0]))
+                    {
+                        outcome.followed_export = true;
+                        match &fact.binding {
+                            SourceExportBinding::LocalDeclaration(index) if member.is_none() => {
+                                outcome.target = this.target(&target, *index)?;
+                            }
+                            SourceExportBinding::ReExport(reference) => {
+                                let forwarded_query = BindingQuery::new(path, reference, member);
+                                if let Some(first) = visited.get(&forwarded_query).copied() {
+                                    // The parent owns cycle causes directly; no uncached set escapes
+                                    // with a charge that outlives its temporary result.
+                                    for (cycle, _) in
+                                        visited.iter().filter(|(_, position)| **position >= first)
+                                    {
+                                        let key = document_file_resolution_key(
+                                            this.project,
+                                            &cycle.source,
+                                        )?;
+                                        this.insert_cause(&mut causes, &key)?;
+                                    }
+                                } else {
+                                    let forwarded =
+                                        this.resolve(forwarded_query, visited, depth + 1)?;
+                                    outcome.target.clone_from(&forwarded.target);
+                                    for key in &forwarded.dependencies {
+                                        this.insert_cause(&mut causes, key)?;
+                                    }
+                                }
+                            }
+                            SourceExportBinding::LocalDeclaration(_)
+                            | SourceExportBinding::RustReExport(_)
+                            | SourceExportBinding::AmbiguousDeclarations(_)
+                            | SourceExportBinding::UnresolvedDeclarations(_)
+                            | SourceExportBinding::Unresolved => {}
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            visited.remove(&query);
+            result?;
+            outcome.dependencies = causes.keys;
+            let retained_bytes = outcome
+                .retained_bytes()
+                .saturating_add(query.retained_bytes());
+            Ok((outcome, retained_bytes))
+        })?;
         let outcome = Arc::new(outcome);
-        self.retained_bytes = self
-            .retained_bytes
-            .saturating_add(outcome.retained_bytes())
-            .saturating_add(query.retained_bytes());
         self.queries
             .entry(query)
             .or_default()
             .insert(depth, Arc::clone(&outcome));
-        self.check_budget()?;
         Ok(outcome)
     }
 

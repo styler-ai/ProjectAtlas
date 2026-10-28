@@ -1,9 +1,9 @@
 //! Cargo-root and module ownership for Rust static bindings.
 use super::{
     BindingResolver, BindingSource, CallBindingResolution, CallBindings, CanonicalResolutionKey,
-    CliError, EntitySelector, GraphEntity, GraphLimits, IndexWorkStage, MAX_FORWARDING_DEPTH,
-    MAX_INCREMENTAL_RESOLUTION_ITEMS, STAGED_GRAPH_ROW_BYTES, SourceCallBinding, SourceGraph,
-    SourceSemanticFacts, document_file_resolution_key, invalid_graph_contract,
+    CauseWorkspace, CliError, EntitySelector, GraphEntity, IndexWorkStage, MAX_FORWARDING_DEPTH,
+    MAX_INCREMENTAL_RESOLUTION_ITEMS, ResolverScratch, STAGED_GRAPH_ROW_BYTES, SourceCallBinding,
+    SourceGraph, SourceSemanticFacts, document_file_resolution_key, invalid_graph_contract,
     resolution_key_limit_failure,
 };
 use projectatlas_core::graph::{ExternalSelector, RepositoryFilePath};
@@ -84,7 +84,7 @@ struct Slots {
 }
 
 /// Rust value and module namespaces can share a spelling.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Namespace {
     /// Callable values.
     Value,
@@ -181,100 +181,101 @@ pub(super) fn resolve_rust_bindings<'g>(
         if resolver.shared.packages.package_owner(&raw.path).is_none() {
             continue;
         }
-        let candidate_calls = facts
-            .rust()
-            .into_iter()
-            .flat_map(|rust| &rust.candidate_calls)
-            .map(|call| (call.relation, call))
-            .collect::<BTreeMap<_, _>>();
-        let candidate_index_bytes =
-            (candidate_calls.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES);
-        resolver.charge(candidate_index_bytes)?;
-        for call in facts.calls() {
-            resolver.shared.check_budget()?;
-            if let Some(candidates) = candidate_calls.get(&call.relation) {
-                let outcome = resolver.resolve_candidates(&raw.path, facts, candidates)?;
+        resolver.with_scratch(|resolver, scratch| {
+            let candidate_index_bytes = (facts.rust().map_or(0, |rust| rust.candidate_calls.len())
+                as u64)
+                .saturating_mul(STAGED_GRAPH_ROW_BYTES);
+            scratch.reserve(resolver.shared, candidate_index_bytes)?;
+            let candidate_calls = facts
+                .rust()
+                .into_iter()
+                .flat_map(|rust| &rust.candidate_calls)
+                .map(|call| (call.relation, call))
+                .collect::<BTreeMap<_, _>>();
+            for call in facts.calls() {
+                resolver.shared.check_budget()?;
+                if let Some(candidates) = candidate_calls.get(&call.relation) {
+                    let outcome = resolver.resolve_candidates(&raw.path, facts, candidates)?;
+                    resolver
+                        .charge(STAGED_GRAPH_ROW_BYTES.saturating_add(raw.path.len() as u64))?;
+                    bindings
+                        .entry(raw.path.clone())
+                        .or_default()
+                        .insert(call.relation, outcome);
+                    continue;
+                }
+                let (module, path, namespace) = match &call.binding {
+                    SourceCallBinding::Imported {
+                        import,
+                        member,
+                        rust_toolchain: None,
+                        ..
+                    } => {
+                        let Some(binding) = facts
+                            .imports()
+                            .get(*import)
+                            .and_then(|import| import.rust.as_deref())
+                        else {
+                            continue;
+                        };
+                        if !binding.supported || binding.role == UseRole::Wildcard {
+                            continue;
+                        }
+                        let mut path = binding.path.clone();
+                        if let Some(member) = member {
+                            path.segments
+                                .extend(member.split("::").map(ToString::to_string));
+                        }
+                        (
+                            Arc::clone(&binding.module),
+                            path,
+                            binding.role == UseRole::SelfNamespace && member.is_none(),
+                        )
+                    }
+                    SourceCallBinding::RustPath(call) => {
+                        (Arc::clone(&call.module), call.path.clone(), false)
+                    }
+                    _ => continue,
+                };
+                // Preserve complete paths; no packed key or display-name reinterpretation.
+                let outcome = resolver.resolve(Request {
+                    source: raw.path.clone(),
+                    module,
+                    path,
+                    namespace,
+                    import: false,
+                    toolchain: false,
+                })?;
+                resolver.charge(STAGED_GRAPH_ROW_BYTES.saturating_add(raw.path.len() as u64))?;
                 bindings
                     .entry(raw.path.clone())
                     .or_default()
                     .insert(call.relation, outcome);
+            }
+            for import in facts.imports() {
+                resolver.shared.check_budget()?;
+                let Some(binding) = import.rust.as_deref() else {
+                    continue;
+                };
+                if !binding.supported || import.rust_toolchain.is_some() {
+                    continue;
+                }
+                let outcome = resolver.resolve(Request {
+                    source: raw.path.clone(),
+                    module: Arc::clone(&binding.module),
+                    path: binding.path.clone(),
+                    namespace: binding.role != UseRole::Item,
+                    import: true,
+                    toolchain: false,
+                })?;
                 resolver.charge(STAGED_GRAPH_ROW_BYTES.saturating_add(raw.path.len() as u64))?;
-                continue;
+                bindings
+                    .entry(raw.path.clone())
+                    .or_default()
+                    .insert(import.relation, outcome);
             }
-            let (module, path, namespace) = match &call.binding {
-                SourceCallBinding::Imported {
-                    import,
-                    member,
-                    rust_toolchain: None,
-                    ..
-                } => {
-                    let Some(binding) = facts
-                        .imports()
-                        .get(*import)
-                        .and_then(|import| import.rust.as_deref())
-                    else {
-                        continue;
-                    };
-                    if !binding.supported || binding.role == UseRole::Wildcard {
-                        continue;
-                    }
-                    let mut path = binding.path.clone();
-                    if let Some(member) = member {
-                        path.segments
-                            .extend(member.split("::").map(ToString::to_string));
-                    }
-                    (
-                        Arc::clone(&binding.module),
-                        path,
-                        binding.role == UseRole::SelfNamespace && member.is_none(),
-                    )
-                }
-                SourceCallBinding::RustPath(call) => {
-                    (Arc::clone(&call.module), call.path.clone(), false)
-                }
-                _ => continue,
-            };
-            // Preserve complete paths; no packed key or display-name reinterpretation.
-            let outcome = resolver.resolve(Request {
-                source: raw.path.clone(),
-                module,
-                path,
-                namespace,
-                import: false,
-                toolchain: false,
-            })?;
-            bindings
-                .entry(raw.path.clone())
-                .or_default()
-                .insert(call.relation, outcome);
-            resolver.charge(STAGED_GRAPH_ROW_BYTES.saturating_add(raw.path.len() as u64))?;
-        }
-        for import in facts.imports() {
-            resolver.shared.check_budget()?;
-            let Some(binding) = import.rust.as_deref() else {
-                continue;
-            };
-            if !binding.supported || import.rust_toolchain.is_some() {
-                continue;
-            }
-            let outcome = resolver.resolve(Request {
-                source: raw.path.clone(),
-                module: Arc::clone(&binding.module),
-                path: binding.path.clone(),
-                namespace: binding.role != UseRole::Item,
-                import: true,
-                toolchain: false,
-            })?;
-            bindings
-                .entry(raw.path.clone())
-                .or_default()
-                .insert(import.relation, outcome);
-            resolver.charge(STAGED_GRAPH_ROW_BYTES.saturating_add(raw.path.len() as u64))?;
-        }
-        resolver.shared.retained_bytes = resolver
-            .shared
-            .retained_bytes
-            .saturating_sub(candidate_index_bytes);
+            Ok(((), 0))
+        })?;
     }
     Ok(())
 }
@@ -282,22 +283,60 @@ pub(super) fn resolve_rust_bindings<'g>(
 impl<'g> RustResolver<'_, '_, 'g, '_> {
     /// Account all additional caches under the operation's existing memory boundary.
     fn charge(&mut self, bytes: u64) -> Result<(), CliError> {
-        self.shared.retained_bytes = self.shared.retained_bytes.saturating_add(bytes);
-        self.shared.check_budget()
+        self.shared.reserve_scratch(bytes)
+    }
+
+    /// Release temporary construction on every exit and charge the completed owner once.
+    fn with_scratch<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, &mut ResolverScratch) -> Result<(T, u64), CliError>,
+    ) -> Result<T, CliError> {
+        let mut scratch = ResolverScratch::default();
+        let result = operation(self, &mut scratch);
+        self.shared.release_scratch(scratch.retained_bytes)?;
+        let (value, retained_bytes) = result?;
+        self.shared.reserve_scratch(retained_bytes)?;
+        Ok(value)
+    }
+
+    /// Use the shared bounded cause owner for Rust-specific source traversal.
+    fn insert_cause(
+        &mut self,
+        causes: &mut CauseWorkspace<'_>,
+        key: &CanonicalResolutionKey,
+    ) -> Result<(), CliError> {
+        self.shared.insert_cause(causes, key)
     }
 
     /// Missing paths remain invalidation causes, without attempting to read them.
-    fn cause(
-        &mut self,
-        path: &str,
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
-    ) -> Result<bool, CliError> {
-        self.shared.check_budget()?;
-        causes.insert(document_file_resolution_key(self.shared.project, path)?);
-        if causes.len() > GraphLimits::MAX_ROWS as usize {
-            return Err(resolution_key_limit_failure(causes.len()));
-        }
+    fn cause(&mut self, path: &str, causes: &mut CauseWorkspace<'_>) -> Result<bool, CliError> {
+        let key = document_file_resolution_key(self.shared.project, path)?;
+        self.insert_cause(causes, &key)?;
         Ok(self.shared.sources.nodes.contains_key(path))
+    }
+
+    /// Preserve root certainty while reserving each new owned path before insertion.
+    fn insert_root(
+        &mut self,
+        scratch: &mut ResolverScratch,
+        roots: &mut BTreeMap<String, bool>,
+        path: String,
+        certain: bool,
+    ) -> Result<(), CliError> {
+        self.shared.check_budget()?;
+        if let Some(existing) = roots.get_mut(&path) {
+            *existing &= certain;
+            return Ok(());
+        }
+        if roots.len() >= MAX_INCREMENTAL_RESOLUTION_ITEMS as usize {
+            return Err(resolution_key_limit_failure(roots.len().saturating_add(1)));
+        }
+        scratch.reserve(
+            self.shared,
+            STAGED_GRAPH_ROW_BYTES.saturating_add(path.capacity() as u64),
+        )?;
+        roots.insert(path, certain);
+        Ok(())
     }
 
     /// Index complete native ownership facts once, sharing source/module payloads.
@@ -312,65 +351,94 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
             return Ok(None);
         };
         if !self.slots.contains_key(path) {
-            let mut slots = Slots::default();
-            let mut bytes = STAGED_GRAPH_ROW_BYTES.saturating_add(path.len() as u64);
-            for (ordinal, declaration) in facts.declarations.iter().enumerate() {
-                self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-                slots
-                    .values
-                    .entry(Arc::clone(&declaration.module))
-                    .or_default()
-                    .entry(declaration.name.clone())
-                    .or_default()
-                    .push(ordinal);
-                bytes = bytes
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
-                    .saturating_add(declaration.name.len() as u64);
-            }
-            for (ordinal, module) in facts.modules.iter().enumerate() {
-                self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-                slots
-                    .modules
-                    .entry(Arc::clone(&module.parent))
-                    .or_default()
-                    .entry(module.name.clone())
-                    .or_default()
-                    .push(ordinal);
-                bytes = bytes
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
-                    .saturating_add(module.name.len() as u64);
-            }
-            for (ordinal, method) in facts.associated.iter().enumerate() {
-                self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-                slots
-                    .associated
-                    .entry((
-                        Arc::clone(&method.module),
-                        method.owner.clone(),
-                        method.name.clone(),
-                    ))
-                    .or_default()
-                    .push(ordinal);
-                bytes = bytes
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
-                    .saturating_add(method.owner.len() as u64)
-                    .saturating_add(method.name.len() as u64);
-            }
-            if let Some(facts) = source.source.semantics() {
-                for import in facts.imports() {
-                    self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-                    if let (Some(binding), Some(reference)) = (&import.rust, &import.rust_toolchain)
-                        && let Some(identity) = super::super::rust_import_identity(reference)
-                    {
-                        bytes = bytes
-                            .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
-                            .saturating_add(identity.capacity() as u64);
-                        slots.toolchain.insert(Arc::as_ptr(binding), identity);
+            let slots = self.with_scratch(|this, scratch| {
+                let mut slots = Slots::default();
+                let mut bytes = STAGED_GRAPH_ROW_BYTES.saturating_add(path.len() as u64);
+                scratch.reserve(this.shared, bytes)?;
+                for (ordinal, declaration) in facts.declarations.iter().enumerate() {
+                    this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                    scratch.reserve(
+                        this.shared,
+                        STAGED_GRAPH_ROW_BYTES
+                            .saturating_mul(4)
+                            .saturating_add(declaration.name.len() as u64),
+                    )?;
+                    slots
+                        .values
+                        .entry(Arc::clone(&declaration.module))
+                        .or_default()
+                        .entry(declaration.name.clone())
+                        .or_default()
+                        .push(ordinal);
+                    bytes = bytes
+                        .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
+                        .saturating_add(declaration.name.len() as u64);
+                }
+                for (ordinal, module) in facts.modules.iter().enumerate() {
+                    this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                    scratch.reserve(
+                        this.shared,
+                        STAGED_GRAPH_ROW_BYTES
+                            .saturating_mul(4)
+                            .saturating_add(module.name.len() as u64),
+                    )?;
+                    slots
+                        .modules
+                        .entry(Arc::clone(&module.parent))
+                        .or_default()
+                        .entry(module.name.clone())
+                        .or_default()
+                        .push(ordinal);
+                    bytes = bytes
+                        .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
+                        .saturating_add(module.name.len() as u64);
+                }
+                for (ordinal, method) in facts.associated.iter().enumerate() {
+                    this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                    scratch.reserve(
+                        this.shared,
+                        STAGED_GRAPH_ROW_BYTES
+                            .saturating_mul(4)
+                            .saturating_add(method.owner.len() as u64)
+                            .saturating_add(method.name.len() as u64),
+                    )?;
+                    slots
+                        .associated
+                        .entry((
+                            Arc::clone(&method.module),
+                            method.owner.clone(),
+                            method.name.clone(),
+                        ))
+                        .or_default()
+                        .push(ordinal);
+                    bytes = bytes
+                        .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
+                        .saturating_add(method.owner.len() as u64)
+                        .saturating_add(method.name.len() as u64);
+                }
+                if let Some(facts) = source.source.semantics() {
+                    for import in facts.imports() {
+                        this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                        if let (Some(binding), Some(reference)) =
+                            (&import.rust, &import.rust_toolchain)
+                            && let Some(identity) = super::super::rust_import_identity(reference)
+                        {
+                            scratch.reserve(
+                                this.shared,
+                                STAGED_GRAPH_ROW_BYTES
+                                    .saturating_mul(4)
+                                    .saturating_add(identity.capacity() as u64),
+                            )?;
+                            bytes = bytes
+                                .saturating_add(STAGED_GRAPH_ROW_BYTES * 4)
+                                .saturating_add(identity.capacity() as u64);
+                            slots.toolchain.insert(Arc::as_ptr(binding), identity);
+                        }
                     }
                 }
-            }
+                Ok((slots, bytes))
+            })?;
             self.slots.insert(path.to_string(), slots);
-            self.charge(bytes)?;
         }
         Ok(Some(source))
     }
@@ -379,7 +447,7 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
     fn roots(
         &mut self,
         path: &str,
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
+        causes: &mut CauseWorkspace<'_>,
     ) -> Result<Arc<[(String, bool)]>, CliError> {
         let Some(package) = self.shared.packages.package_owner(path) else {
             return Ok(Arc::from([]));
@@ -407,15 +475,14 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
                 let target_directory = join(&directory, relative);
                 let prefix = format!("{target_directory}/");
                 if let Some(relative) = path.strip_prefix(&prefix) {
-                    causes.insert(
-                        cargo_target_inventory_key(
-                            self.shared.project,
-                            &package_name,
-                            &manifest,
-                            &target_directory,
-                        )
-                        .map_err(invalid_graph_contract)?,
-                    );
+                    let key = cargo_target_inventory_key(
+                        self.shared.project,
+                        &package_name,
+                        &manifest,
+                        &target_directory,
+                    )
+                    .map_err(invalid_graph_contract)?;
+                    self.insert_cause(causes, &key)?;
                     if let Some(component) = relative
                         .split('/')
                         .next()
@@ -429,80 +496,80 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         if let Some(roots) = self.roots.get(&manifest) {
             return Ok(Arc::clone(roots));
         }
-        let overrides = targets
-            .targets
-            .iter()
-            .filter_map(|target| {
-                target
-                    .name
-                    .as_ref()
-                    .map(|name| (target.kind, name.as_str()))
-            })
-            .collect::<BTreeSet<_>>();
-        let override_bytes = (overrides.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES);
-        self.charge(override_bytes)?;
-        let mut roots = BTreeMap::<String, bool>::new();
-        for target in &targets.targets {
-            self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-            if let Some(path) = repository_join(&directory, &target.path) {
-                roots.insert(path, true);
-            }
-        }
-        for auto in &targets.automatic {
-            self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-            if let Some(path) = auto.kind.conventional_root() {
-                let overridden = auto.kind == TargetKind::Binary
-                    && overrides.contains(&(auto.kind, package_name.as_str()));
-                if !overridden {
-                    roots
-                        .entry(join(&directory, path))
-                        .and_modify(|certain| *certain &= auto.certain)
-                        .or_insert(auto.certain);
-                }
-            }
-            let Some(relative) = auto.kind.automatic_directory() else {
-                continue;
-            };
-            let prefix = format!("{}/", join(&directory, relative));
-            for (path, _) in self.shared.sources.nodes.range(prefix.as_str()..) {
-                self.shared.control.check(IndexWorkStage::SymbolParsing)?;
-                let Some(relative) = path.strip_prefix(&prefix) else {
-                    break;
-                };
-                let name = relative
-                    .strip_suffix(".rs")
-                    .filter(|name| !name.contains('/'))
-                    .or_else(|| {
-                        relative
-                            .strip_suffix("/main.rs")
-                            .filter(|name| !name.contains('/'))
-                    });
-                let Some(name) = name.filter(|name| !name.is_empty()) else {
-                    continue;
-                };
-                if overrides.contains(&(auto.kind, name)) {
-                    continue;
-                }
-                roots
-                    .entry((*path).to_string())
-                    .and_modify(|certain| *certain &= auto.certain)
-                    .or_insert(auto.certain);
-                if roots.len() > MAX_INCREMENTAL_RESOLUTION_ITEMS as usize {
-                    return Err(resolution_key_limit_failure(roots.len()));
-                }
-            }
-        }
-        let roots: Arc<[(String, bool)]> = roots.into_iter().collect::<Vec<_>>().into();
-        self.charge(
-            roots
+        let roots = self.with_scratch(|this, scratch| {
+            scratch.reserve(
+                this.shared,
+                (targets.targets.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES),
+            )?;
+            let overrides = targets
+                .targets
                 .iter()
-                .fold(STAGED_GRAPH_ROW_BYTES, |bytes, (path, _)| {
+                .filter_map(|target| {
+                    target
+                        .name
+                        .as_ref()
+                        .map(|name| (target.kind, name.as_str()))
+                })
+                .collect::<BTreeSet<_>>();
+            let mut roots = BTreeMap::<String, bool>::new();
+            for target in &targets.targets {
+                this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                if let Some(path) = repository_join(&directory, &target.path) {
+                    this.insert_root(scratch, &mut roots, path, true)?;
+                }
+            }
+            for auto in &targets.automatic {
+                this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                if let Some(path) = auto.kind.conventional_root() {
+                    let overridden = auto.kind == TargetKind::Binary
+                        && overrides.contains(&(auto.kind, package_name.as_str()));
+                    if !overridden {
+                        this.insert_root(
+                            scratch,
+                            &mut roots,
+                            join(&directory, path),
+                            auto.certain,
+                        )?;
+                    }
+                }
+                let Some(relative) = auto.kind.automatic_directory() else {
+                    continue;
+                };
+                let prefix = format!("{}/", join(&directory, relative));
+                let nodes = Arc::clone(&this.shared.sources.nodes);
+                for (path, _) in nodes.range(prefix.as_str()..) {
+                    this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                    let Some(relative) = path.strip_prefix(&prefix) else {
+                        break;
+                    };
+                    let name = relative
+                        .strip_suffix(".rs")
+                        .filter(|name| !name.contains('/'))
+                        .or_else(|| {
+                            relative
+                                .strip_suffix("/main.rs")
+                                .filter(|name| !name.contains('/'))
+                        });
+                    let Some(name) = name.filter(|name| !name.is_empty()) else {
+                        continue;
+                    };
+                    if overrides.contains(&(auto.kind, name)) {
+                        continue;
+                    }
+                    this.insert_root(scratch, &mut roots, (*path).to_string(), auto.certain)?;
+                }
+            }
+            let roots: Arc<[(String, bool)]> = roots.into_iter().collect::<Vec<_>>().into();
+            let retained_bytes = roots.iter().fold(
+                STAGED_GRAPH_ROW_BYTES.saturating_add(manifest.capacity() as u64),
+                |bytes, (path, _)| {
                     bytes
                         .saturating_add(STAGED_GRAPH_ROW_BYTES)
                         .saturating_add(path.capacity() as u64)
-                }),
-        )?;
-        self.shared.retained_bytes = self.shared.retained_bytes.saturating_sub(override_bytes);
+                },
+            );
+            Ok((roots, retained_bytes))
+        })?;
         self.roots.insert(manifest, Arc::clone(&roots));
         Ok(roots)
     }
@@ -512,60 +579,65 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         if let Some(result) = self.memberships.get(path) {
             return Ok(Arc::clone(result));
         }
-        let mut result = Membership::default();
-        let roots = self.roots(path, &mut result.causes)?;
-        let mut owner = None;
-        let mut count = 0;
-        for (root, certain) in roots.iter() {
-            self.shared.check_budget()?;
-            let directory = parent(root).to_string();
-            let Some(parts) = candidate_path(&directory, path) else {
-                continue;
-            };
-            if !self.cause(root, &mut result.causes)? {
-                continue;
-            }
-            let mut module = Module {
-                root: root.clone(),
-                file: root.clone(),
-                inline: Arc::from([]),
-                logical: Vec::new(),
-                directory,
-                visibility: Visibility::Public,
-            };
-            if module.file != path {
-                for part in parts {
-                    let Some(child) = self.declared_module(&module, &part, &mut result.causes)?
-                    else {
-                        break;
-                    };
-                    module = child;
-                    if module.file == path {
-                        break;
+        let result = self.with_scratch(|this, scratch| {
+            let mut causes = CauseWorkspace::new(scratch);
+            let mut selected_owner = None;
+            let roots = this.roots(path, &mut causes)?;
+            let mut owner = None;
+            let mut count = 0;
+            for (root, certain) in roots.iter() {
+                this.shared.check_budget()?;
+                let directory = parent(root).to_string();
+                let Some(parts) = candidate_path(&directory, path) else {
+                    continue;
+                };
+                if !this.cause(root, &mut causes)? {
+                    continue;
+                }
+                let mut module = Module {
+                    root: root.clone(),
+                    file: root.clone(),
+                    inline: Arc::from([]),
+                    logical: Vec::new(),
+                    directory,
+                    visibility: Visibility::Public,
+                };
+                if module.file != path {
+                    for part in parts {
+                        let Some(child) = this.declared_module(&module, &part, &mut causes)? else {
+                            break;
+                        };
+                        module = child;
+                        if module.file == path {
+                            break;
+                        }
+                    }
+                }
+                if module.file == path && module.inline.is_empty() {
+                    count += 1;
+                    if *certain {
+                        owner = Some(module);
                     }
                 }
             }
-            if module.file == path && module.inline.is_empty() {
-                count += 1;
-                if *certain {
-                    owner = Some(module);
-                }
+            if count == 1 {
+                selected_owner = owner;
             }
-        }
-        if count == 1 {
-            result.owner = owner;
-        }
-        let cause_bytes = result.causes.iter().fold(0_u64, |bytes, key| {
-            bytes
-                .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(key.canonical_identity().len() as u64)
-        });
-        self.charge(
-            STAGED_GRAPH_ROW_BYTES
+            let result = Membership {
+                owner: selected_owner,
+                causes: causes.keys,
+            };
+            let cause_bytes = result.causes.iter().fold(0_u64, |bytes, key| {
+                bytes
+                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                    .saturating_add(key.canonical_identity().len() as u64)
+            });
+            let retained_bytes = STAGED_GRAPH_ROW_BYTES
                 .saturating_add(path.len() as u64)
                 .saturating_add(cause_bytes)
-                .saturating_add(result.owner.as_ref().map_or(0, module_bytes)),
-        )?;
+                .saturating_add(result.owner.as_ref().map_or(0, module_bytes));
+            Ok((result, retained_bytes))
+        })?;
         let result = Arc::new(result);
         self.memberships
             .insert(path.to_string(), Arc::clone(&result));
@@ -577,7 +649,7 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         &mut self,
         owner: &Module,
         name: &str,
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
+        causes: &mut CauseWorkspace<'_>,
     ) -> Result<Option<Module>, CliError> {
         if !self.cause(&owner.file, causes)? {
             return Ok(None);
@@ -633,7 +705,7 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         &mut self,
         owner: &Module,
         logical: &[String],
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
+        causes: &mut CauseWorkspace<'_>,
     ) -> Result<Option<Module>, CliError> {
         let mut module = Module {
             root: owner.root.clone(),
@@ -668,78 +740,77 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         if let Some(result) = self.candidate_queries.get(&key) {
             return Ok(Arc::clone(result));
         }
-        let mut result = CallBindingResolution {
-            followed_export: true,
-            ..CallBindingResolution::default()
-        };
-        let mut count = 0_u32;
-        if call.member.is_none() && !call.declarations.is_empty() {
-            let owner = self.shared.source(source)?;
-            for ordinal in call.declarations.iter() {
-                self.shared.check_budget()?;
-                count += 1;
-                result.target = self.shared.target(&owner, *ordinal)?;
-            }
-        }
-        for (import, reference) in call.bindings.iter() {
-            self.shared.check_budget()?;
-            let Some(import) = facts
-                .imports()
-                .get(*import)
-                .filter(|import| import.references.get(*reference).is_some())
-            else {
-                count += 1;
-                continue;
+        let result = self.with_scratch(|this, scratch| {
+            let mut causes = CauseWorkspace::new(scratch);
+            let mut result = CallBindingResolution {
+                followed_export: true,
+                ..CallBindingResolution::default()
             };
-            let Some(binding) = import
-                .rust
-                .as_deref()
-                .filter(|binding| binding.supported && binding.role != UseRole::Wildcard)
-            else {
+            let mut count = 0_u32;
+            if call.member.is_none() && !call.declarations.is_empty() {
+                let owner = this.shared.source(source)?;
+                for ordinal in call.declarations.iter() {
+                    this.shared.check_budget()?;
+                    count += 1;
+                    result.target = this.shared.target(&owner, *ordinal)?;
+                }
+            }
+            for (import, reference) in call.bindings.iter() {
+                this.shared.check_budget()?;
+                let Some(import) = facts
+                    .imports()
+                    .get(*import)
+                    .filter(|import| import.references.get(*reference).is_some())
+                else {
+                    count += 1;
+                    continue;
+                };
+                let Some(binding) = import
+                    .rust
+                    .as_deref()
+                    .filter(|binding| binding.supported && binding.role != UseRole::Wildcard)
+                else {
+                    count += 1;
+                    continue;
+                };
+                let mut path = binding.path.clone();
+                if let Some(member) = &call.member {
+                    path.segments
+                        .extend(member.split("::").map(ToString::to_string));
+                }
+                let outcome = this.resolve(Request {
+                    source: source.to_string(),
+                    module: Arc::clone(&binding.module),
+                    path,
+                    namespace: binding.role == UseRole::SelfNamespace && call.member.is_none(),
+                    import: false,
+                    toolchain: import.rust_toolchain.is_some(),
+                })?;
+                for key in &outcome.dependencies {
+                    this.insert_cause(&mut causes, key)?;
+                }
+                if outcome.absent {
+                    continue;
+                }
                 count += 1;
-                continue;
-            };
-            let mut path = binding.path.clone();
-            if let Some(member) = &call.member {
-                path.segments
-                    .extend(member.split("::").map(ToString::to_string));
+                result.target.clone_from(&outcome.target);
+                result.ambiguous = result.ambiguous.max(outcome.ambiguous);
             }
-            let outcome = self.resolve(Request {
-                source: source.to_string(),
-                module: Arc::clone(&binding.module),
-                path,
-                namespace: binding.role == UseRole::SelfNamespace && call.member.is_none(),
-                import: false,
-                toolchain: import.rust_toolchain.is_some(),
-            })?;
-            result
-                .dependencies
-                .extend(outcome.dependencies.iter().cloned());
-            if outcome.absent {
-                continue;
+            let source_key = document_file_resolution_key(this.shared.project, source)?;
+            this.insert_cause(&mut causes, &source_key)?;
+            if count > 1 {
+                result.ambiguous = result.ambiguous.max(std::num::NonZeroU32::new(count));
+                result.target = None;
             }
-            count += 1;
-            result.target.clone_from(&outcome.target);
-            result.ambiguous = result.ambiguous.max(outcome.ambiguous);
-        }
-        result
-            .dependencies
-            .insert(document_file_resolution_key(self.shared.project, source)?);
-        if result.dependencies.len() > GraphLimits::MAX_ROWS as usize {
-            return Err(resolution_key_limit_failure(result.dependencies.len()));
-        }
-        if count > 1 {
-            result.ambiguous = result.ambiguous.max(std::num::NonZeroU32::new(count));
-            result.target = None;
-        }
-        result.absent = count == 0;
-        self.charge(
-            result
+            result.absent = count == 0;
+            result.dependencies = causes.keys;
+            let retained_bytes = result
                 .retained_bytes()
                 .saturating_add(STAGED_GRAPH_ROW_BYTES * 2)
                 .saturating_add(key.0.capacity() as u64)
-                .saturating_add(key.3.as_ref().map_or(0, String::capacity) as u64),
-        )?;
+                .saturating_add(key.3.as_ref().map_or(0, String::capacity) as u64);
+            Ok((result, retained_bytes))
+        })?;
         let result = Arc::new(result);
         self.candidate_queries.insert(key, Arc::clone(&result));
         Ok(result)
@@ -751,96 +822,93 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
             return Ok(Arc::clone(result));
         }
         self.ambiguous = 0;
-        if request.toolchain {
-            let result = Arc::new(CallBindingResolution {
-                target: Some(self.external(&request.path.segments.join("::"))?),
-                followed_export: true,
-                dependencies: [document_file_resolution_key(
-                    self.shared.project,
-                    &request.source,
-                )?]
-                .into(),
-                ..CallBindingResolution::default()
-            });
-            self.charge(
-                result
-                    .retained_bytes()
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                    .saturating_add(request.source.capacity() as u64),
-            )?;
-            self.queries.insert(request, Arc::clone(&result));
-            return Ok(result);
-        }
-        let membership = self.membership(&request.source)?;
-        let mut result = CallBindingResolution {
-            followed_export: true,
-            absent: request.namespace && !request.import,
-            dependencies: membership.causes.clone(),
-            ..CallBindingResolution::default()
+        let membership = if request.toolchain {
+            None
+        } else {
+            Some(self.membership(&request.source)?)
         };
-        if let Some(owner) = &membership.owner {
-            let mut logical = owner.logical.clone();
-            logical.extend(request.module.iter().cloned());
-            if let Some(module) = self.address(owner, &logical, &mut result.dependencies)? {
-                let mut visited = BTreeSet::new();
-                if request.import {
-                    let namespace = self.path(
-                        &module,
-                        &request.path,
-                        Namespace::Module,
-                        &logical,
-                        &mut result.dependencies,
-                        &mut visited,
-                        0,
-                    )?;
-                    let value = if request.namespace {
-                        None
-                    } else {
-                        self.path(
+        let result = self.with_scratch(|this, scratch| {
+            let mut causes = CauseWorkspace::new(scratch);
+            let mut result = CallBindingResolution {
+                followed_export: true,
+                absent: !request.toolchain && request.namespace && !request.import,
+                ..CallBindingResolution::default()
+            };
+            if request.toolchain {
+                result.target = Some(this.external(&request.path.segments.join("::"))?);
+                let key = document_file_resolution_key(this.shared.project, &request.source)?;
+                this.insert_cause(&mut causes, &key)?;
+            }
+            if let Some(membership) = &membership {
+                for key in &membership.causes {
+                    this.insert_cause(&mut causes, key)?;
+                }
+            }
+            if let Some(owner) = membership
+                .as_ref()
+                .and_then(|membership| membership.owner.as_ref())
+            {
+                let mut logical = owner.logical.clone();
+                logical.extend(request.module.iter().cloned());
+                if let Some(module) = this.address(owner, &logical, &mut causes)? {
+                    let mut visited = BTreeSet::new();
+                    if request.import {
+                        let namespace = this.path(
+                            &module,
+                            &request.path,
+                            Namespace::Module,
+                            &logical,
+                            &mut causes,
+                            &mut visited,
+                            0,
+                        )?;
+                        let value = if request.namespace {
+                            None
+                        } else {
+                            this.path(
+                                &module,
+                                &request.path,
+                                Namespace::Value,
+                                &logical,
+                                &mut causes,
+                                &mut visited,
+                                0,
+                            )?
+                        };
+                        result.target = this.import_target(namespace, value)?;
+                    } else if !request.namespace {
+                        match this.path(
                             &module,
                             &request.path,
                             Namespace::Value,
                             &logical,
-                            &mut result.dependencies,
+                            &mut causes,
                             &mut visited,
                             0,
-                        )?
-                    };
-                    result.target = self.import_target(namespace, value)?;
-                } else if !request.namespace {
-                    match self.path(
-                        &module,
-                        &request.path,
-                        Namespace::Value,
-                        &logical,
-                        &mut result.dependencies,
-                        &mut visited,
-                        0,
-                    )? {
-                        Some(Selection::Value(entity, _, _)) => result.target = Some(entity),
-                        Some(Selection::Absent) => result.absent = true,
-                        _ => {}
+                        )? {
+                            Some(Selection::Value(entity, _, _)) => result.target = Some(entity),
+                            Some(Selection::Absent) => result.absent = true,
+                            _ => {}
+                        }
                     }
                 }
             }
-        }
-        if result.target.is_none() && self.ambiguous > 1 {
-            result.ambiguous = std::num::NonZeroU32::new(self.ambiguous);
-        }
-        self.charge(
-            result
+            if result.target.is_none() && this.ambiguous > 1 {
+                result.ambiguous = std::num::NonZeroU32::new(this.ambiguous);
+            }
+            result.dependencies = causes.keys;
+            let retained_bytes = result
                 .retained_bytes()
                 .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(request.source.len() as u64)
+                .saturating_add(request.source.capacity() as u64)
                 .saturating_add(
-                    request
-                        .path
-                        .segments
-                        .iter()
-                        .map(|part| part.capacity() as u64 + std::mem::size_of::<String>() as u64)
-                        .sum::<u64>(),
-                ),
-        )?;
+                    (request.path.segments.capacity() * std::mem::size_of::<String>()) as u64,
+                )
+                .saturating_add(request.path.segments.iter().fold(0_u64, |bytes, part| {
+                    bytes.saturating_add(part.capacity() as u64)
+                }));
+            Ok((result, retained_bytes))
+        })?;
         let result = Arc::new(result);
         self.queries.insert(request, Arc::clone(&result));
         Ok(result)
@@ -911,7 +979,7 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         path: &SourceRustPath,
         namespace: Namespace,
         requester: &[String],
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
+        causes: &mut CauseWorkspace<'_>,
         visited: &mut BTreeSet<(Module, Vec<String>, Namespace)>,
         depth: usize,
     ) -> Result<Option<Selection>, CliError> {
@@ -992,7 +1060,7 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         parts: &[String],
         namespace: Namespace,
         requester: &[String],
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
+        causes: &mut CauseWorkspace<'_>,
         visited: &mut BTreeSet<(Module, Vec<String>, Namespace)>,
         depth: usize,
     ) -> Result<Option<Selection>, CliError> {
@@ -1000,25 +1068,25 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         if depth >= MAX_FORWARDING_DEPTH {
             return Ok(None);
         }
+        // Reserve both owned query copies and their set node before cloning.
+        let frame_bytes = STAGED_GRAPH_ROW_BYTES.saturating_mul(2).saturating_add(
+            module_bytes(owner)
+                .saturating_mul(2)
+                .saturating_add(std::mem::size_of_val(parts) as u64 * 2)
+                .saturating_add(parts.iter().fold(0_u64, |bytes, part| {
+                    bytes.saturating_add(part.len() as u64 * 2)
+                })),
+        );
+        self.shared.reserve_scratch(frame_bytes)?;
         let query = (owner.clone(), parts.to_vec(), namespace);
-        let frame_bytes = module_bytes(owner)
-            .saturating_mul(2)
-            .saturating_add((query.1.capacity() * std::mem::size_of::<String>()) as u64 * 2)
-            .saturating_add(
-                query
-                    .1
-                    .iter()
-                    .map(|part| part.capacity() as u64 * 2)
-                    .sum::<u64>(),
-            );
         if !visited.insert(query.clone()) {
+            self.shared.release_scratch(frame_bytes)?;
             return Ok(None);
         }
-        let result =
-            self.select_inner(owner, parts, namespace, requester, causes, visited, depth)?;
+        let result = self.select_inner(owner, parts, namespace, requester, causes, visited, depth);
         visited.remove(&query);
-        self.shared.retained_bytes = self.shared.retained_bytes.saturating_sub(frame_bytes);
-        Ok(result)
+        self.shared.release_scratch(frame_bytes)?;
+        result
     }
 
     /// One namespace step checks visibility and source-owned competing bindings.
@@ -1029,7 +1097,7 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         parts: &[String],
         namespace: Namespace,
         requester: &[String],
-        causes: &mut BTreeSet<CanonicalResolutionKey>,
+        causes: &mut CauseWorkspace<'_>,
         visited: &mut BTreeSet<(Module, Vec<String>, Namespace)>,
         depth: usize,
     ) -> Result<Option<Selection>, CliError> {
@@ -1312,4 +1380,650 @@ fn candidate_path(directory: &str, path: &str) -> Option<Vec<String>> {
         parts.pop();
     }
     (parts.len() <= MAX_FORWARDING_DEPTH).then_some(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::{
+        PackageIndex, ProjectResolutionRegistry, SourceBindingCache, build_entity_projection,
+    };
+    use super::super::BindingResolver;
+    use super::{Module, Namespace, RustResolver, Visibility};
+    use projectatlas_core::IndexGeneration;
+    use projectatlas_core::{IndexCancellation, IndexWorkControl, IndexWorkFailure};
+    use projectatlas_db::AtlasStore;
+    use projectatlas_symbols::ConfiguredModuleResolution;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::error::Error;
+    use std::io;
+    use std::sync::Arc;
+
+    /// Report a failed boundary proof through the test's fallible result.
+    fn require(condition: bool, message: &str) -> Result<(), super::CliError> {
+        if !condition {
+            return Err(super::CliError::InvalidInput(message.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Preserve actual and expected values without panicking in a fallible test.
+    fn require_eq<T: std::fmt::Debug + PartialEq>(
+        actual: &T,
+        expected: &T,
+    ) -> Result<(), super::CliError> {
+        if actual != expected {
+            return Err(super::CliError::InvalidInput(format!(
+                "actual {actual:?}, expected {expected:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Use the real resolver and empty captured inventory with an isolated store.
+    fn with_empty_resolver(
+        check: impl FnOnce(&mut RustResolver<'_, '_, '_, '_>, &Module) -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let store = AtlasStore::open_for_project(&root.join("atlas.db"), root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("test project identity missing"))?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let generation = IndexGeneration::new(1);
+        let graphs: &[&projectatlas_core::symbols::SymbolGraph] = &[];
+        let packages = PackageIndex::from_graphs(graphs)?;
+        let configured = ConfiguredModuleResolution::default();
+        let entities =
+            build_entity_projection(project, generation, &[], graphs, &packages, true, &control)?;
+        let mut sources = SourceBindingCache::new(root, &[], None);
+        let mut candidates = ProjectResolutionRegistry::default();
+        let replaced = BTreeSet::new();
+        let mut shared = BindingResolver {
+            store: &store,
+            project,
+            generation,
+            base_generation: None,
+            graphs: BTreeMap::new(),
+            entities: &entities,
+            packages: &packages,
+            configured: &configured,
+            sources: &mut sources,
+            candidates: &mut candidates,
+            replaced: &replaced,
+            loaded: None,
+            context: BTreeMap::new(),
+            hydrated: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            retained_bytes: 128,
+            retained_limit: 64 * 1_024,
+            control: &control,
+        };
+        let mut resolver = RustResolver {
+            shared: &mut shared,
+            memberships: BTreeMap::new(),
+            roots: BTreeMap::new(),
+            slots: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            ambiguous: 0,
+            candidate_queries: BTreeMap::new(),
+        };
+        let module = Module {
+            root: "src/lib.rs".to_string(),
+            file: "missing.rs".to_string(),
+            inline: Arc::from([]),
+            logical: Vec::new(),
+            directory: "src".to_string(),
+            visibility: Visibility::Public,
+        };
+        check(&mut resolver, &module)
+    }
+
+    #[test]
+    fn resolver_frames_refuse_before_erasing_retained_state() -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, module| {
+            let before = resolver.shared.retained_bytes;
+            resolver.with_scratch(|this, scratch| {
+                let mut causes = super::CauseWorkspace::new(scratch);
+                // The output cause is already owned: the refusal must be at frame admission.
+                let key = super::document_file_resolution_key(this.shared.project, &module.file)?;
+                this.insert_cause(&mut causes, &key)?;
+                this.shared.retained_limit = this.shared.retained_staging_bytes() + 1;
+                this.shared.check_budget()?;
+                let before_frame = this.shared.retained_bytes;
+                let mut visited = BTreeSet::new();
+                let result = this.select(
+                    module,
+                    &["absent".to_string()],
+                    Namespace::Value,
+                    &[],
+                    &mut causes,
+                    &mut visited,
+                    0,
+                );
+                require(
+                    matches!(
+                        result,
+                        Err(super::CliError::IndexWork(
+                            IndexWorkFailure::ResourceLimitExceeded { .. }
+                        ))
+                    ),
+                    "resolver boundary proof failed",
+                )?;
+                require_eq(&(this.shared.retained_bytes), &(before_frame))?;
+                require(visited.is_empty(), "resolver boundary proof failed")?;
+                require_eq(&(causes.keys), &(BTreeSet::from([key])))?;
+                Ok(((), 0))
+            })?;
+            require_eq(&(resolver.shared.retained_bytes), &(before))?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn resolver_frames_release_cycle_and_inner_error_ownership() -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, module| {
+            let before = resolver.shared.retained_bytes;
+            resolver.with_scratch(|this, scratch| {
+                let parts = vec!["absent".to_string()];
+                let ancestor = (module.clone(), parts.clone(), Namespace::Value);
+                let mut visited = BTreeSet::from([ancestor.clone()]);
+                let mut causes = super::CauseWorkspace::new(scratch);
+                let result = this.select(
+                    module,
+                    &parts,
+                    Namespace::Value,
+                    &[],
+                    &mut causes,
+                    &mut visited,
+                    0,
+                )?;
+                require(result.is_none(), "resolver boundary proof failed")?;
+                require_eq(&(visited), &(BTreeSet::from([ancestor.clone()])))?;
+                require_eq(&(this.shared.retained_bytes), &(before))?;
+                let mut invalid = module.clone();
+                invalid.file = "x".repeat(projectatlas_core::graph::MAX_GRAPH_IDENTITY_BYTES + 1);
+                let result = this.select(
+                    &invalid,
+                    &parts,
+                    Namespace::Value,
+                    &[],
+                    &mut causes,
+                    &mut visited,
+                    0,
+                );
+                require(
+                    matches!(result, Err(super::CliError::InvalidInput(_))),
+                    "resolver boundary proof failed",
+                )?;
+                require_eq(&(visited), &(BTreeSet::from([ancestor])))?;
+                require_eq(&(this.shared.retained_bytes), &(before))?;
+                Ok(((), 0))
+            })?;
+            require_eq(&(resolver.shared.retained_bytes), &(before))?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn cause_workspace_deduplicates_and_refuses_before_copying() -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let before = resolver.shared.retained_bytes;
+            resolver.with_scratch(|this, scratch| {
+                let mut causes = super::CauseWorkspace::new(scratch);
+                let first = super::document_file_resolution_key(this.shared.project, "first.rs")?;
+                let next = super::document_file_resolution_key(this.shared.project, "next.rs")?;
+                this.insert_cause(&mut causes, &first)?;
+                let retained = this.shared.retained_bytes;
+                this.insert_cause(&mut causes, &first)?;
+                require_eq(&(this.shared.retained_bytes), &(retained))?;
+                require_eq(&(causes.keys.len()), &(1))?;
+                this.shared.retained_limit = this.shared.retained_staging_bytes();
+                this.shared.check_budget()?;
+                let result = this.insert_cause(&mut causes, &next);
+                require(
+                    matches!(
+                        result,
+                        Err(super::CliError::IndexWork(
+                            IndexWorkFailure::ResourceLimitExceeded { .. }
+                        ))
+                    ),
+                    "resolver boundary proof failed",
+                )?;
+                require_eq(&(this.shared.retained_bytes), &(retained))?;
+                require_eq(&(causes.keys), &(BTreeSet::from([first])))?;
+                Ok(((), 0))
+            })?;
+            require_eq(&(resolver.shared.retained_bytes), &(before))?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn cause_workspace_bounds_rows_and_releases_on_cancellation() -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            resolver.shared.retained_limit =
+                super::super::super::super::MAX_PUBLICATION_STAGING_BYTES;
+            let before = resolver.shared.retained_bytes;
+            resolver.with_scratch(|this, scratch| {
+                let mut causes = super::CauseWorkspace::new(scratch);
+                for index in 0..super::super::GraphLimits::MAX_ROWS {
+                    let key = super::document_file_resolution_key(
+                        this.shared.project,
+                        &format!("file_{index}.rs"),
+                    )?;
+                    this.insert_cause(&mut causes, &key)?;
+                }
+                let retained = this.shared.retained_bytes;
+                let excess = super::document_file_resolution_key(this.shared.project, "excess.rs")?;
+                require(
+                    this.insert_cause(&mut causes, &excess).is_err(),
+                    "resolver boundary proof failed",
+                )?;
+                require_eq(
+                    &(causes.keys.len()),
+                    &(super::super::GraphLimits::MAX_ROWS as usize),
+                )?;
+                require_eq(&(this.shared.retained_bytes), &(retained))?;
+                let duplicate =
+                    super::document_file_resolution_key(this.shared.project, "file_0.rs")?;
+                this.insert_cause(&mut causes, &duplicate)?;
+                require_eq(&(this.shared.retained_bytes), &(retained))?;
+                Ok(((), 0))
+            })?;
+            require_eq(&(resolver.shared.retained_bytes), &(before))?;
+            let cancelled = resolver.with_scratch(|this, scratch| {
+                let mut causes = super::CauseWorkspace::new(scratch);
+                let key = super::document_file_resolution_key(this.shared.project, "cancel.rs")?;
+                this.insert_cause(&mut causes, &key)?;
+                this.shared.control.cancel();
+                this.insert_cause(&mut causes, &key)?;
+                Ok(((), 0))
+            });
+            require(
+                matches!(
+                    cancelled,
+                    Err(super::CliError::IndexWork(
+                        IndexWorkFailure::Cancelled { .. }
+                    ))
+                ),
+                "resolver boundary proof failed",
+            )?;
+            require_eq(&(resolver.shared.retained_bytes), &(before))?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn root_workspace_refuses_growth_and_preserves_duplicate_certainty()
+    -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let before = resolver.shared.retained_bytes;
+            resolver.with_scratch(|this, scratch| {
+                let mut roots = BTreeMap::new();
+                this.insert_root(scratch, &mut roots, "src/lib.rs".to_string(), true)?;
+                let retained = this.shared.retained_bytes;
+                this.shared.retained_limit = this.shared.retained_staging_bytes();
+                this.shared.check_budget()?;
+                this.insert_root(scratch, &mut roots, "src/lib.rs".to_string(), false)?;
+                require_eq(&this.shared.retained_bytes, &retained)?;
+                require_eq(&roots, &BTreeMap::from([("src/lib.rs".to_string(), false)]))?;
+                let refusal =
+                    this.insert_root(scratch, &mut roots, "src/main.rs".to_string(), true);
+                require(
+                    matches!(
+                        refusal,
+                        Err(super::CliError::IndexWork(
+                            IndexWorkFailure::ResourceLimitExceeded { .. }
+                        ))
+                    ),
+                    "root growth was not refused",
+                )?;
+                require_eq(&this.shared.retained_bytes, &retained)?;
+                require_eq(&roots.len(), &1)?;
+                Ok(((), 0))
+            })?;
+            require_eq(&resolver.shared.retained_bytes, &before)?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn alias_workspace_refusal_cleans_frames_and_preserves_source_cache()
+    -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let shared = &mut *resolver.shared;
+            let query = super::super::BindingQuery {
+                source: "main.js".to_string(),
+                module: "./worker.js".to_string(),
+                imported: Some("run".to_string()),
+                member: None,
+            };
+            let graph = projectatlas_symbols::extract_symbol_graph(
+                "main.js",
+                Some("javascript"),
+                "import {run} from './worker.js'; run();",
+            );
+            let keys = ["first.js", "second.js"]
+                .into_iter()
+                .map(|path| super::document_file_resolution_key(shared.project, path))
+                .collect::<Result<Vec<_>, _>>()?;
+            let source = Arc::new(super::BindingSource {
+                source: super::SourceGraph::Persisted(graph),
+                slots: BTreeMap::new(),
+                modules: BTreeMap::from([(query.module.clone(), keys.clone())]),
+                parents: Vec::new(),
+            });
+            shared.reserve_scratch(super::STAGED_GRAPH_ROW_BYTES * 8)?;
+            shared
+                .context
+                .insert(query.source.clone(), Arc::clone(&source));
+            let before = shared.retained_bytes;
+            shared.retained_limit = shared.retained_staging_bytes()
+                + query.retained_bytes().saturating_mul(2)
+                + super::STAGED_GRAPH_ROW_BYTES
+                + keys[0].canonical_identity().len() as u64;
+            shared.check_budget()?;
+            let mut visited = BTreeMap::new();
+            let result = shared.resolve(query.clone(), &mut visited, 0);
+            require(
+                matches!(
+                    result,
+                    Err(super::CliError::IndexWork(
+                        IndexWorkFailure::ResourceLimitExceeded { .. }
+                    ))
+                ),
+                "alias workspace growth was not refused",
+            )?;
+            require_eq(&shared.retained_bytes, &before)?;
+            require(
+                visited.is_empty() && shared.queries.is_empty(),
+                "alias refusal retained a frame or failed cache entry",
+            )?;
+            require(
+                Arc::ptr_eq(
+                    shared
+                        .context
+                        .get(&query.source)
+                        .ok_or_else(|| io::Error::other("source cache missing"))?,
+                    &source,
+                ),
+                "alias refusal replaced captured context",
+            )?;
+            shared.retained_limit = 64 * 1_024;
+            let outcome = shared.resolve(query.clone(), &mut visited, 0)?;
+            let mut expected = keys.into_iter().collect::<BTreeSet<_>>();
+            expected.insert(super::document_file_resolution_key(
+                shared.project,
+                &query.source,
+            )?);
+            require_eq(&outcome.dependencies, &expected)?;
+            require(visited.is_empty(), "alias success retained a frame")?;
+            let retained = shared.retained_bytes;
+            let cached = shared.resolve(query, &mut visited, 0)?;
+            require(
+                Arc::ptr_eq(&outcome, &cached),
+                "alias query did not reuse its completed outcome",
+            )?;
+            require_eq(&shared.retained_bytes, &retained)?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn alias_workspace_cycles_retain_only_completed_owners_and_errors_release_frames()
+    -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let shared = &mut *resolver.shared;
+            let query = super::super::BindingQuery {
+                source: "self.js".to_string(),
+                module: "./self.js".to_string(),
+                imported: Some("run".to_string()),
+                member: None,
+            };
+            let (_, graph, facts) =
+                projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                    "self.js",
+                    Some("javascript"),
+                    "export {run} from './self.js';",
+                    shared.control,
+                )?
+                .into_parts();
+            let slot = facts
+                .exports()
+                .iter()
+                .position(|export| export.name == "run")
+                .ok_or_else(|| io::Error::other("native reexport slot missing"))?;
+            let key = super::document_file_resolution_key(shared.project, "self.js")?;
+            let entity = super::GraphEntity::new(
+                shared.project,
+                super::EntitySelector::File {
+                    path: projectatlas_core::graph::RepositoryFilePath::new(std::path::Path::new(
+                        "self.js",
+                    ))?,
+                },
+                shared.generation,
+            )?;
+            shared.candidates.insert_candidate(&key, &entity)?;
+            let source = Arc::new(super::BindingSource {
+                source: super::SourceGraph::Captured(Arc::new(
+                    super::super::super::CapturedSourceGraph {
+                        graph,
+                        semantics: facts,
+                        admission: super::super::super::GraphIdentityAdmission::default(),
+                    },
+                )),
+                slots: BTreeMap::from([("run".to_string(), vec![slot])]),
+                modules: BTreeMap::from([(query.module.clone(), vec![key.clone()])]),
+                parents: Vec::new(),
+            });
+            shared.reserve_scratch(super::STAGED_GRAPH_ROW_BYTES * 8)?;
+            shared.context.insert(query.source.clone(), source);
+            let before = shared.retained_bytes;
+            let frame_query = super::super::BindingQuery {
+                source: "unindexed.js".to_string(),
+                ..query.clone()
+            };
+            shared.retained_limit = shared.retained_staging_bytes() + frame_query.retained_bytes();
+            shared.check_budget()?;
+            let mut visited = BTreeMap::new();
+            let refusal = shared.resolve(frame_query, &mut visited, 0);
+            require(
+                matches!(
+                    refusal,
+                    Err(super::CliError::IndexWork(
+                        IndexWorkFailure::ResourceLimitExceeded { .. }
+                    ))
+                ),
+                "second query copy was not admitted before cloning",
+            )?;
+            require_eq(&shared.retained_bytes, &before)?;
+            require(
+                visited.is_empty() && shared.queries.is_empty(),
+                "frame refusal retained owned state",
+            )?;
+            shared.retained_limit = 64 * 1_024;
+            let outcome = shared.resolve(query.clone(), &mut visited, 0)?;
+            require(
+                outcome.followed_export && outcome.target.is_none(),
+                "self reexport did not abstain",
+            )?;
+            require_eq(&outcome.dependencies, &BTreeSet::from([key]))?;
+            require_eq(
+                &shared.retained_bytes,
+                &(before + outcome.retained_bytes() + query.retained_bytes()),
+            )?;
+            require(visited.is_empty(), "cycle retained an ancestor frame")?;
+            let retained = shared.retained_bytes;
+            let cached = shared.resolve(query, &mut visited, 0)?;
+            require(
+                Arc::ptr_eq(&outcome, &cached),
+                "cycle did not reuse completed root outcome",
+            )?;
+            require_eq(&shared.retained_bytes, &retained)?;
+            let missing = super::super::BindingQuery {
+                source: "missing.js".to_string(),
+                module: "./absent.js".to_string(),
+                imported: Some("run".to_string()),
+                member: None,
+            };
+            require(
+                shared.resolve(missing, &mut visited, 0).is_err(),
+                "missing source unexpectedly resolved",
+            )?;
+            require(visited.is_empty(), "alias error retained a frame")?;
+            require_eq(&shared.retained_bytes, &retained)?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn loaded_lookup_keys_reserve_before_copy_and_reuse_completed_admission()
+    -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let shared = &mut *resolver.shared;
+            let key = super::document_file_resolution_key(shared.project, "worker.js")?;
+            shared.loaded = Some(BTreeSet::new());
+            let before = shared.retained_bytes;
+            shared.retained_limit = shared.retained_staging_bytes() + 1;
+            shared.check_budget()?;
+            let refusal = shared.module_file(std::slice::from_ref(&key));
+            require(
+                matches!(
+                    refusal,
+                    Err(super::CliError::IndexWork(
+                        IndexWorkFailure::ResourceLimitExceeded { .. }
+                    ))
+                ),
+                "lookup copy was not refused before read",
+            )?;
+            require_eq(&shared.retained_bytes, &before)?;
+            require(
+                shared.loaded.as_ref().is_some_and(BTreeSet::is_empty),
+                "refused lookup was marked loaded",
+            )?;
+            shared.retained_limit = 64 * 1_024;
+            require_eq(&shared.module_file(std::slice::from_ref(&key))?, &None)?;
+            require(
+                shared
+                    .loaded
+                    .as_ref()
+                    .is_some_and(|loaded| loaded.contains(&key)),
+                "completed lookup was not retained",
+            )?;
+            let retained = shared.retained_bytes;
+            shared.module_file(std::slice::from_ref(&key))?;
+            require_eq(&shared.retained_bytes, &retained)?;
+            Ok(())
+        })
+    }
+
+    /// Seed real parsed import leaves and completed child outcomes for aggregate-only proof.
+    fn cached_candidates(
+        resolver: &mut RustResolver<'_, '_, '_, '_>,
+    ) -> Result<
+        (
+            super::SourceSemanticFacts,
+            projectatlas_symbols::SourceRustCallImports,
+        ),
+        Box<dyn Error>,
+    > {
+        const SOURCE: &str = "src/main.rs";
+        let extracted = projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+            SOURCE,
+            Some("rust"),
+            "use crate::one::run; use crate::two::run; fn caller(){run();}",
+            resolver.shared.control,
+        )?;
+        let (_, _, facts) = extracted.into_parts();
+        require_eq(&(facts.imports().len()), &(2))?;
+        for (index, import) in facts.imports().iter().enumerate() {
+            let binding = import
+                .rust
+                .as_ref()
+                .ok_or_else(|| io::Error::other("native import binding missing"))?;
+            let request = super::Request {
+                source: SOURCE.to_string(),
+                module: Arc::clone(&binding.module),
+                path: binding.path.clone(),
+                namespace: false,
+                import: false,
+                toolchain: false,
+            };
+            let key = super::document_file_resolution_key(
+                resolver.shared.project,
+                &format!("dependency_{index}.rs"),
+            )?;
+            let outcome = Arc::new(super::CallBindingResolution {
+                absent: true,
+                dependencies: BTreeSet::from([key]),
+                ..super::CallBindingResolution::default()
+            });
+            resolver.charge(
+                outcome
+                    .retained_bytes()
+                    .saturating_add(super::STAGED_GRAPH_ROW_BYTES * 4),
+            )?;
+            resolver.queries.insert(request, outcome);
+        }
+        let call = projectatlas_symbols::SourceRustCallImports {
+            relation: 0,
+            bindings: Arc::from([(0, 0), (1, 0)]),
+            declarations: Arc::from([]),
+            member: None,
+        };
+        Ok((facts, call))
+    }
+
+    #[test]
+    fn candidate_union_refusal_preserves_cached_children() -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let (facts, call) = cached_candidates(resolver)?;
+            let before = resolver.shared.retained_bytes;
+            resolver.shared.retained_limit =
+                resolver.shared.retained_staging_bytes() + super::STAGED_GRAPH_ROW_BYTES;
+            resolver.shared.check_budget()?;
+            let result = resolver.resolve_candidates("src/main.rs", &facts, &call);
+            require(
+                matches!(
+                    result,
+                    Err(super::CliError::IndexWork(
+                        IndexWorkFailure::ResourceLimitExceeded { .. }
+                    ))
+                ),
+                "resolver boundary proof failed",
+            )?;
+            require_eq(&(resolver.shared.retained_bytes), &(before))?;
+            require_eq(&(resolver.queries.len()), &(call.bindings.len()))?;
+            require(
+                resolver.candidate_queries.is_empty(),
+                "resolver boundary proof failed",
+            )?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn candidate_union_transfers_unique_causes_once_and_reuses_cache() -> Result<(), Box<dyn Error>>
+    {
+        with_empty_resolver(|resolver, _| {
+            let (facts, call) = cached_candidates(resolver)?;
+            let result = resolver.resolve_candidates("src/main.rs", &facts, &call)?;
+            require(result.absent, "resolver boundary proof failed")?;
+            require(result.target.is_none(), "resolver boundary proof failed")?;
+            let expected = ["src/main.rs", "dependency_0.rs", "dependency_1.rs"]
+                .into_iter()
+                .map(|path| super::document_file_resolution_key(resolver.shared.project, path))
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            require_eq(&(result.dependencies), &(expected))?;
+            let retained = resolver.shared.retained_bytes;
+            let repeated = resolver.resolve_candidates("src/main.rs", &facts, &call)?;
+            require(
+                Arc::ptr_eq(&result, &repeated),
+                "resolver boundary proof failed",
+            )?;
+            require_eq(&(resolver.shared.retained_bytes), &(retained))?;
+            Ok(())
+        })
+    }
 }
