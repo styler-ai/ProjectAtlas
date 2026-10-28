@@ -13567,11 +13567,12 @@ fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
 
 #[test]
 fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    const WORKER_FILE: &str = "worker.py";
     let temp = tempfile::tempdir()?;
     let root = temp.path();
     fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
     fs::write(
-        root.join("worker.py"),
+        root.join(WORKER_FILE),
         "def run(): pass\ndef safe(): pass\n",
     )?;
     for (file, source) in [
@@ -13599,7 +13600,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
         for refreshed in [false, true] {
             if refreshed {
                 fs::write(
-                    root.join("worker.py"),
+                    root.join(WORKER_FILE),
                     "def run():\n return 1\ndef safe(): pass\n",
                 )?;
                 run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
@@ -13607,7 +13608,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
             for (file, target_file) in [
                 ("global.py", "global.py"),
                 ("nonlocal.py", "nonlocal.py"),
-                ("imported.py", "worker.py"),
+                ("imported.py", WORKER_FILE),
             ] {
                 let cli = run_packaged_cli_json(
                     &executable,
@@ -13696,7 +13697,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
             ("", true),
         ] {
             fs::write(
-                root.join("worker.py"),
+                root.join(WORKER_FILE),
                 format!("def run(): pass\ndef safe(): pass\n{suffix}"),
             )?;
             run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
@@ -13708,7 +13709,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
                     (
                         "caller",
                         if resolved {
-                            BTreeSet::from([("worker.py".to_string(), "run".to_string())])
+                            BTreeSet::from([(WORKER_FILE.to_string(), "run".to_string())])
                         } else {
                             BTreeSet::new()
                         },
@@ -13716,7 +13717,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
                     ),
                     (
                         "clean",
-                        BTreeSet::from([("worker.py".to_string(), "safe".to_string())]),
+                        BTreeSet::from([(WORKER_FILE.to_string(), "safe".to_string())]),
                         1,
                     ),
                 ] {
@@ -13760,7 +13761,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
                 }
                 let text = session.call_tool(
                     "atlas_file_summary",
-                    &json!({"project_path": root, "file": "worker.py"}),
+                    &json!({"project_path": root, "file": WORKER_FILE}),
                 )?;
                 let summary: Value = toon_format::decode_default(&text)?;
                 for (name, caller, present) in [
