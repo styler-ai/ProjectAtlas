@@ -92,12 +92,18 @@
         "310": { "blocked_by": [] },
         "314": { "blocked_by": [310] },
         "388": { "blocked_by": [] },
-        "493": { "blocked_by": [310, 314, 388, 563] },
+        "490": { "blocked_by": [310, 563] },
+        "493": { "blocked_by": [310, 314, 388, 490, 563] },
         "563": { "blocked_by": [] }
       }
     }
   },
   "changes": {
+    "reconcile-v060-agent-evaluation": {
+      "contract": "checklist-v1",
+      "primary_issue": 490,
+      "owners": [{ "issue": 490, "first_task": "1.1", "last_task": "3.2" }]
+    },
     "harden-release-dependencies": {
       "contract": "checklist-v1",
       "primary_issue": 732,
@@ -242,7 +248,6 @@
         { "issue": 487, "first_task": "21.1", "last_task": "21.4" },
         { "issue": 488, "first_task": "22.1", "last_task": "22.4" },
         { "issue": 489, "first_task": "23.1", "last_task": "23.4" },
-        { "issue": 490, "first_task": "24.1", "last_task": "24.4" },
         { "issue": 491, "first_task": "25.1", "last_task": "25.4" },
         { "issue": 492, "first_task": "26.1", "last_task": "29.5" }
       ]

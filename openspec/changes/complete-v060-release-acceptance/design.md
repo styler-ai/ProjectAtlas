@@ -76,3 +76,7 @@ None.
 ## Language and refresh scope
 
 Issue #563 remains a required direct child for ABAP, COBOL, Fortran, Ruby, and SQL navigation, the major-language audit including Python, and a representative legacy-to-Rust planning example. Issue #708 now belongs to 0.5.1 under #715 and covers complete indexing and refresh performance. Version 0.6.0 consumes that accepted indexing baseline and checks compatibility; #708 is no longer a child or blocker of #493.
+
+## Observed evaluation scope
+
+The deliberately deferred #490 evidence cycle is admitted through `reconcile-v060-agent-evaluation`, not its historical v0.5 task slice. It has sole parent #493, directly blocks release acceptance, and is directly blocked by #310 and #563. Planning can proceed alongside product work; candidate execution uses the accepted prerequisites and freezes rules before observation. #493 verifies the accepted bounded result before its final candidate freeze without rerunning or owning the experiment. This adds no dependency to RC1 and does not serialize #314 or #388 behind evaluation work.
