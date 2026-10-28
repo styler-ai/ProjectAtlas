@@ -1,5 +1,40 @@
 # Active context
 
+## Clean corrected artifact and current handoff
+
+Code8 b135952 is committed and clean optimized buildPASS51.04s. Immutable binary
+~/.cache/projectatlas-benchmarks/binding-731-b135952-contract8-20261028/projectatlas,
+candidate-binding.json records sourcecommit/tree, cleanstate and executableSHA.
+Fresh18pairedsamplesPASS, no concurrentbuild/index/benchmark. Root4 medians
+0.279575163->0.348819552s, maxRSS30248->33036KiB; root64 0.328215892->0.397766970,
+30636->34316KiB; dense257occurrences 0.166896510->0.160305544,29224->29180KiB.
+Rootlatency+21-25%,RSS+9-12%;dense~4%faster/RSSessentiallyunchanged. Theseare
+additionalbinding-costdata, not#708SLOwaivers. Publiccompactreport updated8/8,
+fixturehashesunchanged; separateexactroottarget/baselinepostprobePASS. Prior7raw
+measurements retainedseparately. Eightinstalledselectorspreparedfor715.
+
+Actualcleanoptimized8 re-ran5unchangedold7fixtures: global/nonlocalRHS, global/
+moduleexports, bareannotation. Targets/fullconvergence/identity/ALLapprovedpurposes/
+noopPASS, compatible7rollback/reupgradePASS. Report:
+/tmp/projectatlas-731-python-directive-native-proof.json; lognative-upgrade.log.
+Aninitialrepeatpurposemutationonstale7runtimecorrectlyreturnedpolicy_drift;
+explicit7watchbeforepurposefixedtheharness, notaproductdefect.
+
+Task2.4 andnow2.6/2.7 recheckedlocal/live aftertheirproof;8/9. Task3.1 andall
+acceptance remainopen forfullnativepush/currenthostedCI+automatedreview/acceptance.
+Lunaapprovedsourceandlatestduplicate-directiveboundarydelta; terminal19Python
+focused andworkspaceClippyPASS. Sourcefieldcomment latestboundarycorrected.
+File-wide directive-name catalogue hasdocumentedboundedoverapproximation: matching
+reads inunrelatedscopesmayalsoconsumethe16kcap. Independentreviewacceptedthis
+conservativeproofloss/rawnavpreservationtradeoff; nofullPythoncompilerclaim.
+Module-onlyglobal andduplicate-directiveunusedretentionwerefixed. Nativepending.
+
+738 nowhasprivateprefixguard+cooperativecontrol(beforepolicy) initsowncheckout.
+CausalnativeunitfailsbeforefixIgnored vsOutsideRoot; corrected4documenttestsPASS,
+includingescape/reentry,normalignored/missing/inrootlink. 738stillrequiresderivation
+bump, realCLI/MCP/syscall+upgrade/platformproof andLunareview beforeclosure.
+NoRCversion/tag/releaseexists. Finalcombined738derivationmustbestrictlynewerthan8.
+
 ## Current Python directive and export correction (2026-10-28)
 
 The milestone audit is complete: native715 children/blockers exactly708/718/721/

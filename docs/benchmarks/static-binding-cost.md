@@ -6,8 +6,8 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-This comparison uses the reviewed contract7/7 source, including deferred-body and
-lexical-retention corrections. It remains separate from release acceptance.
+This comparison uses the reviewed contract8/8 source, including Python directive/export,
+deferred-body and lexical-retention corrections. It remains separate from release acceptance.
 
 Three paired rounds alternate baseline/candidate order. Each sample initializes
 a fresh non-Git fixture in a fresh process; filesystem/page caches remain warm.
@@ -17,16 +17,16 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2841 | 0.3488 | 27728 | 33364 |
-| 64 Cargo roots, 256 callers | 0.3296 | 0.3917 | 28948 | 35088 |
-| Dense/comment/nested source | 0.1665 | 0.1627 | 26664 | 29320 |
+| Four Cargo roots, 256 callers | 0.2796 | 0.3488 | 30248 | 33036 |
+| 64 Cargo roots, 256 callers | 0.3282 | 0.3978 | 30636 | 34316 |
+| Dense/comment/nested source | 0.1669 | 0.1603 | 29224 | 29180 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-Their measured initial time increases by about 19–23%, and maximum RSS by 20–21%.
-The dense case improves median time by about 2%, with about 10% higher peak RSS.
+Their measured initial time increases by about 21–25%, and maximum RSS by 9–12%.
+The dense case improves median time by about 4%, with effectively unchanged peak RSS.
 These observations do not establish a general speedup or a root-count asymptotic
 bound beyond the measured inputs.
 
@@ -53,11 +53,15 @@ candidate package on Linux, Windows, macOS Intel and macOS ARM:
 - `e2e_navigation::rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers`
 - `e2e_navigation::same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild`
 - `e2e_navigation::lexical_capacity_preserves_navigation_and_repairs_after_source_reduction`
+- `e2e_navigation::python_directive_calls_agree_across_cli_mcp_and_refresh`
 
 The root-alias selector queries persisted imported callers and canonical summaries
 through real MCP at both manifest-root checkpoints. The lexical-capacity selector
 indexes four fact-free stress files, retains exact source navigation and unresolved
 raw caller evidence, then proves normal CLI refresh/MCP repair, identity and no-op.
+The Python-directive selector checks global/nonlocal read-before-write callers,
+imported aliases, module/global writes, unaffected exports, canonical summaries,
+unchanged-consumer refresh and rebuild convergence through real CLI and MCP.
 
 The source unit matrix separately checks all 14 native grammar families, the Rust
 build-script alias, admitted HTML/Vue/Svelte mappings, Unicode and CRLF coordinates,
@@ -69,7 +73,7 @@ retain their existing evidence and trust boundaries.
 
 ## Combined release requirements
 
-#708 must consume the final accepted #731 and #732 source, retain its declared
+#708 must consume the final accepted #731, #732 and #738 source, retain its declared
 latency/RSS targets, and measure affected source recovery, initial/full/rebuild,
 sparse/dense edits, current-contract no-ops, unaffected navigation and supported
 upgrades on all four platforms. Report genuine one-time full contract repair
@@ -81,8 +85,9 @@ not exceptions to those release targets.
 #715 must include these installed selectors in its existing candidate package
 matrix and fixture inventory, preserve the public CLI/MCP/plugin/host routes, and
 exercise stable 0.5.0 plus preceding development-contract repair, identity,
-approved-purpose status, no-op and rollback. Derivation and semantic contracts7/7
-repair preceding private6/6 deferred-binding facts as well as the earlier5/6
-occurrence projection. Keep the separate0.4.5 schema-upgrade proof. Reconcile the
+approved-purpose status, no-op and rollback. Derivation and semantic contracts8/8
+repair preceding private7/7 directive/export facts and retain earlier6/6 deferred
+binding and5/6 occurrence repair. The combined #738 derivation must be strictly
+newer than this source contract to repair unchanged private8 document projections. Keep the separate0.4.5 schema-upgrade proof. Reconcile the
 complete installed surface, clean parser-pack build, exact RC version/pins,
 checksums and prerelease/Latest classification before publication acceptance.
