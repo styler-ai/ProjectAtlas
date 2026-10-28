@@ -42,7 +42,13 @@ exports and explicit alias chains. A new uninitialized local still shadows outer
 bindings. Actual initializers, assignments and `for-in`/`for-of` targets retain their
 write semantics; lexical declarations and other language owners are unchanged.
 Standalone JavaScript/TypeScript/TSX and admitted Vue/Svelte/HTML scripts share this
-rule. This is bounded lexical evidence rather than runtime control-flow inference.
+rule.
+Malformed declarators cannot supply no-write or direct-callable initializer proof.
+Check both their own recovery errors and an immediately following error/missing
+node after comments; this catches a recovered equals sign outside the declarator
+without poisoning independently valid comma-delimited siblings. Raw recovered
+calls remain available with unsupported binding authority withdrawn.
+ This is bounded lexical evidence rather than runtime control-flow inference.
 
 Python `global` and `nonlocal` select the module or actual enclosing function
 binding instead of reserving a function-local value. Reads before a write can
@@ -124,8 +130,8 @@ An exhausted export-fact budget invalidates all export target proof, including
 previously captured slots; ordinal filtering and embedded-host remapping preserve
 this completeness boundary.
 
-Extraction derivation contract 9 and semantic resolution contract 9 invalidate
-older derived facts, including preceding development contracts 8/8, 7/7, 6/6, 5/6 and 4/5 and the
+Extraction derivation contract 10 and semantic resolution contract 10 invalidate
+older derived facts, including preceding development contracts 9/9, 8/8, 7/7, 6/6, 5/6 and 4/5 and the
 published 0.5.0 contract 3/3. An ordinary refresh repairs unchanged source through
 the existing bounded full-publication owner. This first reconciliation may parse
 the complete admitted source; later current-contract operations reuse unaffected

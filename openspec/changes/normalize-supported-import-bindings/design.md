@@ -86,6 +86,12 @@ outer binding. Ordinary for initializers share this rule, while for-in/of target
 retain their actual write transitions. Lexical let/const and other language locals
 keep their existing declaration rules. Reuse the bounded NameBindings entry and
 existing AST fields rather than introducing another resolver or execution pass.
+Malformed declarators cannot supply no-write or direct-callable initializer proof.
+Check both their own recovery errors and an immediately following error/missing
+node after comments; this catches a recovered equals sign outside the declarator
+without poisoning independently valid comma-delimited siblings. Raw recovered
+calls remain available with unsupported binding authority withdrawn.
+
 
 Python global/nonlocal names are selected once from the same AST under the shared
 binding limit; a cheap source-keyword prefilter only skips that cooperative cursor
@@ -118,8 +124,9 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 9/9 additionally repairs bare-var reservation in unchanged private8/8
-indexes, retaining the earlier Python directive and private7/7 and6/6 repairs
+or per-call timeline scan is admitted. Contract 10/10 additionally repairs bare-var reservation and malformed initializer
+admission in unchanged private9/9 and8/8 indexes, retaining the earlier Python
+directive and private7/7 and6/6 repairs
 without changing schema, wire shapes or authored state.
 
 Rust qualified paths use the type/module namespace independently of local values.

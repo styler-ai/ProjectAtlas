@@ -2226,7 +2226,10 @@ impl LexicalCollector<'_> {
         }
         // An uninitialized var reserves its function name but performs no write.
         // Keep an earlier function, parameter or initialized variable's timeline.
-        if var && node.child_by_field_name("value").is_none() {
+        if var
+            && !crate::declarator_has_recovery_error(node)
+            && node.child_by_field_name("value").is_none()
+        {
             if let Some(name) = self.binding_name(pattern) {
                 if !self.admit_binding() {
                     return Ok(());
@@ -5432,6 +5435,89 @@ function caller() { renamed(); tools.work(); }
                                 slot.binding,
                                 crate::SourceExportBinding::LocalDeclaration(_)
                             )),
+                        "{language}: {script}: {:?}",
+                        facts.exports
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_var_initializers_cannot_preserve_callable_authority() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("vue", "main.vue", true),
+            ("svelte", "main.svelte", true),
+            ("html", "main.html", true),
+        ] {
+            for (script, resolved) in [
+                (
+                    "function run(){} var run = ; function caller(){run();}",
+                    false,
+                ),
+                (
+                    "function run(){} var run = , other; function caller(){run();}",
+                    false,
+                ),
+                (
+                    "function run(){} var run /* trivia */ = , other; function caller(){run();}",
+                    false,
+                ),
+                (
+                    "export var run=()=>{}; var run = ; function caller(){run();}",
+                    false,
+                ),
+                (
+                    "function run(){} var run, other = ; function caller(){run();}",
+                    true,
+                ),
+                (
+                    "function run(){} var other = , run; function caller(){run();}",
+                    true,
+                ),
+            ] {
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script.to_string()
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (_, graph, facts) = extracted.into_parts();
+                assert!(
+                    !facts.calls.is_empty(),
+                    "{language}: {script}: lost recovered call"
+                );
+                for call in &facts.calls {
+                    let target = match call.binding {
+                        SourceCallBinding::LocalDeclaration(symbol) => {
+                            Some(graph.symbols[symbol].name.as_str())
+                        }
+                        _ => None,
+                    };
+                    assert_eq!(
+                        target,
+                        resolved.then_some("run"),
+                        "{language}: {script}: {:?}",
+                        facts.calls
+                    );
+                }
+                if script.starts_with("export var") {
+                    let slot = facts.exports.iter().find(|slot| slot.name == "run");
+                    assert!(
+                        slot.is_some_and(|slot| !matches!(
+                            slot.binding,
+                            crate::SourceExportBinding::LocalDeclaration(_)
+                        )),
                         "{language}: {script}: {:?}",
                         facts.exports
                     );

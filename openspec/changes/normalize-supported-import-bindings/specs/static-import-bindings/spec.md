@@ -118,6 +118,11 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **THEN** it reserves the function-local name without replacing the existing value; canonical callers and explicit exported aliases retain proven callable targets
 - **AND** an otherwise uninitialized local still shadows outer bindings, while actual initializers, assignments and for-in/of writes retain their invalidation behavior in standalone and admitted embedded scripts
 
+#### Scenario: Malformed initializer recovery cannot invent callable identity
+- **WHEN** a malformed initializer contains a recovery error or leaves a recovery error immediately following its declarator, including a following function absorbed as an initializer
+- **THEN** it cannot authorize a no-write reservation or direct callable declaration, recovered calls retain honest unresolved evidence, and any surviving explicit export slot remains unresolved
+- **AND** independently valid comma-delimited bare declarations before or after another malformed declarator preserve their existing values
+
 #### Scenario: Bounded lexical state with fact-free syntax
 - **WHEN** parallel source files exhaust lexical scope/value capacity or native traversal depth without exhausting symbol or relation caps
 - **THEN** retention remains bounded, all binding/export authority is withdrawn, raw admitted evidence and proven prefix ownership remain navigable, and normal source reduction and refresh repair exact callers without losing project identity

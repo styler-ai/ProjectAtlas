@@ -20,6 +20,19 @@ Historical720 protected-dev metadata report remains unplanned; main is integrati
 
 ## Current #731 correction
 
+Latest source additionally fixes malformed initializer recovery, Luna approved.
+Tree-sitter can swallow a following function as an errored initializer, or place
+ERROR '=' after a bare identifier. Shared declarator_has_recovery_error rejects
+nested/adjacent recovery (skipping comments) for no-write and callable-initializer
+proof, preserves valid comma-delimited siblings and nonempty raw recovered calls.
+Six variants x6 recovery casesPASS, varpositive6x13PASS; realCLI/MCP final10 testPASS
+10.94s, native repairunit1PASS, alltarget/allfeatureClippy+stringsPASS. Contracts now
+10/10, repairing prior9 using captured9digest7ebce4c0ac31d1a9bb12313ae7777133d6f7c3c712ec3a147a244b2cc0edf7de
+and retaining8/7/050 seeds. TemporaryASTdiagnostic removed, no placeholder retained.
+Clean optimized9 artifact4401383 is superseded for acceptance; optimized10 and fresh
+cost/native old8->10 proof pending. 738 combined derivation MUST exceed10.
+
+
 Worktree issue-731, fix/static-bindings-731, PR737 public88c7862. Acceptedmain1b953f1d.
 All mandatory native88 gates PASSED and push completed; hosted88 Rust/Linux passed,
 remaining platforms ongoing at latest readback. CodeQL11 moved existing main path

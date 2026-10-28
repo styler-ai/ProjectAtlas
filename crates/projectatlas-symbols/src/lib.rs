@@ -2034,6 +2034,7 @@ fn declaration_has_direct_callable_initializer(node: Node<'_>) -> bool {
     first_declaration_initializer(node).is_some_and(|initializer| {
         initializer
             .parent()
+            .filter(|declarator| !declarator_has_recovery_error(*declarator))
             .and_then(|declarator| declarator.child_by_field_name("name"))
             .is_some_and(|name| matches!(name.kind(), "identifier" | "simple_identifier"))
             && matches!(
@@ -2045,6 +2046,21 @@ fn declaration_has_direct_callable_initializer(node: Node<'_>) -> bool {
                     | "lambda_expression"
             )
     })
+}
+
+/// Keep an initializer recovery error with its declarator, not a valid sibling.
+fn declarator_has_recovery_error(node: Node<'_>) -> bool {
+    if node.has_error() || node.is_missing() {
+        return true;
+    }
+    let mut sibling = node.next_sibling();
+    while let Some(current) = sibling {
+        if current.kind() != "comment" {
+            return current.is_error() || current.is_missing();
+        }
+        sibling = current.next_sibling();
+    }
+    false
 }
 
 /// Return the first direct declaration initializer.
