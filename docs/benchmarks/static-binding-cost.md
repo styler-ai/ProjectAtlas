@@ -6,9 +6,8 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-This recorded comparison is historical contract6/6 evidence, predating the
-deferred-body and lexical-retention corrections. Replace it with final contract7/7
-measurements before accepting task2.7; it is not current release acceptance.
+This comparison uses the reviewed contract7/7 source, including deferred-body and
+lexical-retention corrections. It remains separate from release acceptance.
 
 Three paired rounds alternate baseline/candidate order. Each sample initializes
 a fresh non-Git fixture in a fresh process; filesystem/page caches remain warm.
@@ -18,16 +17,16 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2873 | 0.3496 | 28704 | 33636 |
-| 64 Cargo roots, 256 callers | 0.3297 | 0.3935 | 29564 | 35348 |
-| Dense/comment/nested source | 0.1694 | 0.1644 | 27780 | 29284 |
+| Four Cargo roots, 256 callers | 0.2841 | 0.3488 | 27728 | 33364 |
+| 64 Cargo roots, 256 callers | 0.3296 | 0.3917 | 28948 | 35088 |
+| Dense/comment/nested source | 0.1665 | 0.1627 | 26664 | 29320 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-Their measured initial time increases by about 19–22%, and maximum RSS by 17–20%.
-The dense case improves median time by about 3%, with about 5% higher peak RSS.
+Their measured initial time increases by about 19–23%, and maximum RSS by 20–21%.
+The dense case improves median time by about 2%, with about 10% higher peak RSS.
 These observations do not establish a general speedup or a root-count asymptotic
 bound beyond the measured inputs.
 

@@ -25,12 +25,11 @@ Its mandatory native push gate passed the complete locked workspace, E2E,
 documentation, dependency/source policy and Atlas checks. Hosted Rust passed;
 platform jobs and final acceptance are pending. This is not RC readiness.
 
-Automated review found two reproduced defects: deferred Python/ECMAScript lookup
-missed later enclosing declarations/imports; fact-free blocks retained uncapped
-lexical environments. Local/live tasks 2.4, 2.6 and 2.7 are reopened (5/9 checked),
-with all acceptance tasks unchecked. Primary has uncommitted review fixes in this
-checkout; preserve them. Existing original history remains on
-`fix/import-normalization-731`; public history must not be rewritten or bypass gates.
+Review corrections are committed as `1a27268`; local/live tasks 2.4, 2.6 and2.7
+are rechecked after current affected proof (8/9). Task3.1 and all acceptance remain
+open for the final native/hosted candidate and feedback. The first native gate's
+74a result does not establish readiness for the corrected source. Independent Luna
+approved the shared namespace admission and loop/deferred/mutation fixes.
 
 The fix uses a precomputed stable timeline suffix for deferred bodies, preserves
 immediate/IIFE/header/first-iterable order, and accounts for ECMAScript assignment,
@@ -42,7 +41,7 @@ Contracts are now 7/7, repairing the prior private 6/6 candidate too. The focuse
 negative tests failed before the fix; 42 lexical tests (within 381 passing symbol tests / one existing ignored) and the permanent
 four-file real CLI/MCP resource/identity/no-op recovery test passed. Current native7/7 repair, extended root MCP, resource CLI/MCP, all three inventory
 checks and warning-clean all-target/all-feature Clippy passed. Independent Luna
-review of the corrected shared namespace admission and loop writes is active; do not
+review of the corrected shared namespace admission and loop writes approved; do not
 count the earlier native/source approval as proof of these uncommitted changes.
 
 The new installed resource selector is
@@ -65,9 +64,11 @@ resolved against the corrected head before acceptance.
 Use this checkout's private database. The native gate refreshed it with contract6;
 installed stable Atlas now returns `policy_drift`, recorded in the bounded
 `deferred-atlas-next` log. Do not downgrade/reset/reindex merely for orientation.
-The earlier paired binding-cost report is retained historical contract6 evidence;
-repeat its affected measurements on the final optimized contract7 source and keep
-#708's fresh combined four-platform SLO proof mandatory. No RC exists.
+The fresh contract7 optimized paired campaign passed all18 samples and the
+separate exact-root target probe. The cost report now records its clean source and
+immutable binary. Eleven unchanged private6 indexes repair to7 with identity,
+approved-purpose status, no-op, representative rebuild and compatible rollback/
+re-upgrade proof. Keep #708's combined four-platform SLO proof mandatory. No RC exists.
 
 ## Static binding repair
 
@@ -154,3 +155,15 @@ then reconcile all selectors and inventories. Require exact clean parser-pack an
 package construction on Linux, Windows, macOS Intel and ARM, RC pins/tag/assets,
 checksums, installation, prerelease classification and unchanged Latest readback.
 Native issue bodies for #708/#715 now carry this combined-source handoff.
+
+## Additional confirmed source boundary bug
+
+Created #738 for document target admission before ignore-policy inspection. Stable
+0.5.0 syscall tracing confirms a source-directory symlink lets a Markdown target
+open an outside `.ignore` before later root rejection. Target source-byte reading
+and code execution are not demonstrated. Worktree `.worktrees/issue-738`, branch
+`fix/document-target-boundary-738`, starts from acceptedmain1b953f1; stable0.5.0
+Atlas init completed on its private database. It remains backlog until its complete
+plan/review and native RC1 parent/blocker graph are admitted. Preserve explicit
+operator root/db/config/global-exclude/worktree metadata capabilities; fix only
+the untrusted derived source-path boundary. CodeQL244 staysopen pending the fix.
