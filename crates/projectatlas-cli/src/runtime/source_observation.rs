@@ -3,8 +3,9 @@
 use super::{
     ScanRuntimePlan, SourceVerificationWork, WatchChangeSet,
     open_atlas_store_read_only_for_project, open_exact_fresh_atlas_store_for_project_controlled,
-    open_exact_saved_source_matches_index_controlled, publication_input_error,
-    source_changed_during_derivation, source_inspection_error,
+    open_exact_saved_source_matches_index_controlled,
+    policy_watch::{PolicyWatchInputs, PolicyWatchSelection},
+    publication_input_error, source_changed_during_derivation, source_inspection_error,
     verify_saved_source_matches_index_controlled,
 };
 use crate::CliError;
@@ -13,7 +14,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use projectatlas_core::graph::ProjectInstanceId;
 use projectatlas_core::{CanonicalProjectRoot, IndexGeneration, IndexWorkControl, IndexWorkStage};
 use projectatlas_db::{AtlasStore, CapturedProjectBinding, IndexPublicationState};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 #[cfg(windows)]
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -355,14 +356,6 @@ impl Hash for SourceBinding {
 }
 
 impl SourceBinding {
-    /// Configuration directory observed separately when it lies outside the source root.
-    fn external_config_parent(&self) -> Option<&Path> {
-        self.config
-            .as_deref()
-            .filter(|config| !config.starts_with(&self.root))
-            .and_then(Path::parent)
-    }
-
     /// Resolve one root, database, and optional configuration into a stable binding.
     fn new(database: &Path, root: &Path, config: Option<&Path>) -> Result<Self, CliError> {
         let root = root.canonicalize().map_err(|source| CliError::Io {
@@ -401,12 +394,22 @@ struct ObservationState {
     verified: Option<VerifiedSourceEpoch>,
 }
 
+/// Native registrations acknowledged by one watcher, including partial failed updates.
+struct SourceWatchCoverage {
+    /// Existing native watcher; callbacks retain their bounded ingress handshake.
+    watcher: RecommendedWatcher,
+    /// External directories whose registration has not been successfully retired.
+    directories: BTreeSet<PathBuf>,
+}
+
 /// Concrete watcher and state for one exact source binding.
 struct SourceObservationEntry {
     /// Exact source, database, and configuration identity.
     binding: SourceBinding,
+    /// Policy namespace shared with the callback without coupling it to epoch locks.
+    policy_selection: PolicyWatchSelection,
     /// Native watcher kept alive for the entry lifetime.
-    watcher: RecommendedWatcher,
+    watcher: Mutex<SourceWatchCoverage>,
     /// Bounded receiver whose lock serializes callback publication with drain acknowledgment.
     receiver: Arc<Mutex<Receiver<Event>>>,
     /// Monotonic count of relevant events accepted by the callback.
@@ -431,14 +434,15 @@ struct SourceObservationEntry {
 #[cfg(windows)]
 impl Drop for SourceObservationEntry {
     fn drop(&mut self) {
-        drop(self.watcher.unwatch(&self.binding.root));
-        if let Some(parent) = self.binding.external_config_parent() {
-            drop(self.watcher.unwatch(parent));
-        }
-        // notify's Windows Unwatch and Drop only enqueue actions. Configure waits
-        // for an acknowledgement after preceding cancellation/completion work,
-        // so directory cleanup cannot race an outstanding native notification.
-        drop(self.watcher.configure(notify::Config::default()));
+        // Cleanup must also cover registrations retained by a partial failed update.
+        let coverage = self
+            .watcher
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(coverage.watcher.unwatch(&self.binding.root));
+        PolicyWatchInputs::unwatch(&mut coverage.watcher, &coverage.directories);
+        // Configure acknowledges preceding native cancellation/completion work.
+        drop(coverage.watcher.configure(notify::Config::default()));
     }
 }
 
@@ -460,15 +464,26 @@ impl fmt::Debug for SourceObservationEntry {
 }
 
 impl SourceObservationEntry {
-    /// Start a bounded native watcher for one source binding.
+    /// Start an isolated observer for owning tests with the normal work budget.
+    #[cfg(test)]
     fn start(binding: SourceBinding) -> Result<Self, CliError> {
+        Self::start_controlled(binding, &super::standalone_index_work_control())
+    }
+
+    /// Start native observation within the caller's original work budget.
+    fn start_controlled(
+        binding: SourceBinding,
+        control: &IndexWorkControl,
+    ) -> Result<Self, CliError> {
         let (sender, receiver) = sync_channel(SOURCE_OBSERVATION_QUEUE_CAPACITY);
         let receiver = Arc::new(Mutex::new(receiver));
         #[cfg(test)]
         let test_sender = sender.clone();
         let ingress_sequence = Arc::new(AtomicU64::new(0));
         let continuity_lost = Arc::new(AtomicBool::new(false));
-        let watcher = notify::recommended_watcher(watcher_callback(
+        let policy_selection = PolicyWatchSelection::new(binding.root.clone());
+        let watcher = notify::recommended_watcher(selected_watcher_callback(
+            policy_selection.clone(),
             sender,
             Arc::clone(&receiver),
             Arc::clone(&ingress_sequence),
@@ -477,7 +492,11 @@ impl SourceObservationEntry {
         .map_err(|source| observer_error(&binding.root, &source))?;
         let mut entry = Self {
             binding,
-            watcher,
+            policy_selection,
+            watcher: Mutex::new(SourceWatchCoverage {
+                watcher,
+                directories: BTreeSet::new(),
+            }),
             receiver,
             ingress_sequence,
             continuity_lost,
@@ -492,15 +511,42 @@ impl SourceObservationEntry {
         };
         entry
             .watcher
+            .get_mut()
+            .map_err(|_poisoned| lock_error(&entry.binding.root, "source observation watcher"))?
+            .watcher
             .watch(&entry.binding.root, RecursiveMode::Recursive)
             .map_err(|source| observer_error(&entry.binding.root, &source))?;
-        if let Some(parent) = entry.binding.external_config_parent() {
-            entry
-                .watcher
-                .watch(parent, RecursiveMode::NonRecursive)
-                .map_err(|source| observer_error(&entry.binding.root, &source))?;
-        }
+        entry.refresh_policy_watches(control)?;
         Ok(entry)
+    }
+
+    /// Update native coverage before sampling source, without holding the receiver lock.
+    fn refresh_policy_watches(&self, control: &IndexWorkControl) -> Result<(), CliError> {
+        // No old epoch can outlive this namespace transition. Publish before a
+        // newly watched input can emit an event; never hold the selector lock
+        // while native watch acknowledgement might need callback progress.
+        self.invalidate();
+        let mut coverage = self
+            .watcher
+            .lock()
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation watcher"))?;
+        let SourceWatchCoverage {
+            watcher,
+            directories,
+        } = &mut *coverage;
+        if let Err(error) = PolicyWatchInputs::install_selected(
+            &self.binding.root,
+            self.binding.config.as_deref(),
+            &self.policy_selection,
+            watcher,
+            directories,
+            control,
+        ) {
+            self.continuity_lost.store(true, Ordering::Release);
+            self.invalidate();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Publish one deterministic test event through the production handshake.
@@ -526,13 +572,26 @@ impl SourceObservationEntry {
         }
     }
 
+    /// Capture request authority without cloning policy/contract strings.
+    fn current_stamp(&self) -> Result<Option<VerifiedReadStamp>, CliError> {
+        self.state
+            .lock()
+            .map(|state| state.verified.as_ref().map(|epoch| epoch.stamp.clone()))
+            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation state"))
+    }
+
     /// Discard only the failed operation's epoch without clearing a successor.
     fn invalidate_epoch(&self, epoch: &VerifiedSourceEpoch) {
+        self.invalidate_stamp(&epoch.stamp);
+    }
+
+    /// Keep a successor installed after the failed request sampled its authority.
+    fn invalidate_stamp(&self, stamp: &VerifiedReadStamp) {
         if let Ok(mut state) = self.state.lock()
             && state
                 .verified
                 .as_ref()
-                .is_some_and(|current| current.stamp == epoch.stamp)
+                .is_some_and(|current| current.stamp == *stamp)
         {
             state.verified = None;
         }
@@ -550,35 +609,52 @@ impl SourceObservationEntry {
     }
 
     /// Reset continuity and drain events before sampling exact source truth.
-    fn clear_before_exact_verification(&self) -> Result<(), CliError> {
-        let receiver = self
-            .receiver
-            .lock()
-            .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
-        self.invalidate();
-        self.continuity_lost.store(false, Ordering::Release);
-        loop {
-            match receiver.try_recv() {
-                Ok(_event) => {}
-                Err(TryRecvError::Empty) => return Ok(()),
-                Err(TryRecvError::Disconnected) => {
-                    self.continuity_lost.store(true, Ordering::Release);
-                    return Ok(());
+    fn clear_before_exact_verification(&self, control: &IndexWorkControl) -> Result<(), CliError> {
+        self.clear_before_exact_verification_with_update(control, || {
+            self.refresh_policy_watches(control)
+        })
+    }
+
+    /// Fence preexisting ingress before a watch update; retain all later uncertainty.
+    fn clear_before_exact_verification_with_update(
+        &self,
+        control: &IndexWorkControl,
+        update: impl FnOnce() -> Result<(), CliError>,
+    ) -> Result<(), CliError> {
+        {
+            let receiver = self.receiver.lock().map_err(|_poisoned| {
+                lock_error(&self.binding.root, "source observation receiver")
+            })?;
+            self.invalidate();
+            self.continuity_lost.store(false, Ordering::Release);
+            loop {
+                control.check(IndexWorkStage::RepositoryTraversal)?;
+                match receiver.try_recv() {
+                    Ok(_event) => {}
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.continuity_lost.store(true, Ordering::Release);
+                        break;
+                    }
                 }
             }
         }
+        // Leave events/overflow received during coverage discovery and native
+        // installation pending. The final verification drain must retry them.
+        update()
     }
 
     /// Return whether any potentially relevant event arrived since exact truth was sampled.
     fn changed_since_exact_verification(
         &self,
         scan_options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
     ) -> Result<bool, CliError> {
         let receiver = self
             .receiver
             .lock()
             .map_err(|_poisoned| lock_error(&self.binding.root, "source observation receiver"))?;
-        self.drain_source_events(&receiver, scan_options)
+        self.drain_source_events(&receiver, scan_options, control)
     }
 
     /// Drain and invalidate atomically with callback publication and epoch installation.
@@ -586,6 +662,7 @@ impl SourceObservationEntry {
         &self,
         receiver: &Receiver<Event>,
         scan_options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
     ) -> Result<bool, CliError> {
         #[cfg(test)]
         if self
@@ -602,19 +679,37 @@ impl SourceObservationEntry {
             return Ok(true);
         }
         let mut changes = WatchChangeSet::default();
+        let mut batch_policy = None;
         loop {
             match receiver.try_recv() {
                 Ok(event) => {
-                    let event_changes = observer_event_changes(&self.binding, scan_options, &event);
-                    changes.requires_full_scan |= event_changes.requires_full_scan;
-                    changes.paths.extend(event_changes.paths);
-                    if self
-                        .binding
-                        .config
-                        .as_ref()
-                        .is_some_and(|config| event.paths.iter().any(|path| path == config))
-                    {
-                        changes.requires_full_scan = true;
+                    let Some(filtered) = filtered_observer_event(&self.binding, &event) else {
+                        continue;
+                    };
+                    // Do not reconstruct policy for database/access events or an
+                    // empty queue. Every relevant event in this drain reuses it.
+                    if batch_policy.is_none() {
+                        let discovered = projectatlas_fs::RootScanPolicy::discover(
+                            &self.binding.root,
+                            scan_options,
+                            control,
+                        )
+                        .map_err(CliError::from);
+                        let discovered = self.preserve_consumed_event(discovered)?;
+                        let inputs =
+                            self.preserve_consumed_event(self.policy_selection.snapshot())?;
+                        batch_policy = Some((discovered, inputs));
+                    }
+                    if let Some((policy, inputs)) = &batch_policy {
+                        let classified = super::notify_event_changes_with_policy(
+                            &self.binding.root,
+                            scan_options,
+                            &filtered,
+                            policy,
+                        );
+                        let mut event_changes = self.preserve_consumed_event(classified)?;
+                        event_changes.requires_full_scan |= inputs.affects(&filtered);
+                        changes.merge(event_changes);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -643,12 +738,22 @@ impl SourceObservationEntry {
         Ok(changed)
     }
 
+    /// Never acknowledge a consumed event after failed policy inspection.
+    fn preserve_consumed_event<T>(&self, result: Result<T, CliError>) -> Result<T, CliError> {
+        if result.is_err() {
+            self.continuity_lost.store(true, Ordering::Release);
+            self.invalidate();
+        }
+        result
+    }
+
     /// Consume events only while the sampled epoch still owns their selection policy.
     fn drain_epoch_events(
         &self,
         receiver: &Receiver<Event>,
         epoch: &VerifiedSourceEpoch,
         scan_options: &projectatlas_fs::ScanOptions,
+        control: &IndexWorkControl,
     ) -> Result<ObservedAcceptance, CliError> {
         let Some(current) = self.current_epoch()? else {
             return Ok(ObservedAcceptance::Invalidated);
@@ -656,7 +761,7 @@ impl SourceObservationEntry {
         if current.stamp != epoch.stamp {
             return Ok(ObservedAcceptance::Superseded);
         }
-        if self.drain_source_events(receiver, scan_options)? {
+        if self.drain_source_events(receiver, scan_options, control)? {
             return Ok(ObservedAcceptance::Invalidated);
         }
         Ok(ObservedAcceptance::Accepted)
@@ -701,12 +806,11 @@ impl SourceObservationEntry {
     }
 }
 
-/// Classify source events without letting this binding's own `SQLite` files self-invalidate it.
-fn observer_event_changes(
-    binding: &SourceBinding,
-    scan_options: &projectatlas_fs::ScanOptions,
-    event: &Event,
-) -> WatchChangeSet {
+/// Remove access and self-database notifications before any policy I/O.
+fn filtered_observer_event(binding: &SourceBinding, event: &Event) -> Option<Event> {
+    if !super::event_kind_affects_index(event.kind) && !event.need_rescan() {
+        return None;
+    }
     let mut filtered = event.clone();
     let metadata_directory = binding.root.join(".projectatlas");
     filtered.paths.retain(|path| {
@@ -715,8 +819,21 @@ fn observer_event_changes(
             && !is_database_runtime_path(&candidate, &binding.database)
     });
     if filtered.paths.is_empty() && !event.need_rescan() {
-        return WatchChangeSet::default();
+        return None;
     }
+    Some(filtered)
+}
+
+/// Test one standalone notification through the production filtering/classification boundary.
+#[cfg(test)]
+fn observer_event_changes(
+    binding: &SourceBinding,
+    scan_options: &projectatlas_fs::ScanOptions,
+    event: &Event,
+) -> WatchChangeSet {
+    let Some(filtered) = filtered_observer_event(binding, event) else {
+        return WatchChangeSet::default();
+    };
     super::notify_event_changes(&binding.root, scan_options, &filtered)
 }
 
@@ -789,7 +906,7 @@ fn missing_windows_sidecar_matches(
 }
 
 /// Compare native paths without converting identity through display text.
-fn same_native_path(left: &Path, right: &Path) -> bool {
+pub(super) fn same_native_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
@@ -899,16 +1016,21 @@ impl SourceObservationRegistry {
         config: Option<&Path>,
         control: &IndexWorkControl,
         repair: SourceRepairPolicy,
-        query: F,
+        mut query: F,
     ) -> Result<SourceReadAdmission<VerifiedReadOutcome<T>>, CliError>
     where
         F: FnMut(&AtlasStore, VerifiedReadStamp) -> Result<T, CliError>,
     {
         let binding = SourceBinding::new(database, root, config)?;
-        let Some(entry) = self.entry(binding.clone())? else {
+        let Some(entry) = self.entry(binding.clone(), control)? else {
             return self.with_exact_fallback(&binding, control, repair, query);
         };
-        self.with_observed_read(&entry, control, repair, query)
+        match self.with_observed_read(&entry, control, repair, &mut query) {
+            Err(CliError::Watcher(_unavailable)) => {
+                self.with_exact_fallback(&binding, control, repair, query)
+            }
+            result => result,
+        }
     }
 
     /// Admit a purpose mutation and retain its source witness through commit.
@@ -920,26 +1042,28 @@ impl SourceObservationRegistry {
         control: &IndexWorkControl,
     ) -> Result<VerifiedMutationAdmission, CliError> {
         let binding = SourceBinding::new(database, root, config)?;
-        let Some(entry) = self.entry(binding.clone())? else {
+        let Some(entry) = self.entry(binding.clone(), control)? else {
             return self.admit_exact_mutation(binding, control);
         };
         let mut work = VerifiedReadWork::default();
         for attempt in 0..VERIFIED_READ_ATTEMPTS {
+            let previous = entry.current_stamp()?;
             if let Err(error) = control.check(IndexWorkStage::Publication) {
-                entry.invalidate();
+                if let Some(stamp) = previous {
+                    entry.invalidate_stamp(&stamp);
+                }
                 return Err(error.into());
             }
             let (store, epoch) =
                 match self.prepare_observed_store(&entry, control, &mut work, attempt == 0) {
                     Ok(Some(prepared)) => prepared,
                     Ok(None) => {
-                        entry.invalidate();
                         return self.admit_exact_mutation(binding, control);
                     }
-                    Err(error) => {
-                        entry.invalidate();
-                        return Err(error);
+                    Err(CliError::Watcher(_unavailable)) => {
+                        return self.admit_exact_mutation(binding, control);
                     }
+                    Err(error) => return Err(error),
                 };
             #[cfg(test)]
             if self
@@ -1050,6 +1174,7 @@ impl SourceObservationRegistry {
     fn entry(
         &self,
         binding: SourceBinding,
+        control: &IndexWorkControl,
     ) -> Result<Option<Arc<SourceObservationEntry>>, CliError> {
         let mut entries = self
             .entries
@@ -1061,7 +1186,8 @@ impl SourceObservationRegistry {
         if entries.len() >= SOURCE_OBSERVATION_CAPACITY {
             return Ok(None);
         }
-        let entry = match SourceObservationEntry::start(binding.clone()) {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        let entry = match SourceObservationEntry::start_controlled(binding.clone(), control) {
             Ok(entry) => Arc::new(entry),
             Err(_observer_unavailable) => return Ok(None),
         };
@@ -1083,8 +1209,11 @@ impl SourceObservationRegistry {
         let started = Instant::now();
         let mut work = VerifiedReadWork::default();
         for attempt in 0..VERIFIED_READ_ATTEMPTS {
+            let previous = entry.current_stamp()?;
             if let Err(error) = control.check(IndexWorkStage::Publication) {
-                entry.invalidate();
+                if let Some(stamp) = previous {
+                    entry.invalidate_stamp(&stamp);
+                }
                 return Err(error.into());
             }
             let (store, epoch) = match self
@@ -1092,22 +1221,17 @@ impl SourceObservationRegistry {
             {
                 Ok(SourceReadAdmission::Current(Some(prepared))) => prepared,
                 Ok(SourceReadAdmission::Reconcile(assessment)) => {
-                    entry.invalidate();
                     return Ok(SourceReadAdmission::Reconcile(assessment));
                 }
                 Ok(SourceReadAdmission::Current(None)) => {
-                    entry.invalidate();
                     return Err(source_changed_during_derivation(&entry.binding.root, "."));
                 }
-                Err(error) => {
-                    entry.invalidate();
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             };
             let value = match query(&store, epoch.stamp.clone()) {
                 Ok(value) => value,
                 Err(error) => {
-                    if matches!(error, CliError::IndexWork(_)) {
+                    if matches!(error, CliError::IndexWork(_) | CliError::Watcher(_)) {
                         entry.invalidate_epoch(&epoch);
                     }
                     drop(store.finish_index_read_snapshot());
@@ -1170,116 +1294,124 @@ impl SourceObservationRegistry {
             .reconcile
             .lock()
             .map_err(|_poisoned| lock_error(&entry.binding.root, "source reconciliation"))?;
-        // One-shot refresh must include writes completed before the request. An empty
-        // callback queue cannot fence events still pending in an asynchronous backend.
-        // Until a causal backend fence is available, require exact refresh admission.
-        // Mutation authority also starts from exact saved source under this lock.
-        if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
-            entry.invalidate();
-        }
-        let plan = ScanRuntimePlan::for_path_controlled(
-            entry.binding.config.as_deref(),
-            &entry.binding.root,
-            None,
-            control,
-        )
-        .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-        entry.changed_since_exact_verification(&plan.scan_options)?;
-        let contract_fingerprint = plan.publication_contract_fingerprint();
-        let policy_witness = source_policy_witness(&plan, control)?;
-        if let Some(epoch) = entry.current_epoch()?
-            && epoch.contract_fingerprint == contract_fingerprint
-            && epoch.policy_witness == policy_witness
-            && !entry.continuity_lost.load(Ordering::Acquire)
-        {
-            let store = open_atlas_store_read_only_for_project(
-                &entry.binding.database,
-                &entry.binding.root,
-            )?;
-            let publication = store.index_publication()?.filter(|publication| {
-                publication.state == IndexPublicationState::Complete
-                    && publication.contract_fingerprint.as_deref()
-                        == Some(contract_fingerprint.as_str())
-            });
-            let captured = store.captured_project_binding()?;
-            work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-            if publication
-                .is_some_and(|publication| publication.generation == epoch.stamp.generation)
-                && captured.project_instance_id == epoch.stamp.project_instance_id
-            {
-                return Ok(SourceReadAdmission::Current(Some((store, epoch))));
+        let prepared = (|| {
+            // One-shot refresh must include writes completed before the request. An empty
+            // callback queue cannot fence events still pending in an asynchronous backend.
+            // Until a causal backend fence is available, require exact refresh admission.
+            // Mutation authority also starts from exact saved source under this lock.
+            if force_exact || matches!(repair, SourceRepairPolicy::RequireCurrent) {
+                entry.invalidate();
             }
-            entry.invalidate();
-            drop(store.finish_index_read_snapshot());
-        }
-
-        for _attempt in 0..VERIFIED_READ_ATTEMPTS {
-            entry.clear_before_exact_verification()?;
-            let before_plan = ScanRuntimePlan::for_path_controlled(
+            let plan = ScanRuntimePlan::for_path_controlled(
                 entry.binding.config.as_deref(),
                 &entry.binding.root,
                 None,
                 control,
             )
             .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-            let before_contract = before_plan.publication_contract_fingerprint();
-            let before_policy = source_policy_witness(&before_plan, control)?;
-            let exact = match repair.open_exact(&entry.binding, control)? {
-                SourceReadAdmission::Current(exact) => exact,
-                SourceReadAdmission::Reconcile(assessment) => {
-                    return Ok(SourceReadAdmission::Reconcile(assessment));
+            entry.changed_since_exact_verification(&plan.scan_options, control)?;
+            let contract_fingerprint = plan.publication_contract_fingerprint();
+            let policy_witness = source_policy_witness(&plan, control)?;
+            if let Some(epoch) = entry.current_epoch()?
+                && epoch.contract_fingerprint == contract_fingerprint
+                && epoch.policy_witness == policy_witness
+                && !entry.continuity_lost.load(Ordering::Acquire)
+            {
+                let store = open_atlas_store_read_only_for_project(
+                    &entry.binding.database,
+                    &entry.binding.root,
+                )?;
+                let publication = store.index_publication()?.filter(|publication| {
+                    publication.state == IndexPublicationState::Complete
+                        && publication.contract_fingerprint.as_deref()
+                            == Some(contract_fingerprint.as_str())
+                });
+                let captured = store.captured_project_binding()?;
+                work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+                if publication
+                    .is_some_and(|publication| publication.generation == epoch.stamp.generation)
+                    && captured.project_instance_id == epoch.stamp.project_instance_id
+                {
+                    return Ok(SourceReadAdmission::Current(Some((store, epoch))));
                 }
-            };
-            work.add_exact(exact.work);
-            let after_plan = ScanRuntimePlan::for_path_controlled(
-                entry.binding.config.as_deref(),
-                &entry.binding.root,
-                None,
-                control,
-            )
-            .map_err(|source| publication_input_error(&entry.binding.root, source))?;
-            let after_contract = after_plan.publication_contract_fingerprint();
-            let after_policy = source_policy_witness(&after_plan, control)?;
-            #[cfg(test)]
-            if self
-                .preparation_invalidations
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                entry.invalidate_after_proven_source_mismatch()?;
+                entry.invalidate();
+                drop(store.finish_index_read_snapshot());
             }
-            if before_contract != after_contract || before_policy != after_policy {
-                drop(exact.store.finish_index_read_snapshot());
-                continue;
+
+            for _attempt in 0..VERIFIED_READ_ATTEMPTS {
+                entry.clear_before_exact_verification(control)?;
+                let before_plan = ScanRuntimePlan::for_path_controlled(
+                    entry.binding.config.as_deref(),
+                    &entry.binding.root,
+                    None,
+                    control,
+                )
+                .map_err(|source| publication_input_error(&entry.binding.root, source))?;
+                let before_contract = before_plan.publication_contract_fingerprint();
+                let before_policy = source_policy_witness(&before_plan, control)?;
+                let exact = match repair.open_exact(&entry.binding, control)? {
+                    SourceReadAdmission::Current(exact) => exact,
+                    SourceReadAdmission::Reconcile(assessment) => {
+                        return Ok(SourceReadAdmission::Reconcile(assessment));
+                    }
+                };
+                work.add_exact(exact.work);
+                let after_plan = ScanRuntimePlan::for_path_controlled(
+                    entry.binding.config.as_deref(),
+                    &entry.binding.root,
+                    None,
+                    control,
+                )
+                .map_err(|source| publication_input_error(&entry.binding.root, source))?;
+                let after_contract = after_plan.publication_contract_fingerprint();
+                let after_policy = source_policy_witness(&after_plan, control)?;
+                #[cfg(test)]
+                if self
+                    .preparation_invalidations
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    entry.invalidate_after_proven_source_mismatch()?;
+                }
+                if before_contract != after_contract || before_policy != after_policy {
+                    drop(exact.store.finish_index_read_snapshot());
+                    continue;
+                }
+                let publication = exact
+                    .store
+                    .index_publication()?
+                    .ok_or_else(|| source_changed_during_derivation(&entry.binding.root, "."))?;
+                let captured = exact.store.captured_project_binding()?;
+                work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+                let receiver = entry.receiver.lock().map_err(|_poisoned| {
+                    lock_error(&entry.binding.root, "source observation receiver")
+                })?;
+                if entry.drain_source_events(&receiver, &after_plan.scan_options, control)? {
+                    drop(receiver);
+                    drop(exact.store.finish_index_read_snapshot());
+                    continue;
+                }
+                let ingress_sequence = entry.ingress_sequence.load(Ordering::Acquire);
+                let epoch = entry.install_epoch(
+                    self.process_nonce,
+                    &captured,
+                    publication.generation,
+                    ingress_sequence,
+                    after_contract,
+                    after_policy,
+                )?;
+                return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
             }
-            let publication = exact
-                .store
-                .index_publication()?
-                .ok_or_else(|| source_changed_during_derivation(&entry.binding.root, "."))?;
-            let captured = exact.store.captured_project_binding()?;
-            work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
-            let receiver = entry.receiver.lock().map_err(|_poisoned| {
-                lock_error(&entry.binding.root, "source observation receiver")
-            })?;
-            if entry.drain_source_events(&receiver, &after_plan.scan_options)? {
-                drop(receiver);
-                drop(exact.store.finish_index_read_snapshot());
-                continue;
-            }
-            let ingress_sequence = entry.ingress_sequence.load(Ordering::Acquire);
-            let epoch = entry.install_epoch(
-                self.process_nonce,
-                &captured,
-                publication.generation,
-                ingress_sequence,
-                after_contract,
-                after_policy,
-            )?;
-            return Ok(SourceReadAdmission::Current(Some((exact.store, epoch))));
+            Ok(SourceReadAdmission::Current(None))
+        })();
+        if !matches!(&prepared, Ok(SourceReadAdmission::Current(Some(_)))) {
+            // No successor can be installed until this cleanup and the owning
+            // reconciliation guard have both completed.
+            entry.invalidate();
         }
-        Ok(SourceReadAdmission::Current(None))
+        prepared
     }
 
     /// Confirm that no source, policy, or observer event invalidated a query result.
@@ -1306,7 +1438,7 @@ impl SourceObservationRegistry {
                 let receiver = entry.receiver.lock().map_err(|_poisoned| {
                     lock_error(&entry.binding.root, "source observation receiver")
                 })?;
-                match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+                match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options, control)? {
                     ObservedAcceptance::Accepted => {}
                     ObservedAcceptance::Superseded => continue,
                     ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
@@ -1324,7 +1456,7 @@ impl SourceObservationRegistry {
             let receiver = entry.receiver.lock().map_err(|_poisoned| {
                 lock_error(&entry.binding.root, "source observation receiver")
             })?;
-            match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options)? {
+            match entry.drain_epoch_events(&receiver, &sampled, &plan.scan_options, control)? {
                 ObservedAcceptance::Accepted => {}
                 ObservedAcceptance::Superseded => continue,
                 ObservedAcceptance::Invalidated => return Ok(ObservedAcceptance::Invalidated),
@@ -1422,6 +1554,25 @@ impl SourceObservationRegistry {
     }
 }
 
+/// Exclude proven unrelated parent-directory traffic before it can consume source queue capacity.
+fn selected_watcher_callback(
+    selection: PolicyWatchSelection,
+    sender: SyncSender<Event>,
+    receiver: Arc<Mutex<Receiver<Event>>>,
+    ingress_sequence: Arc<AtomicU64>,
+    continuity_lost: Arc<AtomicBool>,
+) -> impl FnMut(notify::Result<Event>) + Send + 'static {
+    let mut publish = watcher_callback(sender, receiver, ingress_sequence, continuity_lost);
+    move |result| {
+        if let Ok(event) = &result
+            && !selection.may_affect(event)
+        {
+            return;
+        }
+        publish(result);
+    }
+}
+
 /// Convert native watcher callbacks into bounded ingress and continuity state.
 fn watcher_callback(
     sender: SyncSender<Event>,
@@ -1430,7 +1581,7 @@ fn watcher_callback(
     continuity_lost: Arc<AtomicBool>,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
     move |result| match result {
-        Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
+        Ok(event) if matches!(event.kind, EventKind::Access(_)) && !event.need_rescan() => {}
         result => {
             let _receiver = match receiver.lock() {
                 Ok(receiver) => receiver,
@@ -1450,9 +1601,7 @@ fn watcher_callback(
                         }
                     }
                 }
-                Err(_source) => {
-                    continuity_lost.store(true, Ordering::Release);
-                }
+                Err(_source) => continuity_lost.store(true, Ordering::Release),
             }
             ingress_sequence.fetch_add(1, Ordering::AcqRel);
         }
@@ -1699,15 +1848,21 @@ mod tests {
     }
 
     #[test]
-    fn native_observer_failed_registration_releases_admitted_root() -> Result<(), Box<dyn Error>> {
+    fn native_observer_failed_policy_selection_releases_admitted_root() -> Result<(), Box<dyn Error>>
+    {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("repo");
         fs::create_dir_all(&root)?;
         let database = root.join("atlas.db");
-        let config = temp.path().join("missing-parent").join("config.toml");
+        let blocked = temp.path().join("blocked-parent");
+        fs::write(&blocked, "not a directory")?;
+        let config = blocked.join("config.toml");
         let binding = SourceBinding::new(&database, &root, Some(&config))?;
         let result = SourceObservationEntry::start(binding.clone());
-        require(result.is_err(), "missing configuration parent was accepted")?;
+        require(
+            result.is_err(),
+            "non-directory configuration parent was accepted",
+        )?;
         require(
             !database.exists(),
             "failed observer startup created an index",
@@ -1717,6 +1872,255 @@ mod tests {
         require(
             SourceObservationEntry::start(binding).is_err(),
             "missing root was accepted",
+        )
+    }
+
+    /// Wait for a real native policy event through production draining, never synthetic ingress.
+    fn await_native_policy_change(entry: &SourceObservationEntry) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let control = test_control();
+        while Instant::now() < deadline {
+            if entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &control,
+            )? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(
+            std::io::Error::other("selected external input did not reach native observer draining")
+                .into(),
+        )
+    }
+
+    #[test]
+    fn native_observer_advances_coverage_as_external_policy_parents_are_created()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let database = root.join("atlas.db");
+        let parent = temp.path().join("settings");
+        let nested = parent.join("git");
+        let config = nested.join("config.toml");
+        let entry =
+            SourceObservationEntry::start(SourceBinding::new(&database, &root, Some(&config))?)?;
+        fs::create_dir(&parent)?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::create_dir(&nested)?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::write(&config, "")?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::write(root.join("source.rs"), "fn observed_after_retirement() {}")?;
+        await_native_policy_change(&entry)?;
+        require(
+            !database.exists(),
+            "external watch registration implicitly initialized an index",
+        )
+    }
+
+    #[test]
+    fn native_observer_rebinds_a_replaced_external_policy_directory() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let parent = temp.path().join("settings");
+        fs::create_dir(&root)?;
+        fs::create_dir(&parent)?;
+        let config = parent.join("config.toml");
+        fs::write(&config, "")?;
+        let entry = SourceObservationEntry::start(SourceBinding::new(
+            &root.join("atlas.db"),
+            &root,
+            Some(&config),
+        )?)?;
+        fs::rename(&parent, temp.path().join("retired-settings"))?;
+        fs::create_dir(&parent)?;
+        fs::write(&config, "")?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        fs::write(&config, "# replacement-only edit\n")?;
+        await_native_policy_change(&entry)
+    }
+
+    #[test]
+    fn policy_watch_update_events_and_overflow_survive_the_exact_verification_fence()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let config = temp.path().join("config.toml");
+        fs::write(&config, "")?;
+        let entry = SourceObservationEntry::start(SourceBinding::new(
+            &root.join("atlas.db"),
+            &root,
+            Some(&config),
+        )?)?;
+        let control = test_control();
+        entry.clear_before_exact_verification_with_update(&control, || {
+            entry.refresh_policy_watches(&control)?;
+            entry.publish_test_event(
+                Event::new(EventKind::Modify(ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )))
+                .add_path(config.clone()),
+            )
+        })?;
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &control,
+            )?,
+            "policy event received during registration was discarded",
+        )?;
+        entry.clear_before_exact_verification_with_update(&control, || {
+            entry.refresh_policy_watches(&control)?;
+            entry.continuity_lost.store(true, Ordering::Release);
+            Ok(())
+        })?;
+        require(
+            entry.changed_since_exact_verification(
+                &projectatlas_fs::ScanOptions::default(),
+                &control,
+            )?,
+            "registration-time overflow was cleared before exact acceptance",
+        )
+    }
+
+    #[test]
+    fn failed_classification_of_consumed_event_discards_the_verified_epoch()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        registry
+            .with_verified_current_read(
+                &database,
+                temp.path(),
+                None,
+                &control,
+                |_store, _stamp| Ok(()),
+            )?
+            .require_current()?;
+        let binding = SourceBinding::new(&database, temp.path(), None)?;
+        let entry = registry
+            .entry(binding, &control)?
+            .ok_or_else(|| std::io::Error::other("native observer unavailable"))?;
+        require(
+            entry.current_epoch()?.is_some(),
+            "fixture did not establish a verified epoch",
+        )?;
+        entry.publish_test_event(
+            Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(source),
+        )?;
+        let cancelled = test_control();
+        cancelled.cancel();
+        require(
+            entry
+                .changed_since_exact_verification(
+                    &projectatlas_fs::ScanOptions::default(),
+                    &cancelled,
+                )
+                .is_err(),
+            "cancelled event classification was accepted",
+        )?;
+        require(
+            entry.current_epoch()?.is_none() && entry.continuity_lost.load(Ordering::Acquire),
+            "consumed event failure retained trusted source evidence",
+        )
+    }
+
+    #[test]
+    fn unrelated_external_parent_flood_never_consumes_the_source_queue()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let root = base.join("repo");
+        fs::create_dir(&root)?;
+        let config = base.join("config.toml");
+        fs::write(&config, "")?;
+        let root = root.canonicalize()?;
+        let inputs = PolicyWatchInputs::discover(&root, Some(&config), &test_control())?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        selection.publish(Arc::new(inputs))?;
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut callback = selected_watcher_callback(
+            selection,
+            sender,
+            Arc::clone(&receiver),
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+        );
+        for i in 0..=SOURCE_OBSERVATION_QUEUE_CAPACITY {
+            callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(base.join(format!("unrelated-{i}")))));
+        }
+        require(
+            sequence.load(Ordering::Acquire) == 0 && !lost.load(Ordering::Acquire),
+            "unrelated external traffic consumed observation continuity",
+        )?;
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(config)));
+        require(
+            sequence.load(Ordering::Acquire) == 1 && !lost.load(Ordering::Acquire),
+            "selected external input was not admitted",
+        )?;
+        callback(Ok(Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any,
+        )))
+        .add_path(root.join("source.rs"))));
+        require(
+            lost.load(Ordering::Acquire),
+            "real selected-event overflow stopped failing closed",
+        )
+    }
+
+    #[test]
+    fn native_rescan_flag_survives_access_filtering() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        let (sender, receiver) = sync_channel(1);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let sequence = Arc::new(AtomicU64::new(0));
+        let lost = Arc::new(AtomicBool::new(false));
+        let mut callback = selected_watcher_callback(
+            selection,
+            sender,
+            receiver,
+            Arc::clone(&sequence),
+            Arc::clone(&lost),
+        );
+        let event =
+            Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan);
+        callback(Ok(event.clone()));
+        require(
+            lost.load(Ordering::Acquire) && sequence.load(Ordering::Acquire) == 1,
+            "access kind discarded native loss-of-continuity flag",
+        )?;
+        require(
+            super::super::notify_event_changes(
+                &root,
+                &projectatlas_fs::ScanOptions::default(),
+                &event,
+            )
+            .requires_full_scan,
+            "CLI event classification discarded native rescan flag",
         )
     }
 
@@ -1832,7 +2236,11 @@ mod tests {
                 .get_mut(&binding)
                 .and_then(Arc::get_mut)
                 .ok_or_else(|| std::io::Error::other("test observer is not exclusively owned"))?;
-            entry.watcher = notify::recommended_watcher(|_event| {})?;
+            entry
+                .watcher
+                .get_mut()
+                .map_err(|_poisoned| lock_error(&binding.root, "test watcher"))?
+                .watcher = notify::recommended_watcher(|_event| {})?;
         }
         fs::write(&source, "fn changed_before_observation() {}\n")?;
         let admission = registry.with_verified_current_read(
@@ -2174,7 +2582,10 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let control = test_control();
         let entry = registry
-            .entry(SourceBinding::new(&database, temp.path(), None)?)?
+            .entry(
+                SourceBinding::new(&database, temp.path(), None)?,
+                &test_control(),
+            )?
             .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
         let (store, epoch) = registry
             .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
@@ -2245,6 +2656,58 @@ mod tests {
     }
 
     #[test]
+    fn rejected_preparation_cleans_its_epoch_before_a_successor_can_be_installed()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let (database, _source) = indexed_project(temp.path())?;
+        let registry = SourceObservationRegistry::default();
+        let control = test_control();
+        let prior = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        let MutationSourceWitness::Observed { entry, .. } = &prior.witness else {
+            return Err(std::io::Error::other("observed fixture missing").into());
+        };
+        let stamp = entry
+            .current_stamp()?
+            .ok_or_else(|| std::io::Error::other("initial epoch missing"))?;
+        let config = temp.path().join(".projectatlas/config.toml");
+        fs::write(&config, "[invalid")?;
+        let prepared = registry.prepare_observed_store_with_policy(
+            entry,
+            &control,
+            &mut VerifiedReadWork::default(),
+            false,
+            SourceRepairPolicy::Incremental,
+        );
+        require(
+            prepared.is_err(),
+            "malformed preparation unexpectedly succeeded",
+        )?;
+        require(
+            entry.current_epoch()?.is_none(),
+            "failed preparation released authority before cleaning its epoch",
+        )?;
+        fs::remove_file(&config)?;
+        let successor = registry.admit_mutation(&database, temp.path(), None, &control)?;
+        // A delayed request error may clean only the stamp it sampled before failure.
+        entry.invalidate_stamp(&stamp);
+        let store = super::super::open_atlas_store_for_project(&database, temp.path())?;
+        let transaction = store.begin_purpose_mutation()?;
+        store.set_purpose(
+            "source.rs",
+            "Accepted successor purpose",
+            PurposeSource::Agent,
+        )?;
+        successor.verify()?;
+        transaction.commit()?;
+        require(
+            store.load_node_by_path("source.rs")?.is_some_and(|node| {
+                node.purpose.purpose.as_deref() == Some("Accepted successor purpose")
+            }),
+            "rejected preparation invalidated its accepted successor",
+        )
+    }
+
+    #[test]
     fn superseded_mutation_cleanup_preserves_successor_witness() -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let (database, _source) = indexed_project(temp.path())?;
@@ -2268,8 +2731,14 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let binding = SourceBinding::new(&database, temp.path(), None)?;
         let mut observer = SourceObservationEntry::start(binding.clone())?;
-        observer.watcher.unwatch(&binding.root)?;
-        observer.watcher.configure(notify::Config::default())?;
+        {
+            let coverage = observer
+                .watcher
+                .get_mut()
+                .map_err(|_poisoned| lock_error(&binding.root, "test watcher"))?;
+            coverage.watcher.unwatch(&binding.root)?;
+            coverage.watcher.configure(notify::Config::default())?;
+        }
         let entry = Arc::new(observer);
         registry
             .entries
@@ -2354,7 +2823,10 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let control = test_control();
         let entry = registry
-            .entry(SourceBinding::new(&database, temp.path(), None)?)?
+            .entry(
+                SourceBinding::new(&database, temp.path(), None)?,
+                &test_control(),
+            )?
             .ok_or_else(|| std::io::Error::other("source observer unavailable"))?;
         let (read_store, old_epoch) = registry
             .prepare_observed_store(&entry, &control, &mut VerifiedReadWork::default(), false)?
@@ -2388,8 +2860,12 @@ mod tests {
                 std::io::Error::other("source observation receiver lock poisoned")
             })?;
             require(
-                entry.drain_epoch_events(&receiver, &old_epoch, &previous_options)?
-                    == ObservedAcceptance::Superseded,
+                entry.drain_epoch_events(
+                    &receiver,
+                    &old_epoch,
+                    &previous_options,
+                    &test_control(),
+                )? == ObservedAcceptance::Superseded,
                 "older policy consumed an event belonging to a successor epoch",
             )?;
         }
@@ -2404,7 +2880,7 @@ mod tests {
         )?;
         let plan = ScanRuntimePlan::for_path_controlled(None, temp.path(), None, &control)?;
         require(
-            entry.changed_since_exact_verification(&plan.scan_options)?,
+            entry.changed_since_exact_verification(&plan.scan_options, &control)?,
             "consumed source event was lost to concurrent exact verification",
         )?;
         read_store.finish_index_read_snapshot()?;
@@ -2637,7 +3113,7 @@ mod tests {
         let registry = SourceObservationRegistry::default();
         let binding = SourceBinding::new(&database, temp.path(), None)?;
         let filler = registry
-            .entry(binding.clone())?
+            .entry(binding.clone(), &test_control())?
             .ok_or_else(|| std::io::Error::other("source observer was unavailable"))?;
         {
             let mut entries = registry

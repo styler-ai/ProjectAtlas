@@ -3415,6 +3415,18 @@ impl<'a> DocumentResolutionIndex<'a> {
         if let Some(reason) = self.absent_states.borrow().get(path).copied() {
             return Ok(reason);
         }
+        let reason = self.inspect_absent_reason(path)?;
+        self.absent_states
+            .borrow_mut()
+            .insert(path.to_string(), reason);
+        Ok(reason)
+    }
+
+    /// Inspect one non-indexed path without retaining a repository-wide target cache.
+    fn inspect_absent_reason(
+        &self,
+        path: &str,
+    ) -> Result<DocumentTargetUnresolvedReason, CliError> {
         let native = self.root.join(Path::new(path));
         let reason = if self
             .scan_policy
@@ -3440,9 +3452,6 @@ impl<'a> DocumentResolutionIndex<'a> {
                 Err(_source) => DocumentTargetUnresolvedReason::Unsupported,
             }
         };
-        self.absent_states
-            .borrow_mut()
-            .insert(path.to_string(), reason);
         Ok(reason)
     }
 
@@ -3474,6 +3483,63 @@ impl<'a> DocumentResolutionIndex<'a> {
             }
         }
         DocumentTargetUnresolvedReason::Missing
+    }
+}
+
+/// Prove whether a persisted non-indexed document reason changed without source-node drift.
+/// The cold exact verifier pages minimal inputs and stops at the first mismatch;
+/// no claim of a complete affected closure is made from that first witness.
+pub(super) fn nonindexed_document_projection_changed(
+    store: &AtlasStore,
+    root: &Path,
+    nodes: &[Node],
+    options: &projectatlas_fs::ScanOptions,
+    control: &IndexWorkControl,
+) -> Result<(bool, u64), CliError> {
+    const DOCUMENT_INPUT_PAGE: u32 = 256;
+    let mut page =
+        store.repository_unresolved_documents_page(None, DOCUMENT_INPUT_PAGE, control)?;
+    // Each page loads the exact project identity, then its indexed keyset rows.
+    let mut statements = 2_u64;
+    if page.rows.is_empty() {
+        return Ok((false, statements));
+    }
+    let scan_policy = RootScanPolicy::discover(root, options, control)
+        .map_err(|source| super::source_inspection_error(root, source))?;
+    let index = DocumentResolutionIndex::new(root, nodes, &scan_policy)?;
+    loop {
+        for row in &page.rows {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            let Ok(target) = normalize_document_target(row.source.as_str(), row.reference.as_str())
+            else {
+                continue;
+            };
+            // Existing file/heading and folder state is covered by the source-node delta.
+            if index.kinds_by_path.contains_key(target.path.as_str()) {
+                continue;
+            }
+            let current = if index
+                .casefold_path_counts
+                .contains_key(&target.path.to_lowercase())
+            {
+                DocumentTargetUnresolvedReason::CaseConflict
+            } else {
+                index.inspect_absent_reason(&target.path)?
+            };
+            if current != row.reason {
+                return Ok((true, statements));
+            }
+        }
+        if !page.truncated {
+            return Ok((false, statements));
+        }
+        let after = page.rows.last().map(|row| row.digest);
+        page = store.repository_unresolved_documents_page(
+            after.as_ref(),
+            DOCUMENT_INPUT_PAGE,
+            control,
+        )?;
+        statements = statements.saturating_add(2);
     }
 }
 

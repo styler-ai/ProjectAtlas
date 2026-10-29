@@ -53,6 +53,20 @@ const GRAPH_STAGING_MARKER_VALUE: &str = "v1";
 /// Persisted local-resolution status admitted by resolved graph previews.
 const RESOLUTION_STATUS_RESOLVED: &str = "resolved";
 
+/// Indexed keyset over policy-sensitive document inputs; endpoints stay unhydrated.
+const UNRESOLVED_DOCUMENT_INPUTS_SQL: &str = "SELECT relation.relation_key, source.repository_path,
+                            relation.reference_text, relation.document_unresolved_reason
+                       FROM graph_relations AS relation
+                       LEFT JOIN graph_entities AS source
+                         ON source.entity_key = relation.source_entity_key
+                        AND source.project_instance_id = relation.project_instance_id
+                      WHERE relation.project_instance_id = ?1
+                        AND relation.relation_scope = 'extended'
+                        AND relation.relation_kind = 'documents'
+                        AND relation.resolution_status = 'unresolved'
+                        AND relation.relation_key > ?2
+                      ORDER BY relation.relation_key LIMIT ?3";
+
 /// One bounded page of typed normalized graph rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryGraphPage<T> {
@@ -371,6 +385,19 @@ pub struct RepositoryGraphRelationRow {
     pub target: Option<GraphEntity>,
     /// Closed reason retained only for an unresolved `documents` relation.
     pub document_unresolved_reason: Option<DocumentTargetUnresolvedReason>,
+}
+
+/// Minimal persisted input for rechecking a non-indexed document target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryUnresolvedDocumentRow {
+    /// Stable keyset position inside the selected project and document family.
+    pub digest: [u8; 32],
+    /// Repository-relative file owning the original link selector.
+    pub source: RepositoryFilePath,
+    /// Original bounded selector, interpreted by the document projection owner.
+    pub reference: GraphIdentityText,
+    /// Closed reason from the last complete graph publication.
+    pub reason: DocumentTargetUnresolvedReason,
 }
 
 /// One normalized relation with its file-bearing source classification.
@@ -1980,6 +2007,67 @@ impl AtlasStore {
         page_from_raw(raw, limit, |row| {
             relation_detail_from_row(&entities, row, project, generation)
         })
+    }
+
+    /// Page minimal unresolved-document inputs without hydrating graph endpoints.
+    ///
+    /// Callers retain one publication read snapshot or revalidate its generation
+    /// across all pages. The keyset is exclusive, and every sentinel row is validated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on an invalid limit, missing project identity, cancellation,
+    /// corrupt document input, or SQLite failure. No partial page is returned.
+    pub fn repository_unresolved_documents_page(
+        &self,
+        after: Option<&[u8; 32]>,
+        limit: u32,
+        control: &IndexWorkControl,
+    ) -> DbResult<RepositoryGraphPage<RepositoryUnresolvedDocumentRow>> {
+        control.check(IndexWorkStage::RepositoryTraversal)?;
+        let limit_plus_one = validated_limit_plus_one(
+            limit,
+            GraphLimits::MAX_ROWS,
+            "document rows must be nonzero and within the product ceiling",
+        )?;
+        let project =
+            load_project_identity(&self.connection)?.ok_or(DbError::GraphPublicationUnavailable)?;
+        with_sqlite_read_progress(
+            &self.connection,
+            Some(control),
+            IndexWorkStage::RepositoryTraversal,
+            || {
+                let mut statement = self
+                    .connection
+                    .prepare_cached(UNRESOLVED_DOCUMENT_INPUTS_SQL)?;
+                let mut query = statement.query(params![
+                    &project.as_bytes()[..],
+                    after.map_or(&[][..], |key| &key[..]),
+                    limit_plus_one
+                ])?;
+                let mut rows = Vec::new();
+                while let Some(row) = query.next()? {
+                    control.check(IndexWorkStage::RepositoryTraversal)?;
+                    let reason: String = row.get(3)?;
+                    rows.push(RepositoryUnresolvedDocumentRow {
+                        digest: fixed_bytes::<32>("graph_relations.relation_key", row.get(0)?)?,
+                        source: RepositoryFilePath::new(Path::new(&row.get::<_, String>(1)?))?,
+                        reference: GraphIdentityText::new(row.get::<_, String>(2)?)?,
+                        reason: DocumentTargetUnresolvedReason::from_db(&reason).ok_or_else(
+                            || DbError::InvalidEnum {
+                                field: "graph_relations.document_unresolved_reason",
+                                value: reason,
+                            },
+                        )?,
+                    });
+                }
+                let truncated = rows.len() > limit as usize;
+                if truncated {
+                    rows.pop();
+                }
+                Ok(RepositoryGraphPage { rows, truncated })
+            },
+        )
     }
 
     /// Load one relation-family page with pre-limit source classification selection.
@@ -11565,6 +11653,130 @@ mod tests {
             &store.symbol_relation_count()?,
             &1,
             "legacy symbol relation compatibility",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_document_inputs_are_indexed_paged_and_fail_closed() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let mut store = AtlasStore::open_for_project(&temp.path().join("atlas.db"), temp.path())?;
+        let project = store
+            .project_instance_id()?
+            .ok_or_else(|| io::Error::other("missing project"))?;
+        let document = GraphEntity::new(
+            project,
+            EntitySelector::File {
+                path: RepositoryFilePath::new(Path::new("guide.md"))?,
+            },
+            IndexGeneration::new(1),
+        )?;
+        let relations = (0..3)
+            .map(|number| {
+                LogicalRelation::new(
+                    &document,
+                    GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                    RelationResolution::Unresolved {
+                        reference: GraphIdentityText::new(format!("missing-{number}.rs"))?,
+                    },
+                    ConfidenceClass::High,
+                    Completeness::Complete,
+                    IndexGeneration::new(1),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reasons = relations
+            .iter()
+            .map(|relation| {
+                (
+                    relation.key().clone(),
+                    DocumentTargetUnresolvedReason::Missing,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut publication = store.begin_index_publication("document-inputs")?;
+        publication.begin_scan_replacement()?;
+        publication.upsert_scan_node_batch(&[
+            graph_node(".", NodeKind::Folder, None),
+            graph_node("guide.md", NodeKind::File, Some(".")),
+        ])?;
+        publication.finish_scan_replacement()?;
+        publication.replace_repository_graph(project, &[document], &relations, &[], &[])?;
+        publication.set_document_unresolved_reasons(&reasons)?;
+        publication.complete()?;
+        let control = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        let first = store.repository_unresolved_documents_page(None, 2, &control)?;
+        require(
+            first.truncated && first.rows.len() == 2,
+            "document page lost its sentinel",
+        )?;
+        let last = first
+            .rows
+            .last()
+            .ok_or_else(|| io::Error::other("missing document keyset"))?;
+        let second = store.repository_unresolved_documents_page(Some(&last.digest), 2, &control)?;
+        require(
+            !second.truncated && second.rows.len() == 1,
+            "document keyset lost its final row",
+        )?;
+        let all = first.rows.iter().chain(&second.rows).collect::<Vec<_>>();
+        require(
+            all.windows(2).all(|pair| pair[0].digest < pair[1].digest),
+            "document keyset repeated a row",
+        )?;
+        require(
+            all.iter().all(|row| {
+                row.source.as_str() == "guide.md"
+                    && row.reference.as_str().starts_with("missing-")
+                    && row.reason == DocumentTargetUnresolvedReason::Missing
+            }),
+            "document inputs changed in storage",
+        )?;
+
+        let query = format!("EXPLAIN QUERY PLAN {UNRESOLVED_DOCUMENT_INPUTS_SQL}");
+        let mut statement = store.connection.prepare(&query)?;
+        let details = statement
+            .query_map(params![&project.as_bytes()[..], &[][..], 3], |row| {
+                row.get::<_, String>(3)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        require(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_graph_relations_kind_resolution"))
+                && details.iter().all(|detail| {
+                    !detail.contains("SCAN relation") && !detail.contains("USE TEMP B-TREE")
+                }),
+            &format!("document keyset did not use ordered filtered lookup: {details:?}"),
+        )?;
+        drop(statement);
+        let cancelled = IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None);
+        cancelled.cancel();
+        require(
+            matches!(
+                store.repository_unresolved_documents_page(None, 2, &cancelled),
+                Err(DbError::IndexWork(_))
+            ),
+            "document page ignored cancellation",
+        )?;
+        require(
+            store
+                .repository_unresolved_documents_page(None, 0, &control)
+                .is_err(),
+            "document page accepted zero limit",
+        )?;
+        let sentinel = &second.rows[0].digest;
+        store
+            .connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        store.connection.execute("UPDATE graph_relations SET document_unresolved_reason = 'invalid' WHERE relation_key = ?1", [&sentinel[..]])?;
+        require(
+            matches!(
+                store.repository_unresolved_documents_page(None, 2, &control),
+                Err(DbError::InvalidEnum { .. })
+            ),
+            "document page returned partial success before a corrupt sentinel",
         )?;
         Ok(())
     }

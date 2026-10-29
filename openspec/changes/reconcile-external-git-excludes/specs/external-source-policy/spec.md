@@ -23,6 +23,14 @@ Full traversal, targeted refresh and absent-document selection SHALL use the sam
 - **WHEN** common info/exclude excludes a file and the global excludes file contains a conflicting whitelist for it
 - **THEN** the common exclusion wins in full and targeted selection, while a higher-priority local whitelist still admits the file
 
+#### Scenario: Selected subroot inherits ancestor policy
+- **WHEN** an explicitly selected repository subdirectory inherits ancestor .ignore, .gitignore or common info/exclude rules
+- **THEN** targeted admission agrees with full traversal under the same selected-root identity and does not silently discard inherited rules
+
+#### Scenario: Negation below an ignored parent
+- **WHEN** a leaf negation occurs below a parent directory pruned by the configured ignore engine
+- **THEN** targeted selection does not reopen that leaf when full traversal excludes the parent
+
 ### Requirement: Supported direct configuration selection is explicit
 The external policy selector SHALL load only its supported direct system/global configuration sources with canonical value syntax and declared precedence, and SHALL NOT imply general Git repository configuration loading.
 
@@ -45,9 +53,33 @@ Policy construction and observation SHALL retain the supported selected config/e
 - **WHEN** a selected global config/exclude or common-worktree policy input is created, edited, removed or selected through a supported environment change
 - **THEN** normal refresh reconciles affected admission and document outcomes without importing outside content as project source or repeatedly parsing config per entry
 
+#### Scenario: Continuous watch outside the source root
+- **WHEN** a selected external policy file, absent parent or supported symlink ancestor is created, edited, removed or replaced during continuous CLI/MCP watch
+- **THEN** the existing watcher observes and routes the event to reconciliation without requiring a source-root edit, preserves continuity and cleanup, and never admits the outside path as project source
+
+#### Scenario: Selection changes during a watch session
+- **WHEN** a supported selected config changes the effective excludes pathname
+- **THEN** accepted reconciliation updates external watch coverage, including absent paths, and discovers later edits to the newly selected input without per-event-path reconstruction of global policy
+
+#### Scenario: Policy-only document outcome
+- **WHEN** an exclusion changes the ignored-versus-missing classification of an absent document target without changing the indexed source inventory
+- **THEN** accepted refresh and subsequent CLI/MCP graph queries agree with full reconciliation and do not preserve a stale document reason merely because source nodes are unchanged
+
 #### Scenario: Failure and operator compatibility
 - **WHEN** configured external policy inputs are unreadable/malformed or controlled work is cancelled or exhausts a bound
 - **THEN** existing typed failure/recovery semantics preserve the last valid publication, while valid explicit operator root/DB/config/state and external-policy paths remain usable
+
+#### Scenario: Non-regular input and regular symlink controls
+- **WHEN** a selected external input is unsupported non-regular state or a valid regular file reached through a supported symlink
+- **THEN** unsupported input fails promptly without publishing partial state, while the regular-file and regular-symlink workflows remain usable under the same supported selection semantics
+
+#### Scenario: Non-regular native ignore inputs
+- **WHEN** a root, inherited or admitted nested .ignore, .gitignore or common Git info/exclude input is an unsupported stream or device
+- **THEN** full and targeted admission refuse before the canonical parser opens that input, preserve the last valid publication, and retain ordinary regular-file and regular-symlink behavior
+
+#### Scenario: Pruned subtrees do not load child policy
+- **WHEN** a parent is excluded by enabled repository or configured policy and contains a non-regular child ignore input
+- **THEN** full and targeted selection preserve parent pruning without opening or inspecting policy inside the excluded subtree, and a Git-only compatibility helper does not inspect a disabled ignore family
 
 ### Requirement: Existing compatible indexes repair without authored-state loss
 The existing derivation fingerprint and atomic publication owner SHALL repair both previously admitted excluded files and omitted legitimate files when source bytes are unchanged. A second current-contract refresh SHALL avoid redundant parsing/publication.

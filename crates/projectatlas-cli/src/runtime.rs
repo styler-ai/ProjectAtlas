@@ -5,6 +5,7 @@ mod graph_projection;
 mod module_resolution;
 #[cfg(feature = "optional-parser-supervisor")]
 mod optional_parser_runtime;
+mod policy_watch;
 mod source_observation;
 
 pub(crate) use source_observation::{
@@ -77,9 +78,8 @@ use projectatlas_fs::worktree::{
     git_administrative_identity, git_worktree_lifecycle_matches,
 };
 use projectatlas_fs::{
-    FsError, RootScanPolicy, ScanLimits, ScanOptions, gitignore_excludes_path,
-    scan_path_with_policy_controlled, scan_repo, scan_repo_controlled,
-    scan_repo_controlled_with_work,
+    FsError, RootScanPolicy, ScanLimits, ScanOptions, scan_path_with_policy_controlled, scan_repo,
+    scan_repo_controlled, scan_repo_controlled_with_work,
 };
 use projectatlas_service::{
     ClassifiedRankedNode, CoverageDiscoveryReport, FederatedInputWork, FederatedStore,
@@ -356,6 +356,8 @@ struct CapturedSourceState {
     generation: IndexGeneration,
     /// Complete ordered current-source inventory, without authored metadata.
     nodes: Vec<Node>,
+    /// A non-indexed document state requires graph publication even with identical nodes.
+    document_projection_changed: bool,
 }
 
 /// Current read snapshot established through exact source verification.
@@ -1263,6 +1265,17 @@ fn assess_source_against_publication(
         delta.record(Some(node), None);
     }
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
+    let (document_projection_changed, document_statements) =
+        graph_projection::nonindexed_document_projection_changed(
+            store,
+            &plan.root,
+            &current_nodes,
+            &plan.scan_options,
+            control,
+        )?;
+    work.sqlite_read_statements = work
+        .sqlite_read_statements
+        .saturating_add(document_statements);
     let current_generation = publication_base_generation(store)?;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     if current_generation != generation {
@@ -1275,7 +1288,16 @@ fn assess_source_against_publication(
     let project_instance_id = store.captured_project_binding()?.project_instance_id;
     work.sqlite_read_statements = work.sqlite_read_statements.saturating_add(1);
     Ok(IndexFreshnessAssessment {
-        delta: delta.finish(&plan.root),
+        delta: if document_projection_changed {
+            Some(IndexFreshnessDelta {
+                report: index_policy_refresh_required(&plan.root),
+                paths: HashSet::new(),
+                paths_complete: false,
+                requires_full_scan: true,
+            })
+        } else {
+            delta.finish(&plan.root)
+        },
         work,
         source: CapturedSourceState {
             root: plan.root.clone(),
@@ -1283,6 +1305,7 @@ fn assess_source_against_publication(
             contract_fingerprint: plan.publication_contract_fingerprint(),
             generation,
             nodes: current_nodes,
+            document_projection_changed,
         },
     })
 }
@@ -7836,8 +7859,7 @@ where
 {
     match run_notify(store) {
         Ok(report) => Ok(report),
-        Err(error @ CliError::RefreshRequired(_)) => Err(error),
-        Err(error) => run_polling_watch_loop(
+        Err(error @ CliError::Watcher(_)) => run_polling_watch_loop(
             store,
             plan,
             poll_seconds,
@@ -7845,6 +7867,7 @@ where
             symbol_options,
             Some(error.to_string()),
         ),
+        Err(error) => Err(error),
     }
 }
 
@@ -7881,7 +7904,8 @@ pub(crate) fn run_notify_watch_loop(
     max_cycles: usize,
     symbol_options: &SymbolBuildOptions,
 ) -> Result<WatchReport, CliError> {
-    let mut current_plan = plan.reload()?;
+    let control = index_work_control(symbol_options);
+    let mut current_plan = plan.reload_controlled(&control)?;
     let watch_root = current_plan
         .root
         .canonicalize()
@@ -7892,8 +7916,15 @@ pub(crate) fn run_notify_watch_loop(
     let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
     let continuity_lost = Arc::new(AtomicBool::new(false));
     let callback_continuity_lost = Arc::clone(&continuity_lost);
+    let policy_selection = policy_watch::PolicyWatchSelection::new(watch_root.clone());
+    let callback_selection = policy_selection.clone();
     let mut watcher = RecommendedWatcher::new(
         move |result: notify::Result<Event>| {
+            if let Ok(event) = &result
+                && !callback_selection.may_affect(event)
+            {
+                return;
+            }
             match sender.try_send(result) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_result)) => {
@@ -7910,9 +7941,19 @@ pub(crate) fn run_notify_watch_loop(
     watcher
         .watch(&watch_root, RecursiveMode::Recursive)
         .map_err(|source| CliError::Watcher(source.to_string()))?;
+    let mut registered_policy_directories = std::collections::BTreeSet::new();
+    let mut policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+        &watch_root,
+        current_plan.selected_config_path.as_deref(),
+        &policy_selection,
+        &mut watcher,
+        &mut registered_policy_directories,
+        &control,
+    )?;
     let debounce = Duration::from_secs(poll_seconds.max(1));
     let mut cycles = 0;
-    let mut last_refresh = refresh_index(store, &current_plan, symbol_options)?;
+    let mut last_refresh =
+        refresh_index_controlled(store, &current_plan, symbol_options, &control)?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
         let changes = wait_for_index_event_with_continuity(
@@ -7921,11 +7962,26 @@ pub(crate) fn run_notify_watch_loop(
             debounce,
             &current_plan.scan_options,
             &continuity_lost,
+            &policy_inputs,
         )?;
         if changes.has_changes() {
-            current_plan = plan.reload()?;
-            last_refresh =
-                refresh_index_for_changes(store, &current_plan, &changes, symbol_options)?;
+            let control = index_work_control(symbol_options);
+            current_plan = plan.reload_controlled(&control)?;
+            policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
+                &watch_root,
+                current_plan.selected_config_path.as_deref(),
+                &policy_selection,
+                &mut watcher,
+                &mut registered_policy_directories,
+                &control,
+            )?;
+            last_refresh = refresh_index_for_changes_controlled(
+                store,
+                &current_plan,
+                &changes,
+                symbol_options,
+                &control,
+            )?;
             cycles += 1;
         }
     }
@@ -7947,18 +8003,35 @@ fn wait_for_index_event_with_continuity(
     debounce: Duration,
     scan_options: &ScanOptions,
     continuity_lost: &AtomicBool,
+    policy_inputs: &policy_watch::PolicyWatchInputs,
 ) -> Result<WatchChangeSet, CliError> {
-    let mut changes = notify_result_changes(
-        root,
-        scan_options,
-        receiver.recv().map_err(|source| {
-            CliError::Watcher(format!("watch event channel disconnected: {source}"))
-        })?,
-    )?;
+    let first = receiver
+        .recv()
+        .map_err(|source| CliError::Watcher(format!("watch event channel disconnected: {source}")))?
+        .map_err(|source| CliError::Watcher(source.to_string()))?;
+    let control = standalone_index_work_control();
+    let mut policy = None;
+    let mut classify = |event: &Event| {
+        if !event_kind_affects_index(event.kind) && !event.need_rescan() {
+            return Ok(WatchChangeSet::default());
+        }
+        if policy.is_none() {
+            policy = Some(RootScanPolicy::discover(root, scan_options, &control)?);
+        }
+        let mut changes = if let Some(policy) = &policy {
+            notify_event_changes_with_policy(root, scan_options, event, policy)?
+        } else {
+            WatchChangeSet::default()
+        };
+        changes.requires_full_scan |= policy_inputs.affects(event);
+        Ok::<_, CliError>(changes)
+    };
+    let mut changes = classify(&first)?;
     loop {
         match receiver.recv_timeout(debounce) {
             Ok(result) => {
-                changes.merge(notify_result_changes(root, scan_options, result)?);
+                let event = result.map_err(|source| CliError::Watcher(source.to_string()))?;
+                changes.merge(classify(&event)?);
             }
             Err(RecvTimeoutError::Timeout) => break,
             Err(RecvTimeoutError::Disconnected) => {
@@ -7974,24 +8047,32 @@ fn wait_for_index_event_with_continuity(
     Ok(changes)
 }
 
-/// Convert a `notify` result into index-relevant changes.
-pub(crate) fn notify_result_changes(
-    root: &Path,
-    scan_options: &ScanOptions,
-    result: notify::Result<Event>,
-) -> Result<WatchChangeSet, CliError> {
-    let event = result.map_err(|source| CliError::Watcher(source.to_string()))?;
-    Ok(notify_event_changes(root, scan_options, &event))
-}
-
-/// Convert a `notify` event into index-relevant changes.
+/// Classify one standalone test event under the same batch policy boundary.
+#[cfg(test)]
 pub(crate) fn notify_event_changes(
     root: &Path,
     scan_options: &ScanOptions,
     event: &Event,
 ) -> WatchChangeSet {
-    if !event_kind_affects_index(event.kind) {
-        return WatchChangeSet::default();
+    let control = standalone_index_work_control();
+    RootScanPolicy::discover(root, scan_options, &control)
+        .map_err(CliError::from)
+        .and_then(|policy| notify_event_changes_with_policy(root, scan_options, event, &policy))
+        .unwrap_or_else(|_inspection_failed| WatchChangeSet {
+            requires_full_scan: true,
+            ..WatchChangeSet::default()
+        })
+}
+
+/// Classify a whole event using the caller's one policy snapshot for its batch.
+fn notify_event_changes_with_policy(
+    root: &Path,
+    scan_options: &ScanOptions,
+    event: &Event,
+    policy: &RootScanPolicy,
+) -> Result<WatchChangeSet, CliError> {
+    if !event_kind_affects_index(event.kind) && !event.need_rescan() {
+        return Ok(WatchChangeSet::default());
     }
     let mut changes = WatchChangeSet {
         requires_full_scan: event.need_rescan(),
@@ -8008,7 +8089,8 @@ pub(crate) fn notify_event_changes(
             changes.paths.insert(candidate);
             continue;
         }
-        let Some(index_path) = normalized_watch_index_path(root, path, scan_options) else {
+        let Some(index_path) = normalized_watch_index_path(root, path, scan_options, policy)?
+        else {
             continue;
         };
         if matches!(
@@ -8020,7 +8102,7 @@ pub(crate) fn notify_event_changes(
         }
         changes.paths.insert(index_path);
     }
-    changes
+    Ok(changes)
 }
 
 /// Return whether a `notify` event kind can change indexed content.
@@ -8035,7 +8117,11 @@ pub(crate) fn watch_path_affects_index(
     path: &Path,
     scan_options: &ScanOptions,
 ) -> bool {
-    normalized_watch_index_path(root, path, scan_options).is_some()
+    let control = standalone_index_work_control();
+    RootScanPolicy::discover(root, scan_options, &control).is_ok_and(|policy| {
+        normalized_watch_index_path(root, path, scan_options, &policy)
+            .is_ok_and(|path| path.is_some())
+    })
 }
 
 /// Return one repository-contained native path after watcher normalization and policy checks.
@@ -8043,11 +8129,14 @@ fn normalized_watch_index_path(
     root: &Path,
     path: &Path,
     scan_options: &ScanOptions,
-) -> Option<PathBuf> {
+    policy: &RootScanPolicy,
+) -> Result<Option<PathBuf>, CliError> {
     let candidate = absolute_watch_path(root, path);
-    let relative = safe_watch_relative_path(root, &candidate)?;
+    let Some(relative) = safe_watch_relative_path(root, &candidate) else {
+        return Ok(None);
+    };
     if relative == "." {
-        return Some(root.to_path_buf());
+        return Ok(Some(root.to_path_buf()));
     }
     let policy_path = if candidate.strip_prefix(root).is_ok() {
         candidate.clone()
@@ -8055,22 +8144,25 @@ fn normalized_watch_index_path(
         match candidate.try_exists() {
             Ok(true) => candidate.clone(),
             Ok(false) => root.join(repo_path_to_native(&relative)),
-            Err(_) => return None,
+            Err(source) => {
+                return Err(CliError::Io {
+                    path: candidate,
+                    source,
+                });
+            }
         }
     };
-    // Unknown ignore state should not admit a path into the incremental index.
-    let Ok(gitignore_ignored) = gitignore_excludes_path(root, &policy_path) else {
-        return None;
-    };
-    if gitignore_ignored {
-        return None;
+    // Unknown selection cannot acknowledge the event or preserve a warm epoch.
+    let ignored = policy.excludes_path(&policy_path)?;
+    if ignored {
+        return Ok(None);
     }
     if relative.split('/').any(|component| component == ".purpose")
         || scan_options.excludes_relative_path(&relative)
     {
-        return None;
+        return Ok(None);
     }
-    Some(candidate)
+    Ok(Some(candidate))
 }
 
 /// Return a safe normalized repository path for a watcher event.
@@ -8328,6 +8420,9 @@ fn refresh_full_index_from_source_controlled(
 ) -> Result<IndexRefreshReport, CliError> {
     control.check(IndexWorkStage::Publication)?;
     store.probe_index_publication_writer()?;
+    let document_projection_changed = captured
+        .as_ref()
+        .is_some_and(|source| source.document_projection_changed);
     let batch = stage_full_index_publication_from_source(
         store,
         plan,
@@ -8343,7 +8438,7 @@ fn refresh_full_index_from_source_controlled(
         None,
         control,
     )?;
-    if staged_full_refresh_is_unchanged(store, &batch)? {
+    if !document_projection_changed && staged_full_refresh_is_unchanged(store, &batch)? {
         return Ok(empty_index_refresh_report(plan.text_options));
     }
     let outcome = publish_index_batch(store, batch, control)?;
@@ -8395,7 +8490,8 @@ fn empty_index_refresh_report(text_options: TextIndexOptions) -> IndexRefreshRep
     }
 }
 
-/// Refresh filesystem and symbol state for a debounced event batch.
+/// Refresh a test event batch with the ordinary operation budget.
+#[cfg(test)]
 pub(crate) fn refresh_index_for_changes(
     store: &mut AtlasStore,
     plan: &ScanRuntimePlan,
@@ -13739,22 +13835,23 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
                     ));
                 }
                 Err(error)
-            })?;
-        require_eq(
-            &fallback_report.mode.as_str(),
-            &WATCH_MODE_POLLING,
-            "canceled notify batch fallback mode",
-        )?;
-        if fallback_report
-            .fallback_reason
-            .as_deref()
-            .is_none_or(|reason| !reason.contains("canceled"))
-        {
+            });
+        if !matches!(
+            fallback_report,
+            Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+        ) {
             return Err(io::Error::other(
-                "polling fallback did not retain the notify failure reason",
+                "canceled notify batch was retried with a fresh polling budget",
             )
             .into());
         }
+        require_eq(
+            &store.index_publication()?.map(|state| state.generation),
+            &Some(before.generation),
+            "cancelled watcher retains the last valid generation",
+        )?;
+        // Only the caller's explicit retry may acquire another operation budget.
+        refresh_index_for_changes(&mut store, &plan, &changes, &symbol_options)?;
 
         let after = store
             .index_publication()?
@@ -13912,6 +14009,198 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     }
 
     #[test]
+    fn document_freshness_checks_late_keyset_pages_and_leaves_source_changes_to_the_delta()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        run_git_fixture(StdCommand::new("git").arg("init").arg("--quiet").arg(root))?;
+        let exclusions = root.join(".git/info/exclude");
+        fs::write(&exclusions, "")?;
+        let mut links = String::new();
+        for number in 0..520 {
+            writeln!(&mut links, "[target](missing-{number}.rs)")?;
+        }
+        fs::write(root.join("README.md"), format!("# Guide\n\n{links}"))?;
+        let plan = ScanRuntimePlan::for_path(None, root, Some(100_000))?;
+        let options = SymbolBuildOptions::new(100_000, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        refresh_index(&mut store, &plan, &options)?;
+        let control = standalone_index_work_control();
+        let probe = |store: &AtlasStore| {
+            graph_projection::nonindexed_document_projection_changed(
+                store,
+                root,
+                &scan_repo(root, &plan.scan_options)?,
+                &plan.scan_options,
+                &control,
+            )
+        };
+        require_eq(
+            &probe(&store)?,
+            &(false, 6),
+            "complete multi-page unchanged document probe",
+        )?;
+        let initial = store.index_publication()?;
+        refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &store.index_publication()?,
+            &initial,
+            "multi-page unchanged publication",
+        )?;
+        let rows = store.repository_unresolved_documents_page(None, 1_024, &control)?;
+        require_eq(&rows.rows.len(), &520, "document keyset fixture size")?;
+        let last = rows
+            .rows
+            .last()
+            .ok_or_else(|| io::Error::other("missing final document"))?;
+        fs::write(&exclusions, format!("{}\n", last.reference.as_str()))?;
+        require_eq(
+            &probe(&store)?,
+            &(true, 6),
+            "late-page document policy mismatch",
+        )?;
+        let report = refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &report.symbols.parsed,
+            &0,
+            "late-page policy source parse count",
+        )?;
+        require_eq(&probe(&store)?, &(false, 6), "late-page document repair")?;
+
+        let first = rows
+            .rows
+            .first()
+            .ok_or_else(|| io::Error::other("missing initial document"))?;
+        fs::write(
+            root.join(first.reference.as_str()),
+            "pub fn appeared() {}\n",
+        )?;
+        let delta = detect_index_freshness(&store, &plan)?;
+        require_eq(
+            &delta.as_ref().map(|delta| delta.report.reason),
+            &Some(IndexRefreshReason::PathsChanged),
+            "newly indexed document target uses ordinary source delta",
+        )?;
+        let report = refresh_index(&mut store, &plan, &options)?;
+        require_eq(&report.symbols.parsed, &1, "new source target parsed once")?;
+        require_eq(
+            &probe(&store)?,
+            &(false, 6),
+            "new source target graph is current",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn policy_only_nonindexed_document_changes_refresh_without_source_reparsing()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let info = root.join(".git/info");
+        run_git_fixture(StdCommand::new("git").arg("init").arg("--quiet").arg(root))?;
+        let exclusions = info.join("exclude");
+        fs::write(&exclusions, "missing-policy.rs\n")?;
+        fs::write(
+            root.join("README.md"),
+            "# Guide\n\n[target](missing-policy.rs)\n",
+        )?;
+        let plan = ScanRuntimePlan::for_path(None, root, Some(1_024))?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        let mut store =
+            open_atlas_store_for_project(&root.join(".projectatlas/projectatlas.db"), root)?;
+        refresh_index(&mut store, &plan, &options)?;
+        let reason = |store: &AtlasStore| -> Result<_, Box<dyn Error>> {
+            let page = store.repository_graph_relation_rows(
+                RepositoryGraphRelationQuery::Family {
+                    relation: GraphRelationKind::Extended(ExtendedRelationKind::Documents),
+                },
+                8,
+                None,
+            )?;
+            require_eq(&page.rows.len(), &1, "policy-only document count")?;
+            Ok(page.rows[0].document_unresolved_reason)
+        };
+        require_eq(
+            &reason(&store)?,
+            &Some(DocumentTargetUnresolvedReason::Ignored),
+            "initial policy reason",
+        )?;
+        let initial = store.index_publication()?;
+        fs::write(&exclusions, "")?;
+        let assessment = detect_index_freshness_controlled(
+            &store,
+            &plan,
+            ScanLimits::default(),
+            &standalone_index_work_control(),
+        )?;
+        require_eq(
+            &assessment.delta.as_ref().map(|delta| delta.report.reason),
+            &Some(IndexRefreshReason::PolicyDrift),
+            "nonindexed policy freshness",
+        )?;
+        let cancelled = standalone_index_work_control();
+        cancelled.cancel();
+        let failure = refresh_index_controlled(&mut store, &plan, &options, &cancelled);
+        if !matches!(failure, Err(CliError::IndexWork(_))) {
+            return Err(io::Error::other("cancelled document refresh was admitted").into());
+        }
+        require_eq(
+            &store.index_publication()?,
+            &initial,
+            "failed document publication preserved",
+        )?;
+        require_eq(
+            &reason(&store)?,
+            &Some(DocumentTargetUnresolvedReason::Ignored),
+            "failed document reason preserved",
+        )?;
+        let report = refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &report.symbols.parsed,
+            &0,
+            "policy-only source reparse count",
+        )?;
+        require_eq(
+            &reason(&store)?,
+            &Some(DocumentTargetUnresolvedReason::Missing),
+            "refreshed document reason",
+        )?;
+        let after = store.index_publication()?;
+        refresh_index(&mut store, &plan, &options)?;
+        require_eq(
+            &store.index_publication()?,
+            &after,
+            "current policy no-op publication",
+        )?;
+
+        // Offline non-node state changes use the same owning classifier, not policy bytes alone.
+        let outside = tempfile::tempdir()?;
+        let target = root.join("missing-policy.rs");
+        if create_document_target_symlink(&outside.path().join("absent.rs"), &target)? {
+            let report = refresh_index(&mut store, &plan, &options)?;
+            require_eq(
+                &report.symbols.parsed,
+                &0,
+                "non-node target source reparse count",
+            )?;
+            require_eq(
+                &reason(&store)?,
+                &Some(DocumentTargetUnresolvedReason::Unsupported),
+                "dangling target reason",
+            )?;
+            fs::remove_file(&target)?;
+            refresh_index(&mut store, &plan, &options)?;
+            require_eq(
+                &reason(&store)?,
+                &Some(DocumentTargetUnresolvedReason::Missing),
+                "removed non-node target reason",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn nonindexed_document_target_transitions_refresh_the_inbound_closure()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
@@ -13988,6 +14277,38 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             }
             Err(source) => Err(source),
         }
+    }
+
+    #[test]
+    fn watch_work_failure_is_not_retried_with_a_new_polling_budget() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        fs::write(temp.path().join("source.rs"), "fn initial() {}\n")?;
+        let plan = ScanRuntimePlan::for_path(None, temp.path(), Some(1_024))?;
+        let mut store = open_atlas_store_for_project(
+            &temp.path().join(".projectatlas/projectatlas.db"),
+            &plan.root,
+        )?;
+        let options = SymbolBuildOptions::new(1_024, Some(1), None);
+        refresh_index(&mut store, &plan, &options)?;
+        let before = store.index_publication()?;
+        fs::write(temp.path().join("source.rs"), "fn pending() {}\n")?;
+        let result = run_watch_with_polling_fallback(&mut store, &plan, 0, 1, &options, |_| {
+            Err(projectatlas_core::IndexWorkFailure::DeadlineExceeded {
+                stage: IndexWorkStage::RepositoryTraversal,
+            }
+            .into())
+        });
+        require_eq(
+            &matches!(result, Err(CliError::IndexWork(_))),
+            &true,
+            "typed deadline must propagate instead of starting polling",
+        )?;
+        require_eq(
+            &store.index_publication()?,
+            &before,
+            "failure fallback published pending source",
+        )?;
+        Ok(())
     }
 
     #[test]

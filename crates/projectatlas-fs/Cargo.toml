@@ -9,8 +9,12 @@ homepage.workspace = true
 [dependencies]
 projectatlas-core.workspace = true
 blake3.workspace = true
+gix-config.workspace = true
 ignore.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

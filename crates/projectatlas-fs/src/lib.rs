@@ -2,8 +2,10 @@
 
 pub mod worktree;
 
+mod git_config;
+
 use blake3::Hasher;
-use ignore::{DirEntry, WalkBuilder, WalkState, gitignore::GitignoreBuilder};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 use projectatlas_core::language::{
     LANGUAGE_CONTENT_DETECTION_MAX_BYTES, LanguageDetection, LanguageDetectionRequest,
     detect_language_request, language_capability,
@@ -19,7 +21,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -136,6 +138,8 @@ pub struct RootScanPolicy {
     root: PathBuf,
     /// Caller options extended with repository-derived exclusions.
     options: ScanOptions,
+    /// One shared walker configuration, including compiled external ignore rules.
+    walker: WalkBuilder,
 }
 
 impl RootScanPolicy {
@@ -159,7 +163,39 @@ impl RootScanPolicy {
             source,
         })?;
         let options = scan_options_for_root(&root, options, control)?;
-        Ok(Self { root, options })
+        for ancestor in root.ancestors() {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            validate_local_ignore_inputs(ancestor, true, true)?;
+        }
+        let mut walker = WalkBuilder::new(&root);
+        walker
+            .hidden(false)
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(false)
+            .require_git(false)
+            .current_dir(root.clone());
+        let external = git_config::ExternalGitConfig::discover(&root, control)?;
+        if let Some(path) = external.excludes {
+            match fs::metadata(&path) {
+                Ok(metadata) => {
+                    git_config::require_regular_file(&path, &metadata)?;
+                    if let Some(error) = walker.add_ignore(&path) {
+                        return Err(FsError::Io {
+                            path,
+                            source: io::Error::other(error),
+                        });
+                    }
+                }
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(FsError::Io { path, source }),
+            }
+        }
+        Ok(Self {
+            root,
+            options,
+            walker,
+        })
     }
 
     /// Return whether one repository-contained path is excluded by the
@@ -178,7 +214,7 @@ impl RootScanPolicy {
         if should_skip_path(&self.root, &absolute, &self.options) {
             return Ok(true);
         }
-        standard_ignore_excludes_path(&self.root, &absolute)
+        standard_ignore_excludes_path(&self.root, &absolute, &self.walker, true, true)
     }
 }
 
@@ -391,12 +427,7 @@ pub fn scan_repo_controlled_with_work(
     let policy = RootScanPolicy::discover(root, options, control)?;
     let root = policy.root;
     let options = policy.options;
-    let mut builder = WalkBuilder::new(&root);
-    builder
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .require_git(false);
+    let mut builder = policy.walker;
     let effective_workers = effective_scan_workers(limits, control);
     if effective_workers == 0 {
         return Err(IndexWorkFailure::resource_limit(
@@ -412,13 +443,49 @@ pub fn scan_repo_controlled_with_work(
     let nodes = Arc::new(Mutex::new(Vec::new()));
     let errors = Arc::new(Mutex::new(Vec::new()));
     let budget = Arc::new(ScanBudget::new(limits, control.clone()));
+    let filter_errors = Arc::clone(&errors);
+    let filter_root = root.clone();
+    let filter_options = options.clone();
+    let filter_control = control.clone();
+    let policy_failed = Arc::new(AtomicBool::new(false));
+    let filter_failed = Arc::clone(&policy_failed);
+    // The ignore worker opens directory rules before calling its visitor. The
+    // admission filter runs before enqueueing a child directory, so guard here.
+    builder.filter_entry(move |entry| {
+        if filter_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        if should_skip_path(&filter_root, entry.path(), &filter_options) {
+            return false;
+        }
+        if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            return true;
+        }
+        let validation = filter_control
+            .check(IndexWorkStage::RepositoryTraversal)
+            .map_err(FsError::from)
+            .and_then(|()| validate_local_ignore_inputs(entry.path(), true, true));
+        if let Err(error) = validation {
+            // A wide directory of rejected children retains only the first
+            // policy error, then stops further policy I/O and queued work.
+            if !filter_failed.swap(true, Ordering::AcqRel) {
+                push_error(&filter_errors, error);
+            }
+            return false;
+        }
+        true
+    });
     builder.build_parallel().run(|| {
         let root = root.clone();
         let options = options.clone();
         let nodes = Arc::clone(&nodes);
         let errors = Arc::clone(&errors);
         let budget = Arc::clone(&budget);
+        let policy_failed = Arc::clone(&policy_failed);
         Box::new(move |result| {
+            if policy_failed.load(Ordering::Acquire) {
+                return WalkState::Quit;
+            }
             if let Err(error) = budget.claim_entry() {
                 push_error(&errors, error.into());
                 return WalkState::Quit;
@@ -458,6 +525,8 @@ pub fn scan_repo_controlled_with_work(
             }
         })
     });
+    // The builder retains its admission closure after worker shutdown.
+    drop(builder);
     let errors = Arc::try_unwrap(errors)
         .map_err(|_remaining| state_error(&root, "parallel scanner error state still shared"))?;
     let mut errors = errors.into_inner().map_err(|source| {
@@ -640,84 +709,123 @@ pub fn gitignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
     } else {
         absolute
     };
-    Ok(ignore_family_match(&root, &absolute, ".gitignore")?.unwrap_or(false))
+    let mut builder = WalkBuilder::new(&root);
+    builder
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(true)
+        .git_exclude(false)
+        .git_global(false)
+        .require_git(false)
+        .current_dir(root.clone());
+    standard_ignore_excludes_path(&root, &absolute, &builder, false, false)
 }
 
-/// Apply the same standard ignore-family precedence as `WalkBuilder`.
-fn standard_ignore_excludes_path(root: &Path, path: &Path) -> FsResult<bool> {
+/// Keep non-repeatable streams/devices out of the canonical ignore parser.
+/// Missing inputs and symlinks to regular files retain the engine's normal semantics.
+fn validate_local_ignore_inputs(
+    directory: &Path,
+    plain_ignore: bool,
+    git_exclude: bool,
+) -> FsResult<()> {
+    match fs::metadata(directory) {
+        Ok(metadata) if !metadata.is_dir() => return Ok(()),
+        Ok(_) => {}
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(FsError::Io {
+                path: directory.to_path_buf(),
+                source,
+            });
+        }
+    }
+    if plain_ignore {
+        validate_optional_policy_file(&directory.join(".ignore"))?;
+    }
+    validate_optional_policy_file(&directory.join(".gitignore"))?;
+    if git_exclude && let Some(common) = common_git_directory(directory)? {
+        validate_optional_policy_file(&common.join("info/exclude"))?;
+    }
+    Ok(())
+}
+
+/// Refuse a present unsupported policy file before a library can block opening it.
+fn validate_optional_policy_file(path: &Path) -> FsResult<()> {
+    match fs::metadata(path) {
+        Ok(metadata) => git_config::require_regular_file(path, &metadata),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(FsError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Reuse the traversal engine's hierarchy, parent pruning and exclusion precedence.
+fn standard_ignore_excludes_path(
+    root: &Path,
+    path: &Path,
+    builder: &WalkBuilder,
+    plain_ignore: bool,
+    git_exclude: bool,
+) -> FsResult<bool> {
     let relative = normalize_repo_path(root, path)?;
     if relative == "." || relative.split('/').any(|component| component == "..") {
         return Ok(false);
     }
-    if let Some(ignored) = ignore_family_match(root, path, ".ignore")? {
-        return Ok(ignored);
+    for ancestor in root.ancestors() {
+        validate_local_ignore_inputs(ancestor, plain_ignore, git_exclude)?;
     }
-    if let Some(ignored) = ignore_family_match(root, path, ".gitignore")? {
-        return Ok(ignored);
+    // A fresh lazy matcher observes local policy edits without retaining a growing
+    // cache in the shared root policy. Its external matchers reuse the builder.
+    let mut matcher = builder
+        .build_matchers()
+        .into_iter()
+        .next()
+        .ok_or_else(|| FsError::Io {
+            path: root.to_path_buf(),
+            source: io::Error::other("source policy has no selected ignore root"),
+        })?;
+    // Match directories using guarded parents before examining their rules.
+    // A pruned parent's own policy inputs must never be opened or inspected.
+    let relative = Path::new(&relative);
+    let mut parents = relative
+        .ancestors()
+        .skip(1)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect::<Vec<_>>();
+    parents.reverse();
+    for parent in parents {
+        let (matched, error) = matcher.matched_with_errors(parent, true);
+        if let Some(error) = error {
+            return Err(FsError::Io {
+                path: root.join(parent),
+                source: io::Error::other(error),
+            });
+        }
+        if matched.is_ignore() {
+            return Ok(true);
+        }
+        validate_local_ignore_inputs(&root.join(parent), plain_ignore, git_exclude)?;
     }
-    if let Some(common_git_dir) = common_git_directory(root)?
-        && let Some(ignored) = ignore_file_match(root, path, &common_git_dir.join("info/exclude"))?
-    {
-        return Ok(ignored);
-    }
-    let (global, error) = GitignoreBuilder::new(root).build_global();
+    let (matched, error) = matcher.matched_with_errors(
+        relative,
+        path.metadata().is_ok_and(|metadata| metadata.is_dir()),
+    );
     if let Some(error) = error {
         return Err(FsError::Io {
-            path: git_global_excludes_path().unwrap_or_else(|| root.to_path_buf()),
-            source: io::Error::other(error.to_string()),
+            path: path.to_path_buf(),
+            source: io::Error::other(error),
         });
     }
-    Ok(ignore_match(&global, path).unwrap_or(false))
-}
-
-/// Return the deepest matching rule from one nested ignore-file family.
-fn ignore_family_match(root: &Path, path: &Path, file_name: &str) -> FsResult<Option<bool>> {
-    let is_dir = path.metadata().is_ok_and(|metadata| metadata.is_dir());
-    let target_dir = if is_dir {
-        path
-    } else {
-        path.parent().unwrap_or(root)
-    };
-    let mut outcome = None;
-    for directory in gitignore_search_dirs(root, target_dir) {
-        let ignore_path = directory.join(file_name);
-        if let Some(matched) = ignore_file_match(&directory, path, &ignore_path)? {
-            outcome = Some(matched);
-        }
-    }
-    Ok(outcome)
-}
-
-/// Match one ignore-format file while retaining ignore versus whitelist state.
-fn ignore_file_match(root: &Path, path: &Path, source: &Path) -> FsResult<Option<bool>> {
-    if !source.exists() {
-        return Ok(None);
-    }
-    let mut builder = GitignoreBuilder::new(root);
-    if let Some(error) = builder.add(source) {
-        return Err(FsError::Io {
-            path: source.to_path_buf(),
-            source: io::Error::other(error.to_string()),
-        });
-    }
-    let matcher = builder.build().map_err(|error| FsError::Io {
-        path: source.to_path_buf(),
-        source: io::Error::other(error.to_string()),
-    })?;
-    Ok(ignore_match(&matcher, path))
-}
-
-/// Reduce an ignore matcher result to its policy-relevant tri-state.
-fn ignore_match(matcher: &ignore::gitignore::Gitignore, path: &Path) -> Option<bool> {
-    let is_dir = path.metadata().is_ok_and(|metadata| metadata.is_dir());
-    let matched = matcher.matched_path_or_any_parents(path, is_dir);
-    if matched.is_ignore() {
-        Some(true)
-    } else if matched.is_whitelist() {
-        Some(false)
-    } else {
-        None
-    }
+    Ok(matched.is_ignore())
 }
 
 /// Resolve the global Git excludes file selected by the same ignore engine as scans.
@@ -726,7 +834,11 @@ fn ignore_match(matcher: &ignore::gitignore::Gitignore, path: &Path) -> Option<b
 /// witness should therefore preserve the path and its absent/present state.
 #[must_use]
 pub fn git_global_excludes_path() -> Option<PathBuf> {
-    ignore::gitignore::gitconfig_excludes_path()
+    let root = std::env::current_dir().ok()?;
+    let control = IndexWorkControl::new(IndexCancellation::new(), Some(DEFAULT_SCAN_TIMEOUT));
+    git_config::ExternalGitConfig::discover(&root, &control)
+        .ok()?
+        .excludes
 }
 
 /// Return bounded external inputs that can change the standard scan ignore policy.
@@ -796,21 +908,9 @@ pub fn source_selection_policy_paths_controlled(
             }
         }
     }
-    if let Some(home) = home_directory() {
-        paths.insert(home.join(".gitconfig"));
-        paths.insert(home.join(".config").join("git").join("config"));
-        paths.insert(home.join(".config").join("git").join("ignore"));
-    }
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        paths.insert(xdg.join("git").join("config"));
-        paths.insert(xdg.join("git").join("ignore"));
-    }
-    if let Some(global_excludes) = git_global_excludes_path() {
-        paths.insert(global_excludes);
-    }
+    let external = git_config::ExternalGitConfig::discover(&root, control)?;
+    paths.extend(external.sources);
+    paths.extend(external.excludes);
     if let Some(common_git_dir) = common_git_directory(&root)? {
         let registrations = common_git_dir.join("worktrees");
         paths.insert(registrations.clone());
@@ -1110,24 +1210,6 @@ fn home_directory() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-}
-
-/// Return directories whose `.gitignore` files can affect a target path.
-fn gitignore_search_dirs(root: &Path, target_dir: &Path) -> Vec<PathBuf> {
-    let mut directories = Vec::new();
-    let mut current = target_dir;
-    loop {
-        directories.push(current.to_path_buf());
-        if current == root {
-            break;
-        }
-        let Some(parent) = current.parent() else {
-            break;
-        };
-        current = parent;
-    }
-    directories.reverse();
-    directories
 }
 
 /// Return the correct walker state for a skipped entry.
@@ -2310,6 +2392,70 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn nonregular_ignore_inputs_refuse_before_open_and_preserve_pruned_subtrees()
+    -> Result<(), Box<dyn Error>> {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join(".git/info"))?;
+        let options = ScanOptions::default();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        for relative in [".ignore", ".gitignore", ".git/info/exclude"] {
+            let input = root.join(relative);
+            mkfifo(&input, Mode::S_IRUSR | Mode::S_IWUSR)?;
+            if !matches!(RootScanPolicy::discover(&root, &options, &control),
+                Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput)
+            {
+                return Err(io::Error::other("nonregular root policy input was accepted").into());
+            }
+            fs::remove_file(input)?;
+        }
+        let nested = root.join("nested");
+        fs::create_dir(&nested)?;
+        let input = nested.join(".ignore");
+        let policy = RootScanPolicy::discover(&root, &options, &control)?;
+        mkfifo(&input, Mode::S_IRUSR | Mode::S_IWUSR)?;
+        if !matches!(policy.excludes_path(&nested.join("absent.rs")),
+            Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput)
+        {
+            return Err(io::Error::other("targeted nested policy input was accepted").into());
+        }
+        // The legacy Git-only helper must not inspect the disabled .ignore family.
+        if gitignore_excludes_path(&root, &nested.join("absent.rs"))? {
+            return Err(
+                io::Error::other("legacy Git-only policy changed its admitted family").into(),
+            );
+        }
+        fs::write(root.join(".gitignore"), "nested/\n")?;
+        if !policy.excludes_path(&nested.join("absent.rs"))? {
+            return Err(io::Error::other("targeted ignored parent was reopened").into());
+        }
+        let nodes = scan_repo(&root, &options)?;
+        reject_path(&nodes, "nested")?;
+        fs::remove_file(input)?;
+        fs::write(root.join(".gitignore"), "")?;
+        let regular = temp.path().join("regular-policy");
+        fs::write(&regular, "blocked.rs\n")?;
+        symlink(&regular, nested.join(".ignore"))?;
+        fs::write(nested.join("blocked.rs"), "pub fn blocked() {}")?;
+        fs::write(nested.join("kept.rs"), "pub fn kept() {}")?;
+        let policy = RootScanPolicy::discover(&root, &options, &control)?;
+        if !policy.excludes_path(&nested.join("blocked.rs"))? {
+            return Err(io::Error::other("regular policy symlink was not applied").into());
+        }
+        let nodes = scan_repo(&root, &options)?;
+        reject_path(&nodes, "nested/blocked.rs")?;
+        require_path(&nodes, "nested/kept.rs")?;
+        // An absent or non-directory parent is not a selected policy directory.
+        fs::write(root.join("ordinary.rs"), "pub fn ordinary() {}")?;
+        policy.excludes_path(&root.join("ordinary.rs/absent.rs"))?;
+        Ok(())
+    }
+
+    #[test]
     fn root_scan_policy_classifies_absent_standard_and_atlas_ignores() -> Result<(), Box<dyn Error>>
     {
         let temp = tempfile::tempdir()?;
@@ -2339,6 +2485,58 @@ mod tests {
         require(
             policy.excludes_path(&repo.join(".projectatlas").join("state.db"))?,
             "Atlas-specific excluded prefix was not retained",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inherited_ignore_policy_matches_full_and_targeted_subroots() -> Result<(), Box<dyn Error>> {
+        let mut failures = Vec::new();
+        for source in [".ignore", ".gitignore", ".git/info/exclude"] {
+            let temp = tempfile::tempdir()?;
+            let repo = temp.path().join("repo");
+            let selected = repo.join("sub");
+            fs::create_dir_all(&selected)?;
+            run_git(&repo, &["init", "--quiet"])?;
+            fs::write(repo.join(source), "sub/hidden.rs\n")?;
+            fs::write(selected.join("hidden.rs"), "fn hidden() {}\n")?;
+            fs::write(selected.join("keep.rs"), "fn keep() {}\n")?;
+            let nodes = scan_repo(&selected, &ScanOptions::default())?;
+            require_path(&nodes, "keep.rs")?;
+            let traversed = nodes.iter().any(|node| node.path == "hidden.rs");
+            let control = IndexWorkControl::new(IndexCancellation::new(), None);
+            let policy = RootScanPolicy::discover(&selected, &ScanOptions::default(), &control)?;
+            let excluded = policy.excludes_path(&selected.join("hidden.rs"))?;
+            if traversed || !excluded {
+                failures.push(format!(
+                    "{source}: full admitted={traversed}, targeted excluded={excluded}"
+                ));
+            }
+        }
+        require(
+            failures.is_empty(),
+            &format!("inherited policy disagreed: {failures:?}"),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ignored_parent_cannot_be_reopened_by_a_leaf_negation() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let repo = temp.path();
+        fs::create_dir(repo.join("private"))?;
+        fs::write(repo.join(".gitignore"), "private/\n!private/hidden.rs\n")?;
+        fs::write(repo.join("private/hidden.rs"), "fn hidden() {}\n")?;
+        let nodes = scan_repo(repo, &ScanOptions::default())?;
+        require(
+            !nodes.iter().any(|node| node.path == "private/hidden.rs"),
+            "full scan admitted a leaf below an excluded parent",
+        )?;
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(repo, &ScanOptions::default(), &control)?;
+        require(
+            policy.excludes_path(&repo.join("private/hidden.rs"))?,
+            "targeted policy reopened an excluded parent",
         )?;
         Ok(())
     }

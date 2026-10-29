@@ -13084,3 +13084,313 @@ fn relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries()
     }
     Ok(())
 }
+
+#[test]
+fn external_git_exclusions_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    const POLICY_HOME_DIRECTORY: &str = "isolated-home";
+    const POLICY_DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join(TEST_REPO_DIR);
+    let home = temp.path().join(POLICY_HOME_DIRECTORY);
+    fs::create_dir(&repo)?;
+    fs::create_dir(&home)?;
+    git_success(&repo, &["init", "--quiet"])?;
+    let configuration = temp.path().join("selected.gitconfig");
+    let rules = temp.path().join("global rules.ignore");
+    let configuration_text = configuration
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture configuration is not UTF-8"))?;
+    let rules_text = rules
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture exclusions are not UTF-8"))?;
+    git_success(
+        &repo,
+        &[
+            "config",
+            "--file",
+            configuration_text,
+            "core.excludesFile",
+            rules_text,
+        ],
+    )?;
+    fs::write(&rules, "global.rs\nmissing-policy.rs\n")?;
+    fs::write(repo.join(".git/info/exclude"), "shared.rs\n")?;
+    fs::write(
+        repo.join("README.md"),
+        "# Policy\n\n[global](global.rs)\n[shared](shared.rs)\n[missing](missing-policy.rs)\n[kept](kept.rs)\n",
+    )?;
+    for name in ["global.rs", "shared.rs", "kept.rs"] {
+        fs::write(repo.join(name), "pub fn selected() {}\n")?;
+    }
+    let home_text = home
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture home is not UTF-8"))?;
+    let xdg = home.join("xdg");
+    let xdg_text = xdg
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture XDG path is not UTF-8"))?;
+    let environment = [
+        ("HOME", Some(home_text)),
+        ("XDG_CONFIG_HOME", Some(xdg_text)),
+        ("GIT_CONFIG_GLOBAL", Some(configuration_text)),
+        ("GIT_CONFIG_SYSTEM", Some("")),
+        ("GIT_CONFIG_NOSYSTEM", Some("true")),
+        ("PROJECTATLAS_NO_TELEMETRY", Some("1")),
+    ];
+    let executable = mcp_contract_executable();
+    let database = repo.join(POLICY_DATABASE_PATH);
+    let cli = |root: &Path, db: &Path, arguments: &[&str]| -> Result<Value, Box<dyn Error>> {
+        let mut command = StdCommand::new(&executable);
+        command
+            .current_dir(root)
+            .args(["--format", "json", "--db"])
+            .arg(db)
+            .args(arguments);
+        for (key, value) in environment {
+            if let Some(value) = value {
+                command.env(key, value);
+            }
+        }
+        let output = command.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "policy CLI {arguments:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let relations = [
+        "symbols",
+        "relations",
+        "--view",
+        "detailed",
+        "--file",
+        "README.md",
+        "--direction",
+        "outbound",
+        "--relation",
+        "documents",
+        "--content-selection",
+        "documentation",
+        "--limit",
+        "10",
+    ];
+    let verify = |value: &Value, ignored: usize, missing: usize| -> Result<(), Box<dyn Error>> {
+        let rows = value
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("policy relation rows are absent"))?;
+        if rows.len() != 4
+            || rows
+                .iter()
+                .filter(|row| {
+                    row.get("document_unresolved_reason")
+                        .and_then(Value::as_str)
+                        == Some("ignored")
+                })
+                .count()
+                != ignored
+            || rows
+                .iter()
+                .filter(|row| {
+                    row.get("document_unresolved_reason")
+                        .and_then(Value::as_str)
+                        == Some("missing")
+                })
+                .count()
+                != missing
+        {
+            return Err(
+                io::Error::other(format!("policy document outcomes differ: {value}")).into(),
+            );
+        }
+        Ok(())
+    };
+    cli(&repo, &database, &["scan", "."])?;
+    verify(&cli(&repo, &database, &relations)?, 3, 0)?;
+    let (identity, reviewed, initial) = {
+        let store = AtlasStore::open_for_project(&database, &repo)?;
+        store.set_purpose(
+            "kept.rs",
+            "Expose the retained public policy fixture",
+            PurposeSource::Agent,
+        )?;
+        (
+            store.project_instance_id()?,
+            store.load_node_by_path("kept.rs")?.map(|row| row.purpose),
+            store.index_publication()?,
+        )
+    };
+    let (mut session, _) =
+        McpContractSession::spawn_initialized(&executable, &repo, &database, &environment)?;
+    let operation = (|| -> Result<(), Box<dyn Error>> {
+        let arguments = json!({"project_path": repo, "file": "README.md", "view": "detailed", "direction": "outbound", "relation": "documents", "content_selection": "documentation", "limit": 10});
+        let value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        verify(&value, 3, 0)?;
+        fs::write(&rules, "global.rs\n")?;
+        let refusal: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        require_json_string(&refusal, &["error", "kind"], "refresh_required")?;
+        if AtlasStore::open_read_only(&database)?.index_publication()? != initial {
+            return Err(io::Error::other("stale document read mutated publication").into());
+        }
+        let refreshed: Value = toon_format::decode_default(&session.call_tool(
+            "atlas_watch_once",
+            &json!({"project_path": repo, "path": repo}),
+        )?)?;
+        if refreshed
+            .pointer("/watch/last_symbols/parsed")
+            .and_then(Value::as_u64)
+            != Some(0)
+        {
+            return Err(io::Error::other(format!(
+                "policy-only MCP refresh reparsed unchanged source: {refreshed}"
+            ))
+            .into());
+        }
+        let value: Value =
+            toon_format::decode_default(&session.call_tool("atlas_symbol_relations", &arguments)?)?;
+        verify(&value, 2, 1)?;
+        verify(&cli(&repo, &database, &relations)?, 2, 1)?;
+        let after = AtlasStore::open_read_only(&database)?.index_publication()?;
+        cli(&repo, &database, &["watch", "--once"])?;
+        let store = AtlasStore::open_read_only(&database)?;
+        if store.index_publication()? != after
+            || store.project_instance_id()? != identity
+            || store.load_node_by_path("kept.rs")?.map(|row| row.purpose) != reviewed
+        {
+            return Err(io::Error::other(
+                "policy repair lost identity, approved purpose or no-op stability",
+            )
+            .into());
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(operation, || session.shutdown())?;
+
+    git_success(&repo, &["add", "README.md", "kept.rs"])?;
+    git_success(
+        &repo,
+        &[
+            "-c",
+            "user.name=Policy Fixture",
+            "-c",
+            "user.email=policy@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "Seed policy fixture",
+        ],
+    )?;
+    let linked = temp.path().join("linked");
+    let linked_text = linked
+        .to_str()
+        .ok_or_else(|| io::Error::other("fixture linked root is not UTF-8"))?;
+    git_success(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            linked_text,
+            "HEAD",
+        ],
+    )?;
+    for name in ["global.rs", "shared.rs"] {
+        fs::write(linked.join(name), "pub fn excluded() {}\n")?;
+    }
+    let mut oracle = git_command_for_root(&linked);
+    oracle.args(["check-ignore", "--no-index", "global.rs", "shared.rs"]);
+    for (key, value) in environment {
+        if let Some(value) = value {
+            oracle.env(key, value);
+        }
+    }
+    let oracle = oracle.output()?;
+    if !oracle.status.success()
+        || !String::from_utf8(oracle.stdout)?
+            .lines()
+            .eq(["global.rs", "shared.rs"])
+    {
+        return Err(
+            io::Error::other("native Git exclusion oracle disagrees with linked fixture").into(),
+        );
+    }
+    let linked_database = linked.join(POLICY_DATABASE_PATH);
+    cli(&linked, &linked_database, &["scan", "."])?;
+    verify(&cli(&linked, &linked_database, &relations)?, 2, 1)?;
+    fs::write(linked.join(".gitignore"), "!global.rs\n!shared.rs\n")?;
+    cli(&linked, &linked_database, &["watch", "--once"])?;
+    verify(&cli(&linked, &linked_database, &relations)?, 0, 1)?;
+    #[cfg(unix)]
+    {
+        const NESTED_POLICY_DIRECTORY: &str = "nested-inputs";
+        for (nested, name) in [
+            (false, ".ignore"),
+            (false, ".gitignore"),
+            (false, ".git/info/exclude"),
+            (true, ".ignore"),
+            (true, ".gitignore"),
+            (true, ".git/info/exclude"),
+        ] {
+            let directory = if nested {
+                repo.join(NESTED_POLICY_DIRECTORY)
+            } else {
+                repo.clone()
+            };
+            let input = directory.join(name);
+            if let Some(parent) = input.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let previous = if input.is_file() {
+                Some(fs::read(&input)?)
+            } else {
+                None
+            };
+            if input.exists() {
+                fs::remove_file(&input)?;
+            }
+            let made = StdCommand::new("mkfifo").arg(&input).output()?;
+            if !made.status.success() {
+                return Err(io::Error::other("could not create policy FIFO fixture").into());
+            }
+            let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+            let mut command = Command::new(&executable);
+            command
+                .current_dir(&repo)
+                .timeout(Duration::from_secs(5))
+                .args(["--format", "json", "--db"])
+                .arg(&database)
+                .args(["scan", "."]);
+            for (key, value) in environment {
+                if let Some(value) = value {
+                    command.env(key, value);
+                }
+            }
+            let rejected = command.output()?;
+            if rejected.status.success()
+                || !String::from_utf8_lossy(&rejected.stderr).contains("not a regular file")
+            {
+                return Err(io::Error::other(format!(
+                    "nonregular policy was not refused promptly: {input:?}: {rejected:?}"
+                ))
+                .into());
+            }
+            if AtlasStore::open_read_only(&database)?.index_publication()? != before {
+                return Err(io::Error::other(
+                    "nonregular policy failure changed the last valid publication",
+                )
+                .into());
+            }
+            fs::remove_file(&input)?;
+            if let Some(previous) = previous {
+                fs::write(&input, previous)?;
+            }
+        }
+    }
+    Ok(())
+}
