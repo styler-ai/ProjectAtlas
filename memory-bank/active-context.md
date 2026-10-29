@@ -4,7 +4,7 @@
 
 Continue until v0.5.1-rc1 is published and independently verified. Latest stays
 stable0.5.0. Stable promotion, milestone closure and715task3.2 need later instruction.
-No permission pending. Primary alone implements; existing /root/luna_review is
+No permission pending. Primary alone implements; existing luna_review is
 read-only GPT-6 Luna max using the same custom Rust/database skills and accepted spec.
 User asked release ETA: no reliable time; remaining work is hours, not minutes.
 
