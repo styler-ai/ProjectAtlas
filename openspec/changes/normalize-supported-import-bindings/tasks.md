@@ -16,4 +16,4 @@
 
 ## 3. Accept the integrated fix
 
-- [ ] 3.1 Resolve independent and automated feedback, reconcile specification and architecture disposition, and pass cargo fmt --all --check plus required locked affected Rust, docs, dependency/security, strict OpenSpec, scoped IssueOps and native/hosted gates before issue closure.
+- [x] 3.1 Resolve independent and automated feedback, reconcile specification and architecture disposition, and pass cargo fmt --all --check plus required locked affected Rust, docs, dependency/security, strict OpenSpec, scoped IssueOps and native/hosted gates before issue closure.
