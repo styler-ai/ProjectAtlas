@@ -49,3 +49,7 @@ None. Existing token-impact reporting, graph authority, database ownership, CLI/
 - Windows, Linux, macOS x64/arm64 runtime, installer, plugin, generated host, CLI/MCP, parser, database, workflow, evaluation, and release boundaries.
 - Retained npm adapter planning belongs to #388 in v0.6.0, not delivered v0.5.0 scope.
 - OpenSpec/IssueOps mapping, candidate-versus-published readiness, native GitHub hierarchy and dependency graph, version-matched guidance, issue-specific Mermaid documentation, and final hosted release state.
+
+## Deferred v0.6 evaluation planning (#490)
+
+The September disposition of #490 remains v0.6.0, outside v0.5.1-rc1. Its established task IDs 24.1–24.4 now describe that future evidence cycle, with all execution/review tasks unchecked. Its sole parent is #493, which it directly blocks; current prerequisites are #310 and #563, while #314 and #388 remain independent. The versioned/native graph and current issue mirror must agree. The owning `repository-quality-evaluation` delta spec requires preregistration before observation, equivalent rotated arms, retention of unfavorable outcomes and bounded sanitized observed results separately from modeled savings. Planning runs no experiment, promises no favorable result and adds no product architecture; the existing harness is reused when adequate.

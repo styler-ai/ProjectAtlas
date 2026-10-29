@@ -37,3 +37,7 @@ None. The release owner composes accepted child contracts and does not redefine 
 ## Language and refresh scope
 
 Issue #563 remains a required direct child for ABAP, COBOL, Fortran, Ruby, and SQL navigation, the major-language audit including Python, and a representative legacy-to-Rust planning example. Issue #708 now belongs to 0.5.1 under #715 and covers complete indexing and refresh performance. Version 0.6.0 consumes that accepted indexing baseline and checks compatibility; #708 is no longer a child or blocker of #493.
+
+## Observed evaluation scope
+
+Issue #490 remains in v0.6.0 under its September roadmap disposition and now has current task authority in the existing #490 slice in `complete-v050-release-readiness`. It is a direct #493 child and blocker, with #310 and #563 as its genuine direct prerequisites. #490 owns preregistration, equivalent-arm execution and bounded sanitized observed results; #493 consumes that accepted result without duplicating the experiment. No evaluation execution is claimed, and #490 is outside v0.5.1-rc1.

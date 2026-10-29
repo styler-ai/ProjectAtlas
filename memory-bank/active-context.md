@@ -13,8 +13,8 @@ mechanism. Luna finalsource/proof review found no newblocker; 3.1/allacceptance
 correctlyremainopen pending accepted-main conflictresolution/currentgates/readiness.
 
 Acceptedmain3ef603aad39c435cf130545a555f8d746ec745ba mergedfutureplanningPR740:
-allfourplatforms+verify+CodeQL/Codexgreen;490staysopen41/alltasksunchecked. Normal
-merge it into public731branch, with sameowner(#731) mergecommit, no rebase/force.
+allfourplatforms+verify+CodeQL/Codexgreen;490staysopen41/alltasksunchecked. The accepted planning is now resolved into public731branch with a normal
+same-owner merge; source/code/locks/toolchain/workflows are unchanged.
 Preserve this memory and all ownsource/plan. Then cheap/current IssueOps and normal
 native/hosted gate, resolvefeedback before finaltask/acceptance/normalmerge/closure.
 Source d0b08e77 DER11/SEM11 cleanopt/hash/6nativeupgrades/18costsample evidence
