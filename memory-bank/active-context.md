@@ -4,7 +4,7 @@
 
 Continue through publication and independent verification of v0.5.1-rc1. Keep
 v0.5.0 Latest. Stable promotion, #715 task3.2 and milestone closure need later
-instruction. No permission pending. Primary writes code; existing /root/luna_review
+instruction. No permission pending. Primary writes code; existing Luna Max reviewer
 (GPT-6 Luna max) reviews read-only with custom Rust/database skills and accepted
 specifications. Investigate shared root causes and broader confirmed manifestations;
 all confirmed stable050/self-hosting bugs must be fixed for RC1. Evaluate scanner
@@ -73,6 +73,10 @@ root4 .276970->.347707s/RSS30164->33404KiB; root64 .323980->.390011/RSS31316->34
 dense .168489->.160716/RSS29216->29340. Root20–26%slower/+10–11%RSS,dense5%faster/
 <1%RSS; no708SLOwaiver. Allprefixstages/logs retained. Luna approvedtasks2.4–2.7
 source/spec/support/proof onexact581f3df/artifactSHA. Nativepush/currenthosted remain.
+
+Nativepush45265 at9063dc3 stopped at strictstrings: a revieweridentifier in memory
+looked like a nonportable machine path. Corrected to portable reviewer wording; no
+production change or gate bypass. Receipt/log preserved, new normalpush required.
 
 NEXT: normalnativepush of bookkeepinghead (productionunchanged581f3df), exacthead
 hosted/platform/currentfeedback, answer/resolvegenerator threadafterpublicproof,
