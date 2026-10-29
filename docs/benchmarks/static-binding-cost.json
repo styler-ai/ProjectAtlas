@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-28",
-  "source_commit": "d0b08e77bc9ac1388e10534944d3a525b56ff581",
-  "derivation_contract": 11,
-  "semantic_contract": 11,
+  "source_commit": "581f3df05114db4d23d442f2125bf4e384c7c5d5",
+  "derivation_contract": 12,
+  "semantic_contract": 12,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "b3d15be02b59e233eac15f8fb6d74eacdefaba4e69d3a47b57cbe87087166f61",
+  "candidate_binary_sha256": "c8f6d7cfd6928f03c2f775a30fbcd2f2ec3dbd49b2c0f150c17aaffc6c47d8ac",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -32,8 +32,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.28807906701695174,
-          "peak_rss_kib": 27692,
+          "wall_seconds": 0.2769703230005689,
+          "peak_rss_kib": 30164,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -45,8 +45,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.34375468399957754,
-          "peak_rss_kib": 32572,
+          "wall_seconds": 0.3477070940134581,
+          "peak_rss_kib": 33404,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -65,8 +65,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.3291595769987907,
-          "peak_rss_kib": 28556,
+          "wall_seconds": 0.32397962000686675,
+          "peak_rss_kib": 31316,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -78,8 +78,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.38751978197251447,
-          "peak_rss_kib": 33816,
+          "wall_seconds": 0.3900112120027188,
+          "peak_rss_kib": 34304,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -98,8 +98,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.1683786919747945,
-          "peak_rss_kib": 26788,
+          "wall_seconds": 0.16848940498312004,
+          "peak_rss_kib": 29216,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -111,8 +111,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.16149503798806109,
-          "peak_rss_kib": 28500,
+          "wall_seconds": 0.16071591898798943,
+          "peak_rss_kib": 29340,
           "work": {
             "candidates": 2,
             "parsed": 2,

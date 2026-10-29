@@ -6,7 +6,7 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-This comparison uses the reviewed contract 11/11 source, including separate body
+This comparison uses the reviewed contract 12/12 source, including generator declaration ownership, separate body
 and parameter environments, bounded Rust/shared forwarding workspaces, bare-var
 and recovered-initializer handling, Python directive/export evidence and deferred
 bindings. It remains separate from release acceptance.
@@ -19,16 +19,16 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2881 | 0.3438 | 27692 | 32572 |
-| 64 Cargo roots, 256 callers | 0.3292 | 0.3875 | 28556 | 33816 |
-| Dense/comment/nested source | 0.1684 | 0.1615 | 26788 | 28500 |
+| Four Cargo roots, 256 callers | 0.2770 | 0.3477 | 30164 | 33404 |
+| 64 Cargo roots, 256 callers | 0.3240 | 0.3900 | 31316 | 34304 |
+| Dense/comment/nested source | 0.1685 | 0.1607 | 29216 | 29340 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-Their measured initial time increases by about 18–19%, and maximum RSS by 18%.
-The dense case improves median time by about 4%, with about 6% higher peak RSS.
+Their measured initial time increases by about 20–26%, and maximum RSS by 10–11%.
+The dense case improves median time by about 5%, with less than 1% higher peak RSS.
 These observations do not establish a general speedup or a root-count asymptotic
 bound beyond the measured inputs.
 
@@ -66,11 +66,14 @@ The Python-directive selector checks global/nonlocal read-before-write callers,
 imported aliases, module/global writes, unaffected exports, canonical summaries,
 unchanged-consumer refresh and rebuild convergence through real CLI and MCP.
 The bare-var selector preserves local and exported callable bindings through
-JS/TS alias chains, real-write invalidation and restoration, unchanged importers,
+JS/TS/TSX alias chains, real-write invalidation and restoration, unchanged importers,
 canonical summaries, incremental/full repair and no-op. Recovery-error source
 controls retain raw unresolved calls and independently valid bare-var siblings.
 The same selector checks separate body/parameter environments, class static blocks
 and TypeScript namespaces through persisted CLI/MCP graph and summary queries.
+Generator declarations and their async forms retain body/parameter ownership and
+canonical callers; default/named generator exports survive explicit re-export
+chains. Admitted Vue/Svelte/HTML script hosts preserve the same ownership.
 
 The source unit matrix separately checks all 14 native grammar families, the Rust
 build-script alias, admitted HTML/Vue/Svelte mappings, Unicode and CRLF coordinates,
@@ -94,11 +97,11 @@ not exceptions to those release targets.
 #715 must include these installed selectors in its existing candidate package
 matrix and fixture inventory, preserve the public CLI/MCP/plugin/host routes, and
 exercise stable 0.5.0 plus preceding development-contract repair, identity,
-approved-purpose status, no-op and rollback. Derivation and semantic contracts 11/11
-repair preceding private 10/10 environments and retain the earlier initializer,
+approved-purpose status, no-op and rollback. Derivation and semantic contracts 12/12
+repair preceding private 11/11 generator ownership and 10/10 environments and retain the earlier initializer,
 reservation, directive/export, deferred-binding and occurrence repairs. The current
 optimized artifact also passes actual native upgrade/convergence checks from
-stable 0.5.0 and development contracts 5, 6, 7, 8 and 10, with state/no-op/rollback
+stable 0.5.0 and development contracts 5, 6, 7, 8, 10 and 11, with state/no-op/rollback
 controls as applicable. The combined #738/#739 derivation must be strictly newer
 than the final #731 derivation, retaining its semantic contract, so unchanged
 private candidates cannot bypass the document/exclusion repairs. Keep the separate 0.4.5 schema-upgrade proof. Reconcile the

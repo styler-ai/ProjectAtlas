@@ -28,12 +28,15 @@ include the actual locked grammar node. Async generators use the same node; name
 anonymous generator expressions and starred methods already use existing kinds.
 No new parser/provider/schema/wire shape or query-time parse was introduced.
 
+Reviewed source581f3df05114db4d23d442f2125bf4e384c7c5d5, clean optimized12 binary
+~/.cache/projectatlas-benchmarks/binding-731-581f3df-contract12-20261029/projectatlas,
+SHA c8f6d7cfd6928f03c2f775a30fbcd2f2ec3dbd49b2c0f150c17aaffc6c47d8ac.
 Current DER12/SEM12 repairs unchanged11/11 indexes. Captured actualSEM11 digest
 4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d; runtime fingerprint
 unit seeds11 and retains10/9/8/7/6/5/4/stable comparisons. Semantic unit verifies
 prior11 distinct. Accepted spec/design/support docs name generator declarations.
-Tasks2.4/2.5/2.6/2.7 reopened local/live immediately; checked4/9. Task3.1 and all5
-acceptance remain unchecked. Planned IssueOps9/9/4 and strictOpenSpec PASS.
+Tasks2.4/2.5/2.6/2.7 passed current proof and independent review; checked8/9. Task3.1 and all5
+acceptance remain unchecked. Prior planned IssueOps9/9/4 and strictOpenSpec PASS; reread9/9/8 now.
 
 ## Current validation
 
@@ -56,19 +59,32 @@ canonical summaries, parameter/body shadowing, incremental/full/identity/no-op.
 Inventory remains216; navigation digest037ec6d40e73db22b436f7c98af86c73f23b2c4e94b3ad008cf383b770899843.
 No live local build remains at this checkpoint; sharedtarget is free for nextgate.
 
-## Next actions
+## Current native proof and next actions
 
-1. Complete warning-strict workspace Rustdoc/doctests, clean source commit and
-   immutable optimized12 binary with source/tree/SHA binding.
-2. Run actual preceding11 generator negative/unchanged upgrade/full/identity/all
-   approved purposes/no-op/compatible rollback through corrected native runtime.
-   Prepared /tmp/projectatlas-731-generator-native-upgrade.py (not yet run).
-   Retain previous6 native stage coverage, rebind affected current proofs/cost.
-3. Current optimized CLI/MCP selectors, representative paired cost report, Luna
-   proof/readiness review; only then recheck tasks2.4–2.7. Native normal push,
-   exact-head hosted/platform checks, thread reply/resolution and finalreadiness
-   precede protected normal merge/closure. Do not use6639 checks for changedsource.
-4. Continue739/738 combined,708 and715 all the way RC publication.
+Warning-strict workspaceRustdoc/doctests PASS. All7 native upgrade stages nowPASS:
+stable050 + contracts5/6/7/8/10 retained, newactual11 generator JS/TS/TSX+hosts/
+staticforwarding/unchanged/full/identity/ALLapproved/no-op/compatrollback. Prepared
+native script nowexecuted; /tmp/projectatlas-731-contract12-generator-native-proof.json
+and /tmp/projectatlas-731-contract12-native-proofs.json retain exactreceipts. Old
+parameter target was file-owned positivecontrol; correctedgenerator calls are
+queried by exactcaller selector, avoiding misleadingfile-only emptycalls.
+OptimizedexpandedCLI/MCP1PASS. Fresh18pairedcostsamples sourcebound581f3df published:
+root4 .276970->.347707s/RSS30164->33404KiB; root64 .323980->.390011/RSS31316->34304;
+dense .168489->.160716/RSS29216->29340. Root20–26%slower/+10–11%RSS,dense5%faster/
+<1%RSS; no708SLOwaiver. Allprefixstages/logs retained. Luna approvedtasks2.4–2.7
+source/spec/support/proof onexact581f3df/artifactSHA. Nativepush/currenthosted remain.
+
+NEXT: normalnativepush of bookkeepinghead (productionunchanged581f3df), exacthead
+hosted/platform/currentfeedback, answer/resolvegenerator threadafterpublicproof,
+3.1+allacceptanceindependentreview/readiness, normalprotectedmerge/closure731.
+Then integrate739/738/741/708/715 and continue throughRC1. NoRCyet.
+Newconfirmedinitbug741 (separate from731) genericpublicissue/backlog; privateworktree
+issue741/fix/generated-state-741 onexactaccepted3ef (localmainpointerwasold7cd;
+FFcorrectedBEFOREindex/code). Stable050AtlasinitSUCCESS689parsed; nextfunnel used.
+Lateinitguardalreadyrefusesnonrealprojectstatedir butautomaticconfig/nonsource/DB/
+WAL/hostwritesoccurfirst. Stable isolated repro /tmp/projectatlas-init-symlink-stable-repro.json;
+Lunastaticallyconfirmed295/294/292/274 sharethisowner. Plan/RC1milestone741pending
+independentplanreview; preserveexplicitexternalDB/config/rootcapabilities. No741codeyet.
 
 ## Verified prior implementation and reusable evidence
 
