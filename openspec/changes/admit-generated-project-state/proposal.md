@@ -19,6 +19,9 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   configuration and source-root paths. Preserve those supported operator capabilities.
 - Prevent a generated file write from following an unsafe pre-existing leaf alias;
   preserve valid files and the last valid state on refusal or failed publication.
+- Protect the same implicit destinations in config ignore edits, root `.gitignore`
+  creation and the default JSON map sidecar. Preserve custom/external config and map
+  outputs, existing-entry Gitignore no-ops and read-only config aliases.
 - Trace analogous producer/write/admission paths and prove positive compatibility,
   causal failures and real installed CLI/MCP behavior on supported platforms.
 

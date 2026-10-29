@@ -79,6 +79,38 @@ publication boundary; bound the actual guarantees and do not claim universal TOC
 elimination. Do not introduce lock files, retained directory-handle frameworks or
 new dependencies without a demonstrated need and explicit reviewed tradeoff.
 
+### Manual helpers share exact automatic document ownership
+
+Actual installed 0.5.0 CLI and MCP tests confirm that `ignore add` follows a dangling
+default `.projectatlas/config.toml` link and `ignore init-gitignore` creates the target
+of a dangling root `.gitignore` link. The default map JSON sidecar also truncates
+outside symlink and hardlink targets through both real interfaces. The legacy map
+identity check protects only its TOON input, not arbitrary outside targets.
+
+Reuse the operation-scoped guard and existing atomic publication with a document
+role bound to one of four exact managed destinations: private `config.toml`, legacy
+root `projectatlas.toml`, root `.gitignore` or private `projectatlas.json`. This role
+checks only its owning directory and target; unrelated DB/host outputs do not gate
+these mutations. The same managed namespace stays protected when spelled explicitly.
+Custom/external operator config and map destinations keep their supported route.
+
+Acquire config write admission only for an actual change, so no-change operations
+and ordinary reads preserve valid config aliases. Reject changed managed config or
+default sidecar symlink/reparse entries; atomically replace regular entries so an
+outside hardlink owner is not mutated. Preserve permissions of existing files and
+ordinary creation permissions under the process umask, using the pinned tempfile
+builder rather than changing process-wide umask or widening permissions afterward.
+Keep the legacy TOON alias refusal before any JSON mutation.
+
+Gitignore creation treats any existing directory entry as its existing no-op,
+including a dangling link. No-clobber publication handles a racing entry without
+following it or claiming creation. Use the same bounded directory identities and
+owned staging cleanup; do not add a general path framework or universal race claim.
+
+Require causal owning tests and real CLI/MCP controls for dangling/live aliases,
+regular hardlinks, legacy/default layouts, custom/external config and output paths,
+unchanged mutations, existing-entry/racing Gitignore status and new-file modes.
+
 ### Explicit paths remain supported
 
 An explicitly selected external database or config path is an intended operator

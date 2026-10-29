@@ -124,6 +124,16 @@ identity or writing defaults. Existing config and nonsource bytes remain intact;
 generated host documents are replaced atomically with existing permissions preserved.
 Ordinary navigation does not require valid generated host documents.
 
+Ignore edits and optional JSON map output apply the same ownership boundary to
+their exact managed documents. Changed default or legacy config and default JSON
+sidecars reject indirect entries; atomic replacement preserves outside hardlink
+targets and existing permissions. Unchanged config operations still read valid
+aliases. Gitignore initialization leaves every existing entry untouched, including
+dangling links, and reports a racing entry as existing rather than created.
+New documents use ordinary permissions under the process umask. Explicit custom
+config and map destinations retain their operator-selected behavior; JSON output
+still refuses to overwrite its legacy TOON import through an alias.
+
 Canonical source-root aliases and explicit external database/configuration paths remain
 supported. A conventional-looking database filename outside the independently selected
 root remains an operator-selected binding. Before startup database discovery, explicit

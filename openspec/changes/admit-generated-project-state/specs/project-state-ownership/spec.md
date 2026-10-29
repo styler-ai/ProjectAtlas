@@ -25,6 +25,11 @@ destinations SHALL be refused without outside-owner side effects.
 - **WHEN** an automatic generated output has an unsafe existing leaf alias or its owning directory changes before publication
 - **THEN** the writer preserves ownership at its actual mutation boundary, refuses unsupported state or publishes only its own entry, and does not follow the alias to alter outside-owned bytes
 
+#### Scenario: Manual helpers mutate managed documents
+- **WHEN** ignore edits change a managed default or legacy config, Gitignore initialization finds an existing or racing directory entry, or a map request writes the default JSON sidecar
+- **THEN** the shared CLI/MCP writer protects only the exact managed destination, preserves outside alias targets, valid permissions and ordinary creation modes, and reports Gitignore creation truthfully without clobbering an existing entry
+- **AND** no-change config operations, existing-entry Gitignore no-ops, explicit custom/external config and map destinations, and the legacy TOON alias refusal retain their supported behavior
+
 ### Requirement: Supported explicit paths remain available
 Explicit operator-selected database/config paths and canonical selected-root aliases
 SHALL retain their supported behavior and existing identity/configuration safeguards.

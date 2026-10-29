@@ -278,6 +278,13 @@ withheld; the original private stage is retained rather than unlinking a pathnam
 uncertain ownership. Restore the intended directory before retrying. These failures do
 not require resetting the index or deleting approved purposes.
 
+If a changed default configuration or default JSON map sidecar is refused because
+it is indirect, restore a direct file at that managed destination before retrying.
+The helper commands preserve outside link targets and existing file permissions.
+Unchanged config edits and existing `.gitignore` entries remain no-ops, including a
+dangling `.gitignore` link. Explicit external config and custom map output selection
+remain supported through their existing options.
+
 ### Optional current map response
 
 When you need the complete current AtlasMap, request it directly:

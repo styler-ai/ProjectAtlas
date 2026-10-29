@@ -5,6 +5,81 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+#[test]
+fn root_document_creation_preserves_existing_entries_and_race_status() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let path = root.join(super::GITIGNORE_FILE);
+    let mut guard = ProjectStateGuard::preflight_document(&root, &path)?
+        .ok_or_else(|| io::Error::other("root document was not admitted"))?;
+    let written = guard.publish(&path, b"requested", FilePublication::Create, || {
+        fs::write(&path, b"racing complete document")
+    })?;
+    require(!written, "racing document was reported as created")?;
+    require(
+        fs::read(&path)? == b"racing complete document",
+        "racing document was clobbered",
+    )?;
+    require(
+        !guard.create_document(b"replacement")?,
+        "existing document was reported as created",
+    )?;
+    require(
+        !root.join(STATE_DIRECTORY).exists(),
+        "root document created unrelated private state",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn racing_gitignore_alias_is_neither_followed_nor_reported_created() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let path = root.join(super::GITIGNORE_FILE);
+    let outside = root.join("outside");
+    let guard = ProjectStateGuard::preflight_document(&root, &path)?
+        .ok_or_else(|| io::Error::other("root document was not admitted"))?;
+    let written = guard.publish(&path, b"requested", FilePublication::Create, || {
+        std::os::unix::fs::symlink(&outside, &path)
+    })?;
+    require(
+        !written && !outside.exists(),
+        "racing alias was written or reported created",
+    )?;
+    require(
+        fs::symlink_metadata(&path)?.file_type().is_symlink(),
+        "existing alias was replaced",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn document_creation_uses_ordinary_umask_and_replacement_preserves_permissions() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let control = root.join("ordinary-create");
+    fs::write(&control, b"control")?;
+    let path = root.join(super::GITIGNORE_FILE);
+    let mut guard = ProjectStateGuard::preflight_document(&root, &path)?
+        .ok_or_else(|| io::Error::other("root document was not admitted"))?;
+    require(
+        guard.create_document(b"first")?,
+        "new document was not created",
+    )?;
+    require(
+        fs::metadata(&path)?.permissions().mode() & 0o777
+            == fs::metadata(&control)?.permissions().mode() & 0o777,
+        "document creation widened or restricted the ordinary umask mode",
+    )?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+    guard.write_document(b"second")?;
+    require(
+        fs::metadata(&path)?.permissions().mode() & 0o777 == 0o640,
+        "replacement lost existing permissions",
+    )
+}
+
 /// Return a typed test failure rather than panic in a fallible filesystem test.
 fn require(condition: bool, message: &str) -> io::Result<()> {
     if condition {

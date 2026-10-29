@@ -862,19 +862,45 @@ pub(crate) fn init_gitignore(
         load_atlas_config_for_root(project_root)?
     };
     let gitignore_path = config.root.join(".gitignore");
-    let existed = gitignore_path.exists();
-    if !existed {
-        fs::write(&gitignore_path, default_gitignore_text()).map_err(|source| {
-            AtlasMapError::Io {
+    let existed = match fs::symlink_metadata(&gitignore_path) {
+        Ok(_) => true,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(AtlasMapError::Io {
+                path: gitignore_path,
+                source,
+            });
+        }
+    };
+    let created = if existed {
+        false
+    } else {
+        let mut guard = crate::project_state::ProjectStateGuard::preflight_document(
+            &config.root,
+            &gitignore_path,
+        )
+        .map_err(|source| AtlasMapError::Io {
+            path: gitignore_path.clone(),
+            source,
+        })?
+        .ok_or_else(|| AtlasMapError::Io {
+            path: gitignore_path.clone(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gitignore has no admitted project owner",
+            ),
+        })?;
+        guard
+            .create_document(default_gitignore_text().as_bytes())
+            .map_err(|source| AtlasMapError::Io {
                 path: gitignore_path.clone(),
                 source,
-            }
-        })?;
-    }
+            })?
+    };
     Ok(GitignoreInitReport {
         gitignore_path: effective_config_path_display(&gitignore_path),
-        existed,
-        created: !existed,
+        existed: existed || !created,
+        created,
         gitignore_inherited: true,
     })
 }
@@ -893,7 +919,7 @@ pub(crate) fn add_ignore_entry(
     let changed = values.insert(normalized.clone());
     if changed {
         write_string_array(&mut document, kind, &values)?;
-        write_config_document(&path, &document)?;
+        write_config_document(&path, &document, project_root)?;
     }
     let config = load_atlas_config(Some(&path))?;
     Ok(ignore_mutation_report(
@@ -942,7 +968,7 @@ pub(crate) fn remove_ignore_entry(
         normalized_prefix
     };
     if changed {
-        write_config_document(&path, &document)?;
+        write_config_document(&path, &document, project_root)?;
     }
     let config = load_atlas_config(Some(&path))?;
     Ok(ignore_mutation_report(
@@ -1241,7 +1267,26 @@ fn load_config_document_for_edit(path: &Path) -> AtlasMapResult<DocumentMut> {
 }
 
 /// Persist an editable TOML document to disk.
-fn write_config_document(path: &Path, document: &DocumentMut) -> AtlasMapResult<()> {
+fn write_config_document(
+    path: &Path,
+    document: &DocumentMut,
+    project_root: &Path,
+) -> AtlasMapResult<()> {
+    if let Some(mut guard) =
+        crate::project_state::ProjectStateGuard::preflight_document(project_root, path).map_err(
+            |source| AtlasMapError::Io {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?
+    {
+        return guard
+            .write_document(document.to_string().as_bytes())
+            .map_err(|source| AtlasMapError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+    }
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -2727,7 +2772,15 @@ pub(crate) fn write_json_map(content: &str, config: &AtlasMapConfig) -> AtlasMap
         }
         _ => config.map_path.with_extension("json"),
     };
-    if let Some(parent) = json_path.parent() {
+    let document_guard =
+        crate::project_state::ProjectStateGuard::preflight_document(&config.root, &json_path)
+            .map_err(|source| AtlasMapError::Io {
+                path: json_path.clone(),
+                source,
+            })?;
+    if document_guard.is_none()
+        && let Some(parent) = json_path.parent()
+    {
         fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
             path: parent.to_path_buf(),
             source,
@@ -2768,6 +2821,35 @@ pub(crate) fn write_json_map(content: &str, config: &AtlasMapConfig) -> AtlasMap
             });
         }
     };
+    if let Some(mut guard) = document_guard {
+        if let Some(legacy) = &legacy {
+            let aliases_legacy = match same_file::Handle::from_path(&json_path) {
+                Ok(identity) => &identity == legacy,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => false,
+                Err(source) => {
+                    return Err(AtlasMapError::Io {
+                        path: json_path,
+                        source,
+                    });
+                }
+            };
+            if aliases_legacy {
+                return Err(AtlasMapError::Io {
+                    path: json_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "JSON sidecar aliases the legacy map",
+                    ),
+                });
+            }
+        }
+        return guard
+            .write_document(content.as_bytes())
+            .map_err(|source| AtlasMapError::Io {
+                path: json_path,
+                source,
+            });
+    }
     let mut output = match OpenOptions::new().write(true).open(&json_path) {
         Ok(file) => file,
         Err(source) if source.kind() == io::ErrorKind::NotFound => OpenOptions::new()
@@ -3167,6 +3249,100 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    #[test]
+    fn automatic_document_mutations_preserve_alias_owners() -> Result<(), Box<dyn Error>> {
+        for operation in ["config", "gitignore", "map"] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            fs::create_dir(root.join(".projectatlas"))?;
+            let outside = temp.path().join("outside");
+            let leaf = match operation {
+                "config" => root.join(".projectatlas/config.toml"),
+                "gitignore" => root.join(".gitignore"),
+                _ => root.join(".projectatlas/projectatlas.json"),
+            };
+            std::os::unix::fs::symlink(&outside, &leaf)?;
+            match operation {
+                "config" => {
+                    if add_ignore_entry(None, &root, IgnoreEntryKind::PathPrefix, "generated")
+                        .is_ok()
+                    {
+                        return Err(
+                            io::Error::other("automatic config followed a dangling alias").into(),
+                        );
+                    }
+                }
+                "gitignore" => {
+                    let report = super::init_gitignore(None, &root)?;
+                    if report.created || !report.existed {
+                        return Err(io::Error::other(
+                            "existing gitignore alias was treated as absent",
+                        )
+                        .into());
+                    }
+                }
+                _ => {
+                    let mut config = test_config(root.join(".projectatlas/projectatlas.toon"));
+                    config.root = root.clone();
+                    if write_json_map("{}", &config).is_ok() {
+                        return Err(
+                            io::Error::other("automatic JSON sidecar followed an alias").into()
+                        );
+                    }
+                }
+            }
+            if outside.exists() || !fs::symlink_metadata(&leaf)?.file_type().is_symlink() {
+                return Err(io::Error::other(
+                    "refusal changed an outside target or existing alias",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_document_replacement_preserves_hardlinked_targets() -> Result<(), Box<dyn Error>> {
+        for operation in ["config", "map"] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            fs::create_dir(root.join(".projectatlas"))?;
+            let outside = temp.path().join("outside");
+            let original = if operation == "config" {
+                super::default_config_text()
+            } else {
+                "outside data".to_string()
+            };
+            fs::write(&outside, original.as_bytes())?;
+            let leaf = root.join(if operation == "config" {
+                ".projectatlas/config.toml"
+            } else {
+                ".projectatlas/projectatlas.json"
+            });
+            fs::hard_link(&outside, &leaf)?;
+            if operation == "config" {
+                add_ignore_entry(None, &root, IgnoreEntryKind::PathPrefix, "generated")?;
+            } else {
+                let mut config = test_config(root.join(".projectatlas/projectatlas.toon"));
+                config.root = root;
+                write_json_map("{}", &config)?;
+            }
+            if fs::read(&outside)? != original.as_bytes() || fs::read(&leaf)? == original.as_bytes()
+            {
+                return Err(io::Error::other(
+                    "document mutation changed its outside hardlink owner",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn initialization_refuses_indirect_state_before_creating_outputs() -> Result<(), Box<dyn Error>>

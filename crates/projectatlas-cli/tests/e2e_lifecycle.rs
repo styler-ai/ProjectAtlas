@@ -4994,7 +4994,7 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
     let root = temp.path().join("selected-project");
     let control = temp.path().join("control-project");
     for project in [&root, &control] {
-        fs::create_dir_all(project.join("src"))?;
+        fs::create_dir_all(project.join(SRC_DIR_NAME))?;
         fs::write(project.join("src/lib.rs"), "pub fn owned() {}\n")?;
         let initialized = command(&executable, project).arg("init").output()?;
         if !initialized.status.success() {
@@ -5235,6 +5235,379 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                     "MCP init followed an automatic state-directory alias: {response}"
                 ))
                 .into());
+            }
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dyn Error>> {
+    const CONFIG_PATH: &str = ".projectatlas/config.toml";
+    const DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+
+    fn command(executable: &Path, root: &Path) -> StdCommand {
+        let mut command = StdCommand::new(executable);
+        command
+            .current_dir(root)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["--format", "json"]);
+        command
+    }
+
+    fn invoke(
+        executable: &Path,
+        root: &Path,
+        session: Option<&mut McpContractSession>,
+        arguments: &[&str],
+        tool: &str,
+        parameters: &Value,
+        refused: bool,
+    ) -> Result<String, Box<dyn Error>> {
+        if let Some(session) = session {
+            // Administrative tools retain their established typed error payload
+            // inside a successful MCP transport result. Assert its exact cause
+            // below rather than confusing transport status with admission.
+            let text = session.call_tool(tool, parameters)?;
+            if !refused && text.starts_with("error:") {
+                return Err(io::Error::other(format!("MCP {tool} failed: {text}")).into());
+            }
+            return Ok(text);
+        }
+        let output = command(executable, root).args(arguments).output()?;
+        if output.status.success() == refused {
+            return Err(io::Error::other(format!(
+                "document command {arguments:?} expected refusal={refused}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(if refused {
+            String::from_utf8(output.stderr)?
+        } else {
+            String::from_utf8(output.stdout)?
+        })
+    }
+
+    let temp = tempfile::tempdir()?;
+    let executable = mcp_contract_executable();
+    let control = temp.path().join("control");
+    fs::create_dir(&control)?;
+    let initialized = command(&executable, &control)
+        .args(["init", "--no-scan"])
+        .output()?;
+    if !initialized.status.success() {
+        return Err(io::Error::other(String::from_utf8_lossy(&initialized.stderr)).into());
+    }
+    let mut session =
+        McpContractSession::spawn(&executable, &control, &control.join(DATABASE_PATH))?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for mcp in [false, true] {
+            let root = temp.path().join(if mcp { "mcp" } else { "cli" });
+            fs::create_dir(&root)?;
+            let initialized = command(&executable, &root)
+                .args(["init", "--no-scan"])
+                .output()?;
+            if !initialized.status.success() {
+                return Err(io::Error::other(String::from_utf8_lossy(&initialized.stderr)).into());
+            }
+            let config = root.join(CONFIG_PATH);
+            let mut document: toml::Value = toml::from_str(&fs::read_to_string(&config)?)?;
+            document["project"]["root"] = toml::Value::String(
+                root.to_str()
+                    .ok_or_else(|| io::Error::other("fixture root is not UTF-8"))?
+                    .to_owned(),
+            );
+            let original_config = toml::to_string(&document)?.into_bytes();
+            fs::write(&config, &original_config)?;
+            for legacy in [false, true] {
+                let config = if legacy {
+                    let flat = root.join("projectatlas.toml");
+                    fs::rename(&config, &flat)?;
+                    flat
+                } else {
+                    config.clone()
+                };
+                let original = fs::read(&config)?;
+                let outside = root.with_extension(if legacy { "legacy-config" } else { "config" });
+                fs::rename(&config, &outside)?;
+                fs::hard_link(&outside, &config)?;
+                invoke(
+                    &executable,
+                    &root,
+                    mcp.then_some(&mut session),
+                    &["ignore", "add", "--kind", "path-prefix", "generated"],
+                    "atlas_ignore_add",
+                    &json!({"project_path": root, "kind": "path-prefix", "value": "generated"}),
+                    false,
+                )?;
+                if fs::read(&outside)? != original || fs::read(&config)? == original {
+                    return Err(
+                        io::Error::other("config replacement changed its outside owner").into(),
+                    );
+                }
+                fs::remove_file(&config)?;
+                #[cfg(any(unix, windows))]
+                {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&outside, &config)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_file(&outside, &config)?;
+                    // An unchanged mutation reads a live alias without writing it.
+                    invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut session),
+                        &["ignore", "remove", "--kind", "path-prefix", "absent"],
+                        "atlas_ignore_remove",
+                        &json!({"project_path": root, "kind": "path-prefix", "value": "absent"}),
+                        false,
+                    )?;
+                    let error = invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut session),
+                        &["ignore", "add", "--kind", "path-prefix", "generated"],
+                        "atlas_ignore_add",
+                        &json!({"project_path": root, "kind": "path-prefix", "value": "generated"}),
+                        true,
+                    )?;
+                    if !error.contains("automatic output requires a direct regular file")
+                        || fs::read(&outside)? != original
+                    {
+                        return Err(io::Error::other(format!(
+                            "managed config alias was not preserved: {error}"
+                        ))
+                        .into());
+                    }
+                    fs::remove_file(&outside)?;
+                    let error = invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut session),
+                        &["ignore", "add", "--kind", "path-prefix", "generated"],
+                        "atlas_ignore_add",
+                        &json!({"project_path": root, "kind": "path-prefix", "value": "generated"}),
+                        !legacy,
+                    )?;
+                    // Discovery has always ignored a dangling legacy config and
+                    // selected the ordinary private default instead.
+                    if (!legacy
+                        && !error.contains("automatic output requires a direct regular file"))
+                        || outside.exists()
+                    {
+                        return Err(io::Error::other(format!(
+                            "dangling managed config alias was followed: {error}"
+                        ))
+                        .into());
+                    }
+                    if legacy {
+                        fs::remove_file(root.join(CONFIG_PATH))?;
+                    }
+                    fs::remove_file(&config)?;
+                }
+                fs::write(&config, &original)?;
+                if legacy {
+                    fs::rename(&config, root.join(CONFIG_PATH))?;
+                }
+            }
+
+            let sidecar = root.join(".projectatlas/projectatlas.json");
+            let outside = root.with_extension("map");
+            fs::write(&outside, b"outside map bytes")?;
+            fs::hard_link(&outside, &sidecar)?;
+            invoke(
+                &executable,
+                &root,
+                mcp.then_some(&mut session),
+                &["map", "--json", "--force"],
+                "atlas_map",
+                &json!({"project_path": root, "json": true, "force": true}),
+                false,
+            )?;
+            if fs::read(&outside)? != b"outside map bytes"
+                || fs::read(&sidecar)? == b"outside map bytes"
+            {
+                return Err(
+                    io::Error::other("default map replacement changed its outside owner").into(),
+                );
+            }
+            fs::remove_file(&sidecar)?;
+            #[cfg(any(unix, windows))]
+            {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&outside, &sidecar)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(&outside, &sidecar)?;
+                for dangling in [false, true] {
+                    if dangling {
+                        fs::remove_file(&outside)?;
+                    }
+                    let error = invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut session),
+                        &["map", "--json", "--force"],
+                        "atlas_map",
+                        &json!({"project_path": root, "json": true, "force": true}),
+                        true,
+                    )?;
+                    if !error.contains("automatic output requires a direct regular file")
+                        || (!dangling && fs::read(&outside)? != b"outside map bytes")
+                        || (dangling && outside.exists())
+                    {
+                        return Err(io::Error::other(format!(
+                            "default map alias was followed: {error}"
+                        ))
+                        .into());
+                    }
+                }
+                fs::remove_file(&sidecar)?;
+                let gitignore = root.join(".gitignore");
+                if gitignore.exists() {
+                    fs::remove_file(&gitignore)?;
+                }
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&outside, &gitignore)?;
+                #[cfg(windows)]
+                std::os::windows::fs::symlink_file(&outside, &gitignore)?;
+                for live in [false, true] {
+                    if live {
+                        fs::write(&outside, b"outside ignore bytes")?;
+                    }
+                    let report = invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut session),
+                        &["ignore", "init-gitignore"],
+                        "atlas_ignore_init_gitignore",
+                        &json!({"project_path": root}),
+                        false,
+                    )?;
+                    let status = if mcp {
+                        report.contains("created: false") && report.contains("existed: true")
+                    } else {
+                        let value: Value = serde_json::from_str(&report)?;
+                        value["created"] == false && value["existed"] == true
+                    };
+                    if !status
+                        || (!live && outside.exists())
+                        || (live && fs::read(&outside)? != b"outside ignore bytes")
+                    {
+                        return Err(io::Error::other(format!(
+                            "existing Gitignore alias changed: {report}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            // The legacy import is protected even though regular managed entries
+            // are otherwise replaceable without modifying their hardlink owner.
+            let legacy = root.join(".projectatlas/projectatlas.toon");
+            fs::write(&legacy, b"legacy import bytes")?;
+            fs::hard_link(&legacy, &sidecar)?;
+            let error = invoke(
+                &executable,
+                &root,
+                mcp.then_some(&mut session),
+                &["map", "--json", "--force"],
+                "atlas_map",
+                &json!({"project_path": root, "json": true, "force": true}),
+                true,
+            )?;
+            if !error.contains("JSON sidecar aliases the legacy map")
+                || fs::read(&legacy)? != b"legacy import bytes"
+            {
+                return Err(io::Error::other(format!(
+                    "legacy map alias was not protected: {error}"
+                ))
+                .into());
+            }
+            fs::write(&config, &original_config)?;
+
+            let operator_config = root.with_extension("operator.toml");
+            let selected_config = root.with_extension("selected.toml");
+            let operator_map = root.with_extension("operator-map.toon");
+            let operator_sidecar = operator_map.with_extension("json");
+            let operator_target = root.with_extension("operator-output");
+            document["project"]["map_path"] = toml::Value::String(
+                operator_map
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("fixture map path is not UTF-8"))?
+                    .to_owned(),
+            );
+            let operator_before = toml::to_string(&document)?;
+            fs::write(&operator_config, &operator_before)?;
+            fs::hard_link(&operator_config, &selected_config)?;
+            fs::write(&operator_target, b"explicit output bytes")?;
+            fs::hard_link(&operator_target, &operator_sidecar)?;
+            let config_argument = selected_config
+                .to_str()
+                .ok_or_else(|| io::Error::other("fixture config path is not UTF-8"))?;
+            let mut configured_session = if mcp {
+                let (session, _) = McpContractSession::spawn_configured(
+                    &executable,
+                    &root,
+                    &root.join(DATABASE_PATH),
+                    Some(&selected_config),
+                    &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+                )?;
+                Some(session)
+            } else {
+                None
+            };
+            let configured_result = (|| -> Result<(), Box<dyn Error>> {
+                invoke(
+                    &executable,
+                    &root,
+                    configured_session.as_mut(),
+                    &[
+                        "--config",
+                        config_argument,
+                        "ignore",
+                        "add",
+                        "--kind",
+                        "path-prefix",
+                        "generated",
+                    ],
+                    "atlas_ignore_add",
+                    &json!({"kind": "path-prefix", "value": "generated"}),
+                    false,
+                )?;
+                if fs::read_to_string(&operator_config)? == operator_before {
+                    return Err(io::Error::other(
+                        "explicit config lost its supported link semantics",
+                    )
+                    .into());
+                }
+                invoke(
+                    &executable,
+                    &root,
+                    configured_session.as_mut(),
+                    &["--config", config_argument, "map", "--json", "--force"],
+                    "atlas_map",
+                    &json!({"json": true, "force": true}),
+                    false,
+                )?;
+                let published: Value = serde_json::from_slice(&fs::read(&operator_target)?)?;
+                if !published.is_object()
+                    || !same_file::is_same_file(&operator_target, &operator_sidecar)?
+                {
+                    return Err(io::Error::other(
+                        "explicit custom map lost its supported destination",
+                    )
+                    .into());
+                }
+                Ok(())
+            })();
+            if let Some(configured_session) = configured_session {
+                complete_mcp_test_after_shutdown(configured_result, || {
+                    configured_session.shutdown()
+                })?;
+            } else {
+                configured_result?;
             }
         }
         Ok(())
@@ -7542,7 +7915,21 @@ impl McpContractSession {
         database: &Path,
         environment: &[(&str, Option<&str>)],
     ) -> Result<(Self, Value), Box<dyn Error>> {
+        Self::spawn_configured(executable, repo, database, None, environment)
+    }
+
+    /// Select an explicit operator config without changing the transport lifecycle.
+    fn spawn_configured(
+        executable: &Path,
+        repo: &Path,
+        database: &Path,
+        config: Option<&Path>,
+        environment: &[(&str, Option<&str>)],
+    ) -> Result<(Self, Value), Box<dyn Error>> {
         let mut command = StdCommand::new(executable);
+        if let Some(config) = config {
+            command.arg("--config").arg(config);
+        }
         command
             .current_dir(repo)
             .arg("--db")

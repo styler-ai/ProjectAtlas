@@ -11,6 +11,12 @@ const STATE_DIRECTORY: &str = ".projectatlas";
 const DATABASE_FILE: &str = "projectatlas.db";
 /// Default config whose creation remains an automatic project output.
 const CONFIG_FILE: &str = "config.toml";
+/// Legacy root configuration selected by the existing discovery fallback.
+const LEGACY_CONFIG_FILE: &str = "projectatlas.toml";
+/// Optional sidecar next to the default legacy map import location.
+const JSON_MAP_FILE: &str = "projectatlas.json";
+/// Git's fixed root-level exclusion document.
+const GITIGNORE_FILE: &str = ".gitignore";
 /// Default nonsource metadata created by every ordinary initializer.
 const NONSOURCE_FILE: &str = "projectatlas-nonsource-files.toon";
 /// Automatically generated host outputs, all preflighted before identity changes.
@@ -50,6 +56,41 @@ enum StateAdmission {
     Database,
     /// Also admit bootstrap and generated-host destinations.
     Generated,
+    /// Mutate only one exact managed document, independently of other outputs.
+    Document(ProjectDocument),
+}
+
+/// Fixed project destinations whose implicit writers must not follow aliases.
+#[derive(Clone, Copy)]
+enum ProjectDocument {
+    /// Configuration in the direct private state directory.
+    Config,
+    /// Legacy root-level configuration.
+    LegacyConfig,
+    /// Explicitly requested default JSON map sidecar.
+    JsonMap,
+    /// Create Git exclusions only when no directory entry already exists.
+    Gitignore,
+}
+
+impl ProjectDocument {
+    /// Return the fixed filename owned by this document kind.
+    const fn filename(self) -> &'static str {
+        match self {
+            Self::Config => CONFIG_FILE,
+            Self::LegacyConfig => LEGACY_CONFIG_FILE,
+            Self::JsonMap => JSON_MAP_FILE,
+            Self::Gitignore => GITIGNORE_FILE,
+        }
+    }
+
+    /// Select the direct directory without following the private namespace.
+    fn directory(self, root: &Path) -> PathBuf {
+        match self {
+            Self::Config | Self::JsonMap => root.join(STATE_DIRECTORY),
+            Self::LegacyConfig | Self::Gitignore => root.to_path_buf(),
+        }
+    }
 }
 
 /// Retain the admitted root and existing state-directory objects during writes.
@@ -61,14 +102,14 @@ pub(crate) struct ProjectStateGuard {
     root: PathBuf,
     /// Retained root object, preventing reuse of its old filesystem identity.
     root_identity: Handle,
-    /// Product-owned direct directory under the selected root.
+    /// Admitted publication directory: the root or its direct private directory.
     directory: PathBuf,
     /// Existing state-directory object, when one was present at admission.
     directory_identity: Option<Handle>,
     /// Selected automatic database; external operator paths remain independent.
     automatic_database: Option<PathBuf>,
-    /// Selected default configuration; explicit external paths are not inferred.
-    automatic_config: Option<PathBuf>,
+    /// Exact automatic document; explicit custom/external paths are not inferred.
+    automatic_document: Option<PathBuf>,
     /// The concrete operation boundary, never a process-global routing setting.
     admission: StateAdmission,
 }
@@ -99,6 +140,43 @@ impl ProjectStateGuard {
         Self::admit(&root, Some(database), None, StateAdmission::Database).map(Some)
     }
 
+    /// Admit one fixed document while preserving custom/external operator paths.
+    pub(crate) fn preflight_document(root: &Path, path: &Path) -> io::Result<Option<Self>> {
+        let root = fs::canonicalize(root)?;
+        for document in [
+            ProjectDocument::Config,
+            ProjectDocument::LegacyConfig,
+            ProjectDocument::JsonMap,
+            ProjectDocument::Gitignore,
+        ] {
+            if !named(path.file_name(), document.filename()) {
+                continue;
+            }
+            let directory = document.directory(&root);
+            let owned = match document {
+                ProjectDocument::Config | ProjectDocument::JsonMap => {
+                    owned_named_path(path, &directory, document.filename())
+                }
+                ProjectDocument::LegacyConfig | ProjectDocument::Gitignore => {
+                    path.parent().is_some_and(|parent| {
+                        fs::canonicalize(parent).is_ok_and(|value| value == root)
+                    })
+                }
+            };
+            if owned {
+                let target = directory.join(document.filename());
+                return Self::admit(
+                    &root,
+                    None,
+                    Some(&target),
+                    StateAdmission::Document(document),
+                )
+                .map(Some);
+            }
+        }
+        Ok(None)
+    }
+
     /// Capture the exact filesystem owner for one operation role.
     fn admit(
         root: &Path,
@@ -111,7 +189,10 @@ impl ProjectStateGuard {
             return Err(refusal(root, "selected canonical root changed"));
         }
         let root_identity = Handle::from_path(root)?;
-        let directory = root.join(STATE_DIRECTORY);
+        let directory = match admission {
+            StateAdmission::Document(document) => document.directory(root),
+            StateAdmission::Database | StateAdmission::Generated => root.join(STATE_DIRECTORY),
+        };
         let directory_identity = match optional_metadata(&directory)? {
             Some(metadata) => {
                 require_directory(&directory, &metadata)?;
@@ -122,16 +203,19 @@ impl ProjectStateGuard {
         let automatic_database = database
             .filter(|path| owned_named_path(path, &directory, DATABASE_FILE))
             .map(Path::to_path_buf);
-        let automatic_config = config
-            .filter(|path| owned_named_path(path, &directory, CONFIG_FILE))
-            .map(Path::to_path_buf);
+        let automatic_document = match admission {
+            StateAdmission::Document(_) => config.map(Path::to_path_buf),
+            StateAdmission::Database | StateAdmission::Generated => config
+                .filter(|path| owned_named_path(path, &directory, CONFIG_FILE))
+                .map(Path::to_path_buf),
+        };
         let guard = Self {
             root: root.to_path_buf(),
             root_identity,
             directory,
             directory_identity,
             automatic_database,
-            automatic_config,
+            automatic_document,
             admission,
         };
         guard.verify()?;
@@ -149,11 +233,17 @@ impl ProjectStateGuard {
             if !nonsource.exists() {
                 require_regular_or_absent(&nonsource)?;
             }
-            if let Some(config) = &self.automatic_config
+            if let Some(config) = &self.automatic_document
                 && !config.exists()
             {
                 require_regular_or_absent(config)?;
             }
+        }
+        if let StateAdmission::Document(document) = self.admission
+            && !matches!(document, ProjectDocument::Gitignore)
+            && let Some(path) = &self.automatic_document
+        {
+            require_regular_or_absent(path)?;
         }
         if let Some(database) = &self.automatic_database {
             for suffix in WAL_SIDECAR_SUFFIXES {
@@ -214,7 +304,7 @@ impl ProjectStateGuard {
 
     /// Create only the admitted direct state directory and retain its object.
     pub(crate) fn ensure_directory(&mut self) -> io::Result<()> {
-        if !matches!(self.admission, StateAdmission::Generated) {
+        if matches!(self.admission, StateAdmission::Database) {
             return Err(refusal(
                 &self.directory,
                 "database admission cannot create generated state",
@@ -236,11 +326,42 @@ impl ProjectStateGuard {
     /// Publish a generated entry without writing through an existing file alias.
     pub(crate) fn write_generated(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         self.publish(path, bytes, FilePublication::Replace, || Ok(()))
+            .map(|_| ())
     }
 
     /// Publish defaults without exposing partial bytes or replacing existing data.
     pub(crate) fn write_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         self.publish(path, bytes, FilePublication::Create, || Ok(()))
+            .map(|_| ())
+    }
+
+    /// Replace only the exact admitted document, preserving existing permissions.
+    pub(crate) fn write_document(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.ensure_directory()?;
+        let path = self.document_path()?;
+        self.publish(path, bytes, FilePublication::Replace, || Ok(()))
+            .map(|_| ())
+    }
+
+    /// Atomically create an admitted document, reporting a racing existing entry.
+    pub(crate) fn create_document(&mut self, bytes: &[u8]) -> io::Result<bool> {
+        self.ensure_directory()?;
+        self.publish(
+            self.document_path()?,
+            bytes,
+            FilePublication::Create,
+            || Ok(()),
+        )
+    }
+
+    /// Keep document publication bound to its constructor-selected target.
+    fn document_path(&self) -> io::Result<&Path> {
+        if !matches!(self.admission, StateAdmission::Document(_)) {
+            return Err(refusal(&self.root, "document admission is required"));
+        }
+        self.automatic_document
+            .as_deref()
+            .ok_or_else(|| refusal(&self.root, "document target is unavailable"))
     }
 
     /// Compare actual parent owners while preserving selected path spelling.
@@ -259,24 +380,51 @@ impl ProjectStateGuard {
         bytes: &[u8],
         publication: FilePublication,
         before_publication: impl FnOnce() -> io::Result<()>,
-    ) -> io::Result<()> {
-        if !matches!(self.admission, StateAdmission::Generated) {
+    ) -> io::Result<bool> {
+        if matches!(self.admission, StateAdmission::Database) {
             return Err(refusal(
                 path,
                 "database admission cannot publish generated files",
+            ));
+        }
+        if matches!(self.admission, StateAdmission::Document(_)) && path != self.document_path()? {
+            return Err(refusal(
+                path,
+                "document target differs from its admitted entry",
             ));
         }
         if !self.owns_entry(path)? {
             return Err(refusal(path, "generated output is outside its state owner"));
         }
         self.verify()?;
-        let permissions = optional_metadata(path)?
+        let gitignore_creation = matches!(
+            self.admission,
+            StateAdmission::Document(ProjectDocument::Gitignore)
+        ) && matches!(publication, FilePublication::Create);
+        if gitignore_creation && optional_metadata(path)?.is_some() {
+            return Ok(false);
+        }
+        let metadata = if gitignore_creation {
+            None
+        } else {
+            optional_metadata(path)?
+        };
+        let permissions = metadata
             .map(|metadata| {
                 require_regular(path, &metadata)?;
                 Ok::<_, io::Error>(metadata.permissions())
             })
             .transpose()?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+        #[cfg(unix)]
+        let mut builder = tempfile::Builder::new();
+        #[cfg(not(unix))]
+        let builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        if permissions.is_none() && matches!(self.admission, StateAdmission::Document(_)) {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o666));
+        }
+        let mut temporary = builder.tempfile_in(&self.directory)?;
         let prepared = (|| {
             temporary.write_all(bytes)?;
             if let Some(permissions) = permissions {
@@ -294,15 +442,27 @@ impl ProjectStateGuard {
             FilePublication::Replace => temporary.persist(path),
         };
         match result {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(mut failure) => {
                 if matches!(publication, FilePublication::Create)
                     && failure.error.kind() == io::ErrorKind::AlreadyExists
                 {
+                    if gitignore_creation {
+                        let existing = self
+                            .verify_directories()
+                            .and_then(|()| optional_metadata(path));
+                        match existing {
+                            Ok(Some(_)) => return Ok(false),
+                            Err(source) => {
+                                return Err(self.staging_failure(&mut failure.file, source));
+                            }
+                            Ok(None) => {}
+                        }
+                    }
                     let existing = self.verify().and_then(|()| optional_metadata(path));
                     match existing {
                         Ok(Some(metadata)) if !indirect(&metadata) && metadata.is_file() => {
-                            return Ok(());
+                            return Ok(false);
                         }
                         Err(source) => return Err(self.staging_failure(&mut failure.file, source)),
                         Ok(_) => {}
