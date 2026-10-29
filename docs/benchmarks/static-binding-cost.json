@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-29",
-  "source_commit": "3531b47574c3c6409eb7cfe22a51955c24180ff9",
+  "source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
   "derivation_contract": 14,
   "semantic_contract": 14,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "b05d68e498248b2b73cb5660156194532a8bd13126139c7f2a0dcb10ab6ff5f0",
+  "candidate_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -34,8 +34,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.2855905930045992,
-          "peak_rss_kib": 27468,
+          "wall_seconds": 0.29100097401533276,
+          "peak_rss_kib": 27800,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -47,8 +47,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.34091520999209024,
-          "peak_rss_kib": 33988,
+          "wall_seconds": 0.34574258301290683,
+          "peak_rss_kib": 33660,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -67,8 +67,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.33304131199838594,
-          "peak_rss_kib": 28460,
+          "wall_seconds": 0.3334017060115002,
+          "peak_rss_kib": 28800,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -80,8 +80,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.38786842999979854,
-          "peak_rss_kib": 34968,
+          "wall_seconds": 0.38861294800881296,
+          "peak_rss_kib": 34512,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -100,8 +100,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.16799606999848038,
-          "peak_rss_kib": 26432,
+          "wall_seconds": 0.1699748270038981,
+          "peak_rss_kib": 26484,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -113,8 +113,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.16010884701972827,
-          "peak_rss_kib": 29824,
+          "wall_seconds": 0.16327839001314715,
+          "peak_rss_kib": 29552,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -133,8 +133,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.10073904800810851,
-          "peak_rss_kib": 22768,
+          "wall_seconds": 0.10127518000081182,
+          "peak_rss_kib": 23188,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -146,8 +146,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11682017298880965,
-          "peak_rss_kib": 25788,
+          "wall_seconds": 0.11635323299560696,
+          "peak_rss_kib": 25696,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -166,8 +166,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.11406613199505955,
-          "peak_rss_kib": 23696,
+          "wall_seconds": 0.11304260999895632,
+          "peak_rss_kib": 24372,
           "work": {
             "candidates": 1,
             "parsed": 1,
@@ -179,8 +179,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14175645299837925,
-          "peak_rss_kib": 27692,
+          "wall_seconds": 0.14304742100648582,
+          "peak_rss_kib": 26884,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -206,5 +206,33 @@
     "host_named_callers_verified": 63,
     "contextual_baseline": "selected named caller anchors unavailable in both native and host cases; not merely zero call rows",
     "sample_assertions": "Every candidate sample checks resolved calls and expected occurrences; a separate probe checks exact targets and baseline state; all 63 host callers are checked after measurement."
+  },
+  "reexport_storage": {
+    "protocol": "Three alternating paired rounds, same semantic14 source, fresh fixture/process, GNU time RSS maximum and median elapsed initialization; ordinary exact caller target and zero-parsed no-op verified after every sample. Long missing module remains unresolved, not falsely resolved.",
+    "baseline_source_commit": "3531b47574c3c6409eb7cfe22a51955c24180ff9",
+    "baseline_binary_sha256": "b05d68e498248b2b73cb5660156194532a8bd13126139c7f2a0dcb10ab6ff5f0",
+    "candidate_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
+    "candidate_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
+    "source_hashes": {
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "barrel.js": "bd09d8769016636baaffbd8c1c64c8d5298333865e39d06801aed07986e911ef",
+      "target.js": "daf7c1ff3c305ff0d909f412f001c3ccf10944e05854f628b777b2e0a0908816",
+      "caller.js": "be151cf34dfab9fb26540494c47d17ed0a7d8f84ed5e8434d9d81a7786fadc80"
+    },
+    "module_literal_bytes": 65538,
+    "export_slots": 512,
+    "authored_bytes": 73741,
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 0.16101096701459028,
+        "max_peak_rss_kib": 56752
+      },
+      "candidate": {
+        "wall_seconds": 0.13649863001774065,
+        "max_peak_rss_kib": 25444
+      }
+    },
+    "scope": "Targeted storage regression, separate from 0.5.0 affected-work comparison and release SLOs."
   }
 }

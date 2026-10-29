@@ -3,7 +3,17 @@
 ## Current source and proof override
 
 Primary works in731, public48e9f591b0d02d015550946f0cde606584bdd023 on PR737.
-Source3531b47 DER14/SEM14 plus owned UNCOMMITTED sharedmodule allocation repair.
+Currentclean sourcecheckpoint0f403aa includes sharedmodule allocation repair,
+DER14/SEM14unchanged. Optimizedcurrentbuild2591PASS;30pairedaffectedworkplus6
+pairedstorage-regression samples23398PASS. Immutabledefaultrelease852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e,
+/tmp/projectatlas-731-shared-module-optimized-path.txt andcandidate-binding.json.
+Docsbenchmarksnowcurrent0f403/sourceboundbinary. Separatestoragefixture65,538byte
+module512slots median0.161011->0.136499s,maxRSS56752->25444KiB (15.2%time/55.2%RSS
+lower); ordinaryexacttargetandzero-parsednoopverifiedeachsample. Main5casesstill
+correctedworkvs050increases (rootwall1.188/1.166,RSS1.211/1.198;dense.961/1.116;
+context1.149/1.108;host1.265/1.103). No708SLOwaiver. Exact4targetpostprobePASS.
+Costraw /tmp/projectatlas-731-binding-cost-shared-modules.json and
+/tmp/projectatlas-731-reexport-storage-cost-proof.json; docsretainoldcomparison.
 Prior normalnativepush53154 PASS. No merge/RC. Earlier public92b/hours estimates
 below are historical: no reliable releaseETA while engineering issues remain.
 Shared target nowleased731;741 finished focusedpipeline67993 and committed e1e633c.
@@ -12,7 +22,7 @@ SHA b6aa4229f5bcae98f7b8941f61380b5e2cd823bc6011f8d696930e68de3a87e5.
 
 Current wholeissue Luna review found reachable re-export moduleclone amplification:
 one longliteral copied per exportslot before postextractadmission. Reopened7312.5/2.7duringreview; current2.5source/actualCLI-MCPproofcompleteand
-2.6earlierupgrade/failureproofreconciled:7/9implementation,2.7/3.1/all5acceptanceopen. Exactbodyreadback
+2.6earlierupgrade/failureproofreconciled:8/9implementation,3.1/all5acceptanceopen;2.7nowcheckedaftercurrentcost/proofhandoff. Exactbodyreadback
 /tmp/projectatlas-731-shared-module-readback.json, strict/scoped9/9/5PASS.
 Proposal/design/spec expanded sameowner/RC1, no arbitrary newpath restrictions.
 New owning test causallyFAIL beforefix, nowPASS0.08s for JS/TS/TSX/Vue/Svelte/HTML:
@@ -280,3 +290,13 @@ ExactRC versions/pins, cleanparser4OS, allinstalledCLI/nested/MCP/plugin/skills/
 realhosts, upgradesincl045/recovery/concurrency/performance/security/deps/packages,
 normalprotectedPRs, tag/non-draftprereleaseLatestfalse, assets/downloadSHA/install/
 Latest050readback pending. NoRCexists; activeunlimitedgoal, notblocked.
+
+## Immediate next action
+
+Normalnativepush currentcommittedsource+costhandoff to existingPR737, then resolve
+strictnessandtworesource feedbackthreads with publishedfix/counterevidence, reconcile
+PRbody/hosted/currentsource and finalLunaacceptance. Do notmergewhile3.1/all5open.
+No activeCargo/benchmark atwrite; target731untilnormalpushterminal.741fullLunareview
+found confirmedlegacyinitbypass: init --config projectatlas.toml danglingalias writes
+outside becauseGeneratedguardownsprivateconfigonly. Fix741underRC1;2.1stillopen,
+no silentdeferral. Primarycanedit741while731nativepushbutnotbuildbeforetargetfree.

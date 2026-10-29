@@ -8,7 +8,8 @@ verified. Exact identities, fixture hashes, work counters and protocol are in
 
 The measurements use the optimized contract 14/14 source, including source goals,
 host roles, contextual-keyword/arrow recovery and exact module identities, alongside
-the preceding declaration, binding, occurrence and bounded-forwarding repairs.
+the preceding declaration, binding, occurrence and bounded-forwarding repairs,
+and shared re-export module storage before staging admission.
 The source and binary identities are recorded in the compact result. The original
 contract-12 fixtures and raw measurements remain preserved; the three shared fixture
 source sets are unchanged. This evidence remains separate from release acceptance.
@@ -21,22 +22,23 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2856 | 0.3409 | 27468 | 33988 |
-| 64 Cargo roots, 256 callers | 0.3330 | 0.3879 | 28460 | 34968 |
-| Dense/comment/nested source | 0.1680 | 0.1601 | 26432 | 29824 |
-| 256 contextual-keyword calls | 0.1007 | 0.1168 | 22768 | 25788 |
-| 64 script programs, 63 callers | 0.1141 | 0.1418 | 23696 | 27692 |
+| Four Cargo roots, 256 callers | 0.2910 | 0.3457 | 27800 | 33660 |
+| 64 Cargo roots, 256 callers | 0.3334 | 0.3886 | 28800 | 34512 |
+| Dense/comment/nested source | 0.1700 | 0.1633 | 26484 | 29552 |
+| 256 contextual-keyword calls | 0.1013 | 0.1164 | 23188 | 25696 |
+| 64 script programs, 63 callers | 0.1130 | 0.1430 | 24372 | 26884 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-Their measured initial time increases by about 16–19%, and maximum RSS by 23–24%.
-The dense Rust case improves median time by about 5%, with about 13% higher RSS.
-The contextual native case adds about 16% time and 13% RSS; the host case adds about
-24% time and 17% RSS. Both contextual fixtures lack the selected named caller anchor
-in the baseline; these compare different successfully extracted work. They establish
-neither a general speedup nor a root-count asymptotic bound beyond these inputs.
+The root initial-time ratios are 1.188 and 1.166; maximum-RSS ratios
+are 1.211 and 1.198. Dense Rust time/RSS ratios are
+0.961/1.116. Native contextual time/RSS ratios are
+1.149/1.108, and host ratios are 1.265/1.103.
+Both contextual fixtures lack the selected named caller anchor in the baseline;
+these compare different successfully extracted work. They establish neither a
+general speedup nor a root-count asymptotic bound beyond these inputs.
 
 The root fixtures use explicit binary targets at `targets/tN/main.rs`, each
 containing `pub fn run()` and declared worker modules. Each worker imports
@@ -141,3 +143,20 @@ than the final #731 derivation, retaining its semantic contract, so unchanged
 private candidates cannot bypass the document/exclusion repairs. Keep the separate 0.4.5 schema-upgrade proof. Reconcile the
 complete installed surface, clean parser-pack build, exact RC version/pins,
 checksums and prerelease/Latest classification before publication acceptance.
+
+
+The re-export storage regression has a separate paired comparison against the
+preceding optimized contract-14 source. One 65,538-byte missing module literal is
+shared by 512 explicit export slots; an independent ordinary imported caller must
+still resolve to `target.js::work`. Every sample also verifies a zero-parsed no-op.
+The long module is retained as source evidence without inventing a filesystem target.
+
+Across three alternating paired rounds, initialization median fell from
+0.1610 to 0.1365 seconds and maximum peak RSS fell from
+56,752 to 25,444 KiB. This is about
+15.2% less elapsed time and
+55.2% less peak RSS for this bounded regression fixture.
+The source hash set and both executable identities are in the compact result.
+Causal source tests additionally check shared module allocation, clone behavior and
+retained-byte accounting across JavaScript, TypeScript, TSX, Vue, Svelte and HTML.
+This targeted repair does not waive the separate release performance gates.
