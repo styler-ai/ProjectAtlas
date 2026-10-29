@@ -18,7 +18,11 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 13;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 14;
+/// Disjoint ECMAScript lookup namespaces for explicit files and inferred modules.
+const ECMA_FILE_SCOPE: &str = "file:";
+/// Legacy extensionless and package-entry aliases never identify an explicit file.
+const ECMA_MODULE_SCOPE: &str = "module:";
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -811,7 +815,7 @@ pub fn derive_resolution_keys_with_context(
     let language = GraphIdentityText::new(resolution_family)?;
     let package = package.map(GraphIdentityText::new).transpose()?;
 
-    let source_scopes = canonical_source_scopes(&graph.path);
+    let source_scopes = canonical_source_scopes(&graph.path, provider_owner);
     let configured_source_scopes =
         if provider_owner == SemanticProviderOwner::EcmaScript && package.is_some() {
             canonical_configured_source_scopes(&graph.path)
@@ -1719,7 +1723,10 @@ fn bounded_keys(
 }
 
 /// Return normalized canonical scopes exported by a repository source path.
-fn canonical_source_scopes(path: &str) -> Vec<String> {
+fn canonical_source_scopes(path: &str, provider: SemanticProviderOwner) -> Vec<String> {
+    if provider == SemanticProviderOwner::EcmaScript {
+        return canonical_configured_source_scopes(path);
+    }
     let mut scopes = source_stems_for_path(path);
     scopes.extend(module_aliases_for_path(path));
     normalize_scopes(scopes, normalize_repository_scope)
@@ -1729,12 +1736,53 @@ fn canonical_source_scopes(path: &str) -> Vec<String> {
 fn canonical_configured_source_scopes(path: &str) -> Vec<String> {
     let mut scopes = source_stems_for_path(path)
         .into_iter()
-        .map(|scope| normalize_repository_scope(&scope))
         .filter(|scope| !scope.is_empty())
         .collect::<Vec<_>>();
     scopes.sort();
     scopes.dedup();
+    ecmascript_source_scopes(path, scopes)
+}
+
+/// Frame extensionless aliases separately from explicit file identities.
+///
+/// Keep only the established JavaScript-output source substitutions. These keys
+/// represent candidate sets, not compiler search order; competing files remain
+/// ambiguous. In particular `.mjs`, `.cjs` and embedded hosts never share them.
+fn ecmascript_source_scopes(path: &str, module_scopes: Vec<String>) -> Vec<String> {
+    let mut scopes = module_scopes
+        .into_iter()
+        .map(|scope| format!("{ECMA_MODULE_SCOPE}{scope}"))
+        .collect::<Vec<_>>();
+    scopes.push(format!("{ECMA_FILE_SCOPE}{path}"));
+    let lower = path.to_ascii_lowercase();
+    let substitution = [".d.ts", ".tsx", ".ts", ".jsx"]
+        .into_iter()
+        .find(|extension| lower.ends_with(extension));
+    if let Some(extension) = substitution {
+        let stem = &path[..path.len() - extension.len()];
+        scopes.push(format!("{ECMA_FILE_SCOPE}{stem}.js"));
+        if matches!(extension, ".d.ts" | ".tsx") {
+            scopes.push(format!("{ECMA_FILE_SCOPE}{stem}.jsx"));
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
     scopes
+}
+
+/// Preserve explicit terminal suffixes independently of automatic language
+/// detection; directory dots do not make an extensionless module a file lookup.
+pub(super) fn ecmascript_module_scope(path: &str) -> String {
+    let explicit = path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.'));
+    let namespace = if explicit {
+        ECMA_FILE_SCOPE
+    } else {
+        ECMA_MODULE_SCOPE
+    };
+    format!("{namespace}{path}")
 }
 
 /// Normalize, expand, sort, and deduplicate candidate scopes.
@@ -2519,6 +2567,8 @@ mod tests {
 
     #[test]
     fn semantic_resolution_contract_digest_is_bounded_and_deterministic() {
+        const PRE_ARROW_CONTEXT_DIGEST: &str =
+            "66cab1855f1689308cdc5bb858a63e8d3ed42e825b073d62cada7347383731a7";
         const PRE_SOURCE_CONTEXT_DIGEST: &str =
             "784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424";
         const PRE_GENERATOR_DECLARATION_DIGEST: &str =
@@ -2526,13 +2576,14 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 13);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 14);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
         assert_ne!(first, PRE_MODULE_CALLBACK_DIGEST);
         assert_ne!(first, PRE_GENERATOR_DECLARATION_DIGEST);
         assert_ne!(first, PRE_SOURCE_CONTEXT_DIGEST);
+        assert_ne!(first, PRE_ARROW_CONTEXT_DIGEST);
     }
 
     #[test]
@@ -2747,6 +2798,173 @@ mod tests {
             resolve_relative_import_path("src/foo.bar/main.ts", "./reader"),
             Some("src/foo.bar/reader".to_string())
         );
+    }
+
+    #[test]
+    fn explicit_ecmascript_suffixes_do_not_merge_module_or_callable_targets()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(94)?;
+        let configured = ConfiguredModuleResolution::new(vec![EcmaScriptModuleConfig::new(
+            "tsconfig.json",
+            EcmaScriptConfigKind::TypeScript,
+            Some("src".to_string()),
+            vec![EcmaScriptPathMapping::new(
+                "@/*",
+                vec!["src/*".to_string()],
+            )?],
+        )?])?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let targets = [
+            ("js", "javascript", "export function run(){}"),
+            ("jsx", "javascript", "export function run(){}"),
+            ("ts", "typescript", "export function run(){}"),
+            ("tsx", "tsx", "export function run(){}"),
+            ("d.ts", "typescript", "export declare function run(): void;"),
+            ("mjs", "javascript", "export function run(){}"),
+            ("cjs", "javascript", "function run(){}"),
+            ("vue", "vue", "<script>export function run(){}</script>"),
+            (
+                "svelte",
+                "svelte",
+                "<script module>export function run(){}</script>",
+            ),
+            (
+                "html",
+                "html",
+                "<script type='module'>export function run(){}</script>",
+            ),
+            (
+                "htm",
+                "html",
+                "<script type='module'>export function run(){}</script>",
+            ),
+            ("js.ts", "typescript", "export function run(){}"),
+            ("json.ts", "typescript", "export function run(){}"),
+            ("widget", "typescript", "export function run(){}"),
+        ];
+        for (specifier, allowed) in [
+            ("target.svelte", &["svelte"][..]),
+            ("target.html", &["html"][..]),
+            ("target.htm", &["htm"][..]),
+            ("target.vue", &["vue"][..]),
+            ("target.mjs", &["mjs"][..]),
+            ("target.cjs", &["cjs"][..]),
+            ("target.ts", &["ts"][..]),
+            ("target.tsx", &["tsx"][..]),
+            ("target.d.ts", &["d.ts"][..]),
+            ("target.js", &["js", "jsx", "ts", "tsx", "d.ts"][..]),
+            ("target.jsx", &["jsx", "tsx", "d.ts"][..]),
+            ("target.json", &[][..]),
+            ("target.widget", &["widget"][..]),
+            ("target/index.js", &[][..]),
+            ("../target", &[][..]),
+        ] {
+            for prefix in ["./", "@/", ""] {
+                let source = format!(
+                    "import {{run}} from '{prefix}{specifier}'; function caller(){{run();}}"
+                );
+                let caller = crate::extract_symbol_graph_with_semantics_controlled(
+                    "src/caller.ts",
+                    Some("typescript"),
+                    &source,
+                    &control,
+                )?;
+                let caller_keys = derive_resolution_keys_with_context(
+                    project,
+                    Some("app"),
+                    caller.graph(),
+                    ResolutionProjectionContext::with_configured_modules(&configured)
+                        .with_source_semantics(caller.semantics()),
+                )?;
+                let dependencies =
+                    relation_keys_of_kind(caller.graph(), &caller_keys, RelationKind::Imports);
+                for (suffix, language, source) in targets {
+                    let path = format!("src/target.{suffix}");
+                    let target = crate::extract_symbol_graph_with_semantics_controlled(
+                        &path,
+                        Some(language),
+                        source,
+                        &control,
+                    )?;
+                    let target_keys = derive_resolution_keys_with_context(
+                        project,
+                        Some("app"),
+                        target.graph(),
+                        ResolutionProjectionContext::default()
+                            .with_source_semantics(target.semantics()),
+                    )?;
+                    let expected = allowed.contains(&suffix);
+                    require(
+                        dependencies
+                            .iter()
+                            .any(|keys| keys_intersect(keys, target_keys.source_keys()))
+                            == expected,
+                        &format!("module: {prefix}{specifier} -> {path}"),
+                    )?;
+                    let calls = relation_keys(caller.graph(), &caller_keys, "run");
+                    let exports = symbol_keys(target.graph(), &target_keys, "run");
+                    require(
+                        keys_intersect(calls, exports)
+                            == (expected && !matches!(suffix, "cjs" | "d.ts")),
+                        &format!("call: {prefix}{specifier} -> {path}"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ecmascript_module_paths_preserve_entry_aliases_and_literal_file_names()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(95)?;
+        for (caller_path, module, target_path, expected) in [
+            ("src/main.ts", "./tools", "src/tools/index.ts", true),
+            (
+                "src/main.ts",
+                "./tools/index.ts",
+                "src/tools/index.ts",
+                true,
+            ),
+            ("src/main.ts", "./tools.js", "src/tools/index.ts", false),
+            (
+                "src/foo.bar/main.ts",
+                "./tools",
+                "src/foo.bar/tools.ts",
+                true,
+            ),
+            ("src/main.ts", "./tools", "packages/other/tools.ts", false),
+            ("main.ts", "./target  name.js", "target  name.js", true),
+            ("main.ts", "./target::name.js", "target::name.js", true),
+        ] {
+            let caller = extract_symbol_graph(
+                caller_path,
+                Some("typescript"),
+                &format!("import {{run}} from '{module}'; function caller(){{run();}}"),
+            );
+            let target =
+                extract_symbol_graph(target_path, Some("typescript"), "export function run(){}");
+            let caller_keys = derive_resolution_keys(project, None, &caller)?;
+            let target_keys = derive_resolution_keys(project, None, &target)?;
+            require(
+                relation_keys_of_kind(&caller, &caller_keys, RelationKind::Imports)
+                    .iter()
+                    .any(|keys| keys_intersect(keys, target_keys.source_keys()))
+                    == expected,
+                &format!("module: {caller_path}: {module} -> {target_path}"),
+            )?;
+            require(
+                keys_intersect(
+                    relation_keys(&caller, &caller_keys, "run"),
+                    symbol_keys(&target, &target_keys, "run"),
+                ) == expected,
+                &format!("call: {caller_path}: {module} -> {target_path}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -3119,7 +3337,8 @@ mod tests {
         let modules = cache
             .get("src/page.ts")
             .ok_or_else(|| io::Error::other("source graph omitted its import-scope cache"))?;
-        if modules.len() != 1 || modules.get("@/controller") != Some(&vec!["src/controller".into()])
+        if modules.len() != 1
+            || modules.get("@/controller") != Some(&vec!["module:src/controller".into()])
         {
             return Err(io::Error::other(
                 "repeated imported calls did not reuse one configured scope expansion",
@@ -3608,7 +3827,8 @@ mod tests {
         let provider = projectatlas_core::graph::GraphIdentityText::new("ecma-script")?;
         let family = projectatlas_core::graph::GraphIdentityText::new("ecmascript")?;
         let package = projectatlas_core::graph::GraphIdentityText::new("web")?;
-        let identity = projectatlas_core::graph::GraphIdentityText::new("src/shared/reader")?;
+        let identity =
+            projectatlas_core::graph::GraphIdentityText::new("module:src/shared/reader")?;
         let expected = CanonicalResolutionKey::new(
             project,
             projectatlas_core::graph::ResolutionKeyDomain::Module,
@@ -4038,11 +4258,11 @@ mod tests {
         Ok(())
     }
 
-    fn require(condition: bool, message: &'static str) -> Result<(), Box<dyn Error>> {
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
         if condition {
             Ok(())
         } else {
-            Err(io::Error::other(message).into())
+            Err(io::Error::other(message.to_string()).into())
         }
     }
 

@@ -6,10 +6,13 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-This comparison uses the reviewed contract 12/12 source, including generator declaration ownership, separate body
+The measurements below retain the reviewed contract 12/12 baseline, including generator declaration ownership, separate body
 and parameter environments, bounded Rust/shared forwarding workspaces, bare-var
 and recovered-initializer handling, Python directive/export evidence and deferred
-bindings. It remains separate from release acceptance.
+bindings. Current contract 14/14 additionally repairs actual source goals, host roles
+and contextual-keyword/arrow recovery. Its source-bound cost campaign is required
+before acceptance; the older measurements below are not current-contract proof.
+This evidence remains separate from release acceptance.
 
 Three paired rounds alternate baseline/candidate order. Each sample initializes
 a fresh non-Git fixture in a fresh process; filesystem/page caches remain warm.
@@ -57,6 +60,7 @@ candidate package on Linux, Windows, macOS Intel and macOS ARM:
 - `e2e_navigation::lexical_capacity_preserves_navigation_and_repairs_after_source_reduction`
 - `e2e_navigation::python_directive_calls_agree_across_cli_mcp_and_refresh`
 - `e2e_navigation::bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh`
+- `e2e_navigation::ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles`
 
 The root-alias selector queries persisted imported callers and canonical summaries
 through real MCP at both manifest-root checkpoints. The lexical-capacity selector
@@ -75,6 +79,18 @@ Generator declarations and their async forms retain body/parameter ownership and
 canonical callers; default/named generator exports survive explicit re-export
 chains. Admitted Vue/Svelte/HTML script hosts preserve the same ownership.
 
+The source-context selector queries exact targets and canonical called-by summaries
+through both public CLI and MCP after initialization, a source-goal edit and full
+rebuild, then checks identity and no-op publication. It covers Script names,
+strict references/invalid bindings, implicit arguments, HTML source goals/global
+visibility, Vue/Svelte scope direction and role validity, static import admission
+and explicit-language TypeScript compatibility, and supported versus unsupported host exports.
+Same-stem HTML/Svelte targets retain their explicit suffix identities. Source-key
+controls additionally cover configured aliases/baseUrl, native output substitutions,
+unknown explicitly selected suffixes and wrong-directory basename negatives.
+Concise-arrow grammar recovery and async/module/header negatives have causal
+source-unit coverage; those CLI fixture arrow names reach the same native path.
+
 The source unit matrix separately checks all 14 native grammar families, the Rust
 build-script alias, admitted HTML/Vue/Svelte mappings, Unicode and CRLF coordinates,
 multiline imports, qualified callbacks, filtering and cancellation. Static source
@@ -85,7 +101,7 @@ retain their existing evidence and trust boundaries.
 
 ## Combined release requirements
 
-#708 must consume the final accepted #731, #732, #738 and #739 source, retain its declared
+#708 must consume the final accepted #731, #732, #738, #739 and #741 source, retain its declared
 latency/RSS targets, and measure affected source recovery, initial/full/rebuild,
 sparse/dense edits, current-contract no-ops, unaffected navigation and supported
 upgrades on all four platforms. Report genuine one-time full contract repair
@@ -97,12 +113,17 @@ not exceptions to those release targets.
 #715 must include these installed selectors in its existing candidate package
 matrix and fixture inventory, preserve the public CLI/MCP/plugin/host routes, and
 exercise stable 0.5.0 plus preceding development-contract repair, identity,
-approved-purpose status, no-op and rollback. Derivation and semantic contracts 12/12
-repair preceding private 11/11 generator ownership and 10/10 environments and retain the earlier initializer,
-reservation, directive/export, deferred-binding and occurrence repairs. The current
-optimized artifact also passes actual native upgrade/convergence checks from
-stable 0.5.0 and development contracts 5, 6, 7, 8, 10 and 11, with state/no-op/rollback
-controls as applicable. The combined #738/#739 derivation must be strictly newer
+approved-purpose status, no-op and rollback. Current derivation and semantic
+contracts 14/14 repair the source-context, occurrence-owner, arrow recovery and
+explicit module-identity defects while retaining the preceding ownership repairs.
+The current unoptimized functional candidate passes actual native upgrades from
+stable 0.5.0 and contracts 12 and 13, including unchanged-source repair, approved
+purposes and identity, full convergence, no-op, early deadline refusal, rollback
+and re-upgrade. An early deadline does not establish mid-publication cancellation.
+The older contract-12 optimized artifact passed native upgrade/convergence from
+stable 0.5.0 and contracts 5, 6, 7, 8, 10 and 11; retain those historical results
+and repeat the required final-candidate boundaries before release acceptance.
+The combined #738/#739/#741 derivation must be strictly newer
 than the final #731 derivation, retaining its semantic contract, so unchanged
 private candidates cannot bypass the document/exclusion repairs. Keep the separate 0.4.5 schema-upgrade proof. Reconcile the
 complete installed surface, clean parser-pack build, exact RC version/pins,

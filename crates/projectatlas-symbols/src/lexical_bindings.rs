@@ -1787,10 +1787,11 @@ impl LexicalCollector<'_> {
                 self.bind(scope, name, 0, true, BindingTarget::Shadow);
             }
         }
-        if let Some(imports) = self
-            .imports
-            .get(&(node.start_byte(), node.end_byte()))
-            .cloned()
+        if crate::owns_import_occurrence(node, self.graph)
+            && let Some(imports) = self
+                .imports
+                .get(&(node.start_byte(), node.end_byte()))
+                .cloned()
         {
             for import in imports {
                 if self.language == "rust" {
@@ -1897,10 +1898,11 @@ impl LexicalCollector<'_> {
         {
             self.python_match_bindings(node, self.value_declaration_scope(scope), check)?;
         }
-        if let Some(calls) = self
-            .calls
-            .get(&(node.start_byte(), node.end_byte()))
-            .cloned()
+        if crate::is_call_node(node.kind())
+            && let Some(calls) = self
+                .calls
+                .get(&(node.start_byte(), node.end_byte()))
+                .cloned()
         {
             for fact in calls {
                 let target = call_target(node)
@@ -6124,9 +6126,54 @@ function caller() { renamed(); tools.work(); }
     }
 
     #[test]
+    fn component_import_hoisting_reaches_a_preceding_module_callable() {
+        for (language, source) in [
+            (
+                "vue",
+                "<script>function caller(){run();}</script><script setup>import {run} from './worker.js';</script>",
+            ),
+            (
+                "svelte",
+                "<script module>function caller(){run();}</script><script>import {run} from './worker.js';</script>",
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                &format!("main.{language}"),
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            assert_eq!(extracted.semantics().calls().len(), 1);
+            assert!(
+                matches!(
+                    extracted.semantics().calls()[0].binding,
+                    SourceCallBinding::Imported { .. }
+                ),
+                "{language}: {:?}: {:?}",
+                extracted.semantics(),
+                extracted.graph()
+            );
+        }
+    }
+
+    #[test]
     fn contextual_keyword_calls_keep_arguments_and_real_operators_distinct() {
         for language in ["javascript", "typescript", "tsx"] {
             for (content, expected) in [
+                (
+                    "function await(){} const caller=()=>await();",
+                    vec!["await"],
+                ),
+                (
+                    "function yield(){} const caller=()=>yield();",
+                    vec!["yield"],
+                ),
+                (
+                    "function interface(){} const caller=()=>interface();",
+                    vec!["interface"],
+                ),
                 ("function yield(){} yield(yield());", vec!["yield", "yield"]),
                 ("function await(){} await(await());", vec!["await", "await"]),
                 ("'use strict'; function await(){} await();", vec!["await"]),
@@ -6147,6 +6194,22 @@ function caller() { renamed(); tools.work(); }
                 ("function await(){} await(value?:number);", vec![]),
                 ("function await(){} await(...values:number[]);", vec![]),
                 ("function await(){} await(...values);", vec!["await"]),
+                (
+                    "function yield(){} function target(){} yield* target();",
+                    vec!["target"],
+                ),
+                (
+                    "function await(){} function target(){} await* target();",
+                    vec!["target"],
+                ),
+                (
+                    "function target(){} function* caller(){yield* target();}",
+                    vec!["target"],
+                ),
+                (
+                    "function target(){} const caller=async()=>await(target());",
+                    vec!["target"],
+                ),
             ] {
                 let extracted = extract_symbol_graph_with_semantics_controlled(
                     &format!(
@@ -6210,6 +6273,207 @@ function caller() { renamed(); tools.work(); }
                         "{language}: {content}: {facts:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn restricted_arrow_keywords_never_gain_identifier_targets() {
+        for language in ["javascript", "typescript", "tsx"] {
+            for (content, typed) in [
+                ("function await(){} const caller=async()=>await();", false),
+                (
+                    "function await(){} const caller=async value=>await();",
+                    false,
+                ),
+                (
+                    "function await(){} const caller=async(value)=>await();",
+                    false,
+                ),
+                (
+                    "function await(){} export {}; const caller=()=>await();",
+                    false,
+                ),
+                ("function await(){} const caller=(value:)=>await();", true),
+                (
+                    "function await(){} const caller=(...values:)=>await();",
+                    true,
+                ),
+                ("function await(){} const caller=()\n=>await();", true),
+                (
+                    "function await(){} const caller=():number\n=>await();",
+                    true,
+                ),
+                ("function await(){} const caller=async\n()=>await();", true),
+            ] {
+                if typed && language == "javascript" {
+                    continue;
+                }
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    "main.ts",
+                    Some(language),
+                    content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                assert!(
+                    extracted.semantics().calls().iter().all(|call| matches!(
+                        call.binding,
+                        SourceCallBinding::Unresolved | SourceCallBinding::Shadowed
+                    )),
+                    "{language}: {content}: {:?}",
+                    extracted.semantics()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concise_arrow_keyword_calls_retain_actual_body_and_formal_contexts() {
+        let mut failures = Vec::new();
+        for language in ["javascript", "typescript", "tsx"] {
+            for (body, typed, resolved) in [
+                ("const caller=()=>await();", false, true),
+                ("const caller=(()=>await());", false, true),
+                ("const caller=()=>(await());", false, true),
+                ("const caller=value=>await();", false, true),
+                ("const caller=(value)=>await();", false, true),
+                ("const caller=()=>await(await());", false, true),
+                ("function outer(){return ()=>await();}", false, true),
+                (
+                    "async function outer(){const caller=()=>await();}",
+                    false,
+                    true,
+                ),
+                ("const caller=(await)=>await();", false, false),
+                ("const caller=(value:number)=>await();", true, true),
+                ("const caller=():number=>await();", true, true),
+                ("const caller=<T,>(value:T)=>await();", true, true),
+                ("const caller=()/*header*/=>await();", false, true),
+                ("const caller=()=>\nawait();", false, true),
+                ("const values=[()=>await()];", false, true),
+                ("const object={value:()=>await()};", false, true),
+                ("const value=flag?()=>await():()=>0;", false, true),
+                ("const value=flag?()=>0:()=>await();", false, true),
+            ] {
+                if typed && language == "javascript" {
+                    continue;
+                }
+                let content = format!("function await(){{}} {body}");
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    "main.ts",
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let count = if body.contains("await(await())") {
+                    2
+                } else {
+                    1
+                };
+                let facts = extracted.semantics();
+                if facts.calls().len() != count
+                    || facts.calls().iter().any(|call| {
+                        matches!(call.binding, SourceCallBinding::LocalDeclaration(_)) != resolved
+                    })
+                {
+                    let ast = crate::tree_sitter_language(language)
+                        .and_then(|grammar| {
+                            crate::parse_tree_sitter_language(&grammar, &content, &mut || {
+                                Ok::<(), std::convert::Infallible>(())
+                            })
+                            .ok()
+                            .flatten()
+                        })
+                        .map(|tree| {
+                            let mut cursor = tree.root_node().walk();
+                            let mut errors = Vec::new();
+                            loop {
+                                let node = cursor.node();
+                                if node.is_error() {
+                                    let mut children = node.walk();
+                                    errors.push(
+                                        node.children(&mut children)
+                                            .map(|child| {
+                                                (
+                                                    child.kind().to_string(),
+                                                    content
+                                                        .get(child.byte_range())
+                                                        .unwrap_or_default()
+                                                        .to_string(),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    );
+                                }
+                                if cursor.goto_first_child() {
+                                    continue;
+                                }
+                                while !cursor.goto_next_sibling() {
+                                    if !cursor.goto_parent() {
+                                        return format!(
+                                            "{} errors={errors:?}",
+                                            tree.root_node().to_sexp()
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                    failures.push(format!(
+                        "{language}: {content}: calls={:?}: {ast:?}",
+                        facts.calls()
+                    ));
+                }
+                if body == "const caller=(await)=>await();" && facts.calls().len() == 1 {
+                    assert!(matches!(
+                        facts.calls()[0].binding,
+                        SourceCallBinding::Shadowed
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn repaired_arrow_and_real_await_operator_keep_independent_calls() {
+        for language in ["javascript", "typescript", "tsx"] {
+            for repaired in [
+                "const caller=()=>await();",
+                "const caller=flag?()=>await():()=>0;",
+                "const caller=flag?()=>0:()=>await();",
+            ] {
+                let content = format!(
+                    "function await(){{}} function target(){{}} {repaired} async function real(){{await(target());}}"
+                );
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    "main.ts",
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let calls = extracted.semantics().calls();
+                assert_eq!(calls.len(), 2, "{language}: {content}: {calls:?}");
+                assert!(
+                    calls
+                        .iter()
+                        .all(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_))),
+                    "{language}: {content}: {calls:?}"
+                );
+                let names = calls
+                    .iter()
+                    .map(|call| {
+                        extracted.graph().relations[call.relation]
+                            .target_name
+                            .as_str()
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(names, std::collections::BTreeSet::from(["await", "target"]));
             }
         }
     }
@@ -6298,7 +6562,7 @@ function caller() { renamed(); tools.work(); }
     }
 
     #[test]
-    fn typescript_commonjs_extension_preserves_static_import_transform_support() {
+    fn explicit_typescript_language_preserves_imports_without_js_goal_inference() {
         let extracted = extract_symbol_graph_with_semantics_controlled(
             "main.cts",
             Some("typescript"),

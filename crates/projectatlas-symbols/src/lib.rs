@@ -1553,35 +1553,77 @@ fn parse_source_program<E>(
         return Ok(None);
     };
     if let Some(path) = ecmascript_path {
-        let context = semantic::ecmascript_context::source_context(
-            tree.root_node(),
+        return repair_contextual_tree(
+            &mut parser,
+            tree,
             path,
             None,
-            content,
-            check,
-        )?;
-        let mut projected = None;
-        if semantic::ecmascript_context::project_contextual_identifiers(
-            tree.root_node(),
-            context,
             content,
             SourceByteSpan {
                 start: 0,
                 end: content.len(),
             },
-            &mut projected,
+            &mut None,
             check,
-        )? && let Some(projected) = projected
-        {
-            let Some(reparsed) = parse_tree_with_parser(&mut parser, &projected, check)? else {
-                return Ok(None);
-            };
-            if !reparsed.root_node().has_error() {
-                return Ok(Some(reparsed));
-            }
-        }
+        );
     }
     Ok(Some(tree))
+}
+
+/// Prove contextual repairs through the same parser and actual candidate scopes.
+///
+/// At most two reparses share one private buffer: the second only restores tokens
+/// proved to be reserved operators in the first candidate. No per-call reparsing.
+fn repair_contextual_tree<E>(
+    parser: &mut Parser,
+    original: Tree,
+    path: &str,
+    role: Option<semantic::embedded_source::EmbeddedScriptRole>,
+    content: &str,
+    span: SourceByteSpan,
+    projected: &mut Option<String>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
+    use semantic::ecmascript_context::{
+        ContextualProjectionValidation, project_contextual_identifiers, source_context,
+        validate_contextual_projection,
+    };
+    let context = source_context(original.root_node(), path, role, content, check)?;
+    if !project_contextual_identifiers(
+        original.root_node(),
+        context,
+        content,
+        span,
+        projected,
+        check,
+    )? {
+        return Ok(Some(original));
+    }
+    let Some(projected) = projected else {
+        return Ok(Some(original));
+    };
+    for _ in 0..2 {
+        let Some(candidate) = parse_tree_with_parser(parser, projected, check)? else {
+            return Ok(None);
+        };
+        if candidate.root_node().has_error() {
+            return Ok(Some(original));
+        }
+        match validate_contextual_projection(
+            candidate.root_node(),
+            path,
+            role,
+            span,
+            content,
+            projected,
+            check,
+        )? {
+            ContextualProjectionValidation::Valid => return Ok(Some(candidate)),
+            ContextualProjectionValidation::Restored => {}
+            ContextualProjectionValidation::Rejected => return Ok(Some(original)),
+        }
+    }
+    Ok(Some(original))
 }
 
 /// Parse each admitted program once with one reused grammar parser and budget.
@@ -1640,32 +1682,22 @@ fn parse_embedded_script_trees<E>(
         if parser.set_included_ranges(&[range]).is_err() {
             return Ok(None);
         }
-        let Some(mut tree) = parse_tree_with_parser(&mut parser, content, check)? else {
+        let Some(tree) = parse_tree_with_parser(&mut parser, content, check)? else {
             return Ok(None);
         };
-        let context = semantic::ecmascript_context::source_context(
-            tree.root_node(),
+        let Some(tree) = repair_contextual_tree(
+            &mut parser,
+            tree,
             path,
             Some(region.role),
-            content,
-            check,
-        )?;
-        if semantic::ecmascript_context::project_contextual_identifiers(
-            tree.root_node(),
-            context,
             content,
             region.span,
             &mut projected,
             check,
-        )? && let Some(projected) = &projected
-        {
-            let Some(reparsed) = parse_tree_with_parser(&mut parser, projected, check)? else {
-                return Ok(None);
-            };
-            if !reparsed.root_node().has_error() {
-                tree = reparsed;
-            }
-        }
+        )?
+        else {
+            return Ok(None);
+        };
         trees.push(tree);
     }
     Ok(Some(trees))
@@ -2015,10 +2047,7 @@ fn visit_node<E>(
             return Ok(ControlFlow::Continue(()));
         }
     }
-    let import_like = is_import_node(node.kind())
-        || (node.kind() == "export_statement"
-            && semantic::provider_for_graph(graph) == Some(SemanticProviderOwner::EcmaScript)
-            && node.child_by_field_name("source").is_some());
+    let import_like = owns_import_occurrence(node, graph);
     if graph.relations.len() >= MAX_RELATIONS_PER_FILE && import_like {
         graph.parser = ParserKind::Fallback;
         *incomplete = true;
@@ -2771,6 +2800,14 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "namespace_use_declaration" => Some(SymbolKind::Import),
         _ => None,
     }
+}
+
+/// Select the exact syntax nodes allowed to produce import occurrence evidence.
+fn owns_import_occurrence(node: Node<'_>, graph: &SymbolGraph) -> bool {
+    is_import_node(node.kind())
+        || (node.kind() == "export_statement"
+            && semantic::provider_for_graph(graph) == Some(SemanticProviderOwner::EcmaScript)
+            && node.child_by_field_name("source").is_some())
 }
 
 /// Return whether a node is an import-like relation.

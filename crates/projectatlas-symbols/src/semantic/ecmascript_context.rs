@@ -101,11 +101,7 @@ pub(crate) fn callable_contexts<E>(
         outer.with_strict(body.is_strict())
     };
     let formals = if arrow {
-        EcmascriptNameContext {
-            await_keyword: outer.await_keyword || asynchronous,
-            yield_keyword: outer.yield_keyword,
-            ..body
-        }
+        arrow_formal_context(outer, body, asynchronous)
     } else {
         body
     };
@@ -114,6 +110,19 @@ pub(crate) fn callable_contexts<E>(
         formals,
         body,
     })
+}
+
+/// Arrow formals inherit restrictions that their non-async concise body resets.
+fn arrow_formal_context(
+    outer: EcmascriptNameContext,
+    body: EcmascriptNameContext,
+    asynchronous: bool,
+) -> EcmascriptNameContext {
+    EcmascriptNameContext {
+        await_keyword: outer.await_keyword || asynchronous,
+        yield_keyword: outer.yield_keyword,
+        ..body
+    }
 }
 
 /// Select the context of an actual child, including enclosing computed keys.
@@ -214,16 +223,22 @@ pub(crate) fn project_contextual_identifiers<E>(
 ) -> Result<bool, E> {
     fn visit<E>(
         node: Node<'_>,
-        context: EcmascriptNameContext,
+        mut context: EcmascriptNameContext,
         content: &str,
         projected: &mut Option<String>,
         depth: usize,
+        mut uncertain: bool,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<bool, E> {
         check()?;
-        let keyword_recovery = node.is_error() && keyword_formals_recovery(node, check)?;
-        if depth >= 256 || node.is_missing() || node.is_error() && !keyword_recovery {
+        if depth >= crate::MAX_TREE_SITTER_AST_DEPTH || node.is_missing() {
             return Ok(false);
+        }
+        if node.is_error() {
+            uncertain = true;
+            // A recovered wrapper may hide an ordinary arrow/function boundary.
+            // Candidate AST validation must prove the actual parameters afterward.
+            context = context.callable(false, false, true);
         }
         if node.child_count() == 0 {
             let contextual = !context.is_module()
@@ -236,7 +251,10 @@ pub(crate) fn project_contextual_identifiers<E>(
                     }
                     _ => false,
                 };
-            if contextual && content.get(node.byte_range()) == Some(node.kind()) {
+            if contextual
+                && content.get(node.byte_range()) == Some(node.kind())
+                && (!uncertain || original_keyword_recovery(node, check)?)
+            {
                 if projected.is_none() {
                     check()?;
                     *projected = Some(content.to_owned());
@@ -245,8 +263,6 @@ pub(crate) fn project_contextual_identifiers<E>(
                 if let Some(buffer) = projected
                     && let Some(last) = buffer.get_mut(node.end_byte() - 1..node.end_byte())
                 {
-                    // These exact ASCII tokens change only their final byte;
-                    // no splice or suffix movement can grow with token density.
                     last.make_ascii_uppercase();
                 }
                 return Ok(true);
@@ -267,6 +283,7 @@ pub(crate) fn project_contextual_identifiers<E>(
                 content,
                 projected,
                 depth + 1,
+                uncertain,
                 check,
             )?;
         }
@@ -281,7 +298,7 @@ pub(crate) fn project_contextual_identifiers<E>(
     if !contains_contextual_keyword(program, check)? {
         return Ok(false);
     }
-    visit(root, context, content, projected, 0, check)
+    visit(root, context, content, projected, 0, false, check)
 }
 
 /// Search only this program's bytes, with bounded cooperative scan checkpoints.
@@ -311,47 +328,252 @@ fn contains_contextual_keyword<E>(
     Ok(false)
 }
 
-/// Admit only the pinned TypeScript keyword/parentheses/formals recovery wrapper.
-///
-/// Nested calls flatten the prefix tokens into the same ERROR. The sole named
-/// child must still be complete native formals; no argument syntax is interpreted
-/// here. All other error contents remain an opaque scope/context barrier.
-fn keyword_formals_recovery<E>(
-    node: Node<'_>,
+/// Require original native call/binding evidence before relaxing an error context.
+fn original_keyword_recovery<E>(
+    token: Node<'_>,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<bool, E> {
-    let mut cursor = node.walk();
-    let mut nesting = 0_usize;
-    let mut expect_keyword = true;
-    let mut complete = false;
-    for child in node.children(&mut cursor) {
+    if token.parent().is_some_and(|error| {
+        error.is_error()
+            && error.child_count() == 1
+            && error.parent().is_some_and(|parent| {
+                matches!(
+                    parent.kind(),
+                    "formal_parameters" | "required_parameter" | "optional_parameter"
+                )
+            })
+    }) {
+        return Ok(true);
+    }
+    let mut next = token.next_sibling();
+    for _ in 0..crate::MAX_TREE_SITTER_AST_DEPTH {
         check()?;
-        if child.is_missing() {
+        let Some(node) = next else {
+            return Ok(false);
+        };
+        if node.is_missing() {
             return Ok(false);
         }
-        match child.kind() {
-            "await" | "interface" if expect_keyword && !complete => {
-                expect_keyword = false;
-            }
-            "(" if !expect_keyword && !complete => {
-                nesting += 1;
-                expect_keyword = true;
-            }
-            "formal_parameters" if !expect_keyword && !complete && !child.has_error() => {
-                complete = true;
-            }
-            ")" if complete && nesting > 0 => {
-                nesting -= 1;
+        match node.kind() {
+            "comment" | "(" | "await" | "yield" | "interface" => {}
+            "formal_parameters" | "parenthesized_expression" => return Ok(!node.has_error()),
+            "ERROR" => {
+                // A conditional's following arm can be recovered as a type
+                // annotation inside this wrapper. Only its leading complete
+                // native group proves the call prefix; the candidate parser
+                // must independently establish the whole expression/program.
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    check()?;
+                    if child.kind() == "comment" {
+                        continue;
+                    }
+                    return Ok(matches!(
+                        child.kind(),
+                        "formal_parameters" | "parenthesized_expression"
+                    ) && !child.has_error());
+                }
+                return Ok(false);
             }
             _ => return Ok(false),
         }
+        next = node.next_sibling();
     }
-    Ok(complete && nesting == 0)
+    Ok(false)
+}
+
+/// Whether a candidate is ready, needs one operator-restoring parse, or is unsafe.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ContextualProjectionValidation {
+    /// Every changed byte is a valid identifier under the actual candidate AST.
+    Valid,
+    /// An actual reserved operator/binding was restored; the tree must be reparsed.
+    Restored,
+    /// Original-to-candidate correspondence or grammar context was not proved.
+    Rejected,
+}
+
+/// Validate every changed token against actual native scopes, never guessed error scopes.
+pub(crate) fn validate_contextual_projection<E>(
+    root: Node<'_>,
+    path: &str,
+    role: Option<EmbeddedScriptRole>,
+    span: crate::SourceByteSpan,
+    original: &str,
+    projected: &mut str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<ContextualProjectionValidation, E> {
+    fn visit<E>(
+        node: Node<'_>,
+        context: EcmascriptNameContext,
+        original: &str,
+        projected: &mut str,
+        depth: usize,
+        restored: &mut bool,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<usize>, E> {
+        check()?;
+        if depth >= crate::MAX_TREE_SITTER_AST_DEPTH || node.is_error() || node.is_missing() {
+            return Ok(None);
+        }
+        if node.kind() == "arrow_function" && !arrow_line_terminators_valid(node, original, check)?
+        {
+            return Ok(None);
+        }
+        if node.child_count() == 0 {
+            let Some(text) = original.get(node.byte_range()) else {
+                return Ok(None);
+            };
+            let Some(candidate) = projected.get(node.byte_range()) else {
+                return Ok(None);
+            };
+            if text == candidate {
+                return Ok(Some(0));
+            }
+            if !matches!(text, "await" | "yield" | "interface")
+                || !matches!(
+                    node.kind(),
+                    "identifier"
+                        | "type_identifier"
+                        | "property_identifier"
+                        | "shorthand_property_identifier"
+                        | "shorthand_property_identifier_pattern"
+                )
+                || text.as_bytes()[..text.len() - 1] != candidate.as_bytes()[..candidate.len() - 1]
+                || text.as_bytes()[text.len() - 1].to_ascii_uppercase()
+                    != candidate.as_bytes()[candidate.len() - 1]
+            {
+                return Ok(None);
+            }
+            let allowed = if node.kind() == "property_identifier" {
+                super::ecmascript_identifier::identifier_name_value(text).is_some()
+            } else {
+                super::ecmascript_identifier::contextual_identifier_value(
+                    text,
+                    context,
+                    super::EcmascriptNameRole::Reference,
+                )
+                .is_some()
+            };
+            if !allowed {
+                if let Some(last) = projected.get_mut(node.end_byte() - 1..node.end_byte()) {
+                    last.make_ascii_lowercase();
+                }
+                *restored = true;
+                return Ok(Some(0));
+            }
+            return Ok(Some(1));
+        }
+        let callable = if is_callable(node) {
+            Some(callable_contexts(node, context, original, check)?)
+        } else {
+            None
+        };
+        let mut count = 0;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let Some(admitted) = visit(
+                child,
+                child_context(node, child, context, callable),
+                original,
+                projected,
+                depth + 1,
+                restored,
+                check,
+            )?
+            else {
+                return Ok(None);
+            };
+            count += admitted;
+        }
+        Ok(Some(count))
+    }
+    let context = source_context(root, path, role, original, check)?;
+    let mut restored = false;
+    let Some(admitted) = visit(root, context, original, projected, 0, &mut restored, check)? else {
+        return Ok(ContextualProjectionValidation::Rejected);
+    };
+    let (Some(before), Some(after)) = (
+        original.get(span.start..span.end),
+        projected.get(span.start..span.end),
+    ) else {
+        return Ok(ContextualProjectionValidation::Rejected);
+    };
+    let mut changed = 0;
+    for (index, (before, after)) in before.bytes().zip(after.bytes()).enumerate() {
+        crate::check_parser_iteration(index, check)?;
+        changed += usize::from(before != after);
+    }
+    Ok(if changed != admitted {
+        ContextualProjectionValidation::Rejected
+    } else if restored {
+        ContextualProjectionValidation::Restored
+    } else {
+        ContextualProjectionValidation::Valid
+    })
+}
+
+/// Enforce arrow no-line-terminator boundaries absent from tolerant AST shape checks.
+fn arrow_line_terminators_valid<E>(
+    node: Node<'_>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<bool, E> {
+    fn gap<E>(
+        content: &str,
+        start: usize,
+        end: usize,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let Some(text) = content.get(start..end) else {
+            return Ok(false);
+        };
+        for (index, value) in text.chars().enumerate() {
+            crate::check_parser_iteration(index, check)?;
+            if matches!(value, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    let Some(parameters) = node
+        .child_by_field_name("parameters")
+        .or_else(|| node.child_by_field_name("parameter"))
+    else {
+        return Ok(false);
+    };
+    let mut cursor = node.walk();
+    let Some(arrow) = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "=>")
+    else {
+        return Ok(false);
+    };
+    let head = node
+        .child_by_field_name("return_type")
+        .unwrap_or(parameters);
+    if !gap(content, head.end_byte(), arrow.start_byte(), check)? {
+        return Ok(false);
+    }
+    let mut cursor = node.walk();
+    if let Some(asynchronous) = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "async")
+    {
+        let first = node
+            .child_by_field_name("type_parameters")
+            .unwrap_or(parameters);
+        return gap(content, asynchronous.end_byte(), first.start_byte(), check);
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_contextual_keyword, project_contextual_identifiers, source_context};
+    use super::{
+        ContextualProjectionValidation, contains_contextual_keyword,
+        project_contextual_identifiers, source_context, validate_contextual_projection,
+    };
     use std::convert::Infallible;
 
     #[test]
@@ -436,5 +658,61 @@ mod tests {
             }
         });
         assert_eq!(result, Err("cancelled"));
+    }
+
+    #[test]
+    fn candidate_context_restores_operators_and_rejects_unmatched_rewrites() {
+        for (original, candidate, expected) in [
+            (
+                "async function caller(){await(work());}",
+                "async function caller(){awaiT(work());}",
+                ContextualProjectionValidation::Restored,
+            ),
+            (
+                "function* caller(){yield(work());}",
+                "function* caller(){yielD(work());}",
+                ContextualProjectionValidation::Restored,
+            ),
+            (
+                "export {}; await(work());",
+                "export {}; awaiT(work());",
+                ContextualProjectionValidation::Restored,
+            ),
+            (
+                "'await';",
+                "'awaiT';",
+                ContextualProjectionValidation::Rejected,
+            ),
+            (
+                "// await",
+                "// awaiT",
+                ContextualProjectionValidation::Rejected,
+            ),
+        ] {
+            let Some(grammar) = crate::tree_sitter_language("typescript") else {
+                return;
+            };
+            let mut check = || Ok::<(), Infallible>(());
+            let tree = crate::parse_tree_sitter_language(&grammar, candidate, &mut check);
+            assert!(matches!(tree, Ok(Some(_))));
+            let Ok(Some(tree)) = tree else { return };
+            let mut projected = candidate.to_string();
+            let result = validate_contextual_projection(
+                tree.root_node(),
+                "main.ts",
+                None,
+                crate::SourceByteSpan {
+                    start: 0,
+                    end: original.len(),
+                },
+                original,
+                &mut projected,
+                &mut check,
+            );
+            assert!(matches!(result, Ok(value) if value == expected));
+            if expected == ContextualProjectionValidation::Restored {
+                assert_eq!(projected, original);
+            }
+        }
     }
 }

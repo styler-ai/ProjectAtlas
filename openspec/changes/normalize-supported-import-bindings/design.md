@@ -65,28 +65,42 @@ valid outer Script binding cannot become their guessed target. Import aliases
 select the actual local leaf; type-only imports do not enter the value namespace.
 
 The pinned grammars also misread legal Script `yield()` calls, and TypeScript
-`await()`/`interface()` calls, before raw call production. Native Node and the
-official TypeScript 5.9.3 Script compiler confirm the language-valid cases; this is
-not a promise to emulate newer compiler configuration or framework transforms.
-Before raw fact capture, normalize only exact ambiguous keyword tokens under the
-shared source context in a lazy private same-length buffer. Keep strings, comments,
-ordinary interfaces and real generator/async operators untouched. TypeScript's
-recovery exception accepts only its closed keyword/parentheses prefix plus one
-complete native formal-parameters node, including flattened nested-call prefixes;
-other recovery remains opaque. The native parser, not local argument logic,
-then establishes the actual calls, arguments and surrounding expressions.
+`await()`/`interface()` calls, including concise arrows in containers. Native Node
+and the official TypeScript 5.9.3 Script compiler confirm the language-valid cases;
+this is not compiler configuration or framework-transform emulation.
 
-At most one additional parse runs for each affected program, reusing that grammar's
-parser and single included range. Each token updates only its final ASCII byte through a safe mutable str slice,
-without splice/suffix movement as token density increases. Clone at most once per affected grammar projection,
-not per token or region; unaffected and module programs retain their first trees.
-The auxiliary buffer is private and discarded before returning extraction, with
-every text/name/signature/hash/span read still backed by original source bytes.
-Observe the same source-size, depth and cooperative operation cancellation/deadline
-bounds before/after allocation and during traversal/reparse; do not reset budgets
-per program. Measure the added AST traversal/copy/parse work in the source-bound
-cost campaign. This is a bounded exception to one-pass parsing, not another parser
-engine, synthetic call facts or a new published host projection.
+Do not reconstruct arrow/conditional grammar from recovered tokens. Traverse the
+original native AST with the shared source contexts; error wrappers make only
+Await/Yield context uncertain, preserving known module/strict restrictions. A
+relaxed anonymous keyword must still have original native call/binding evidence:
+complete adjacent formals/parenthesized-call syntax (including a bounded nested
+keyword prefix) or an exact keyword-only native parameter binding error. Reject
+intervening operands/stars and unknown recovery. Bound sibling evidence lookahead
+by the existing AST-depth ceiling. Preserve strings, comments and ordinary types.
+
+Lazily normalize only the final ASCII byte of an admitted token in one private
+same-length buffer. The same pinned parser supplies the actual candidate AST,
+which must be error-free. A second bounded context walk then proves every changed
+byte corresponds to one exact identifier leaf valid under its actual source,
+function-name, formal, body and class context; property names retain IdentifierName
+rules. Compare the admitted leaf count with changed bytes in the exact program
+span so merged, swallowed, opaque or unaccounted changes cannot gain authority.
+Enforce actual arrow no-line-terminator header boundaries alongside grammar shape.
+
+Restore a token proved reserved as an operator in the candidate context, then
+allow at most one final native reparse and validation. Thus each affected program
+has at most two additional parses, never a per-call parse or fixed-point loop.
+Reject incomplete correspondence or a failed final proof and retain the original
+tree/raw evidence. The native parser owns calls, arguments and surrounding syntax;
+no synthetic call facts, argument parser or second grammar engine is introduced.
+
+Reuse that grammar's parser and single included range. Clone at most once per
+affected projection, not per token/region; original source supplies every name,
+signature, hash and span. Final-byte writes do not splice or move suffixes as token
+density rises. Prefilter only program bytes through bounded cooperative chunks;
+keep source-size/depth/deadline/cancellation ownership across scanning, allocation,
+parsing and validation. Measure all added AST/copy/parse work, including dense
+keywords and region counts, before release acceptance.
 
 Preserve every explicit default-slot occurrence, including unsupported expressions
 and export clauses, as typed unresolved evidence when no declaration is proved.
@@ -110,7 +124,7 @@ retain original offsets; separate parses prevent cross-region recovery and ASI
 ambiguity, including the older TypeScript scanner without an included-range-start
 ASI rule. Aggregate parse/traversal cancellation and limits across the file;
 parsed bytes are the sum of admitted regions plus only the affected programs'
-bounded contextual-keyword reparses, not the whole host per region.
+bounded contextual-keyword reparses (at most two), not the whole host per region.
 Map sorted range endpoints in one pass. Remap the collected declarations,
 imports and calls through explicit append-only host ordinals, then seal against the
 original host bytes. Keep structural/fallback host provenance. A compatibility row
@@ -138,8 +152,9 @@ Static imports/re-exports cannot obtain module dependency or alias authority fro
 an actual Script program (HTML classic or explicit JavaScript CJS), or from a
 static import nested outside a program root. Preserve raw occurrences and negative
 local shadows, plus ordinary module, Vue/Svelte and TypeScript import-transform
-positives. A TypeScript CTS extension alone does not prohibit its supported ES
-import syntax; keep content-based module detection there. Dynamic import/require
+positives. When TypeScript is explicitly supplied to the source API, CTS alone does not
+prohibit ES import syntax; keep content-based module detection there. Automatic
+CTS/MTS detection remains outside the current registered extension surface. Dynamic import/require
 and unspecified compiler transforms do not gain or lose supported capabilities.
 
 Use the declared host's known roles: Vue normal script has module scope and script
@@ -175,7 +190,53 @@ slots through existing unresolved/declaration markers so fallback cannot resurre
 an unsupported target. This corrects the accepted fixtures' source-role assumption
 without adding component-constructor or framework-transform inference.
 
+### Explicit files and inferred module aliases have different identities
+
+Real CLI/MCP testing found that removing every terminal suffix merged an explicit
+`./target.svelte` with `target.html` and native same-stem files. Relative imports,
+configured `paths` substitutions and `baseUrl` all used this shared assumption.
+The target projection also emitted basename and `src/`-stripped aliases, allowing
+`src/caller.ts` importing `../target` to select an unrelated `src/target.js`.
+
+Keep this repair at ECMAScript resolution-key ownership. Frame private scope text
+as `file:` for explicit terminal suffixes and `module:` for extensionless lookup;
+both namespaces use repository-exact paths. Source module scopes retain only the
+exact extensionless stem and existing package-entry aliases. Explicit file keys
+never gain basename, stripped-root, Rust separator or display-name aliases, and
+preserve literal path bytes. Dots in directory names do not select a file lookup.
+Unknown explicit suffixes retain exact identities for explicitly selected source
+languages without adding automatic language detection or parser support.
+
+Retain the supported conservative JavaScript-output candidates: `.js` may select
+`.ts`, `.tsx`, `.d.ts`, `.js` or `.jsx`; `.jsx` may select `.tsx`, `.d.ts` or `.jsx`.
+These are candidate identities, not compiler search-order emulation; competitors
+remain ambiguous. `.mjs`, `.cjs`, direct TypeScript suffixes and embedded-host
+suffixes remain distinct. This agrees with the relevant extension-substitution
+families in the [TypeScript module reference](https://www.typescriptlang.org/docs/handbook/modules/reference#file-extension-substitution)
+without adding unsupported CTS/MTS, arbitrary transforms or runtime module loading.
+
+The existing key schema, configured-module admission, per-fact limits and cached
+once-per-import expansion remain unchanged. Concrete helper functions and two
+closed namespace constants avoid another resolver abstraction or filesystem probe.
+Work is bounded by existing per-source key limits; fewer broad aliases offset the
+small explicit-file candidate fan-out, with final source-bound costs still measured.
+The public relative-path helper keeps its legacy result; internal ECMAScript lookup
+uses exact normalized components. Rust/Python projection and normalization retain
+their provider-owned rules. Matrix tests cover relative/configured/baseUrl module
+and callable keys, registered suffixes, explicit unknown suffixes, entry aliases,
+literal file names and wrong-directory/compound-stem negatives. Real CLI/MCP,
+unchanged-native upgrade, full rebuild and no-op convergence are required proof.
+
 ### Binding ownership controls calls
+
+Occurrence lookup must require the raw producer's native node-owner predicate as
+well as byte extent. A program/wrapper can share the whole span of its sole
+import or call. Claiming that occurrence again creates false competing bindings
+and repeated call work, as confirmed by an import-only component block hoisted to
+a preceding module callable. Reuse the existing registry-derived producer guards
+for imports/re-exports and calls; do not deduplicate genuinely distinct competitors
+or add public fact fields merely to repair a same-span wrapper collision.
+
 
 At each call site, select language-valid visible lexical bindings before same-file or imported-name matching. Parameters/locals shadow declarations and imports; local imports are visible only within their scope. Preserve independently scoped aliases. Dynamic or insufficient binding evidence prevents exact local and cross-file fallback while retaining the raw call relation with honest resolution/trust. Preserve explicit Rust crate/self/super qualification and unshadowed standard-toolchain roots through AST-owned static references. Apply the same lexical lookup to a proven bool.then function-item callback's own AST argument and byte extent; the enclosing method's callee binding is not callback proof. Language owners account for function/block scope, declaration visibility and conservative conditional/closure behavior. The registry supplies variants; grammar-only local graphs do not gain cross-file providers.
 
@@ -242,7 +303,11 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 13/13 repairs source-context and
+or per-call timeline scan is admitted. Contract 14/14 repairs concise-arrow and
+container keyword ambiguity in unchanged private13/13 indexes, including actual
+candidate-context/operator validation and exact AST occurrence ownership. Both
+extraction and semantic contracts advance because raw and resolved facts change.
+Contract 13/13 repairs source-context and
 host-role authority, contextual parser ambiguities, implicit/private owners and
 invalid-binding shadows in unchanged private12/12 indexes. Actual native12 repair,
 full convergence, authored state, no-op and failure/rollback proof remains required.

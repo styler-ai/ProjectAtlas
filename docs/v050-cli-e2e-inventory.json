@@ -6,7 +6,7 @@
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "c4e20538ffe3f35ffa77f236cb68c5a3f46813b3f467aee2ed615ed8b0a31349",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "4c4a53eff4375a14394515b572c45891c8b1980e902382a7aadb941a83b5fe2f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "3f583175a078d607cbc7d7db0ac6d26361e7507e518e79e6113ae8a97e27ad08",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "037ec6d40e73db22b436f7c98af86c73f23b2c4e94b3ad008cf383b770899843",
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "afff32d2a43a9062d626ba70ea14c7194e18d52e1355a0a61ba2d95fcca0c3fb",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "e416034a42890de43892722fb21ec2f262734f165f3a67400d366a9cb8913643"
     }
   },
@@ -14,7 +14,7 @@
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 216,
+  "test_count": 217,
   "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -1923,6 +1923,13 @@
     },
     {
       "name": "python_directive_calls_agree_across_cli_mcp_and_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles",
       "owner": "e2e_navigation",
       "attributes": [
         "#[test]"

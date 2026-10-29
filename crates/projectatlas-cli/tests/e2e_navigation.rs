@@ -14042,13 +14042,328 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
     Ok(())
 }
 
+/// Shared ECMAScript dependency fixture used by binding and capacity contracts.
+const ECMASCRIPT_WORKER_FILE_NAME: &str = "worker.js";
+
+#[test]
+fn ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join(ECMASCRIPT_WORKER_FILE_NAME),
+        "export function run(){}\n",
+    )?;
+    let mut cases = Vec::new();
+    for extension in ["js", "ts", "tsx"] {
+        for name in ["eval", "arguments", "await", "yield", "interface"] {
+            let file = format!("loose_{name}.{extension}");
+            cases.push((
+                file.clone(),
+                format!("function {name}(){{}} const caller=()=>{name}();\n"),
+                file,
+                name.to_string(),
+                true,
+            ));
+        }
+    }
+    for (file, source, target, present) in [
+        (
+            "strict_reference.js",
+            "function eval(){} function caller(){'use strict';eval();}",
+            "eval",
+            true,
+        ),
+        (
+            "strict_binding.js",
+            "function eval(){'use strict';} function caller(){eval();}",
+            "eval",
+            false,
+        ),
+        (
+            "implicit_arguments.js",
+            "function arguments(){} function caller(){arguments();}",
+            "arguments",
+            false,
+        ),
+        (
+            "module_binding.js",
+            "export {}; function eval(){} function caller(){eval();}",
+            "eval",
+            false,
+        ),
+        (
+            "classic_globals.html",
+            "<script>function run(){}</script><script type=module>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "module_isolation.html",
+            "<script type=module>function run(){}</script><script>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+        (
+            "module_siblings.html",
+            "<script type=module>function run(){}</script><script type=module>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+        (
+            "classic_typescript.html",
+            "<script lang=ts>function run(){}</script><script lang=ts>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "normal_setup.vue",
+            "<script>function run(){}</script><script setup>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "setup_normal.vue",
+            "<script>function caller(){run();}</script><script setup>function run(){}</script>",
+            "run",
+            false,
+        ),
+        (
+            "module_instance.svelte",
+            "<script module>function run(){}</script><script>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "instance_module.svelte",
+            "<script module>function caller(){run();}</script><script>function run(){}</script>",
+            "run",
+            false,
+        ),
+        (
+            "duplicate_normal.vue",
+            "<script>function run(){}</script><script>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+        (
+            "duplicate_module.svelte",
+            "<script module>function run(){}</script><script module>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+    ] {
+        cases.push((
+            file.to_string(),
+            source.to_string(),
+            file.to_string(),
+            target.to_string(),
+            present,
+        ));
+    }
+    for (file, source, present) in [
+        (
+            "classic_import.html",
+            "<script>import {run} from './worker.js'; function caller(){run();}</script>",
+            false,
+        ),
+        (
+            "module_import.html",
+            "<script type=module>import {run} from './worker.js'; function caller(){run();}</script>",
+            true,
+        ),
+        (
+            "module_setup_import.vue",
+            "<script>function caller(){run();}</script><script setup>import {run} from './worker.js';</script>",
+            true,
+        ),
+        (
+            "module_instance_import.svelte",
+            "<script module>function caller(){run();}</script><script>import {run} from './worker.js';</script>",
+            true,
+        ),
+        (
+            "commonjs_import.cjs",
+            "import {run} from './worker.js'; function caller(){run();}",
+            false,
+        ),
+        (
+            "typed_module_import.ts",
+            "import {run} from './worker.js'; function caller(){run();}",
+            true,
+        ),
+    ] {
+        cases.push((
+            file.to_string(),
+            source.to_string(),
+            "worker.js".to_string(),
+            "run".to_string(),
+            present,
+        ));
+    }
+    for (target_file, attributes, present) in [
+        ("normal_target.vue", "", true),
+        ("setup_target.vue", "setup", false),
+        ("module_target.svelte", "module", true),
+        ("instance_target.svelte", "", false),
+        ("module_target.html", "type=module", true),
+        ("classic_target.html", "", false),
+        (
+            "conflicting_target.svelte",
+            "context=instance context=module",
+            false,
+        ),
+    ] {
+        fs::write(
+            root.join(target_file),
+            format!("<script {attributes}>export function run(){{}}</script>"),
+        )?;
+        let file = format!("consumer_{}.js", target_file.replace('.', "_"));
+        cases.push((
+            file,
+            format!("import {{run}} from './{target_file}'; function caller(){{run();}}"),
+            target_file.to_string(),
+            "run".to_string(),
+            present,
+        ));
+    }
+    for (file, source, ..) in &cases {
+        fs::write(root.join(file), source)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for phase in 0..3 {
+            if phase == 1 {
+                let (file, source, _, _, present) = &mut cases[0];
+                source.push_str("\nexport {};\n");
+                fs::write(root.join(file), source)?;
+                *present = false;
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            } else if phase == 2 {
+                run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+            }
+            for (file, _, target_file, target, present) in &cases {
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    root,
+                    &database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--symbol",
+                        "caller",
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ],
+                )?;
+                let text = session.call_tool(
+                    "atlas_symbol_relations",
+                    &json!({
+                        "project_path": root, "view": "detailed", "file": file,
+                        "symbol": "caller", "relation": "calls", "limit": 10,
+                    }),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                let expected = if *present {
+                    BTreeSet::from([(target_file.clone(), target.clone())])
+                } else {
+                    BTreeSet::new()
+                };
+                for response in [cli, mcp] {
+                    let rows = response
+                        .pointer("/symbol_relations/rows")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| {
+                            io::Error::other(format!("source context caller rows missing: {file}"))
+                        })?;
+                    if rows.len() != 1 || rust_binding_targets(rows) != expected {
+                        return Err(io::Error::other(format!("source context targets differ: phase={phase} file={file} expected={expected:?} rows={rows:?}")).into());
+                    }
+                }
+                let cli_summary =
+                    run_packaged_cli_json(&executable, root, &database, &["summary", target_file])?;
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path": root, "file": target_file}),
+                )?;
+                let mcp_summary: Value = toon_format::decode_default(&text)?;
+                for summary in [
+                    &cli_summary,
+                    mcp_summary.get("file_summary").ok_or_else(|| {
+                        io::Error::other("MCP source context summary envelope missing")
+                    })?,
+                ] {
+                    let function =
+                        summary
+                            .get("functions")
+                            .and_then(Value::as_array)
+                            .and_then(|functions| {
+                                functions
+                                    .iter()
+                                    .find(|function| function["name"] == *target)
+                            });
+                    // Conflicting host attributes can exclude the whole region;
+                    // absence is valid only for this deliberately unadmitted case.
+                    if function.is_none() && target_file == "conflicting_target.svelte" && !present
+                    {
+                        continue;
+                    }
+                    let callers = function
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| {
+                            io::Error::other(format!(
+                                "source context target summary missing: {target_file}::{target}"
+                            ))
+                        })?;
+                    rust_binding_equal(
+                        &callers
+                            .iter()
+                            .any(|value| value == &format!("{file}::caller")),
+                        present,
+                    )?;
+                }
+            }
+        }
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+            &identity,
+        )?;
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
 #[test]
 fn lexical_capacity_preserves_navigation_and_repairs_after_source_reduction()
 -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path();
     fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
-    fs::write(root.join("worker.js"), "export function run() {}\n")?;
+    fs::write(
+        root.join(ECMASCRIPT_WORKER_FILE_NAME),
+        "export function run() {}\n",
+    )?;
     let source = "import {run as launch} from './worker.js'; function caller(){launch();}\n";
     for index in 0..4 {
         fs::write(

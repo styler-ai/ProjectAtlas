@@ -23,6 +23,11 @@ Supported static import bindings SHALL retain the same dependencies and alias id
 - **WHEN** an ECMAScript module specifier encodes its path using escaped quotes, backslashes, hexadecimal or Unicode escapes, or literal line continuation
 - **THEN** dependency and caller resolution use its strict static string value while source evidence retains its spelling; malformed escapes and non-lossless UTF-8 values do not fabricate targets
 
+#### Scenario: Explicit suffixes and repository paths identify distinct targets
+- **WHEN** relative imports, configured aliases or baseUrl refer to an explicit source-file suffix among same-stem native or admitted-host files
+- **THEN** dependency and callable keys preserve the exact file identity, including unknown suffixes under explicit language selection, without matching a different host/native suffix or a stripped-root or basename alias in another directory
+- **AND** supported JavaScript-output source candidates and extensionless package-entry aliases remain available with conservative ambiguity, while Rust/Python rules and automatic language support remain unchanged
+
 #### Scenario: Python explicit line continuation
 - **WHEN** a valid Python static import uses backslash line continuation between an imported name and its `as` alias
 - **THEN** the module dependency, alias identity and imported caller match the equivalent single-line declaration
@@ -119,13 +124,18 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **THEN** declarations and identifier references use their own language-valid script/module, strict and async/generator grammar contexts, preserving legal non-strict bindings and strict references to legal outer values without admitting invalid declarations
 - **AND** strict import bindings remain strict, actual directive prologues and classes retain their rules, escaped directive text does not invent strict mode, and declaration/export linking retains the original admitted binding evidence
 
+#### Scenario: Sole-statement wrappers do not claim the statement occurrence
+- **WHEN** a native program or transparent wrapper has the same byte extent as its sole import or call
+- **THEN** lexical occurrence matching also requires the raw producer's node owner, so a hoisted import is not bound twice and a call is not claimed again by wrappers
+- **AND** distinct real import competitors and repeated raw call occurrences retain their existing ambiguity and identity
+
 #### Scenario: Implicit arguments ownership does not become an outer caller
 - **WHEN** an ordinary, async, generator or method body references arguments while an outer declaration has the same name, or an arrow inherits that reference
 - **THEN** non-arrow callable arguments ownership prevents a false outer target, arrows inherit the correct enclosing owner, and valid top-level or explicitly established local bindings retain their own callers
 
 #### Scenario: Contextual keyword calls survive the pinned grammar ambiguity
 - **WHEN** a language-valid Script uses yield as an identifier, or the pinned TypeScript grammar recovers an await/interface call through its closed keyword/parentheses/formals shape
-- **THEN** a bounded same-length private normalization and native reparse preserve the ordinary raw calls, nested arguments and lexical targets with original source spelling, positions and identity
+- **THEN** a bounded same-length private normalization and native reparse with actual candidate-context and complete changed-token validation preserve the ordinary raw calls, nested arguments and lexical targets with original source spelling, positions and identity
 - **AND** actual interfaces, strings/comments, module/async/generator restrictions and arbitrary malformed recovery gain no fabricated call authority; unchanged predecessor indexes repair through the updated extraction and semantic contracts
 
 #### Scenario: HTML script goals and lexical roots remain distinct
@@ -137,7 +147,7 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 #### Scenario: Static imports require a supported module source position
 - **WHEN** a classic HTML script, explicit JavaScript CJS source or nested non-program position contains a static import
 - **THEN** raw occurrences remain visible but invalid module/alias authority cannot create dependencies or callers, including a false fallback to an outer namesake
-- **AND** valid module script, component and TypeScript import-transform workflows retain their supported targets; CTS alone does not prohibit TypeScript ES import syntax
+- **AND** valid module script, component and TypeScript import-transform workflows retain their supported targets; explicitly selected TypeScript does not inherit JavaScript CJS restrictions; automatic CTS detection remains outside the registered surface
 
 #### Scenario: Declared component script roles retain directional visibility
 - **WHEN** admitted Vue normal/setup scripts or Svelte module/instance scripts share a source file

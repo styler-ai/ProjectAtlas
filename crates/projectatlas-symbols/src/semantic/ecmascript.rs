@@ -390,14 +390,22 @@ pub(super) fn module_scopes(
     module: &str,
     configured_source: Option<&ConfiguredModuleSource<'_>>,
 ) -> Vec<String> {
-    if let Some(scope) = resolve_relative_import_path(caller_path, module) {
-        return vec![scope];
+    if let Some(path) = relative_import_path(caller_path, module) {
+        return vec![super::super::resolution_keys::ecmascript_module_scope(
+            &path,
+        )];
     }
     configured_source.map_or_else(Vec::new, |configured| configured.scopes_for_import(module))
 }
 
 /// Resolve one repository-relative ECMAScript module specifier.
 pub(crate) fn resolve_relative_import_path(caller_path: &str, module_spec: &str) -> Option<String> {
+    relative_import_path(caller_path, module_spec)
+        .map(|path| super::super::resolution_keys::strip_known_source_extension(&path))
+}
+
+/// Normalize repository components without discarding explicit file identity.
+fn relative_import_path(caller_path: &str, module_spec: &str) -> Option<String> {
     if !(module_spec.starts_with("./") || module_spec.starts_with("../")) {
         return None;
     }
@@ -419,9 +427,7 @@ pub(crate) fn resolve_relative_import_path(caller_path: &str, module_spec: &str)
             value => components.push(value.to_string()),
         }
     }
-    Some(super::super::resolution_keys::strip_known_source_extension(
-        &components.join("/"),
-    ))
+    Some(components.join("/"))
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! Validated repository-configured ECMAScript module scopes.
 
-use crate::resolution_keys::strip_known_source_extension;
+use crate::resolution_keys::ecmascript_module_scope;
 use std::error::Error;
 use std::fmt;
 
@@ -222,7 +222,7 @@ impl ConfiguredModuleSource<'_> {
                         ModulePatternMatch::Wildcard(capture) => target.replacen('*', capture, 1),
                     })
                 })
-                .map(|scope| strip_known_source_extension(&scope))
+                .map(|scope| ecmascript_module_scope(&scope))
                 .collect::<Vec<_>>();
             scopes.sort();
             scopes.dedup();
@@ -236,7 +236,7 @@ impl ConfiguredModuleSource<'_> {
         } else {
             format!("{base_url}/{module_spec}")
         };
-        vec![strip_known_source_extension(&scope)]
+        vec![ecmascript_module_scope(&scope)]
     }
 }
 
@@ -457,14 +457,14 @@ mod tests {
         if configured
             .for_source("packages/app/src/page.ts")
             .scopes_for_import("@/models/user")
-            != vec!["packages/shared/models/user"]
+            != vec!["module:packages/shared/models/user"]
         {
             return Err(std::io::Error::other("nearest config or specific pattern lost").into());
         }
         if configured
             .for_source("src/page.ts")
             .scopes_for_import("@/controller")
-            != vec!["src/controller"]
+            != vec!["module:src/controller"]
         {
             return Err(std::io::Error::other("root alias did not resolve").into());
         }
@@ -496,14 +496,14 @@ mod tests {
         if configured
             .for_source("src/page.tsx")
             .scopes_for_import("@/tools")
-            != vec!["src/typed/tools/index"]
+            != vec!["file:src/typed/tools/index.ts"]
         {
             return Err(std::io::Error::other("TypeScript config preference lost").into());
         }
         if configured
             .for_source("src/page.jsx")
             .scopes_for_import("@/tools")
-            != vec!["src/script/tools/index"]
+            != vec!["file:src/script/tools/index.js"]
         {
             return Err(std::io::Error::other("JavaScript config preference lost").into());
         }
