@@ -259,6 +259,7 @@ impl SourceSemanticFacts {
     pub fn retained_bytes(&self) -> u64 {
         let mut rust_uses = HashSet::new();
         let mut rust_modules = HashSet::new();
+        let mut import_modules = HashSet::new();
         let mut bytes = (std::mem::size_of::<Self>() as u64)
             .saturating_add(self.path.capacity() as u64)
             .saturating_add(self.content_hash.capacity() as u64)
@@ -274,7 +275,7 @@ impl SourceSemanticFacts {
             if let Some(reference) = &import.rust_toolchain {
                 bytes = bytes
                     .saturating_add(std::mem::size_of::<ImportReference>() as u64)
-                    .saturating_add(reference.retained_heap_bytes());
+                    .saturating_add(reference.retained_heap_bytes(&mut import_modules));
             }
             if let Some(binding) = &import.rust {
                 bytes = bytes.saturating_add(crate::rust_binding_source::use_retained_bytes(
@@ -290,7 +291,7 @@ impl SourceSemanticFacts {
                         .saturating_mul(std::mem::size_of::<ImportReference>() as u64),
                 );
             for reference in &import.references {
-                bytes = bytes.saturating_add(reference.retained_heap_bytes());
+                bytes = bytes.saturating_add(reference.retained_heap_bytes(&mut import_modules));
             }
         }
         let mut shared = HashSet::new();
@@ -299,6 +300,7 @@ impl SourceSemanticFacts {
                 &self.calls,
                 &mut shared,
                 &mut rust_modules,
+                &mut import_modules,
             ))
             .saturating_add(
                 (self.exports.capacity() as u64)
@@ -308,7 +310,9 @@ impl SourceSemanticFacts {
             bytes = bytes
                 .saturating_add(export.name.capacity() as u64)
                 .saturating_add(match &export.binding {
-                    SourceExportBinding::ReExport(reference) => reference.retained_heap_bytes(),
+                    SourceExportBinding::ReExport(reference) => {
+                        reference.retained_heap_bytes(&mut import_modules)
+                    }
                     SourceExportBinding::RustReExport(binding) => {
                         crate::rust_binding_source::use_retained_bytes(
                             binding,
@@ -1008,7 +1012,12 @@ fn validate_ordinal_map(
 /// Count owned call payloads, charging each immutable overload allocation once.
 pub(crate) fn call_binding_heap_bytes(calls: &[SourceCallFact]) -> u64 {
     let mut shared = HashSet::new();
-    call_binding_heap_bytes_with_shared(calls, &mut shared, &mut HashSet::new())
+    call_binding_heap_bytes_with_shared(
+        calls,
+        &mut shared,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+    )
 }
 
 /// Share allocation accounting across call policies and export ambiguity markers.
@@ -1016,10 +1025,13 @@ fn call_binding_heap_bytes_with_shared(
     calls: &[SourceCallFact],
     shared: &mut HashSet<*const [usize]>,
     rust_modules: &mut HashSet<*const [String]>,
+    import_modules: &mut HashSet<*const str>,
 ) -> u64 {
     calls.iter().fold(0_u64, |bytes, call| {
         bytes.saturating_add(match &call.binding {
-            SourceCallBinding::Qualified(reference) => reference.retained_heap_bytes(),
+            SourceCallBinding::Qualified(reference) => {
+                reference.retained_heap_bytes(import_modules)
+            }
             SourceCallBinding::RustPath(call) => call.path.retained_bytes().saturating_add(
                 crate::rust_binding_source::module_retained_bytes(&call.module, rust_modules),
             ),
@@ -1030,7 +1042,7 @@ fn call_binding_heap_bytes_with_shared(
             } => (member.as_ref().map_or(0, String::capacity) as u64).saturating_add(
                 rust_toolchain.as_ref().map_or(0, |reference| {
                     (std::mem::size_of::<ImportReference>() as u64)
-                        .saturating_add(reference.retained_heap_bytes())
+                        .saturating_add(reference.retained_heap_bytes(import_modules))
                 }),
             ),
             SourceCallBinding::LocalDeclarations(declarations)

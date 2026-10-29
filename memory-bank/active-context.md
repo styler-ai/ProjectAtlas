@@ -1,12 +1,77 @@
 # Active context
 
+## Current source and proof override
+
+Primary works in731, public48e9f591b0d02d015550946f0cde606584bdd023 on PR737.
+Source3531b47 DER14/SEM14 plus owned UNCOMMITTED sharedmodule allocation repair.
+Prior normalnativepush53154 PASS. No merge/RC. Earlier public92b/hours estimates
+below are historical: no reliable releaseETA while engineering issues remain.
+Shared target nowleased731;741 finished focusedpipeline67993 and committed e1e633c.
+Its current debugartifact+binding path /tmp/projectatlas-741-document-debug-path.txt,
+SHA b6aa4229f5bcae98f7b8941f61380b5e2cd823bc6011f8d696930e68de3a87e5.
+
+Current wholeissue Luna review found reachable re-export moduleclone amplification:
+one longliteral copied per exportslot before postextractadmission. Reopened7312.5/2.7duringreview; current2.5source/actualCLI-MCPproofcompleteand
+2.6earlierupgrade/failureproofreconciled:7/9implementation,2.7/3.1/all5acceptanceopen. Exactbodyreadback
+/tmp/projectatlas-731-shared-module-readback.json, strict/scoped9/9/5PASS.
+Proposal/design/spec expanded sameowner/RC1, no arbitrary newpath restrictions.
+New owning test causallyFAIL beforefix, nowPASS0.08s for JS/TS/TSX/Vue/Svelte/HTML:
+64longliteralexports sharemoduleallocation across slots/consumerclones andretainbyte
+estimate stayslinear. Logs /tmp/projectatlas-731-shared-module-{causal-negative,restored}.log.
+Current private ImportReference moduleArc<str>; export_clauses createsoneperstatement,
+consumerclones shareit, SourceSemanticFacts accounting dedups sameArc acrossimport/
+call/export. Public getters/facts/keys/valueidentities unchanged. Luna independently
+approved source and no DER/SEM bump solelyforallocation. No newparser/provider/schema.
+Normalimportwholecapturedrelation240charlimitbounds analogousclonebehavior. Runtime
+forwardingquerycopy isone boundedsource transient plus pre-reserved retainedcache,
+not all8kslots beforeadmission. Do not claim allmoduletextgloballyshared.
+
+Separate automatedreport200kimports×64targets isUNREACHABLE inactualnativepath:
+validASTmodulefact projects scopes ONCEperrelation; absentfact fallbackimportdisplay
+is240charbounded. Keep counterevidence, no blindkeyalgorithm change. CurrentCodeQL11high annotations are separate fromtheseP2reviewcomments. Correct
+ref is refs/pull/737/head (merge queried0andwasnotclearance). Exactpublic48e9analysis
+2054021359 IDs282/278/277/276/244/243/242/241/221/220/216 allinreviewedunion. Ten
+ownedstagecleanupflows retainpreviousboundarydispositions;244 confirmedowner738
+remainsRC1blocker, supersedingoldstatictriage. Noalertsdismissed. Currentartifacts
+/tmp/projectatlas-731-current-codeql-head-open.json andlatest-codeql-analyses.json.
+Luna full731packetcomplete: sharedmodulefixsourceapproved/noinvalidationbump;
+notfinalacceptance untilcurrentcost/publicthreads/PRbody/native/hostedreconciled. Ninthstrictness threadplusnewresourcecomments
+still need currentpublicrepair/reply/resolution/readback. CurrentCI40880417535
+Rust/repository/Linux/Windows/macOSARMPASS; Intelinitialpinnedrustupinstallfailedbefore
+compile, attempt2failedjobsrerun passedsetupandisrunningproof. Notfinalnewsourceproof.
+
+Fullsymbols60062PASS417+1existingignore; Clippythenfailedonlyexplicitpanicmacroin
+newtest, correctedwithoutproductionchange. Sequential57504TERMINALPASS current
+Clippy/workspacecheck/strings/strictdocs/doctests/actualnativebuild17.70s. Actual
+CLI/MCPforwardingselector24451TERMINALPASS68.01s oncurrenttree. No livebuild/test;
+nextsourcecheckpoint thenoptimizedcurrentcost. Task2.5nowcheckedwithsixlanguageunit
+andcurrentrealCLI/MCP;2.6nowcheckedafter actualnative050+stages5-13/allapproved/
+identity/full/noop/rollback/earlydeadline and nativepushcancel/atomicpublication
+proofreconciliation. NoSEMchange; reuseapplicableproof,notmidpublicationclaim. Do not editsourcewhilevalidationreadsit orrun
+siblingbuild/E2E/benchmarks. Afterterminal, capturecurrentnativeartifact andactual
+CLI/MCP forwarding/host/currentallocationcontrols, thenoptimizednewsourcecostand
+handoff. Older2.6native050andstages5-13upgrade/full/identity/approved/noop/rollback/
+earlydeadline proofsremainvalue-applicable, finalnative/hostedmustbuildcurrenttree.
+No claimearlydeadlineprovesmidpublicationcancel. Restore2.5/2.7onlywhenownproofpassed.
+
+Verified historicalcurrent14 artifacts/cost: defaultoptimizedsource3531b47SHA
+b05d68e498248b2b73cb5660156194532a8bd13126139c7f2a0dcb10ab6ff5f0,
+path /tmp/projectatlas-731-contract14-optimized-path.txt;candidate-binding.jsonbesideit.
+Thirtypairedsamples /tmp/projectatlas-731-binding-cost-contract14.json, script
+/tmp/projectatlas-731-contract14-cost-proof.py. Committeddocsbenchmarks14truebefore
+allocationdelta; remeasurecurrentperformance. Native050/C12/C13 andstage5/6/7/8/9/
+10/11 actualoptimized14upgrade/full/state/noop/rollbackPASS in corresponding
+/tmp/projectatlas-731-contract14-{upgrade-proof,stage-upgrade-proof}.json/.log/.py.
+All63hostcallersverified exacttarget; denseTS256occurrences preserved. Costsinclude
+16-24%time/13-24%RSSincreases oncorrectedworkfixtures; no708SLOwaiver.
+
 ## Goal, authority and checkout
 
 Continue until v0.5.1-rc1 is published and independently verified. Latest stays
 stable0.5.0. Stable promotion, milestone closure and715task3.2 need later instruction.
 No permission pending. Primary alone implements; existing luna_review is
 read-only GPT-6 Luna max using the same custom Rust/database skills and accepted spec.
-User asked release ETA: no reliable time; remaining work is hours, not minutes.
+User asked release ETA: no reliable time while required engineering and release proof remain.
 
 Primary .worktrees/issue-731 / fix/static-bindings-731 / PR737. Reviewed source13 base c1cf3b0ed7956b917a6c09fe821cba27d9eba5d1
 (message-only reword of unpublished98c46ce to include required issue reference);

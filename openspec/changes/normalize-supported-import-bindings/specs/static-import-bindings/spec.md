@@ -107,6 +107,10 @@ Normalization SHALL reuse bounded indexing work and preserve cancellation, parse
 - **WHEN** dense imports, large comments or deeply grouped input reach existing work or size limits
 - **THEN** processing terminates within the existing cooperative bounds, reports incomplete evidence honestly and preserves the last valid publication on refusal
 
+#### Scenario: Re-export module literals do not multiply by binding count
+- **WHEN** one supported source-bearing re-export contains many independent slots and a long static module literal
+- **THEN** extraction and consumer clones share immutable module storage before staging admission, retained-byte accounting charges that allocation once, and exact names, literals, slot independence, cancellation and existing resource ceilings remain intact
+
 #### Scenario: Omitted binding or export dependency evidence
 - **WHEN** a native declaration, import or source-bearing re-export is omitted at a capture resource ceiling
 - **THEN** retained facts cannot establish exact call or exported-target authority from the incomplete environment, while raw navigation and module dependency evidence remains available

@@ -11,9 +11,10 @@ use projectatlas_core::graph::{
 };
 use projectatlas_core::language::{LANGUAGE_CAPABILITIES, SemanticProviderOwner};
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
@@ -398,11 +399,12 @@ impl ResolutionKeyProjection {
     #[must_use]
     pub fn rust_toolchain_imports_retained_bytes(&self) -> u64 {
         self.rust_toolchain_imports.as_ref().map_or(0, |imports| {
+            let mut modules = HashSet::new();
             imports.values().fold(0_u64, |bytes, reference| {
                 bytes.saturating_add(128).saturating_add(
                     reference
                         .as_ref()
-                        .map_or(0, ImportReference::retained_heap_bytes),
+                        .map_or(0, |reference| reference.retained_heap_bytes(&mut modules)),
                 )
             })
         })
@@ -580,8 +582,8 @@ pub enum ImportSyntax {
 pub struct ImportReference {
     /// Source-language syntax that produced the reference.
     syntax: ImportSyntax,
-    /// Imported module specifier or path.
-    module: String,
+    /// Immutable module text shared by source slots and consumer clones.
+    module: Arc<str>,
     /// Imported declaration name for named imports.
     imported: Option<String>,
     /// Name visible to callers in the importing source file.
@@ -596,9 +598,19 @@ impl ImportReference {
         imported: Option<&str>,
         local: &str,
     ) -> Self {
+        Self::with_shared_module(syntax, Arc::from(module), imported, local)
+    }
+
+    /// Retain one statement's module allocation without copying it per slot.
+    pub(crate) fn with_shared_module(
+        syntax: ImportSyntax,
+        module: Arc<str>,
+        imported: Option<&str>,
+        local: &str,
+    ) -> Self {
         Self {
             syntax,
-            module: module.to_string(),
+            module,
             imported: imported.map(ToString::to_string),
             local: local.to_string(),
         }
@@ -628,9 +640,14 @@ impl ImportReference {
         &self.local
     }
 
-    /// Count owned text capacities separately from the containing reference vector.
-    pub(crate) fn retained_heap_bytes(&self) -> u64 {
-        (self.module.capacity() as u64)
+    /// Charge a shared module once within its containing source estimate.
+    pub(crate) fn retained_heap_bytes(&self, modules: &mut HashSet<*const str>) -> u64 {
+        let module = if modules.insert(Arc::as_ptr(&self.module)) {
+            (self.module.len() as u64).saturating_add((2 * std::mem::size_of::<usize>()) as u64)
+        } else {
+            0
+        };
+        module
             .saturating_add(self.imported.as_ref().map_or(0, String::capacity) as u64)
             .saturating_add(self.local.capacity() as u64)
     }
@@ -1883,12 +1900,7 @@ mod tests {
         imported: Option<&str>,
         local: &str,
     ) -> ImportReference {
-        ImportReference {
-            syntax,
-            module: module.to_string(),
-            imported: imported.map(ToString::to_string),
-            local: local.to_string(),
-        }
+        ImportReference::new(syntax, module, imported, local)
     }
 
     #[test]

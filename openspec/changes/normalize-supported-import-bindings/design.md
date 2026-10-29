@@ -386,3 +386,25 @@ None.
 ## Verification
 
 Causal producer/normalizer and lexical-binding tests, including malformed syntax, comments/literals/continuations, nested/mixed/independent aliases, exact module spelling, default/re-export chains and cycles. Registry-derived local-call tests cover confirmed native languages plus supported positive and fallback/optional controls. Real CLI/MCP persisted module/caller and summary queries, host positions/trust, incremental/full and upgrade/no-op convergence, identity/purpose/root preservation, changed-source/fault/cancellation/rollback outcomes. Verify indexed bounded caller-query plans, dense/high-degree resource behavior and source recovery accounting. Run locked affected Rust/docs/security, source inventory, strict OpenSpec, scoped IssueOps and mandatory native/hosted gates; independent review covers all five acceptance outcomes and explicit untested limits.
+
+### Shared module literal ownership before staging admission
+
+Current-head security review confirms that a source-bearing ECMAScript re-export
+clones its complete module literal into every independent export slot before
+post-extraction retained-byte admission. The relation display limit does not bound
+these source export facts. Preserve those independent slots and exact literals
+with one statement-owned immutable module allocation shared by ImportReference
+and its consumer clones. Charge shared module storage once in the owning source
+retained-byte estimate; retain per-slot imported/local names and existing caps,
+checkpoints and unsupported-syntax behavior. Reuse Arc and concrete constructors,
+without a global interner, schema, parser or new dependency. Public graph and
+semantic values do not change, so this allocation repair alone needs no extraction
+or semantic invalidation bump. Verify that judgment against the finished delta.
+
+The separate scanner claim of 200,000 named import leaves times 64 configured
+scopes is not reachable through the current native source pipeline: valid source
+imports project their module scopes once per relation, while graph-only fallback
+imports are bounded by the existing display-target admission. Preserve that
+producer/consumer counterevidence rather than changing the key contract on the
+basis of the alert's multiplication. Reassess only if another reachable path is
+causally established.

@@ -3096,7 +3096,8 @@ impl LexicalCollector<'_> {
         node: Node<'_>,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
-        let module = crate::semantic::ecmascript_source_module(node, self.content);
+        let module =
+            crate::semantic::ecmascript_source_module(node, self.content).map(Arc::<str>::from);
         let mut cursor = node.walk();
         let type_only = node
             .children(&mut cursor)
@@ -3114,15 +3115,17 @@ impl LexicalCollector<'_> {
                     if let Some(name) = crate::semantic::ecmascript_export_name(name, self.content)
                     {
                         let binding = module
-                            .as_deref()
+                            .as_ref()
                             .filter(|_| !type_only && !clause.has_error())
                             .map_or(crate::SourceExportBinding::Unresolved, |module| {
-                                crate::SourceExportBinding::ReExport(crate::ImportReference::new(
-                                    crate::ImportSyntax::EcmaScript,
-                                    module,
-                                    None,
-                                    &name,
-                                ))
+                                crate::SourceExportBinding::ReExport(
+                                    crate::ImportReference::with_shared_module(
+                                        crate::ImportSyntax::EcmaScript,
+                                        Arc::clone(module),
+                                        None,
+                                        &name,
+                                    ),
+                                )
                             });
                         self.export_slot(
                             name,
@@ -3158,16 +3161,18 @@ impl LexicalCollector<'_> {
                             .children(&mut tokens)
                             .any(|token| !token.is_named() && token.kind() == "type");
                     let valid = !type_only && !item.has_error();
-                    let binding = if let Some(module) = module.as_deref().filter(|_| valid) {
+                    let binding = if let Some(module) = module.as_ref().filter(|_| valid) {
                         crate::semantic::ecmascript_export_name(source, self.content).map_or(
                             crate::SourceExportBinding::Unresolved,
                             |imported| {
-                                crate::SourceExportBinding::ReExport(crate::ImportReference::new(
-                                    crate::ImportSyntax::EcmaScript,
-                                    module,
-                                    Some(&imported),
-                                    &name,
-                                ))
+                                crate::SourceExportBinding::ReExport(
+                                    crate::ImportReference::with_shared_module(
+                                        crate::ImportSyntax::EcmaScript,
+                                        Arc::clone(module),
+                                        Some(&imported),
+                                        &name,
+                                    ),
+                                )
                             },
                         )
                     } else {
@@ -3866,6 +3871,58 @@ mod tests {
             _ => "",
         };
         format!("<script{attributes}>{source}</script>")
+    }
+
+    #[test]
+    fn reexport_module_storage_is_shared_across_slots_and_consumer_clones() {
+        let module = format!("./{}", "a".repeat(65_536));
+        let slots = (0..64)
+            .map(|index| format!("work as slot{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!("export {{ {slots} }} from '{module}';");
+        for language in ["javascript", "typescript", "tsx", "vue", "svelte", "html"] {
+            let content = if matches!(language, "vue" | "svelte" | "html") {
+                ecmascript_module_fixture(language, &source)
+            } else {
+                source.clone()
+            };
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "barrel.ts",
+                Some(language),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            let facts = extracted.semantics();
+            assert_eq!(facts.exports().len(), 64, "{language}");
+            assert!(facts.exports_complete(), "{language}");
+            let mut allocation = None;
+            for export in facts.exports() {
+                assert!(
+                    matches!(export.binding, crate::SourceExportBinding::ReExport(_)),
+                    "{language}: export lost its static module binding"
+                );
+                let crate::SourceExportBinding::ReExport(reference) = &export.binding else {
+                    return;
+                };
+                assert_eq!(reference.module(), module, "{language}");
+                assert_eq!(reference.imported(), Some("work"), "{language}");
+                assert_eq!(reference.local(), export.name, "{language}");
+                let pointer = reference.module().as_ptr();
+                assert_eq!(*allocation.get_or_insert(pointer), pointer, "{language}");
+                let cloned = reference.clone();
+                assert_eq!(cloned.module().as_ptr(), pointer, "{language}");
+            }
+            assert!(
+                facts.retained_bytes() < (content.len() as u64).saturating_mul(8),
+                "{language}: retained {} for {} source bytes",
+                facts.retained_bytes(),
+                content.len()
+            );
+            assert_eq!(facts.clone().retained_bytes(), facts.retained_bytes());
+        }
     }
 
     #[test]

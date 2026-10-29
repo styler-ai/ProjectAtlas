@@ -14,6 +14,7 @@ Valid imports can retain parser facts while losing persisted dependencies and al
 - Prevent function-local import leakage and parameter/local shadowing from producing false exact callers; include confirmed generic same-file failures in Go, C and C++ without adding cross-file semantic providers.
 - Preserve ECMAScript script/module and function grammar context separately for binding declarations and identifier references, including contextual names, strict directives and implicit arguments ownership. Retain admitted host regions' known mode and lexical-root relationships instead of merging independent module locals into classic or sibling scripts.
 - Reconcile static Rust and ECMAScript re-export alias evidence and downstream imported callers, including conservative ambiguity/cycle behavior.
+- Prevent source-bearing re-export slots and their consumer clones from multiplying one module literal into per-slot owned copies before staging admission; preserve exact values and cancellation without imposing a new module-length restriction.
 - Invalidate stale extraction and semantic projections through their existing contracts; verify unchanged-index repair, persisted dependencies, aliased callers and incremental/full convergence with preserved identity and approved purposes.
 
 ## Capabilities
