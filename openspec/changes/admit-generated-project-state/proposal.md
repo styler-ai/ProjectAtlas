@@ -2,14 +2,16 @@
 
 ## Why
 
-Installed 0.5.0 initialization can create default configuration, nonsource metadata,
-a database and host files before a later existing policy rejects its generated-state
-destination. A failed init must not write outside its automatic project-state owner.
+Installed 0.5.0 can create automatic state outside its intended owner during both
+initialization and ordinary database-backed navigation. SQLite read-only opens may
+initialize WAL shared memory before root metadata is checked; bootstrap can write
+default configuration and host files before a later destination refusal.
 This confirmed self-hosting/security-triage finding is required for RC1 as #741.
 
 ## What Changes
 
-- Admit automatic generated-state destinations before initialization writes, using
+- Admit conventional generated databases and WAL sidecars before every SQLite open,
+  including root discovery and read-only navigation; admit bootstrap outputs before writes, using
   existing bootstrap/filesystem owners and the selected canonical project root.
 - Cover ordinary CLI/MCP init, registered-worktree hydration, root bind/move/detach and generated host files;
   preserve identity, existing authored configuration/purposes and valid reinitialization.
@@ -24,8 +26,8 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
 
 ### New Capabilities
 
-- `project-state-ownership`: destination admission and safe automatic state creation
-  for initialization and generated project host files.
+- `project-state-ownership`: admission of automatic database access and safe project-state
+  creation for initialization and generated host files.
 
 ### Modified Capabilities
 
@@ -34,11 +36,13 @@ This adds no source semantic provider, index schema or CLI/MCP wire field.
 
 ## Impact
 
-Existing CLI init and generated MCP-config writers, shared runtime bootstrap,
+Existing CLI/MCP database selection and root discovery, normal read/write store
+wrappers and early metadata reads, CLI init and generated MCP-config writers, shared runtime bootstrap,
 atlas_map default/nonsource creation, MCP registered-worktree initialization and
 hydration activation, existing filesystem/project-binding helpers, native init tests,
-installed selector inventory and #715 release acceptance. No dependency is selected
-in this plan; prefer existing concrete helpers and standard atomic file operations.
+installed selector inventory and #715 release acceptance. Reuse existing same-file/tempfile helpers and the already locked canonical
+winapi-util as a direct Windows-only dependency for stable hard-link counts; add
+no transitive package, unsafe binding or schema change.
 
 ## Release Scope
 

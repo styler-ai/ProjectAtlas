@@ -2571,6 +2571,21 @@ pub(crate) fn load_scan_import_config(
     Ok(None)
 }
 
+/// Admit automatic database files before any SQLite access.
+///
+/// SQLite read-only opens can initialize SHM, so admission precedes every open.
+pub(crate) fn preflight_managed_database(
+    path: &Path,
+    root: &Path,
+) -> Result<Option<crate::project_state::ProjectStateGuard>, CliError> {
+    crate::project_state::ProjectStateGuard::preflight_database_path(path, root).map_err(|source| {
+        CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
 /// Open or create a durable index bound to one selected project root.
 pub(crate) fn open_atlas_store_for_project(
     path: &Path,
@@ -2584,6 +2599,7 @@ pub(crate) fn open_existing_atlas_store_for_project(
     path: &Path,
     root: &Path,
 ) -> Result<AtlasStore, CliError> {
+    let _admission = preflight_managed_database(path, root)?;
     AtlasStore::open_existing_for_project(path, root).map_err(|source| {
         if matches!(source, projectatlas_db::DbError::InitializationRequired) {
             index_init_required(root, path)
@@ -2602,6 +2618,7 @@ fn open_atlas_store_for_project_with_location_validator<F>(
 where
     F: FnOnce(&Path) -> projectatlas_db::DbResult<()>,
 {
+    let _admission = preflight_managed_database(path, root)?;
     validate_location(path).map_err(project_store_error)?;
     ensure_parent_dir(path)?;
     AtlasStore::open_for_project(path, root).map_err(project_store_error)
@@ -2612,6 +2629,7 @@ pub(crate) fn open_atlas_store_read_only_for_project(
     path: &Path,
     root: &Path,
 ) -> Result<AtlasStore, CliError> {
+    let _admission = preflight_managed_database(path, root)?;
     AtlasStore::open_read_only_for_project(path, root).map_err(|source| {
         if matches!(source, projectatlas_db::DbError::InitializationRequired) {
             index_init_required(root, path)
@@ -2665,7 +2683,22 @@ pub(crate) fn init_config_path(root: &Path, explicit: Option<&Path>) -> PathBuf 
     nested_config
 }
 
+/// Admit automatic initialization outputs before any database mutation.
+pub(crate) fn preflight_generated_state(
+    root: &Path,
+    db_path: &Path,
+    config_path: &Path,
+) -> Result<crate::project_state::ProjectStateGuard, CliError> {
+    crate::project_state::ProjectStateGuard::preflight(root, Some(db_path), Some(config_path))
+        .map_err(|source| CliError::Io {
+            path: root.join(".projectatlas"),
+            source,
+        })
+}
+
 /// Run the one-call first-run init bootstrap.
+///
+/// Automatic destinations are admitted before legacy identity repair can write.
 pub(crate) fn run_init_bootstrap(
     root: &Path,
     db_path: &Path,
@@ -2673,13 +2706,14 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    let config_file = init_config_path(&root, config_path);
+    let state_guard = preflight_generated_state(&root, db_path, &config_file)?;
     if db_path.is_file() {
         AtlasStore::repair_missing_project_root_identity(db_path, &root)
             .map_err(project_store_error)?;
     }
     preflight_existing_project_binding(db_path, &root)?;
     let project_dir = root.join(".projectatlas");
-    let config_file = init_config_path(&root, config_path);
     let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
     let project_dir_existed = project_dir.exists();
     let config_existed = config_file.exists();
@@ -2687,6 +2721,10 @@ pub(crate) fn run_init_bootstrap(
     let db_existed = db_path.exists();
 
     init_project_with_config(&root, Some(&config_file))?;
+    state_guard.verify().map_err(|source| CliError::Io {
+        path: root.join(".projectatlas"),
+        source,
+    })?;
     let mut store = open_atlas_store_for_project(db_path, &root)?;
 
     let mut ok = true;
@@ -2766,6 +2804,7 @@ pub(crate) fn preflight_existing_project_binding(
     db_path: &Path,
     root: &Path,
 ) -> Result<(), CliError> {
+    let _admission = preflight_managed_database(db_path, root)?;
     preflight_project_binding_read_only(db_path, root).map_err(project_store_error)
 }
 
@@ -2862,7 +2901,10 @@ pub(crate) fn config_root_mismatch_error(
 /// Legacy metadata is a display-only recovery hint. The database-owned
 /// candidate reader rejects projections without native authority before this
 /// function constructs a path or probes any candidate configuration location.
-fn legacy_project_root_candidate(db: &Path) -> Result<Option<PathBuf>, CliError> {
+fn legacy_project_root_candidate(
+    db: &Path,
+    _admission: Option<&crate::project_state::ProjectStateGuard>,
+) -> Result<Option<PathBuf>, CliError> {
     if !db.exists() {
         return Ok(None);
     }
@@ -2879,7 +2921,39 @@ pub(crate) fn default_mcp_project_root(
     db: &Path,
     config_path: Option<&Path>,
 ) -> Result<PathBuf, CliError> {
-    let legacy_root = legacy_project_root_candidate(db)?;
+    resolve_database_project_root(db, config_path, true)
+}
+
+/// Admit root discovery using selection available before SQLite metadata reads.
+///
+/// Explicit startup storage outside a known selected namespace is an isolated
+/// operator binding. Its basename alone does not grant automatic ownership.
+pub(crate) fn preflight_database_discovery(
+    db: &Path,
+    config_path: Option<&Path>,
+    isolated_binding: bool,
+) -> Result<Option<crate::project_state::ProjectStateGuard>, CliError> {
+    let root = if let Some(config_path) = config_path {
+        load_atlas_config(Some(config_path))?.root
+    } else if !isolated_binding && let Some(root) = project_root_from_db_path(db) {
+        root
+    } else {
+        std::env::current_dir().map_err(|source| CliError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?
+    };
+    preflight_managed_database(db, &root)
+}
+
+/// Resolve metadata only after the implicit or explicit binding has been admitted.
+fn resolve_database_project_root(
+    db: &Path,
+    config_path: Option<&Path>,
+    isolated_binding: bool,
+) -> Result<PathBuf, CliError> {
+    let admission = preflight_database_discovery(db, config_path, isolated_binding)?;
+    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(config_path) = config_path {
         let config = load_atlas_config(Some(config_path))?;
         let config_root = canonical_source_project_root(&config.root)?;
@@ -2926,7 +3000,7 @@ pub(crate) fn default_cli_project_root(
     {
         return canonical_source_project_root(&project_root);
     }
-    default_mcp_project_root(db, config_path)
+    resolve_database_project_root(db, config_path, database_path_is_explicit)
 }
 
 /// Resolve a CLI repository-root argument, using indexed state for the default `.`.
@@ -5473,6 +5547,7 @@ pub(crate) fn build_settings_report(
     config_path: Option<&Path>,
     format: OutputFormat,
 ) -> Result<SettingsReport, CliError> {
+    let _admission = preflight_database_discovery(db, config_path, true)?;
     let absolute_db = absolute_path(db)?;
     let resolved_config = resolved_mcp_config_path(&absolute_db, config_path)?;
     let config = if let Some(config_path) = resolved_config.as_deref() {
@@ -5827,7 +5902,8 @@ pub(crate) fn resolved_mcp_config_path(
     db: &Path,
     config: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
-    let legacy_root = legacy_project_root_candidate(db)?;
+    let admission = preflight_database_discovery(db, config, true)?;
+    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(path) = config {
         return Ok(Some(absolute_path(path)?));
     }

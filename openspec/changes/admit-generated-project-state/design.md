@@ -13,6 +13,13 @@ files using automatic project paths. Registered-worktree init can call that help
 before hydration. CLI and MCP subsequently generate host files through their existing
 writers. A valid database binding alone does not establish ownership of every output.
 
+Ordinary navigation reproduces the same ownership error: a default database alias
+can cause `overview` to initialize another database's SHM even with telemetry disabled.
+A valid pending-WAL fixture also proves outside writes through hard-linked SHM.
+Ordinary closed-database reads can leave bytes unchanged; preserve that counterevidence.
+SQLite already refuses symbolic WAL/SHM aliases and the tested rollback-journal aliases;
+hard-linked WAL/SHM remain confirmed manifestations owned here.
+
 ## Goals / Non-Goals
 
 Admit automatic output ownership before writes, preserve supported explicit paths,
@@ -30,6 +37,32 @@ Use the existing selected-root and filesystem/project-identity boundaries. Disti
 source-root canonicalization, automatic state ownership and explicit operator-selected
 config/database destinations; none substitutes for the others. Preserve linked
 worktrees and canonical selected-root aliases. No new resolver or public path policy.
+
+### Database access is a separate admission role
+
+Guard conventional `<selected-root>/.projectatlas/projectatlas.db` and its WAL/SHM
+before any SQLite access, including root-identity discovery, CLI settings/root
+reports, normal store opens, MCP startup/nearest/worktree/hydration/usage opens and
+configuration-owned purpose reads. Derive the conventional owner from the selected
+filesystem namespace before reading the DB; a root obtained from that DB is too late.
+The same exact managed entry remains protected when spelled explicitly. Arbitrary
+explicit external database paths remain supported.
+
+Use each store or per-call state's already selected root to classify its managed
+namespace; an external binding can legitimately have the same conventional filename.
+Before root metadata is available, explicit configuration supplies a root without a
+SQLite read. An implicit CLI binding supplies its selected conventional root. Explicit
+startup storage without configuration uses the current known root for this admission;
+a path outside that namespace remains an operator-isolated compatibility binding,
+including when its basename looks conventional. Do not infer its root from SQLite
+and then pretend the first sidecar write was preflighted. This follows the existing
+explicit-binding capability and does not authorize implicit fallback to external data.
+
+Use database-only admission for ordinary reads/writes: invalid or absent generated
+host outputs must not disable valid navigation. Full generated-output admission
+belongs to bootstrap, root transitions and host writers. Preserve existing selected
+root and external config/database capabilities; no global root or routing framework.
+Recheck current callers/registries rather than guarding only the first reported API.
 
 ### Admit before side effects and publish owned files safely
 
@@ -57,7 +90,8 @@ filesystem selection or Git-policy reads into this finding.
 
 ### Keep initialization adapters and refresh paths consistent
 
-CLI/MCP and registered-worktree hydration must use the same owning admission before
+Normal database access, CLI/MCP initialization and registered-worktree hydration must use their
+appropriate shared admission role before
 creation/activation. Direct generated-host writer entry points must not bypass its
 write invariant. Existing valid DB identity and authored purposes remain intact on
 refusal, reinit and compatible upgrade. Root transitions must admit automatic outputs before changing identity; preserve
@@ -77,6 +111,15 @@ only if implementation changes a derived-data contract.
   leaf/directory/regular-existing controls and boundary revalidation; document limits.
 - Refusal/cleanup can lose valid user state -> exact file bytes, identity, all approved
   purposes and last valid publication controls; clean up only newly owned artifacts.
+
+### Native implementation and platform evidence
+
+Reuse existing same-file handles and tempfile publication. A direct Windows-only
+winapi-util dependency reuses the already locked canonical utility solely for stable
+hard-link counts; do not add unsafe platform bindings or unstable std APIs. Ordinary
+DB admission stays constant in the fixed product file family and does not index,
+parse or walk source trees. Preserve valid generated-file permissions and document
+bounded retention when changed ownership makes automatic staging cleanup unsafe.
 
 ## Migration Plan
 

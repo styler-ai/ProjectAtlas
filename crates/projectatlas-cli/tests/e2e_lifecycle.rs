@@ -4951,6 +4951,10 @@ fn init_reports_host_config_failure_before_nonzero_exit() -> Result<(), Box<dyn 
     let blocked_config_path = atlas_dir.join("projectatlas.mcp.json");
     fs::remove_file(&blocked_config_path)?;
     fs::create_dir(&blocked_config_path)?;
+    let database = atlas_dir.join("projectatlas.db");
+    let database_before = fs::read(&database)?;
+    let other_host = atlas_dir.join("projectatlas.claude.mcp.json");
+    let other_host_before = fs::read(&other_host)?;
 
     let failed_output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)
@@ -4960,24 +4964,282 @@ fn init_reports_host_config_failure_before_nonzero_exit() -> Result<(), Box<dyn 
         return Err(io::Error::other("init succeeded despite blocked host config path").into());
     }
 
-    let report: Value = serde_json::from_slice(&failed_output.stdout)?;
-    require_json_bool(&report, &["ok"], false)?;
-    require_json_string(&report, &["host_configs", "0", "harness"], "mcp_json")?;
-    require_json_string(&report, &["host_configs", "0", "status"], "failed")?;
-    require_json_contains(&report, &["host_configs", "0", "error"], "io error")?;
-    let next_steps = report["next_steps"]
-        .as_array()
-        .ok_or_else(|| io::Error::other("init report next_steps missing"))?;
-    if !next_steps.iter().any(|step| {
-        step.as_str()
-            .is_some_and(|text| text.contains("Fix generated host MCP config errors"))
-    }) {
-        return Err(
-            io::Error::other("init report did not include host config recovery step").into(),
-        );
+    let error = String::from_utf8_lossy(&failed_output.stderr);
+    if !error.contains("automatic output requires a direct regular file")
+        || fs::read(&database)? != database_before
+        || fs::read(&other_host)? != other_host_before
+    {
+        return Err(io::Error::other(format!(
+            "host destination was not refused before database or other host writes: {error}"
+        ))
+        .into());
     }
 
     Ok(())
+}
+
+#[test]
+fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dyn Error>> {
+    fn command(executable: &Path, root: &Path) -> StdCommand {
+        let mut command = StdCommand::new(executable);
+        command
+            .current_dir(root)
+            .env("PROJECTATLAS_NO_TELEMETRY", "1")
+            .args(["--format", "json"]);
+        command
+    }
+
+    let temp = tempfile::tempdir()?;
+    let executable = mcp_contract_executable();
+    let root = temp.path().join("selected-project");
+    let control = temp.path().join("control-project");
+    for project in [&root, &control] {
+        fs::create_dir_all(project.join("src"))?;
+        fs::write(project.join("src/lib.rs"), "pub fn owned() {}\n")?;
+        let initialized = command(&executable, project).arg("init").output()?;
+        if !initialized.status.success() {
+            return Err(io::Error::other(format!(
+                "state ownership fixture failed to initialize: {}",
+                String::from_utf8_lossy(&initialized.stderr)
+            ))
+            .into());
+        }
+    }
+    let state = root.join(ATLAS_DIR_NAME);
+    let database = state.join("projectatlas.db");
+    let purpose = command(&executable, &root)
+        .args([
+            "purpose",
+            "set",
+            "src/lib.rs",
+            "Owned state admission fixture",
+        ])
+        .output()?;
+    if !purpose.status.success() {
+        return Err(io::Error::other(format!(
+            "state ownership fixture purpose failed: {}",
+            String::from_utf8_lossy(&purpose.stderr)
+        ))
+        .into());
+    }
+    let before = mcp_database_snapshot(&database)?;
+    if before.authored_purposes.is_empty() {
+        return Err(io::Error::other("ownership fixture has no approved purpose").into());
+    }
+    let control_db = control.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let mut session = McpContractSession::spawn(&executable, &control, &control_db)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for suffix in ["", "-wal", "-shm"] {
+            // Read-only snapshots may leave empty WAL/SHM entries after closing.
+            // Finish the owning writable lifecycle before installing a fixture
+            // alias; never unlink a sidecar belonging to an active connection.
+            let connection = Connection::open(&database)?;
+            let busy: i64 =
+                connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+            if busy != 0 {
+                return Err(io::Error::other("ownership fixture checkpoint remained busy").into());
+            }
+            drop(connection);
+            let outside = temp.path().join(format!("outside{suffix}.bin"));
+            let target = sqlite_sidecar_path(&database, suffix);
+            if suffix.is_empty() {
+                fs::hard_link(&database, &outside)?;
+            } else {
+                if target.exists() {
+                    return Err(
+                        io::Error::other("fixture retained an active SQLite sidecar").into(),
+                    );
+                }
+                fs::write(&outside, b"preserve outside sidecar bytes")?;
+                fs::hard_link(&outside, &target)?;
+            }
+            let outside_before = fs::read(&outside)?;
+            for arguments in [
+                vec!["overview"],
+                vec!["settings"],
+                vec!["root", "show"],
+                vec!["root", "verify"],
+                vec!["root", "set", ".", "--transition", "detach"],
+                vec!["mcp-config"],
+                vec!["init", "--no-scan"],
+            ] {
+                for explicit in [false, true] {
+                    let mut operation = command(&executable, &root);
+                    if explicit {
+                        operation.arg("--db").arg(&database);
+                    }
+                    let refused = operation.args(&arguments).output()?;
+                    let error = String::from_utf8_lossy(&refused.stderr);
+                    if refused.status.success() || !error.contains("multiple hard links") {
+                        return Err(io::Error::other(format!(
+                            "managed {suffix:?} was not admitted before {arguments:?}, explicit={explicit}: {error}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            // The server's process cwd is the control root. Do not let an absent
+            // target config substitute that cwd for this per-call selected root.
+            let config = state.join("config.toml");
+            let config_before = fs::read(&config)?;
+            fs::remove_file(&config)?;
+            for tool in [
+                "atlas_overview",
+                "atlas_root",
+                "atlas_settings",
+                "atlas_init",
+            ] {
+                let response = session.request(
+                    "tools/call",
+                    &json!({"name": tool, "arguments": {"project_path": root}}),
+                )?;
+                if response.get("result").is_none()
+                    || !response.to_string().contains("multiple hard links")
+                {
+                    return Err(io::Error::other(format!(
+                        "MCP {tool} bypassed managed {suffix:?} admission: {response}"
+                    ))
+                    .into());
+                }
+            }
+            fs::write(&config, config_before)?;
+            let mut target_session = McpContractSession::spawn(&executable, &root, &database)?;
+            let target_result = (|| -> Result<(), Box<dyn Error>> {
+                let response = target_session.request(
+                    "tools/call",
+                    &json!({"name": "atlas_overview", "arguments": {}}),
+                )?;
+                if response.get("result").is_none()
+                    || !response.to_string().contains("multiple hard links")
+                {
+                    return Err(io::Error::other(format!(
+                        "MCP startup binding bypassed managed {suffix:?} admission: {response}"
+                    ))
+                    .into());
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(target_result, || target_session.shutdown())?;
+            if fs::read(&outside)? != outside_before {
+                return Err(io::Error::other("refusal modified outside bytes").into());
+            }
+            if !suffix.is_empty() {
+                fs::remove_file(&target)?;
+            }
+            fs::remove_file(&outside)?;
+        }
+
+        // Generated host documents are irrelevant to ordinary data access.
+        let host = state.join("projectatlas.mcp.json");
+        fs::remove_file(&host)?;
+        fs::create_dir(&host)?;
+        for arguments in [vec!["overview"], vec!["settings"], vec!["root", "show"]] {
+            let output = command(&executable, &root).args(&arguments).output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!(
+                    "invalid host output disabled data access {arguments:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+        }
+        session.call_tool("atlas_overview", &json!({"project_path": root}))?;
+        if mcp_database_snapshot(&database)? != before {
+            return Err(io::Error::other("refusals or navigation changed owned state").into());
+        }
+        fs::remove_dir(&host)?;
+        let repaired = command(&executable, &root)
+            .args(["init", "--no-scan"])
+            .output()?;
+        if !repaired.status.success() || !host.is_file() {
+            return Err(io::Error::other(format!(
+                "restored owner could not reinitialize: {}",
+                String::from_utf8_lossy(&repaired.stderr)
+            ))
+            .into());
+        }
+        if mcp_database_snapshot(&database)? != before {
+            return Err(
+                io::Error::other("reinitialization changed authored or indexed state").into(),
+            );
+        }
+
+        // An explicit external database keeps its operator-selected link semantics.
+        let external_state = temp.path().join("operator-storage").join(ATLAS_DIR_NAME);
+        fs::create_dir_all(&external_state)?;
+        let external = external_state.join("projectatlas.db");
+        fs::rename(&database, &external)?;
+        let backup = temp.path().join("operator-backup.db");
+        fs::hard_link(&external, &backup)?;
+        let selected = command(&executable, &root)
+            .arg("--db")
+            .arg(&external)
+            .arg("overview")
+            .output()?;
+        if !selected.status.success() || mcp_database_snapshot(&external)? != before {
+            return Err(io::Error::other(format!(
+                "explicit external storage was restricted or changed state: {}",
+                String::from_utf8_lossy(&selected.stderr)
+            ))
+            .into());
+        }
+        let mut external_session = McpContractSession::spawn(&executable, &root, &external)?;
+        let external_result = external_session
+            .call_tool("atlas_overview", &json!({}))
+            .map(|_| ());
+        complete_mcp_test_after_shutdown(external_result, || external_session.shutdown())?;
+        let absent = session.call_tool("atlas_overview", &json!({"project_path": root}))?;
+        if !absent.contains("init_required") || mcp_database_snapshot(&external)? != before {
+            return Err(io::Error::other(format!(
+                "isolated external binding changed state or became an implicit fallback: {absent}"
+            ))
+            .into());
+        }
+        #[cfg(any(unix, windows))]
+        {
+            let indirect_root = temp.path().join("indirect-project");
+            let outside = temp.path().join("unowned-state");
+            fs::create_dir(&indirect_root)?;
+            fs::create_dir(&outside)?;
+            let indirect_state = indirect_root.join(ATLAS_DIR_NAME);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&outside, &indirect_state)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir(&outside, &indirect_state)?;
+            for arguments in [vec!["init", "--no-scan"], vec!["root", "set", "."]] {
+                let output = command(&executable, &indirect_root)
+                    .args(&arguments)
+                    .output()?;
+                if output.status.success()
+                    || !String::from_utf8_lossy(&output.stderr)
+                        .contains("automatic state requires a direct directory")
+                {
+                    return Err(io::Error::other(format!(
+                        "CLI {arguments:?} followed an automatic state-directory alias: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                    .into());
+                }
+            }
+            let response = session.request(
+                "tools/call",
+                &json!({"name": "atlas_init", "arguments": {"project_path": indirect_root}}),
+            )?;
+            if response.get("result").is_none()
+                || !response
+                    .to_string()
+                    .contains("automatic state requires a direct directory")
+                || fs::read_dir(&outside)?.next().is_some()
+            {
+                return Err(io::Error::other(format!(
+                    "MCP init followed an automatic state-directory alias: {response}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
 }
 
 #[test]
@@ -5703,6 +5965,7 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
 
     let blocked_mcp_config = copied_atlas_dir.join("projectatlas.mcp.json");
     fs::create_dir(&blocked_mcp_config)?;
+    let copied_database_before = fs::read(&copied_db)?;
     let detached = Command::cargo_bin("projectatlas")?
         .arg("--format")
         .arg("json")
@@ -5717,18 +5980,22 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
         .into());
     }
     let detach_error = String::from_utf8_lossy(&detached.stderr);
-    for required in [
-        "root transition Detach committed",
-        "generated project configuration is incomplete",
-        "default bind transition",
-    ] {
-        if !detach_error.contains(required) {
-            return Err(io::Error::other(format!(
-                "partial detach failure omitted {required:?}: {detach_error}"
-            ))
-            .into());
-        }
+    if !detach_error.contains("automatic output requires a direct regular file")
+        || fs::read(&copied_db)? != copied_database_before
+        || copied_config.exists()
+    {
+        return Err(io::Error::other(format!(
+            "invalid host output changed the copied identity before refusal: {detach_error}"
+        ))
+        .into());
     }
+    fs::remove_dir(&blocked_mcp_config)?;
+    Command::cargo_bin("projectatlas")?
+        .args(["--format", "json", "root", "set"])
+        .arg(&copied_repo)
+        .args(["--transition", "detach"])
+        .assert()
+        .success();
     let committed_show = Command::cargo_bin("projectatlas")?
         .arg("--format")
         .arg("json")
@@ -5753,7 +6020,6 @@ fn root_and_metadata_validation_flow() -> Result<(), Box<dyn Error>> {
     if detached_identity == source_identity {
         return Err(io::Error::other("detach preserved the copied project identity").into());
     }
-    fs::remove_dir(&blocked_mcp_config)?;
     let repaired = Command::cargo_bin("projectatlas")?
         .arg("--format")
         .arg("json")

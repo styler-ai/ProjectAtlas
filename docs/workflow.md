@@ -261,6 +261,23 @@ Environment toggles:
 
 ## Troubleshooting
 
+### Automatic project-state ownership
+
+If a command refuses an indirect `.projectatlas` directory or a linked conventional
+database/WAL/SHM entry, restore its intended direct ownership and retry while preserving
+the existing database and authored state. Explicit external storage remains available
+through the existing `--db` and configuration selection. A blocked generated host
+destination prevents initialization or a root transition before identity changes;
+ordinary navigation can still read an otherwise valid atlas. A later unrelated I/O
+failure after a committed transition retains the existing committed-state diagnostic
+and repair guidance.
+
+Generated-file publication preserves the last valid output on failure. If the state
+directory changes while a private file is staged, the error reports that cleanup was
+withheld; the original private stage is retained rather than unlinking a pathname under
+uncertain ownership. Restore the intended directory before retrying. These failures do
+not require resetting the index or deleting approved purposes.
+
 ### Optional current map response
 
 When you need the complete current AtlasMap, request it directly:

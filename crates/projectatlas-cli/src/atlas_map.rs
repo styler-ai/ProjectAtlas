@@ -752,6 +752,11 @@ pub(crate) fn init_project_with_config(
     root: &Path,
     selected_config: Option<&Path>,
 ) -> AtlasMapResult<String> {
+    let canonical_root = fs::canonicalize(root).map_err(|source| AtlasMapError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let root = canonical_root.as_path();
     let project_dir = root.join(".projectatlas");
     let nested_config_path = project_dir.join("config.toml");
     let flat_config_path = root.join("projectatlas.toml");
@@ -767,15 +772,23 @@ pub(crate) fn init_project_with_config(
         },
         Path::to_path_buf,
     );
+    let mut state =
+        crate::project_state::ProjectStateGuard::preflight(root, None, Some(&config_path))
+            .map_err(|source| AtlasMapError::Io {
+                path: project_dir.clone(),
+                source,
+            })?;
     let default_config = if config_path.exists() {
         None
     } else {
         Some(default_config_text_for(root, &config_path)?)
     };
-    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
-        path: project_dir.clone(),
-        source,
-    })?;
+    state
+        .ensure_directory()
+        .map_err(|source| AtlasMapError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
     if let Some(default_config) = default_config {
         if let Some(parent) = config_path
             .parent()
@@ -786,19 +799,39 @@ pub(crate) fn init_project_with_config(
                 source,
             })?;
         }
-        fs::write(&config_path, default_config).map_err(|source| AtlasMapError::Io {
+        state.verify().map_err(|source| AtlasMapError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
+        let owned = state
+            .owns_entry(&config_path)
+            .map_err(|source| AtlasMapError::Io {
+                path: config_path.clone(),
+                source,
+            })?;
+        let written = if owned {
+            state.write_new(&config_path, default_config.as_bytes())
+        } else {
+            // This destination was explicitly selected by the operator.
+            fs::write(&config_path, default_config)
+        };
+        written.map_err(|source| AtlasMapError::Io {
             path: config_path.clone(),
             source,
         })?;
     }
     let nonsource_path = project_dir.join("projectatlas-nonsource-files.toon");
     if !nonsource_path.exists() {
-        fs::write(&nonsource_path, "nonsource_files[]:\n  # path,summary\n").map_err(|source| {
-            AtlasMapError::Io {
+        state.verify().map_err(|source| AtlasMapError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
+        state
+            .write_new(&nonsource_path, b"nonsource_files[]:\n  # path,summary\n")
+            .map_err(|source| AtlasMapError::Io {
                 path: nonsource_path.clone(),
                 source,
-            }
-        })?;
+            })?;
     }
     Ok(String::new())
 }
@@ -1090,6 +1123,14 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
     if !config.db_path.exists() {
         return Ok(BTreeMap::new());
     }
+    let _admission = crate::project_state::ProjectStateGuard::preflight_database_path(
+        &config.db_path,
+        &config.root,
+    )
+    .map_err(|source| AtlasMapError::Io {
+        path: config.db_path.clone(),
+        source,
+    })?;
     let store = AtlasStore::open_read_only_for_project(&config.db_path, &config.root).map_err(
         |source| AtlasMapError::Database {
             path: config.db_path.clone(),
@@ -3126,6 +3167,25 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    #[test]
+    fn initialization_refuses_indirect_state_before_creating_outputs() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("checkout");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        std::os::unix::fs::symlink(&outside, root.join(".projectatlas"))?;
+        let result = super::init_project_with_config(&root, None);
+        if result.is_ok() || fs::read_dir(&outside)?.next().is_some() {
+            return Err(
+                io::Error::other("indirect automatic state was admitted or written").into(),
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::symlink as symlink_file;
     #[cfg(windows)]

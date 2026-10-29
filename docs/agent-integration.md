@@ -116,6 +116,22 @@ also resolves path-less root-sensitive tools from config, indexed DB metadata, o
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
 root.
 
+Automatic project state uses a direct `.projectatlas` directory beneath the selected
+source root. Before SQLite access, ProjectAtlas checks that root's conventional
+database and WAL/SHM entries are direct regular files with a single hard link.
+Initialization and root transitions also admit generated destinations before changing
+identity or writing defaults. Existing config and nonsource bytes remain intact;
+generated host documents are replaced atomically with existing permissions preserved.
+Ordinary navigation does not require valid generated host documents.
+
+Canonical source-root aliases and explicit external database/configuration paths remain
+supported. A conventional-looking database filename outside the independently selected
+root remains an operator-selected binding. Before startup database discovery, explicit
+configuration supplies that root; an explicit binding without configuration uses the
+current root for admission. Per-call `project_path` and worktree selections use their
+own roots. These checks preserve ownership at the admitted operation boundaries;
+they do not lock arbitrary ancestors against concurrent filesystem replacement.
+
 One MCP server can serve the selected control checkout, its registered worktrees, and unrelated
 indexed repositories. Prefer per-call `worktree` for a registered checkout and use `main` for the
 control atlas. Use `atlas_set_project_path` to change the active process default only in a

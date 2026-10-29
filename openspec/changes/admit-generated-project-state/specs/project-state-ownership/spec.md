@@ -6,14 +6,20 @@ while preserving explicit operator-selected filesystem capabilities.
 ## ADDED Requirements
 
 ### Requirement: Automatic state destinations are admitted before writes
-Initialization SHALL establish the automatic project-state directory and output
-ownership before creating or editing default configuration, nonsource metadata,
+Automatic project-state access SHALL establish the conventional database and WAL/SHM
+ownership before SQLite opens, including root discovery and read-only navigation.
+Initialization SHALL establish its output ownership before creating or editing default configuration, nonsource metadata,
 database/WAL, hydration state or generated host files. Unsupported automatic
 destinations SHALL be refused without outside-owner side effects.
 
 #### Scenario: Unsupported project-state directory
 - **WHEN** ordinary CLI/MCP or registered-worktree initialization selects an unsupported automatic state directory
 - **THEN** it reports a causal refusal before generated writes and leaves external fixture files, prior identity and authored state unchanged
+
+#### Scenario: Read-only navigation can initialize SQLite sidecars
+- **WHEN** CLI/MCP navigation, settings/root discovery or another managed database consumer opens a conventional project database with WAL/SHM sidecars
+- **THEN** automatic path ownership is checked before SQLite access, even with telemetry disabled, and refused aliases cannot create or modify outside-owned state
+- **AND** valid navigation remains available when generated host files are absent or invalid because database access does not require generated-output admission
 
 #### Scenario: Automatic file aliases and replaced destinations
 - **WHEN** an automatic generated output has an unsafe existing leaf alias or its owning directory changes before publication

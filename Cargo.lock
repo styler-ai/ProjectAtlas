@@ -1847,6 +1847,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-language",
  "tree-sitter-language-pack",
+ "winapi-util",
  "yaml-rust2",
  "zip",
  "zstd",
