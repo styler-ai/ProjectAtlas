@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "date": "2026-10-28",
-  "source_commit": "581f3df05114db4d23d442f2125bf4e384c7c5d5",
-  "derivation_contract": 12,
-  "semantic_contract": 12,
+  "date": "2026-10-29",
+  "source_commit": "3531b47574c3c6409eb7cfe22a51955c24180ff9",
+  "derivation_contract": 14,
+  "semantic_contract": 14,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "c8f6d7cfd6928f03c2f775a30fbcd2f2ec3dbd49b2c0f150c17aaffc6c47d8ac",
+  "candidate_binary_sha256": "b05d68e498248b2b73cb5660156194532a8bd13126139c7f2a0dcb10ab6ff5f0",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -22,7 +22,9 @@
     "peak_rss": "per-process KiB from GNU time",
     "wall_clock": "Python perf_counter around GNU time child execution",
     "caches": "ordinary warm filesystem/page caches; not cold disk",
-    "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance"
+    "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance",
+    "fixture_digest": "SHA256 of compact sorted JSON mapping relative authored paths to SHA256",
+    "parse_counters": "source-file candidates, not native parser invocation counts"
   },
   "cases": {
     "roots-4": {
@@ -32,8 +34,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.2769703230005689,
-          "peak_rss_kib": 30164,
+          "wall_seconds": 0.2855905930045992,
+          "peak_rss_kib": 27468,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -45,8 +47,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3477070940134581,
-          "peak_rss_kib": 33404,
+          "wall_seconds": 0.34091520999209024,
+          "peak_rss_kib": 33988,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -65,8 +67,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.32397962000686675,
-          "peak_rss_kib": 31316,
+          "wall_seconds": 0.33304131199838594,
+          "peak_rss_kib": 28460,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -78,8 +80,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3900112120027188,
-          "peak_rss_kib": 34304,
+          "wall_seconds": 0.38786842999979854,
+          "peak_rss_kib": 34968,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -98,8 +100,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.16848940498312004,
-          "peak_rss_kib": 29216,
+          "wall_seconds": 0.16799606999848038,
+          "peak_rss_kib": 26432,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -111,14 +113,80 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.16071591898798943,
-          "peak_rss_kib": 29340,
+          "wall_seconds": 0.16010884701972827,
+          "peak_rss_kib": 29824,
           "work": {
             "candidates": 2,
             "parsed": 2,
             "unchanged": 0,
             "symbols": 272,
             "relations": 526
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "contextual-keywords": {
+      "fixture_digest": "362b89780ac9c5b9b5b0a24245f6f00c2fb505e1fdff72c1620a74e473ab124a",
+      "authored_files": 3,
+      "authored_bytes": 67733,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.10073904800810851,
+          "peak_rss_kib": 22768,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 2,
+            "relations": 0
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.11682017298880965,
+          "peak_rss_kib": 25788,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 3,
+            "relations": 256
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "contextual-host": {
+      "fixture_digest": "372f303a73797f070e90a8a0a132ecfdb21592629c3433afcf8089545ad2ddcc",
+      "authored_files": 3,
+      "authored_bytes": 519889,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.11406613199505955,
+          "peak_rss_kib": 23696,
+          "work": {
+            "candidates": 1,
+            "parsed": 1,
+            "unchanged": 0,
+            "symbols": 1,
+            "relations": 0
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.14175645299837925,
+          "peak_rss_kib": 27692,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 65,
+            "relations": 63
           },
           "noop_parsed": 0
         }
@@ -132,6 +200,11 @@
     "all_candidate_samples_checked": true,
     "raw_failed_pre_fix_measurement": "retained separately; excluded from these results",
     "timing_sample_root_assertion": "resolved status",
-    "exact_target_and_baseline_assertion": "separate post-measurement probe; supplemented by permanent exact-target root E2Es"
+    "exact_target_and_baseline_assertion": "separate post-measurement probe; supplemented by permanent exact-target root E2Es",
+    "dense_contextual_candidate_resolved_occurrences": 256,
+    "host_programs": 64,
+    "host_named_callers_verified": 63,
+    "contextual_baseline": "selected named caller anchors unavailable in both native and host cases; not merely zero call rows",
+    "sample_assertions": "Every candidate sample checks resolved calls and expected occurrences; a separate probe checks exact targets and baseline state; all 63 host callers are checked after measurement."
   }
 }

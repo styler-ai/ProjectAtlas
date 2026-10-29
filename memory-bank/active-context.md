@@ -12,7 +12,7 @@ Primary .worktrees/issue-731 / fix/static-bindings-731 / PR737. Reviewed source1
 (message-only reword of unpublished98c46ce to include required issue reference);
 current source14 checkpoint identity is in git log. PublicHEAD92b9bb6c6fc69d62972db910311ddd9088977870. No731merge/RC.
 Verify git status/log. Source14 tasks2.4/2.5 now checked with live issue/mitigation
-sync;6/9 implementations,2.6/2.7/3.1 andALL5acceptance remain open. No acceptance claim.
+sync;7/9 implementations,2.6/3.1 andALL5acceptance remain open. No acceptance claim.
 
 Read memory-bank/README.md and this file after compaction; integration entry is
 .worktrees/v0.5.1/memory-bank/active-context.md. Read COMPLETE installed050Atlas skill
@@ -20,6 +20,42 @@ and short CLI guide before Atlas calls. Exact731MCPbrief returns policy_drift/fu
 preserve private050DB, no orientation reset/downgrade/reindex. Known owner fallback
 is allowed after this verified refusal. Short atlas runtime-info independentlyPASS:
 050, CLI/MCP/SQLite/TOON. Hook readiness warning is not proof the runtime is missing.
+
+## Latest optimized checkpoint and pending publication
+
+Source checkpoint3531b47574c3c6409eb7cfe22a51955c24180ff9 committed/clean at build.
+Reviewed13base c1cf3b0 is message-only replacement of local98c46ce; public92bunchanged.
+Current follow-up changes are ONLY benchmark/docs/tasks/memory bookkeeping, not code.
+Task2.7 now checked (current7/9),2.6/3.1 andALL5acceptanceopen. Sync/readback55121
+pending at write; verify terminal9/9/7. No731merge/RC/finalwholeissueacceptance.
+
+Optimized DEFAULT-feature native build31766 terminalPASS52.93s. Immutable artifact:
+~/.cache/projectatlas-benchmarks/binding-731-3531b47-contract14-20261029/projectatlas
+SHA b05d68e498248b2b73cb5660156194532a8bd13126139c7f2a0dcb10ab6ff5f0.
+candidate-binding.json records clean3531/profile/sourceidentity. Exact path handoff
+/tmp/projectatlas-731-contract14-optimized-path.txt. Debugartifact below also retained.
+
+Fresh30sample campaign81853PASS: three alternating paired rounds across root4/root64/
+denseRust/256contextualTS calls/64HTMLTSprograms(63namedcallers), current realcalls+
+file-candidate counters+zero-parsed noops. Raw /tmp/projectatlas-731-binding-cost-contract14.json,
+script /tmp/projectatlas-731-contract14-cost-proof.py, log contract14-cost-proof.log.
+Docs static-binding-cost.json and .md NOW CURRENT14 (bookkeepingnotyetcommitted).
+Rootmedianratios1.1937/1.1646, denseRust0.9531, contextualTS1.1596,host1.2428;
+RSSratios1.2374/1.2287/1.1283/1.1326/1.1686. No general speedup or708waiver.
+Separate exacttarget/baseline probePASS; contextualbaseline lacks selected caller
+anchors, NOT merely zero rows. All63host callers independently checked actualnative
+and target exactawait; nativeTS retains256occurrences eachcandidate sample. File
+anchor has0directcalls because named-symbol anchors own these calls, correctcontract.
+/tmp/projectatlas-731-contract14-{exact-target-probe,host-density-proof}.json.
+
+Same actualnative050/C12/C13->CURRENT OPTIMIZED14 upgrade/full/state/allapproved/noop/
+earlydeadline/rollback-reupgrade81883PASS. Current contract14-upgrade-proof.json/log
+bindoptimized SHA; debug version archived contract14-debug-upgrade-proof.json/log.
+Metadata note corrected to actualoptimizedprofile; assertions/source unchanged.
+Still reconcile required earlier native5/6/7/8/10/11 and failure/cancellation boundary
+before2.6, not mid-publication cancellation claim. Sharedtarget731, no live cargo or
+benchmark after31766/81853/81883/94816 terminalPASS. Next normalnativepush+hosted
+source proof and finalwholeissuereview. Other owners/715release work below unchanged.
 
 ## Current source14 repair and broader findings
 

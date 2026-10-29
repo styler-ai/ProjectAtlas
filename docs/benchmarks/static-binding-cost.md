@@ -6,13 +6,12 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-The measurements below retain the reviewed contract 12/12 baseline, including generator declaration ownership, separate body
-and parameter environments, bounded Rust/shared forwarding workspaces, bare-var
-and recovered-initializer handling, Python directive/export evidence and deferred
-bindings. Current contract 14/14 additionally repairs actual source goals, host roles
-and contextual-keyword/arrow recovery. Its source-bound cost campaign is required
-before acceptance; the older measurements below are not current-contract proof.
-This evidence remains separate from release acceptance.
+The measurements use the optimized contract 14/14 source, including source goals,
+host roles, contextual-keyword/arrow recovery and exact module identities, alongside
+the preceding declaration, binding, occurrence and bounded-forwarding repairs.
+The source and binary identities are recorded in the compact result. The original
+contract-12 fixtures and raw measurements remain preserved; the three shared fixture
+source sets are unchanged. This evidence remains separate from release acceptance.
 
 Three paired rounds alternate baseline/candidate order. Each sample initializes
 a fresh non-Git fixture in a fresh process; filesystem/page caches remain warm.
@@ -22,18 +21,22 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2770 | 0.3477 | 30164 | 33404 |
-| 64 Cargo roots, 256 callers | 0.3240 | 0.3900 | 31316 | 34304 |
-| Dense/comment/nested source | 0.1685 | 0.1607 | 29216 | 29340 |
+| Four Cargo roots, 256 callers | 0.2856 | 0.3409 | 27468 | 33988 |
+| 64 Cargo roots, 256 callers | 0.3330 | 0.3879 | 28460 | 34968 |
+| Dense/comment/nested source | 0.1680 | 0.1601 | 26432 | 29824 |
+| 256 contextual-keyword calls | 0.1007 | 0.1168 | 22768 | 25788 |
+| 64 script programs, 63 callers | 0.1141 | 0.1418 | 23696 | 27692 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-Their measured initial time increases by about 20–26%, and maximum RSS by 10–11%.
-The dense case improves median time by about 5%, with less than 1% higher peak RSS.
-These observations do not establish a general speedup or a root-count asymptotic
-bound beyond the measured inputs.
+Their measured initial time increases by about 16–19%, and maximum RSS by 23–24%.
+The dense Rust case improves median time by about 5%, with about 13% higher RSS.
+The contextual native case adds about 16% time and 13% RSS; the host case adds about
+24% time and 17% RSS. Both contextual fixtures lack the selected named caller anchor
+in the baseline; these compare different successfully extracted work. They establish
+neither a general speedup nor a root-count asymptotic bound beyond these inputs.
 
 The root fixtures use explicit binary targets at `targets/tN/main.rs`, each
 containing `pub fn run()` and declared worker modules. Each worker imports
@@ -43,8 +46,18 @@ The dense fixture contains one library, 12 nested inline modules, 256 flat alias
 one nested grouped alias, a large block comment, and 257 calls on one physical
 line. Its library and manifest are the two parsed candidates. All three candidate
 samples retain every dense call occurrence behind the correct logical edge.
-Every fresh sample reports one parse per admitted symbol candidate; every following
+Every fresh sample reports all admitted source-file candidates parsed; these are
+file counters, not native parser invocation counts. Contextual repair may use the
+bounded additional native parses described by the source contract. Every following
 unchanged refresh reports zero parsed candidates.
+
+The native contextual fixture has 256 `await()` calls in one non-strict TypeScript
+function plus a large comment. Every candidate sample retains all 256 resolved
+occurrences. The host has one shared classic TypeScript declaration and 63 separate
+classic script programs, each with a distinct caller and an approximately 8 KiB
+comment. Each sample checks its selected caller; a post-measurement probe checks all
+63 named callers against the exact shared declaration. Dots, source roles and program
+ranges retain their ordinary contracts; this adds no framework or compiler inference.
 
 ## Permanent installed selectors
 
@@ -116,7 +129,7 @@ exercise stable 0.5.0 plus preceding development-contract repair, identity,
 approved-purpose status, no-op and rollback. Current derivation and semantic
 contracts 14/14 repair the source-context, occurrence-owner, arrow recovery and
 explicit module-identity defects while retaining the preceding ownership repairs.
-The current unoptimized functional candidate passes actual native upgrades from
+The current optimized default-feature candidate passes actual native upgrades from
 stable 0.5.0 and contracts 12 and 13, including unchanged-source repair, approved
 purposes and identity, full convergence, no-op, early deadline refusal, rollback
 and re-upgrade. An early deadline does not establish mid-publication cancellation.
