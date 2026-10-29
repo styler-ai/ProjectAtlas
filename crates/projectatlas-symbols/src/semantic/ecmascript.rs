@@ -28,6 +28,80 @@ pub(super) fn source_module(node: Node<'_>, content: &str) -> Option<String> {
         .map(std::borrow::Cow::into_owned)
 }
 
+/// One value import's actual local leaf, independent of its exported name.
+fn import_local_leaf(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    match node.kind() {
+        "identifier" => Some(node),
+        "namespace_import" => node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "identifier"),
+        "import_specifier" => {
+            if node
+                .children(&mut cursor)
+                .any(|token| !token.is_named() && matches!(token.kind(), "type" | "typeof"))
+            {
+                return None;
+            }
+            node.child_by_field_name("alias")
+                .or_else(|| node.child_by_field_name("name"))
+        }
+        _ => None,
+    }
+}
+
+/// Invalid value import leaves still shadow an outer valid Script declaration.
+///
+/// Preserve the producer's strict import policy. This supplies only negative
+/// lexical evidence, never an import target or a type-only value binding.
+pub(crate) fn invalid_local_bindings<E>(
+    node: Node<'_>,
+    content: &str,
+    imports_admitted: bool,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Vec<String>, E> {
+    let mut cursor = node.walk();
+    if node.has_error()
+        || node
+            .children(&mut cursor)
+            .any(|token| !token.is_named() && matches!(token.kind(), "type" | "typeof"))
+    {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    let Some(clause) = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "import_clause")
+    else {
+        return Ok(names);
+    };
+    let mut admit = |leaf: Node<'_>| {
+        if let Some(text) = content.get(leaf.byte_range())
+            && (!imports_admitted || binding_identifier_value(text).is_none())
+            && let Some(name) = identifier_name_value(text)
+            && names.len() < crate::MAX_RELATIONS_PER_FILE
+        {
+            names.push(name.into_owned());
+        }
+    };
+    let mut children = clause.walk();
+    for child in clause.named_children(&mut children) {
+        check()?;
+        if child.kind() == "named_imports" {
+            let mut items = child.walk();
+            for item in child.named_children(&mut items) {
+                check()?;
+                if let Some(leaf) = import_local_leaf(item) {
+                    admit(leaf);
+                }
+            }
+        } else if let Some(leaf) = import_local_leaf(child) {
+            admit(leaf);
+        }
+    }
+    Ok(names)
+}
+
 /// Collect independently valid import leaves from the existing ECMAScript AST.
 pub(super) fn source_bindings<E>(
     node: Node<'_>,
@@ -35,6 +109,12 @@ pub(super) fn source_bindings<E>(
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<SourceImportProof, E> {
     check()?;
+    if node
+        .parent()
+        .is_none_or(|parent| parent.kind() != "program")
+    {
+        return Ok(SourceImportProof::default());
+    }
     let Some(module) = source_module(node, content) else {
         return Ok(SourceImportProof::default());
     };
@@ -84,10 +164,7 @@ pub(super) fn source_bindings<E>(
                 }
             }
             "namespace_import" if !child.has_error() => {
-                let mut names = child.walk();
-                if let Some(alias) = child
-                    .named_children(&mut names)
-                    .find(|name| name.kind() == "identifier")
+                if let Some(alias) = import_local_leaf(child)
                     .and_then(|name| name.utf8_text(content.as_bytes()).ok())
                     .and_then(binding_identifier_value)
                 {
@@ -106,17 +183,12 @@ pub(super) fn source_bindings<E>(
                     if item.kind() != "import_specifier" || item.has_error() {
                         continue;
                     }
-                    let mut tokens = item.walk();
-                    if item
-                        .children(&mut tokens)
-                        .any(|token| !token.is_named() && matches!(token.kind(), "type" | "typeof"))
-                    {
-                        continue;
-                    }
                     let Some(name) = item.child_by_field_name("name") else {
                         continue;
                     };
-                    let alias = item.child_by_field_name("alias").unwrap_or(name);
+                    let Some(alias) = import_local_leaf(item) else {
+                        continue;
+                    };
                     let Some(local) = alias
                         .utf8_text(content.as_bytes())
                         .ok()

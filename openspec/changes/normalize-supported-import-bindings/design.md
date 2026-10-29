@@ -39,6 +39,55 @@ raw source spelling/spans. Invalid bindings abstain per leaf; separately proven
 static module dependencies and supported sibling leaves survive. Escape handling,
 keyword policy and the identifier profile belong in semantic invalidation.
 
+That strict-module predicate remains appropriate for import binding leaves, but it
+must not be reused as a context-free filter for every local declaration or callee.
+Native execution and parser negatives confirm that ordinary scripts lose legal
+`eval`/`arguments` bindings; the pinned reserved-word set also contains contextual
+and strict-only names. Separate BindingIdentifier and IdentifierReference validation
+using the existing AST walk's script/module goal, strictness and Await/Yield grammar
+context. Strict code can reference a valid outer non-strict `eval` binding. A function's
+own strict directive affects its binding/formals, while async/generator grammar does
+not itself make unrelated bindings strict. Recognize actual directive prologues,
+not decoded escaped strings or matching text elsewhere. Keep lexical-declaration
+early errors and invalid tolerant-parser leaves conservative.
+
+Retain each admitted cooked declaration binding by its graph ordinal for later
+resolution/export linking; do not revalidate it later without its original context.
+Non-arrow functions/methods/generators own implicit `arguments` shadows, while arrows
+inherit their enclosing binding. Preserve explicit local/parameter/write ownership
+and do not replace unsupported runtime values with a same-name file declaration.
+Use bounded context and ordinal state in the existing lexical walk, without
+per-call ancestor scans, a grammar reimplementation or runtime execution analysis.
+The parser and binder share one source-context owner for declaration names,
+formals, bodies, computed method keys, class expressions and field/static
+initializers. Invalid parameter/local/import leaves retain negative shadows so a
+valid outer Script binding cannot become their guessed target. Import aliases
+select the actual local leaf; type-only imports do not enter the value namespace.
+
+The pinned grammars also misread legal Script `yield()` calls, and TypeScript
+`await()`/`interface()` calls, before raw call production. Native Node and the
+official TypeScript 5.9.3 Script compiler confirm the language-valid cases; this is
+not a promise to emulate newer compiler configuration or framework transforms.
+Before raw fact capture, normalize only exact ambiguous keyword tokens under the
+shared source context in a lazy private same-length buffer. Keep strings, comments,
+ordinary interfaces and real generator/async operators untouched. TypeScript's
+recovery exception accepts only its closed keyword/parentheses prefix plus one
+complete native formal-parameters node, including flattened nested-call prefixes;
+other recovery remains opaque. The native parser, not local argument logic,
+then establishes the actual calls, arguments and surrounding expressions.
+
+At most one additional parse runs for each affected program, reusing that grammar's
+parser and single included range. Each token updates only its final ASCII byte through a safe mutable str slice,
+without splice/suffix movement as token density increases. Clone at most once per affected grammar projection,
+not per token or region; unaffected and module programs retain their first trees.
+The auxiliary buffer is private and discarded before returning extraction, with
+every text/name/signature/hash/span read still backed by original source bytes.
+Observe the same source-size, depth and cooperative operation cancellation/deadline
+bounds before/after allocation and during traversal/reparse; do not reset budgets
+per program. Measure the added AST traversal/copy/parse work in the source-bound
+cost campaign. This is a bounded exception to one-pass parsing, not another parser
+engine, synthetic call facts or a new published host projection.
+
 Preserve every explicit default-slot occurrence, including unsupported expressions
 and export clauses, as typed unresolved evidence when no declaration is proved.
 Competing slots invalidate default target proof across the module. Filtering a
@@ -54,7 +103,15 @@ remains authoritative. A structural-only host parser does not imply that its
 admitted script regions lack symbol work. Plain HTML retains structural summaries;
 CSS/XML and unsupported script regions gain no JavaScript provider.
 
-Reuse each existing same-length JS/TS projection parse. Remap its declarations,
+Reuse the existing same-length JS/TS buffers and one native parser per grammar.
+Parse each actual program through a single included source range, retaining
+its tree until the shared collector has bound all roots. Both scanner variants
+retain original offsets; separate parses prevent cross-region recovery and ASI
+ambiguity, including the older TypeScript scanner without an included-range-start
+ASI rule. Aggregate parse/traversal cancellation and limits across the file;
+parsed bytes are the sum of admitted regions plus only the affected programs'
+bounded contextual-keyword reparses, not the whole host per region.
+Map sorted range endpoints in one pass. Remap the collected declarations,
 imports and calls through explicit append-only host ordinals, then seal against the
 original host bytes. Keep structural/fallback host provenance. A compatibility row
 can stand for one captured import/call occurrence; repeated same-line occurrences
@@ -64,6 +121,59 @@ independent. Correspondence failure discards binding proof and retains fallback
 coverage rather than inventing an association. Bound merge work with indexed
 identities and per-occurrence compatibility consumption, avoiding repeated scans
 of growing same-name occurrence lists.
+
+Preserve bounded per-region source-goal and lexical-owner evidence alongside each
+of the existing same-length JS/TS projections, under the existing 64-region ceiling.
+Do not create or reparse a whole-host copy per script. Retain at most 64 region
+trees across the existing two buffers, and perform source sealing/hash work once
+per projection and final host rather than once per region. A causal current-source HTML
+fixture proves module locals currently leak into a classic script through the merged
+root. HTML classic regions share the document's global lexical environment but each
+region has its own directive prologue; each module region is strict and isolated
+from sibling module locals. Modules may read the shared classic global environment;
+classic scripts cannot read module locals. Keep original offsets, ordinals, dependency
+facts, conservative export ambiguity and resource/cancellation behavior.
+
+Static imports/re-exports cannot obtain module dependency or alias authority from
+an actual Script program (HTML classic or explicit JavaScript CJS), or from a
+static import nested outside a program root. Preserve raw occurrences and negative
+local shadows, plus ordinary module, Vue/Svelte and TypeScript import-transform
+positives. A TypeScript CTS extension alone does not prohibit its supported ES
+import syntax; keep content-based module detection there. Dynamic import/require
+and unspecified compiler transforms do not gain or lose supported capabilities.
+
+Use the declared host's known roles: Vue normal script has module scope and script
+setup has its setup scope; Svelte module declarations are visible to instance code,
+while instance locals cannot flow back into module code. Retain the corresponding
+bounded parent relationship and admitted import ownership, including supported
+compile-time import hoisting where established by the host contract. Do not infer
+arbitrary framework transforms, execution, package-loader configuration or custom
+host semantics. Unsupported or insufficient role evidence must not authorize a
+cross-region target. Prove normal/setup and module/instance positives and negatives
+before claiming their directional support; do not silently narrow admitted hosts.
+
+Require unique role attributes and at most one of each known Vue/Svelte script
+role, including scripts excluded from native parsing by source/language selection.
+Svelte's documented module flag is valueless and its legacy context is exactly
+module; compatible use of both retains support. Reject conflicting/duplicate role
+attributes rather than choosing whichever grants module authority. See the
+[compiler's script reader](https://github.com/sveltejs/svelte/blob/main/packages/svelte/src/compiler/phases/1-parse/read/script.js).
+Keep raw graph facts for tolerant navigation, but propagate an incomplete host
+batch to call/export authority instead of ignoring it. This also prevents a safe
+prefix from becoming a complete lexical environment after an omitted-region limit
+or malformed remainder. HTML multi-script programs and valid two-role components
+retain their existing source evidence. The bounded mechanism is two role bits
+plus existing incomplete flags, not a framework compiler or another scope registry.
+
+Preserve every raw host export slot but admit module-target authority only for a
+role that establishes it: Vue normal script, HTML module script and Svelte module
+script named exports. Vue setup, Svelte instance and HTML classic export syntax
+cannot establish an ES module target. Svelte's component default is compiler-owned;
+even an explicit default source slot cannot identify it. Reconcile older generic
+host-default positive fixtures using the real module-bearing roles, retaining raw
+slots through existing unresolved/declaration markers so fallback cannot resurrect
+an unsupported target. This corrects the accepted fixtures' source-role assumption
+without adding component-constructor or framework-transform inference.
 
 ### Binding ownership controls calls
 
@@ -132,7 +242,11 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 12/12 additionally repairs missing
+or per-call timeline scan is admitted. Contract 13/13 repairs source-context and
+host-role authority, contextual parser ambiguities, implicit/private owners and
+invalid-binding shadows in unchanged private12/12 indexes. Actual native12 repair,
+full convergence, authored state, no-op and failure/rollback proof remains required.
+Contract 12/12 additionally repairs missing
 synchronous/asynchronous generator declaration scopes, callable graph/export
 identity and generator-local value ownership in unchanged private11/11 indexes.
 All locked ECMAScript grammar variants use their existing AST-owned function

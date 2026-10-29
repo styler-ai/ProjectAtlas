@@ -7,7 +7,35 @@ use projectatlas_core::language::{TreeSitterGrammar, tree_sitter_grammar};
 use projectatlas_core::symbols::{SymbolGraph, SymbolKind};
 use tree_sitter::Node;
 
+use crate::semantic::ecmascript_context;
+use crate::semantic::embedded_source::EmbeddedScriptRole;
+use crate::semantic::{EcmascriptNameContext, EcmascriptNameRole};
 use crate::{SourceCallBinding, SourceSemanticFacts, declaration_kind, node_name};
+
+/// One actual parsed program, borrowing its tree until binding has completed.
+pub(super) struct SourceSyntaxRoot<'tree> {
+    /// Native program with original source offsets.
+    pub(super) node: Node<'tree>,
+    /// Declared host role; absent for a standalone source file.
+    pub(super) role: Option<EmbeddedScriptRole>,
+}
+
+/// Cached declaration admission cannot be reconstructed later from its spelling.
+#[derive(Clone, Default)]
+enum DeclarationBindingName {
+    /// The actual declaration has not yet been visited.
+    #[default]
+    Unseen,
+    /// One exact cooked name and its original lexical owner.
+    Admitted {
+        /// Source-valid cooked identifier value.
+        name: String,
+        /// Original lexical/hoisted binding environment.
+        scope: usize,
+    },
+    /// Invalid or conflicting source context cannot grant target authority.
+    Rejected,
+}
 
 /// Bound environments even when syntax produces no capped symbols or relations.
 const MAX_LEXICAL_SCOPES: usize = 16_384;
@@ -279,6 +307,12 @@ enum EcmascriptVarEnvironment {
 struct Scope {
     /// Lexical lookup parent, independent from class presentation ownership.
     parent: Option<usize>,
+    /// Source grammar context, separate from lexical lookup parentage.
+    ecma_context: EcmascriptNameContext,
+    /// File/region environment that owns this scope's host role.
+    ecma_root: usize,
+    /// Declared host role on root environments only.
+    ecma_role: Option<EmbeddedScriptRole>,
     /// Whether lookup crosses a callable boundary; also Python's local owner.
     function: bool,
     /// ECMAScript body/static/namespace vars stay separate from parameter evaluation.
@@ -335,6 +369,10 @@ struct CallSite {
 struct LexicalCollector<'a> {
     /// Registry-selected native language.
     language: &'a str,
+    /// Current visit's syntax profile, restored around recursive visits.
+    ecma_context: EcmascriptNameContext,
+    /// The current program's lexical owner, retained for export-slot decisions.
+    ecma_root: usize,
     /// Captured source backing the existing syntax tree.
     content: &'a str,
     /// Final augmented graph whose ordinals are being proved.
@@ -357,10 +395,14 @@ struct LexicalCollector<'a> {
     calls: BTreeMap<(usize, usize), Vec<usize>>,
     /// Exact emitted declaration identities; collisions stay ambiguous.
     declarations: BTreeMap<(usize, usize, &'a str, &'a str), DeclarationOrdinals<'a>>,
+    /// At most one bounded name admission per emitted ECMAScript declaration.
+    declaration_names: Vec<DeclarationBindingName>,
     /// Admitted calls awaiting visibility lookup after collection.
     sites: Vec<CallSite>,
     /// Explicit export slots collected from the same native tree.
     exports: Vec<crate::SourceExportFact>,
+    /// Lexical owner corresponding to each retained export occurrence.
+    export_scopes: Vec<usize>,
     /// Exhausted export capacity invalidates all target proof, including earlier slots.
     exports_incomplete: bool,
     /// Local export clauses linked after the complete module environment is known.
@@ -383,7 +425,7 @@ struct LexicalCollector<'a> {
 
 /// Resolve captured calls without another parse or a graph-wide scan per call.
 pub(super) fn bind_calls<E>(
-    root: Node<'_>,
+    roots: &[SourceSyntaxRoot<'_>],
     content: &str,
     graph: &SymbolGraph,
     facts: &mut SourceSemanticFacts,
@@ -413,6 +455,8 @@ pub(super) fn bind_calls<E>(
     let bindings_incomplete = facts.bindings_incomplete;
     let mut collector = LexicalCollector {
         language,
+        ecma_context: EcmascriptNameContext::default(),
+        ecma_root: 0,
         content,
         graph,
         facts,
@@ -431,8 +475,14 @@ pub(super) fn bind_calls<E>(
         imports: BTreeMap::new(),
         calls: BTreeMap::new(),
         declarations: BTreeMap::new(),
+        declaration_names: if matches!(language, "javascript" | "typescript" | "tsx") {
+            vec![DeclarationBindingName::Unseen; graph.symbols.len()]
+        } else {
+            Vec::new()
+        },
         sites: Vec::new(),
         exports: Vec::new(),
+        export_scopes: Vec::new(),
         exports_incomplete: false,
         local_exports: Vec::new(),
         export_ambiguities: BTreeSet::new(),
@@ -479,8 +529,13 @@ pub(super) fn bind_calls<E>(
             .and_modify(|ordinals| ordinals.insert(index, graph))
             .or_insert(DeclarationOrdinals::Unique(index));
     }
-    collector.collect_python_directive_names(root, check)?;
-    collector.visit(root, 0, check)?;
+    for root in roots {
+        check()?;
+        collector.collect_python_directive_names(root.node, check)?;
+        let scope = collector.source_root_scope(root, check)?;
+        collector.ecma_root = scope;
+        collector.visit(root.node, scope, check)?;
+    }
     collector.link_python_directives(check)?;
     collector.apply_mutations(check)?;
     if collector.incomplete {
@@ -667,6 +722,163 @@ pub(super) fn bind_calls<E>(
 }
 
 impl LexicalCollector<'_> {
+    /// Allocate only the lexical environment established by this source program.
+    fn source_root_scope<E>(
+        &mut self,
+        root: &SourceSyntaxRoot<'_>,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<usize, E> {
+        if !self.ecmascript() {
+            return Ok(0);
+        }
+        let context = ecmascript_context::source_context(
+            root.node,
+            &self.graph.path,
+            root.role,
+            self.content,
+            check,
+        )?;
+        let separate = matches!(
+            root.role,
+            Some(
+                EmbeddedScriptRole::HtmlModule
+                    | EmbeddedScriptRole::VueSetup
+                    | EmbeddedScriptRole::SvelteInstance
+            )
+        );
+        if !separate {
+            self.scopes[0].ecma_context = context;
+            self.scopes[0].ecma_role = root.role;
+            return Ok(0);
+        }
+        if !self.admit_scope() {
+            return Ok(0);
+        }
+        if matches!(
+            root.role,
+            Some(EmbeddedScriptRole::VueSetup | EmbeddedScriptRole::SvelteInstance)
+        ) {
+            self.scopes[0].ecma_context = EcmascriptNameContext::module();
+        }
+        let scope = self.scopes.len();
+        let instance = root.role != Some(EmbeddedScriptRole::HtmlModule);
+        self.scopes.push(Scope {
+            parent: Some(0),
+            ecma_context: context,
+            ecma_root: scope,
+            ecma_role: root.role,
+            ecma_var_environment: EcmascriptVarEnvironment::Local,
+            function: instance,
+            enclosing_visibility_floor: if instance { root.node.end_byte() } else { 0 },
+            ..Scope::default()
+        });
+        Ok(scope)
+    }
+
+    /// Retain the original declaration's admitted name before entering its body.
+    fn admit_declaration_name<E>(
+        &mut self,
+        node: Node<'_>,
+        symbol: usize,
+        scope: usize,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut context = self.ecma_context;
+        if ecmascript_context::is_class(node) {
+            context = context.with_strict(true);
+        }
+        if ecmascript_context::is_callable(node) {
+            context =
+                ecmascript_context::callable_contexts(node, context, self.content, check)?.name;
+        }
+        let invalid_initializer = if crate::declaration_has_direct_callable_initializer(node)
+            && let Some(initializer) = crate::first_declaration_initializer(node)
+            && ecmascript_context::is_callable(initializer)
+            && let Some(name) = initializer.child_by_field_name("name")
+        {
+            let profile = ecmascript_context::callable_contexts(
+                initializer,
+                self.ecma_context,
+                self.content,
+                check,
+            )?;
+            self.content.get(name.byte_range()).is_none_or(|name| {
+                crate::semantic::ecmascript_contextual_name(
+                    name,
+                    profile.name,
+                    EcmascriptNameRole::Binding,
+                )
+                .is_none()
+            })
+        } else {
+            false
+        };
+        let scope = if node.kind() == "variable_declaration" {
+            self.value_declaration_scope(scope)
+        } else {
+            scope
+        };
+        let role = if node.kind() == "lexical_declaration"
+            || node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "lexical_declaration")
+        {
+            EcmascriptNameRole::LexicalBinding
+        } else {
+            EcmascriptNameRole::Binding
+        };
+        let name = crate::semantic::ecmascript_contextual_name(
+            &self.graph.symbols[symbol].name,
+            context,
+            role,
+        );
+        let next = match name {
+            Some(name) if !invalid_initializer => DeclarationBindingName::Admitted { name, scope },
+            Some(_) | None => DeclarationBindingName::Rejected,
+        };
+        let existing = &mut self.declaration_names[symbol];
+        match (&*existing, &next) {
+            (DeclarationBindingName::Unseen, _) => *existing = next,
+            (
+                DeclarationBindingName::Admitted { name, scope },
+                DeclarationBindingName::Admitted {
+                    name: other_name,
+                    scope: other_scope,
+                },
+            ) if name == other_name && scope == other_scope => {}
+            _ => *existing = DeclarationBindingName::Rejected,
+        }
+        Ok(())
+    }
+
+    /// Derive syntax parameters at the source boundary that actually owns them.
+    fn child_ecma_context<E>(
+        &self,
+        node: Node<'_>,
+        function: bool,
+        class: bool,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<EcmascriptNameContext, E> {
+        let mut context = self.ecma_context;
+        if !self.ecmascript() {
+            return Ok(context);
+        }
+        if class {
+            context = context.with_strict(true);
+        }
+        if function && ecmascript_context::is_callable(node) {
+            context =
+                ecmascript_context::callable_contexts(node, context, self.content, check)?.body;
+        }
+        if node.kind() == "class_static_block" {
+            context = context.with_strict(true);
+            context.await_keyword = true;
+            context.yield_keyword = false;
+            context.arguments_forbidden = true;
+        }
+        Ok(context)
+    }
+
     /// Select directive names once from the captured AST, never from literal matches alone.
     fn collect_python_directive_names<E>(
         &mut self,
@@ -982,7 +1194,10 @@ impl LexicalCollector<'_> {
     fn declaration_binding_name(&self, symbol: usize) -> Option<String> {
         let name = &self.graph.symbols[symbol].name;
         if self.ecmascript() {
-            crate::semantic::ecmascript_binding_value(name)
+            match self.declaration_names.get(symbol)? {
+                DeclarationBindingName::Admitted { name, .. } => Some(name.clone()),
+                DeclarationBindingName::Unseen | DeclarationBindingName::Rejected => None,
+            }
         } else {
             Some(name.clone())
         }
@@ -992,7 +1207,25 @@ impl LexicalCollector<'_> {
     fn binding_name(&self, node: Node<'_>) -> Option<String> {
         let name = self.identifier(node)?;
         if self.ecmascript() {
-            crate::semantic::ecmascript_binding_value(&name)
+            crate::semantic::ecmascript_contextual_name(
+                &name,
+                self.ecma_context,
+                EcmascriptNameRole::Binding,
+            )
+        } else {
+            Some(name)
+        }
+    }
+
+    /// References retain their own early errors, including legal strict eval reads.
+    fn reference_name(&self, node: Node<'_>) -> Option<String> {
+        let name = self.identifier(node)?;
+        if self.ecmascript() {
+            crate::semantic::ecmascript_contextual_name(
+                &name,
+                self.ecma_context,
+                EcmascriptNameRole::Reference,
+            )
         } else {
             Some(name)
         }
@@ -1086,6 +1319,20 @@ impl LexicalCollector<'_> {
     fn visit<E>(
         &mut self,
         node: Node<'_>,
+        scope: usize,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let previous = self.ecma_context;
+        self.ecma_context = self.scopes[scope].ecma_context;
+        let result = self.visit_node(node, scope, check);
+        self.ecma_context = previous;
+        result
+    }
+
+    /// Visit under an already selected syntax and lexical environment.
+    fn visit_node<E>(
+        &mut self,
+        node: Node<'_>,
         mut scope: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
@@ -1137,7 +1384,7 @@ impl LexicalCollector<'_> {
                 .python_reads
                 .insert(name, node.start_byte());
         }
-        if self.ecmascript() && scope == 0 && node.kind() == "export_statement" {
+        if self.ecmascript() && scope == self.ecma_root && node.kind() == "export_statement" {
             self.direct_export(node, check)?;
         }
         let enclosing_scope = scope;
@@ -1178,6 +1425,17 @@ impl LexicalCollector<'_> {
         {
             return self.zig_payload_scope(node, scope, check);
         }
+        let source_context = self.ecma_context;
+        let callable_contexts = if self.ecmascript() && ecmascript_context::is_callable(node) {
+            Some(ecmascript_context::callable_contexts(
+                node,
+                source_context,
+                self.content,
+                check,
+            )?)
+        } else {
+            None
+        };
         let function = is_function(node.kind());
         let class = is_class(node.kind());
         let class = class
@@ -1186,7 +1444,13 @@ impl LexicalCollector<'_> {
                     node.kind(),
                     "enum_item" | "trait_item" | "union_item" | "type_item"
                 );
-        let declaration = declaration_kind(node.kind()).and_then(|_| self.declaration(node));
+        let declaration = crate::source_declaration_kind(node.kind(), Some(self.language))
+            .and_then(|_| self.declaration(node));
+        if self.ecmascript()
+            && let Some(symbol) = declaration
+        {
+            self.admit_declaration_name(node, symbol, scope, check)?;
+        }
         if self.language == "rust"
             && self.scopes[scope].rust_item_owner != RustItemOwner::UnsupportedModule
         {
@@ -1338,6 +1602,10 @@ impl LexicalCollector<'_> {
                             BindingTarget::Declaration(symbol),
                         );
                     }
+                } else if self.ecmascript()
+                    && let Some(name) = crate::semantic::ecmascript_identifier_value(&fact.name)
+                {
+                    self.bind(scope, name, 0, false, BindingTarget::Shadow);
                 }
             }
         }
@@ -1376,7 +1644,12 @@ impl LexicalCollector<'_> {
                         | "switch_expression_arm"
                 ))
             || (self.language == "kotlin" && node.kind() == "catch_block");
-        if function || class || block {
+        let ecma_initializer = self.ecmascript()
+            && matches!(
+                node.kind(),
+                "field_definition" | "public_field_definition" | "class_static_block"
+            );
+        if function || class || block || ecma_initializer {
             if !self.admit_scope() {
                 return Ok(());
             }
@@ -1418,6 +1691,8 @@ impl LexicalCollector<'_> {
             }
             self.scopes.push(Scope {
                 parent: Some(parent),
+                ecma_context: self.child_ecma_context(node, function, class, check)?,
+                ecma_root: self.scopes[parent].ecma_root,
                 function,
                 ecma_var_environment: if self.ecmascript()
                     && node.parent().is_some_and(|owner| {
@@ -1452,7 +1727,26 @@ impl LexicalCollector<'_> {
                 rust_item_owner,
                 ..Scope::default()
             });
+            self.ecma_context = self.scopes[scope].ecma_context;
+            if self.ecmascript()
+                && node.kind() == "class"
+                && let Some(name) = node
+                    .child_by_field_name("name")
+                    .and_then(|name| self.shadow_name(name))
+            {
+                // A class expression's private name is not its outer namesake.
+                self.bind(scope, name, 0, true, BindingTarget::Shadow);
+            }
             if function {
+                if self.ecmascript() && node.kind() != "arrow_function" {
+                    self.bind(
+                        scope,
+                        "arguments".to_string(),
+                        0,
+                        false,
+                        BindingTarget::Shadow,
+                    );
+                }
                 if self.ecmascript()
                     && matches!(
                         node.kind(),
@@ -1461,15 +1755,37 @@ impl LexicalCollector<'_> {
                     && let Some(symbol) = callable_owner
                     && let Some(name) = node
                         .child_by_field_name("name")
-                        .and_then(|name| self.identifier(name))
+                        .and_then(|name| self.binding_name(name))
                 {
                     self.bind(scope, name, 0, false, BindingTarget::Declaration(symbol));
                 }
+                let body_context = self.ecma_context;
+                if let Some(contexts) = callable_contexts {
+                    self.ecma_context = contexts.formals;
+                }
                 self.parameters(node, scope, check)?;
+                self.ecma_context = body_context;
             }
         }
         if self.language == "cpp" && node.kind() == "catch_clause" {
             self.parameters(node, scope, check)?;
+        }
+        if self.ecmascript() && node.kind() == "import_statement" {
+            let imports_admitted = self.ecma_context.is_module()
+                && node
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "program");
+            if !imports_admitted && node.has_error() {
+                self.incomplete = true;
+            }
+            for name in crate::semantic::ecmascript::invalid_local_bindings(
+                node,
+                self.content,
+                imports_admitted,
+                check,
+            )? {
+                self.bind(scope, name, 0, true, BindingTarget::Shadow);
+            }
         }
         if let Some(imports) = self
             .imports
@@ -1533,8 +1849,18 @@ impl LexicalCollector<'_> {
                             BindingNamespace::Namespace,
                         );
                     }
+                    let import_scope = if self.ecmascript()
+                        && scope == self.ecma_root
+                        && matches!(
+                            self.scopes[scope].ecma_role,
+                            Some(EmbeddedScriptRole::VueSetup | EmbeddedScriptRole::SvelteInstance)
+                        ) {
+                        0
+                    } else {
+                        scope
+                    };
                     self.bind(
-                        scope,
+                        import_scope,
                         binding.local().to_string(),
                         if python { node.end_byte() } else { 0 },
                         python && self.scopes[scope].function,
@@ -1653,6 +1979,20 @@ impl LexicalCollector<'_> {
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
+            let saved_context = self.scopes[scope].ecma_context;
+            if self.ecmascript() {
+                self.scopes[scope].ecma_context = ecmascript_context::child_context(
+                    node,
+                    child,
+                    source_context,
+                    callable_contexts,
+                );
+            }
+            let computed_method_key = self.ecmascript()
+                && node.kind() == "method_definition"
+                && node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| name.id() == child.id());
             let python_definition_header = self.language == "python"
                 && (function || class)
                 && node
@@ -1660,13 +2000,16 @@ impl LexicalCollector<'_> {
                     .is_none_or(|body| body.id() != child.id());
             self.visit(
                 child,
-                if python_definition_header {
+                if python_definition_header || computed_method_key {
                     enclosing_scope
                 } else {
                     scope
                 },
                 check,
             )?;
+            if self.ecmascript() {
+                self.scopes[scope].ecma_context = saved_context;
+            }
         }
         Ok(())
     }
@@ -1972,6 +2315,12 @@ impl LexicalCollector<'_> {
         )))
     }
 
+    /// Invalid binding leaves still prevent accidental fallback to an outer value.
+    fn shadow_name(&self, node: Node<'_>) -> Option<String> {
+        self.binding_name(node)
+            .or_else(|| self.ecmascript().then(|| self.identifier(node)).flatten())
+    }
+
     /// Parameters are owned by their function, including destructuring leaves.
     fn parameters<E>(
         &mut self,
@@ -2059,7 +2408,7 @@ impl LexicalCollector<'_> {
             }
             return Ok(());
         }
-        if let Some(name) = self.binding_name(node) {
+        if let Some(name) = self.shadow_name(node) {
             self.bind(scope, name, 0, true, BindingTarget::Shadow);
             return Ok(());
         }
@@ -2097,7 +2446,7 @@ impl LexicalCollector<'_> {
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
         check()?;
-        if let Some(name) = self.binding_name(node) {
+        if let Some(name) = self.shadow_name(node) {
             self.bind(scope, name, from, reserves, BindingTarget::Shadow);
             return Ok(());
         }
@@ -2861,6 +3210,7 @@ impl LexicalCollector<'_> {
             self.exports_incomplete = true;
             self.exports.clear();
             self.local_exports.clear();
+            self.export_scopes.clear();
             return None;
         }
         let index = self.exports.len();
@@ -2874,6 +3224,7 @@ impl LexicalCollector<'_> {
             line: node.start_position().row + 1,
             binding,
         });
+        self.export_scopes.push(self.ecma_root);
         Some(index)
     }
 
@@ -2884,7 +3235,8 @@ impl LexicalCollector<'_> {
     ) -> Result<(), E> {
         for (export, name) in &self.local_exports {
             check()?;
-            let Some(bindings) = self.scopes[0].bindings.get(name) else {
+            let scope = self.export_scopes[*export];
+            let Some(bindings) = self.scopes[scope].bindings.get(name) else {
                 continue;
             };
             if bindings.runtime_mutated {
@@ -2926,17 +3278,60 @@ impl LexicalCollector<'_> {
                 continue;
             };
             let Some(name) = self.declaration_binding_name(symbol) else {
+                if self.ecmascript() {
+                    self.exports[export].binding =
+                        crate::SourceExportBinding::UnresolvedDeclarations(vec![symbol].into());
+                }
                 continue;
             };
-            if self.scopes[0].bindings.get(&name).is_some_and(|bindings| {
-                bindings.runtime_mutated
-                    || bindings
-                        .transitions
-                        .last()
-                        .is_some_and(|binding| binding.target != BindingTarget::Declaration(symbol))
-            }) {
+            let scope = if self.ecmascript() {
+                match &self.declaration_names[symbol] {
+                    DeclarationBindingName::Admitted { scope, .. } => *scope,
+                    DeclarationBindingName::Unseen | DeclarationBindingName::Rejected => {
+                        self.export_scopes[export]
+                    }
+                }
+            } else {
+                0
+            };
+            if self.scopes[scope]
+                .bindings
+                .get(&name)
+                .is_some_and(|bindings| {
+                    bindings.runtime_mutated
+                        || bindings.transitions.last().is_some_and(|binding| {
+                            binding.target != BindingTarget::Declaration(symbol)
+                        })
+                })
+            {
                 self.exports[export].binding =
                     crate::SourceExportBinding::UnresolvedDeclarations(vec![symbol].into());
+            }
+        }
+        if self.ecmascript() {
+            for (export, scope) in self.exports.iter_mut().zip(&self.export_scopes) {
+                check()?;
+                let owner = &self.scopes[*scope];
+                let admitted = owner
+                    .ecma_role
+                    .map_or(owner.ecma_context.is_module(), |role| {
+                        role.admits_export(&export.name)
+                    });
+                if !admitted {
+                    export.binding = match std::mem::replace(
+                        &mut export.binding,
+                        crate::SourceExportBinding::Unresolved,
+                    ) {
+                        crate::SourceExportBinding::LocalDeclaration(symbol) => {
+                            crate::SourceExportBinding::UnresolvedDeclarations(vec![symbol].into())
+                        }
+                        crate::SourceExportBinding::AmbiguousDeclarations(symbols)
+                        | crate::SourceExportBinding::UnresolvedDeclarations(symbols) => {
+                            crate::SourceExportBinding::UnresolvedDeclarations(symbols)
+                        }
+                        _ => crate::SourceExportBinding::Unresolved,
+                    };
+                }
             }
         }
         Ok(())
@@ -2961,7 +3356,7 @@ impl LexicalCollector<'_> {
             let (root, members) = self.rust_path_parts(target)?;
             return Some((root, Some(members.join("::"))));
         }
-        if let Some(name) = self.binding_name(target) {
+        if let Some(name) = self.reference_name(target) {
             return Some((name, None));
         }
         let (object, member) = match target.kind() {
@@ -2989,7 +3384,7 @@ impl LexicalCollector<'_> {
             ),
             _ => return None,
         };
-        Some((self.binding_name(object)?, Some(self.identifier(member)?)))
+        Some((self.reference_name(object)?, Some(self.identifier(member)?)))
     }
 
     /// Preserve only explicit anchored paths and roots with a known toolchain identity.
@@ -3421,6 +3816,7 @@ fn is_class(kind: &str) -> bool {
     matches!(
         kind,
         "class_declaration"
+            | "class"
             | "class_definition"
             | "class_specifier"
             | "struct_item"
@@ -3459,6 +3855,16 @@ mod tests {
     use super::SourceCallBinding;
     use crate::extract_symbol_graph_with_semantics_controlled;
     use projectatlas_core::IndexWorkControl;
+
+    /// Use a host role that actually establishes module-export authority.
+    fn ecmascript_module_fixture(language: &str, source: &str) -> String {
+        let attributes = match language {
+            "html" => " type=\"module\"",
+            "svelte" => " module",
+            _ => "",
+        };
+        format!("<script{attributes}>{source}</script>")
+    }
 
     #[test]
     fn ecmascript_export_clauses_retain_static_forwarding_and_local_identity() {
@@ -3565,7 +3971,11 @@ function caller() { renamed(); tools.work(); }
         ] {
             let script = "type Item = unknown; function run() {} export type { Item as named }; export { type Item as inline, run as named };";
             let content = if host {
-                format!("<script lang=\"ts\">{script}</script>")
+                ecmascript_module_fixture(language, script).replacen(
+                    "<script",
+                    "<script lang=\"ts\"",
+                    1,
+                )
             } else {
                 script.to_string()
             };
@@ -4342,7 +4752,7 @@ function caller() { renamed(); tools.work(); }
         ] {
             let script = "export const arrow = () => {};\nexport let expression = function () {};\nexport var generator = function* () {};\nexport const scalar = 1;\nexport const {ghost: renamed} = () => {};\nexport default () => {};";
             let content = if host {
-                format!("<script>\n{script}\n</script>")
+                ecmascript_module_fixture(language, script)
             } else {
                 script.to_string()
             };
@@ -5436,6 +5846,540 @@ function caller() { renamed(); tools.work(); }
     }
 
     #[test]
+    fn ecmascript_script_names_keep_legal_local_call_bindings() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("html", "main.html", true),
+        ] {
+            for name in [
+                "eval",
+                "arguments",
+                "await",
+                "yield",
+                "let",
+                "static",
+                "implements",
+                "interface",
+                "package",
+                "private",
+                "protected",
+                "public",
+            ] {
+                let script = format!("function {name}(){{}} {name}();");
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (_, _, facts) = extracted.into_parts();
+                let failure_ast = (facts.calls.len() != 1).then(|| {
+                    crate::tree_sitter_language(if host { "javascript" } else { language })
+                        .and_then(|grammar| {
+                            crate::parse_tree_sitter_language(&grammar, &content, &mut || {
+                                Ok::<(), std::convert::Infallible>(())
+                            })
+                            .ok()
+                            .flatten()
+                        })
+                        .map(|tree| {
+                            let mut cursor = tree.root_node().walk();
+                            let mut nodes = Vec::new();
+                            loop {
+                                let node = cursor.node();
+                                nodes.push((
+                                    node.kind().to_string(),
+                                    content.get(node.byte_range()).map(ToString::to_string),
+                                ));
+                                if cursor.goto_first_child() {
+                                    continue;
+                                }
+                                while !cursor.goto_next_sibling() {
+                                    if !cursor.goto_parent() {
+                                        return format!("{nodes:?}");
+                                    }
+                                }
+                            }
+                        })
+                });
+                assert_eq!(
+                    facts.calls.len(),
+                    1,
+                    "{language}: {content}: {failure_ast:?}"
+                );
+                assert!(
+                    matches!(
+                        facts.calls[0].binding,
+                        SourceCallBinding::LocalDeclaration(_)
+                    ),
+                    "{language}: {content}: {:?}",
+                    facts.calls
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ecmascript_contexts_keep_reference_roles_and_implicit_arguments_owners() {
+        for (content, expected) in [
+            (
+                "function eval(){} function caller(){'use strict';eval();}",
+                vec![true],
+            ),
+            ("function eval(){'use strict';} eval();", vec![false]),
+            ("'use\\x20strict'; function eval(){} eval();", vec![true]),
+            ("'use strict'; function eval(){} eval();", vec![false]),
+            (
+                "function arguments(){} arguments(); function caller(){arguments();} const arrow=()=>arguments();",
+                vec![true, false, true],
+            ),
+            (
+                "function arguments(){} function caller(){const arrow=()=>arguments();}",
+                vec![false],
+            ),
+            (
+                "function arguments(){} const object={method(){arguments();}};",
+                vec![false],
+            ),
+            (
+                "function arguments(){} class C{[arguments()]=arguments();}",
+                vec![true, false],
+            ),
+            (
+                "const C=class {method(){function eval(){} eval();}};",
+                vec![false],
+            ),
+            ("async function await(){} await();", vec![true]),
+            ("function* yield(){} yield();", vec![true]),
+            ("const run=async function await(){};run();", vec![false]),
+            ("const run=function* yield(){};run();", vec![false]),
+            (
+                "function eval(){} function caller(eval){'use strict';eval();}",
+                vec![false],
+            ),
+            (
+                "function eval(){} function caller(){'use strict';let eval;eval();}",
+                vec![false],
+            ),
+            (
+                "function arguments(){} const o={[arguments()](){arguments();}};",
+                vec![true, false],
+            ),
+            (
+                "function await(){} class C{field=await();static{await();}}",
+                vec![true, false],
+            ),
+            (
+                "function* caller(){const run=function yield(){};run();}",
+                vec![true],
+            ),
+            (
+                "async function caller(){const run=function await(){};run();}",
+                vec![true],
+            ),
+            (
+                "function Inner(){} const C=class Inner{method(){Inner();}};",
+                vec![false],
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.js",
+                Some("javascript"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{content}: {extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            let observed: Vec<_> = extracted
+                .semantics()
+                .calls()
+                .iter()
+                .map(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_)))
+                .collect();
+            assert_eq!(observed, expected, "{content}: {:?}", extracted.semantics());
+        }
+    }
+
+    #[test]
+    fn html_module_bindings_do_not_leak_into_classic_scripts() {
+        let content = "<script type=\"module\">function local(){} local();</script>\n<script>function caller(){local();}</script>";
+        let extracted = extract_symbol_graph_with_semantics_controlled(
+            "main.html",
+            Some("html"),
+            content,
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(extracted.is_ok(), "{extracted:?}");
+        let Ok(extracted) = extracted else { return };
+        let (_, _, facts) = extracted.into_parts();
+        assert_eq!(facts.calls.len(), 2, "{:?}", facts.calls);
+        assert!(
+            matches!(
+                facts.calls[0].binding,
+                SourceCallBinding::LocalDeclaration(_)
+            ) && matches!(facts.calls[1].binding, SourceCallBinding::Unresolved),
+            "{:?}",
+            facts.calls
+        );
+    }
+
+    #[test]
+    fn host_programs_keep_scope_direction_and_independent_grammar_ranges() {
+        for (language, content, expected) in [
+            (
+                "html",
+                "<script>function shared(){}</script><script type=module>shared();</script><script>shared();</script>",
+                vec![true, true],
+            ),
+            (
+                "html",
+                "<script type=module>function hidden(){}</script><script type=module>hidden();</script>",
+                vec![false],
+            ),
+            (
+                "html",
+                "<script>function eval(){}</script><script>'use strict';eval();</script><script>function arguments(){} arguments();</script>",
+                vec![true, true],
+            ),
+            (
+                "html",
+                "<script>function run(){} run()</script><script>run()</script>",
+                vec![true, true],
+            ),
+            (
+                "html",
+                "<script lang=ts>function run(){} run()</script><script lang=ts>run()</script>",
+                vec![true, true],
+            ),
+            (
+                "html",
+                "<script>function broken(</script><script>function run(){} run();</script>",
+                vec![true],
+            ),
+            (
+                "vue",
+                "<script>function normal(){} setup();</script><script setup>normal(); function setup(){}</script>",
+                vec![false, true],
+            ),
+            (
+                "svelte",
+                "<script module>function moduleLocal(){} instanceLocal();</script><script>moduleLocal(); function instanceLocal(){}</script>",
+                vec![false, true],
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                &format!("main.{language}"),
+                Some(language),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            let observed: Vec<_> = extracted
+                .semantics()
+                .calls()
+                .iter()
+                .map(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_)))
+                .collect();
+            assert_eq!(
+                observed,
+                expected,
+                "{language}: {content}: {:?}",
+                extracted.semantics()
+            );
+        }
+        for (language, instance) in [("vue", "setup"), ("svelte", "")] {
+            let module = if language == "vue" { "" } else { "module" };
+            let content = format!(
+                "<script {instance}>import {{run}} from './worker'; run();</script><script {module}>run();</script>"
+            );
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                &format!("main.{language}"),
+                Some(language),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            assert_eq!(extracted.semantics().calls().len(), 2);
+            assert!(
+                extracted
+                    .semantics()
+                    .calls()
+                    .iter()
+                    .all(|call| matches!(call.binding, SourceCallBinding::Imported { .. })),
+                "{language}: {:?}",
+                extracted.semantics()
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_keyword_calls_keep_arguments_and_real_operators_distinct() {
+        for language in ["javascript", "typescript", "tsx"] {
+            for (content, expected) in [
+                ("function yield(){} yield(yield());", vec!["yield", "yield"]),
+                ("function await(){} await(await());", vec!["await", "await"]),
+                ("'use strict'; function await(){} await();", vec!["await"]),
+                (
+                    "async function outer(){function inner(){function await(){} await();}}",
+                    vec!["await"],
+                ),
+                (
+                    "function yield(){} function* gen(){yield 1;} yield();",
+                    vec!["yield"],
+                ),
+                ("function* gen(){yield 1;}", vec![]),
+                ("async function caller(){await unknown;}", vec![]),
+                ("export {}; await unknown;", vec![]),
+                ("class C{static{await unknown;}}", vec![]),
+                ("function await(){} await(", vec![]),
+                ("function await(){} await(value:number);", vec![]),
+                ("function await(){} await(value?:number);", vec![]),
+                ("function await(){} await(...values:number[]);", vec![]),
+                ("function await(){} await(...values);", vec!["await"]),
+            ] {
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    &format!(
+                        "main.{}",
+                        if language == "javascript" {
+                            "js"
+                        } else if language == "typescript" {
+                            "ts"
+                        } else {
+                            "tsx"
+                        }
+                    ),
+                    Some(language),
+                    content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (.., graph, facts) = extracted.into_parts();
+                let calls: Vec<_> = facts
+                    .calls
+                    .iter()
+                    .map(|call| graph.relations[call.relation].target_name.as_str())
+                    .collect();
+                let ast = (calls != expected).then(|| {
+                    crate::tree_sitter_language(language)
+                        .and_then(|grammar| {
+                            crate::parse_tree_sitter_language(&grammar, content, &mut || {
+                                Ok::<(), std::convert::Infallible>(())
+                            })
+                            .ok()
+                            .flatten()
+                        })
+                        .map(|tree| {
+                            let mut cursor = tree.root_node().walk();
+                            let mut nodes = Vec::new();
+                            loop {
+                                let node = cursor.node();
+                                nodes.push((
+                                    node.kind().to_string(),
+                                    content.get(node.byte_range()).map(ToString::to_string),
+                                ));
+                                if cursor.goto_first_child() {
+                                    continue;
+                                }
+                                while !cursor.goto_next_sibling() {
+                                    if !cursor.goto_parent() {
+                                        return format!("{nodes:?}");
+                                    }
+                                }
+                            }
+                        })
+                });
+                assert_eq!(calls, expected, "{language}: {content}: {facts:?}: {ast:?}");
+                if !expected.is_empty() {
+                    assert!(
+                        facts.calls.iter().all(|call| matches!(
+                            call.binding,
+                            SourceCallBinding::LocalDeclaration(_)
+                        )),
+                        "{language}: {content}: {facts:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_import_leaves_shadow_without_claiming_exported_name_aliases() {
+        for (attributes, import, expected) in [
+            ("", "import {eval} from './worker';", false),
+            ("", "import eval from './worker';", false),
+            ("", "import * as eval from './worker';", false),
+            ("", "import {eval as legal} from './worker';", true),
+            ("lang=ts", "import type {eval} from './worker';", true),
+            ("lang=ts", "import {type eval} from './worker';", true),
+        ] {
+            let content = format!(
+                "<script {attributes}>function eval(){{}}</script><script type=module {attributes}>{import} eval();</script>"
+            );
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "main.html",
+                Some("html"),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            assert_eq!(extracted.semantics().calls().len(), 1);
+            assert_eq!(
+                matches!(
+                    extracted.semantics().calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                expected,
+                "{content}: {:?}",
+                extracted.semantics()
+            );
+        }
+    }
+
+    #[test]
+    fn script_goal_static_imports_preserve_raw_facts_without_module_authority() {
+        for (path, language, content) in [
+            (
+                "main.html",
+                "html",
+                "<script>import {run} from './worker'; function caller(){run();}</script>",
+            ),
+            (
+                "main.cjs",
+                "javascript",
+                "import {run} from './worker'; function caller(){run();}",
+            ),
+            (
+                "main.js",
+                "javascript",
+                "function run(){} function caller(){import {run} from './worker';run();}",
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                path,
+                Some(language),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            assert_eq!(extracted.semantics().imports().len(), 1);
+            assert!(
+                extracted
+                    .semantics()
+                    .imports()
+                    .iter()
+                    .all(|fact| fact.module.is_none() && fact.references.is_empty()),
+                "{path}: {:?}",
+                extracted.semantics()
+            );
+            assert_eq!(extracted.semantics().calls().len(), 1);
+            assert!(
+                extracted.semantics().calls().iter().all(|call| matches!(
+                    call.binding,
+                    SourceCallBinding::Unresolved | SourceCallBinding::Shadowed
+                )),
+                "{path}: {:?}",
+                extracted.semantics()
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_commonjs_extension_preserves_static_import_transform_support() {
+        let extracted = extract_symbol_graph_with_semantics_controlled(
+            "main.cts",
+            Some("typescript"),
+            "import {run} from './worker'; function caller(){run();}",
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(extracted.is_ok(), "{extracted:?}");
+        let Ok(extracted) = extracted else { return };
+        assert_eq!(extracted.semantics().imports().len(), 1);
+        assert!(extracted.semantics().imports()[0].module.is_some());
+        assert_eq!(extracted.semantics().calls().len(), 1);
+        assert!(matches!(
+            extracted.semantics().calls()[0].binding,
+            SourceCallBinding::Imported { .. }
+        ));
+    }
+
+    #[test]
+    fn incomplete_host_roles_and_region_limits_keep_raw_calls_without_authority() {
+        for (language, content) in [
+            ("vue", "<script>function run(){}</script><script>function caller(){run();}</script>".to_string()),
+            ("vue", "<script setup>function run(){}</script><script setup>function caller(){run();}</script>".to_string()),
+            ("svelte", "<script module>function run(){}</script><script module>function caller(){run();}</script>".to_string()),
+            ("svelte", "<script>function run(){}</script><script>function caller(){run();}</script>".to_string()),
+            ("html", format!("<script>function run(){{}} function caller(){{run();}}</script>{}",
+                "<script></script>".repeat(crate::semantic::embedded_source::MAX_EMBEDDED_SCRIPT_REGIONS))),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(&format!("main.{language}"), Some(language), &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None));
+            assert!(extracted.is_ok(), "{extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            assert!(extracted.graph().symbols.iter().any(|symbol| symbol.name == "run"));
+            assert!(extracted.semantics().bindings_incomplete);
+            assert_eq!(extracted.semantics().calls().len(), 1);
+            assert!(extracted.semantics().calls().iter().all(|call| matches!(call.binding, SourceCallBinding::Unresolved)));
+        }
+    }
+
+    #[test]
+    fn host_export_slots_require_module_role_for_target_authority() {
+        for (language, content) in [
+            (
+                "html",
+                "<script>export default function Actual(){}</script>",
+            ),
+            (
+                "vue",
+                "<script setup>export default function Actual(){}</script>",
+            ),
+            (
+                "svelte",
+                "<script>export default function Actual(){}</script>",
+            ),
+            (
+                "svelte",
+                "<script module>export default function Actual(){}</script>",
+            ),
+        ] {
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                &format!("main.{language}"),
+                Some(language),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            let (_, _, facts) = extracted.into_parts();
+            let default = facts.exports().iter().find(|fact| fact.name == "default");
+            assert!(default.is_some(), "{language}: {facts:?}");
+            assert!(
+                default.is_some_and(|fact| matches!(
+                    fact.binding,
+                    crate::SourceExportBinding::Unresolved
+                        | crate::SourceExportBinding::UnresolvedDeclarations(_)
+                )),
+                "{language}: {content}: {facts:?}"
+            );
+        }
+    }
+
+    #[test]
     fn ecmascript_generator_declarations_retain_callable_identity() {
         for (language, path, host) in [
             ("javascript", "main.js", false),
@@ -5454,7 +6398,11 @@ function caller() { renamed(); tools.work(); }
                 "async function* run(){const local=function*(){};} function caller(){run();}",
             ] {
                 let content = if host {
-                    format!("<script>{script}</script>")
+                    if script.starts_with("export ") {
+                        ecmascript_module_fixture(language, script)
+                    } else {
+                        format!("<script>{script}</script>")
+                    }
                 } else {
                     script.to_string()
                 };
@@ -5493,7 +6441,11 @@ function caller() { renamed(); tools.work(); }
                     };
                     assert!(facts.exports.iter().any(|fact|
                         fact.name == export_name
-                            && matches!(fact.binding, crate::SourceExportBinding::LocalDeclaration(target) if target == symbol)),
+                            && if language == "svelte" && export_name == "default" {
+                                matches!(fact.binding, crate::SourceExportBinding::UnresolvedDeclarations(_))
+                            } else {
+                                matches!(fact.binding, crate::SourceExportBinding::LocalDeclaration(target) if target == symbol)
+                            }),
                         "{language}: {script}: {:?}", facts.exports);
                 }
                 if script.contains("const local") {
@@ -5824,7 +6776,11 @@ function caller() { renamed(); tools.work(); }
                 ),
             ] {
                 let content = if host {
-                    format!("<script>{script}</script>")
+                    if script.starts_with("export ") {
+                        ecmascript_module_fixture(language, script)
+                    } else {
+                        format!("<script>{script}</script>")
+                    }
                 } else {
                     script.to_string()
                 };
@@ -5975,7 +6931,7 @@ function caller() { renamed(); tools.work(); }
                     "export let run = () => {{}}; function caller(){{run();}} export {{run as launch}}; {suffix}"
                 );
                 let content = if host {
-                    format!("<script>{script}</script>")
+                    ecmascript_module_fixture(language, &script)
                 } else {
                     script
                 };

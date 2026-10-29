@@ -1769,10 +1769,15 @@ mod tests {
             ("view.svelte", "svelte"),
             ("view.html", "html"),
         ] {
+            let content = if language == "html" {
+                content.replace("<script lang", "<script type=module lang")
+            } else {
+                content.to_string()
+            };
             let extraction = fixture_ok!(crate::extract_symbol_graph_with_semantics_controlled(
                 path,
                 Some(language),
-                content,
+                &content,
                 &projectatlas_core::IndexWorkControl::new(
                     projectatlas_core::IndexCancellation::new(),
                     None
@@ -1821,7 +1826,7 @@ mod tests {
 
     #[test]
     fn embedded_script_families_keep_independent_import_ordinals() {
-        let content = "<script>import { run as first } from './first'; function js_caller() { first(); }</script>\n<script lang='ts'>import { run as second } from './second'; function ts_caller() { second(); }</script>";
+        let content = "<script type=module>import { run as first } from './first'; function js_caller() { first(); }</script>\n<script type=module lang='ts'>import { run as second } from './second'; function ts_caller() { second(); }</script>";
         let extraction = fixture_ok!(crate::extract_symbol_graph_with_semantics_controlled(
             "view.html",
             Some("html"),

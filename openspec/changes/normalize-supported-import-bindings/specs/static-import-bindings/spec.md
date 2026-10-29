@@ -114,6 +114,46 @@ Normalization SHALL reuse bounded indexing work and preserve cancellation, parse
 ### Requirement: Call resolution respects lexical bindings
 Resolved callers SHALL require binding evidence valid at the call site. A local import SHALL NOT create a binding outside its language-defined scope. Parameters and local bindings SHALL shadow imported or same-name file declarations only in the language-defined namespace they occupy. Unknown dynamic targets SHALL remain unresolved rather than become false exact links. Detailed graph navigation and summary caller output SHALL agree.
 
+#### Scenario: ECMAScript names retain their actual syntax roles and context
+- **WHEN** a supported script declares or references names such as eval, arguments, await, yield or strict-only contextual words
+- **THEN** declarations and identifier references use their own language-valid script/module, strict and async/generator grammar contexts, preserving legal non-strict bindings and strict references to legal outer values without admitting invalid declarations
+- **AND** strict import bindings remain strict, actual directive prologues and classes retain their rules, escaped directive text does not invent strict mode, and declaration/export linking retains the original admitted binding evidence
+
+#### Scenario: Implicit arguments ownership does not become an outer caller
+- **WHEN** an ordinary, async, generator or method body references arguments while an outer declaration has the same name, or an arrow inherits that reference
+- **THEN** non-arrow callable arguments ownership prevents a false outer target, arrows inherit the correct enclosing owner, and valid top-level or explicitly established local bindings retain their own callers
+
+#### Scenario: Contextual keyword calls survive the pinned grammar ambiguity
+- **WHEN** a language-valid Script uses yield as an identifier, or the pinned TypeScript grammar recovers an await/interface call through its closed keyword/parentheses/formals shape
+- **THEN** a bounded same-length private normalization and native reparse preserve the ordinary raw calls, nested arguments and lexical targets with original source spelling, positions and identity
+- **AND** actual interfaces, strings/comments, module/async/generator restrictions and arbitrary malformed recovery gain no fabricated call authority; unchanged predecessor indexes repair through the updated extraction and semantic contracts
+
+#### Scenario: HTML script goals and lexical roots remain distinct
+- **WHEN** admitted HTML contains classic and module script regions, including multiple regions of the same grammar or a strict directive in only one classic script
+- **THEN** classic regions retain their shared global bindings with region-local strictness, each module retains its own strict lexical root, and module locals cannot create callers from classic or sibling module regions
+- **AND** module code may retain callers to proven classic globals; isolation does not remove that supported outward lookup
+- **AND** original host coordinates, conservative exported-target ambiguity, the existing projection count, source-work bounds and failure behavior remain intact
+
+#### Scenario: Static imports require a supported module source position
+- **WHEN** a classic HTML script, explicit JavaScript CJS source or nested non-program position contains a static import
+- **THEN** raw occurrences remain visible but invalid module/alias authority cannot create dependencies or callers, including a false fallback to an outer namesake
+- **AND** valid module script, component and TypeScript import-transform workflows retain their supported targets; CTS alone does not prohibit TypeScript ES import syntax
+
+#### Scenario: Declared component script roles retain directional visibility
+- **WHEN** admitted Vue normal/setup scripts or Svelte module/instance scripts share a source file
+- **THEN** their known module and instance/setup ownership, supported import ownership and parent visibility retain legal callers without leaking instance/setup locals back into module code
+- **AND** unsupported custom transformations or insufficient role evidence cannot fabricate cross-region targets or gain another semantic provider
+
+#### Scenario: Host raw exports do not imply module-target authority
+- **WHEN** admitted HTML classic, Vue setup or Svelte instance script contains export syntax, or a Svelte script contains an explicit default slot
+- **THEN** raw export occurrences remain available but cannot authorize an ES module target or resurrect one through declaration fallback
+- **AND** Vue normal-script and HTML module-script static exports and Svelte module-script named exports retain their supported targets, while a compiler-generated component default remains unproved
+
+#### Scenario: Ambiguous or incomplete host programs cannot authorize exact targets
+- **WHEN** Vue/Svelte script role attributes conflict or duplicate, a component repeats a script role, or host reconciliation stops at a malformed remainder or region ceiling
+- **THEN** retained raw navigation remains available but the incomplete host environment cannot authorize exact call/export targets
+- **AND** valid unique component role pairs, compatible Svelte module markers and HTML multi-script behavior retain their positive scope/export evidence
+
 #### Scenario: Deferred enclosing bindings and immediate evaluation
 - **WHEN** a supported Python or ECMAScript deferred body references a unique later enclosing declaration or import
 - **THEN** its canonical call and summary caller retain that target, while immediate expressions, direct IIFEs, definition headers and a generator's first iterable retain source order and competing future writes remain unresolved

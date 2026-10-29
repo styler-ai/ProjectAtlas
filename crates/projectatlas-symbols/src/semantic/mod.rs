@@ -2,11 +2,14 @@
 
 mod cargo;
 pub(super) mod ecmascript;
+pub(super) mod ecmascript_context;
 mod ecmascript_identifier;
 mod ecmascript_literal;
 pub(super) mod embedded_source;
 mod python;
 mod rust;
+
+pub(super) use ecmascript_identifier::{EcmascriptNameContext, EcmascriptNameRole};
 
 use crate::configured_modules::ConfiguredModuleSource;
 use crate::resolution_keys::{ImportReference, ImportSyntax};
@@ -32,9 +35,14 @@ pub(super) fn ecmascript_identifier_value(text: &str) -> Option<String> {
     ecmascript_identifier::identifier_name_value(text).map(std::borrow::Cow::into_owned)
 }
 
-/// Validate grammar-owned local names under the canonical strict binding profile.
-pub(super) fn ecmascript_binding_value(text: &str) -> Option<String> {
-    ecmascript_identifier::binding_identifier_value(text).map(std::borrow::Cow::into_owned)
+/// Validate a source-owned binding or reference under its actual grammar context.
+pub(super) fn ecmascript_contextual_name(
+    text: &str,
+    context: EcmascriptNameContext,
+    role: EcmascriptNameRole,
+) -> Option<String> {
+    ecmascript_identifier::contextual_identifier_value(text, context, role)
+        .map(std::borrow::Cow::into_owned)
 }
 
 /// Resolve grammar-proven static modules even when their local bindings are invalid.

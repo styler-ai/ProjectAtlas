@@ -250,9 +250,14 @@ fn extract_symbol_graph_with_semantics_checked<E>(
         }
         SymbolParserOwner::TreeSitter(_) | SymbolParserOwner::Fallback => {}
     }
-    if let Some(mut parsed) =
-        extract_tree_sitter_graph(path, language, parse_content.as_ref(), check, semantics)?
-    {
+    if let Some(mut parsed) = extract_tree_sitter_graph(
+        path,
+        language,
+        parse_content.as_ref(),
+        check,
+        semantics,
+        None,
+    )? {
         normalize_source_selector_columns(&mut parsed.graph, content, check)?;
         if parsed.incomplete || parsed.graph.parser == ParserKind::Fallback {
             mark_graph_fallback(&mut parsed.graph);
@@ -302,7 +307,8 @@ fn extract_embedded_host_graph_checked<E>(
             extract_fallback_graph_checked(path, language, content, check)?
         }
     };
-    let (projections, _incomplete) = semantic::embedded_source::project(content).into_parts();
+    let (projections, incomplete) =
+        semantic::embedded_source::project_for_host(content, capability.host_kind).into_parts();
     // Embedded hosts retain their structural/fallback graph parser. Runtime
     // coverage therefore remains partial even when admitted tree-sitter facts
     // are merged, including when reconciliation stopped after a safe prefix.
@@ -315,6 +321,7 @@ fn extract_embedded_host_graph_checked<E>(
             projection.source(),
             check,
             Some(&mut source_semantics),
+            Some(projection.regions()),
         )? {
             if semantics.is_some() {
                 source_semantics.bind_source(&parsed.graph, projection.source());
@@ -348,6 +355,19 @@ fn extract_embedded_host_graph_checked<E>(
                 *destination = SourceSemanticFacts::default();
                 mark_graph_fallback(&mut graph);
             }
+        }
+    }
+    if incomplete.is_some()
+        && let Some(facts) = semantics
+    {
+        // Unknown/duplicate host roles or omitted regions cannot prove the
+        // complete lexical environment. Keep raw evidence and static imports.
+        facts.bindings_incomplete = true;
+        facts.exports_incomplete = true;
+        facts.exports.clear();
+        for call in &mut facts.calls {
+            check()?;
+            call.binding = SourceCallBinding::Unresolved;
         }
     }
     check()?;
@@ -1197,6 +1217,7 @@ fn extract_tree_sitter_graph<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
     mut semantics: Option<&mut SourceSemanticFacts>,
+    regions: Option<&[semantic::embedded_source::EmbeddedScriptRegion]>,
 ) -> Result<Option<TreeSitterParse>, E> {
     let Some(language_name) = language else {
         return Ok(None);
@@ -1204,23 +1225,34 @@ fn extract_tree_sitter_graph<E>(
     let Some(grammar) = tree_sitter_grammar(language_name) else {
         return Ok(None);
     };
-    let (tree, has_php_opening_tag) = if grammar == TreeSitterGrammar::Php {
+    let (trees, has_php_opening_tag) = if grammar == TreeSitterGrammar::Php {
         let Some(parsed) = parse_php_tree(content, check)? else {
             return Ok(None);
         };
-        (parsed.tree, Some(parsed.has_opening_tag))
+        (vec![parsed.tree], Some(parsed.has_opening_tag))
     } else {
         let Some(parser_language) = tree_sitter_language(language_name) else {
             return Ok(None);
         };
-        let Some(tree) = parse_tree_sitter_language(&parser_language, content, check)? else {
+        let trees = if let Some(regions) = regions {
+            parse_embedded_script_trees(&parser_language, path, content, regions, check)?
+        } else {
+            let ecmascript = matches!(
+                grammar,
+                TreeSitterGrammar::JavaScript
+                    | TreeSitterGrammar::TypeScript
+                    | TreeSitterGrammar::Tsx
+            );
+            parse_source_program(&parser_language, content, ecmascript.then_some(path), check)?
+                .map(|tree| vec![tree])
+        };
+        let Some(trees) = trees else {
             return Ok(None);
         };
-        (tree, None)
+        (trees, None)
     };
     check()?;
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
-    let root = tree.root_node();
     if has_php_opening_tag == Some(false) {
         return Ok(Some(TreeSitterParse {
             graph,
@@ -1228,23 +1260,51 @@ fn extract_tree_sitter_graph<E>(
             incomplete: false,
         }));
     }
-    let had_errors = root.has_error() && has_php_opening_tag != Some(false);
+    let had_errors = trees.iter().any(|tree| tree.root_node().has_error());
     let mut incomplete = has_php_opening_tag == Some(true) && had_errors;
-    let mut php_namespace_context = if has_php_opening_tag == Some(true) {
-        Some(PhpNamespaceContext::from_program(root, content, check)?)
-    } else {
-        None
-    };
-    let traversal = visit_node(
-        root,
-        0,
-        content,
-        &mut graph,
-        check,
-        php_namespace_context.as_mut(),
-        &mut incomplete,
-        semantics.as_deref_mut(),
-    )?;
+    let mut traversal = ControlFlow::Continue(());
+    for (tree_index, tree) in trees.iter().enumerate() {
+        check()?;
+        let root = tree.root_node();
+        let import_start = semantics.as_ref().map(|facts| facts.imports.len());
+        let mut php_namespace_context = if has_php_opening_tag == Some(true) {
+            Some(PhpNamespaceContext::from_program(root, content, check)?)
+        } else {
+            None
+        };
+        traversal = visit_node(
+            root,
+            0,
+            content,
+            &mut graph,
+            check,
+            php_namespace_context.as_mut(),
+            &mut incomplete,
+            semantics.as_deref_mut(),
+        )?;
+        if matches!(language_name, "javascript" | "typescript" | "tsx")
+            && let (Some(start), Some(facts)) = (import_start, semantics.as_deref_mut())
+            && !semantic::ecmascript_context::source_context(
+                root,
+                path,
+                regions
+                    .and_then(|regions| regions.get(tree_index))
+                    .map(|region| region.role),
+                content,
+                check,
+            )?
+            .is_module()
+        {
+            for import in &mut facts.imports[start..] {
+                check()?;
+                import.module = None;
+                import.references.clear();
+            }
+        }
+        if traversal.is_break() {
+            break;
+        }
+    }
     check()?;
     if traversal.is_continue() {
         languages::augment_language_graph(&mut graph, content, check)?;
@@ -1258,7 +1318,17 @@ fn extract_tree_sitter_graph<E>(
                     call.binding = SourceCallBinding::Unresolved;
                 }
             } else {
-                lexical_bindings::bind_calls(root, content, &graph, facts, check)?;
+                let roots = trees
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tree)| lexical_bindings::SourceSyntaxRoot {
+                        node: tree.root_node(),
+                        role: regions
+                            .and_then(|regions| regions.get(index))
+                            .map(|region| region.role),
+                    })
+                    .collect::<Vec<_>>();
+                lexical_bindings::bind_calls(&roots, content, &graph, facts, check)?;
             }
         }
     }
@@ -1464,11 +1534,171 @@ fn parse_tree_sitter_language<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<Tree>, E> {
+    parse_source_program(parser_language, content, None, check)
+}
+
+/// Parse one program, repairing contextual ECMAScript tokens only when necessary.
+fn parse_source_program<E>(
+    parser_language: &Language,
+    content: &str,
+    ecmascript_path: Option<&str>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
     check()?;
     let mut parser = Parser::new();
     if parser.set_language(parser_language).is_err() {
         return Ok(None);
     }
+    let Some(tree) = parse_tree_with_parser(&mut parser, content, check)? else {
+        return Ok(None);
+    };
+    if let Some(path) = ecmascript_path {
+        let context = semantic::ecmascript_context::source_context(
+            tree.root_node(),
+            path,
+            None,
+            content,
+            check,
+        )?;
+        let mut projected = None;
+        if semantic::ecmascript_context::project_contextual_identifiers(
+            tree.root_node(),
+            context,
+            content,
+            SourceByteSpan {
+                start: 0,
+                end: content.len(),
+            },
+            &mut projected,
+            check,
+        )? && let Some(projected) = projected
+        {
+            let Some(reparsed) = parse_tree_with_parser(&mut parser, &projected, check)? else {
+                return Ok(None);
+            };
+            if !reparsed.root_node().has_error() {
+                return Ok(Some(reparsed));
+            }
+        }
+    }
+    Ok(Some(tree))
+}
+
+/// Parse each admitted program once with one reused grammar parser and budget.
+///
+/// Trees retain original offsets; the input buffer is borrowed, never copied per
+/// region. Separate ranges prevent cross-program recovery and ASI ambiguity.
+fn parse_embedded_script_trees<E>(
+    parser_language: &Language,
+    path: &str,
+    content: &str,
+    regions: &[semantic::embedded_source::EmbeddedScriptRegion],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Vec<Tree>>, E> {
+    check()?;
+    let mut parser = Parser::new();
+    if parser.set_language(parser_language).is_err()
+        || regions.len() > semantic::embedded_source::MAX_EMBEDDED_SCRIPT_REGIONS
+    {
+        return Ok(None);
+    }
+    let mut trees = Vec::with_capacity(regions.len());
+    let mut projected = None;
+    let mut offset = 0;
+    let mut point = tree_sitter::Point { row: 0, column: 0 };
+    for region in regions {
+        check()?;
+        if region.span.start < offset
+            || region.span.start > region.span.end
+            || region.span.end > content.len()
+            || !content.is_char_boundary(region.span.start)
+            || !content.is_char_boundary(region.span.end)
+        {
+            return Ok(None);
+        }
+        advance_source_point(
+            content.as_bytes(),
+            &mut offset,
+            &mut point,
+            region.span.start,
+            check,
+        )?;
+        let start_point = point;
+        advance_source_point(
+            content.as_bytes(),
+            &mut offset,
+            &mut point,
+            region.span.end,
+            check,
+        )?;
+        let range = tree_sitter::Range {
+            start_byte: region.span.start,
+            end_byte: region.span.end,
+            start_point,
+            end_point: point,
+        };
+        if parser.set_included_ranges(&[range]).is_err() {
+            return Ok(None);
+        }
+        let Some(mut tree) = parse_tree_with_parser(&mut parser, content, check)? else {
+            return Ok(None);
+        };
+        let context = semantic::ecmascript_context::source_context(
+            tree.root_node(),
+            path,
+            Some(region.role),
+            content,
+            check,
+        )?;
+        if semantic::ecmascript_context::project_contextual_identifiers(
+            tree.root_node(),
+            context,
+            content,
+            region.span,
+            &mut projected,
+            check,
+        )? && let Some(projected) = &projected
+        {
+            let Some(reparsed) = parse_tree_with_parser(&mut parser, projected, check)? else {
+                return Ok(None);
+            };
+            if !reparsed.root_node().has_error() {
+                tree = reparsed;
+            }
+        }
+        trees.push(tree);
+    }
+    Ok(Some(trees))
+}
+
+/// Map sorted region endpoints in one bounded pass without prefix rescans.
+fn advance_source_point<E>(
+    bytes: &[u8],
+    offset: &mut usize,
+    point: &mut tree_sitter::Point,
+    end: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    while *offset < end {
+        check_parser_iteration(*offset, check)?;
+        if bytes[*offset] == b'\n' {
+            point.row += 1;
+            point.column = 0;
+        } else {
+            point.column += 1;
+        }
+        *offset += 1;
+    }
+    Ok(())
+}
+
+/// Reuse native progress cancellation without resetting the operation budget.
+fn parse_tree_with_parser<E>(
+    parser: &mut Parser,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
+    check()?;
     let mut parse_failure = None;
     let mut progress = |_: &tree_sitter::ParseState| match check() {
         Ok(()) => ControlFlow::Continue(()),
@@ -1753,18 +1983,7 @@ fn visit_node<E>(
                 || is_import_node(node.kind())
                 || is_call_node(node.kind()));
     }
-    let kind = declaration_kind(node.kind()).or_else(|| {
-        (node.kind() == "variable_declaration"
-            && matches!(
-                graph.language.as_deref().and_then(tree_sitter_grammar),
-                Some(
-                    TreeSitterGrammar::JavaScript
-                        | TreeSitterGrammar::TypeScript
-                        | TreeSitterGrammar::Tsx
-                )
-            ))
-        .then_some(SymbolKind::Value)
-    });
+    let kind = source_declaration_kind(node.kind(), graph.language.as_deref());
     if let Some(kind) = kind
         && should_emit_declaration_symbol(node, content)
     {
@@ -2482,6 +2701,23 @@ fn php_semicolon_namespace_parent(
 }
 
 /// Map tree-sitter node kinds to `ProjectAtlas` symbol kinds.
+/// Share actual native declaration admission with source-evidence consumers.
+fn source_declaration_kind(kind: &str, language: Option<&str>) -> Option<SymbolKind> {
+    declaration_kind(kind).or_else(|| {
+        (kind == "variable_declaration"
+            && matches!(
+                language.and_then(tree_sitter_grammar),
+                Some(
+                    TreeSitterGrammar::JavaScript
+                        | TreeSitterGrammar::TypeScript
+                        | TreeSitterGrammar::Tsx
+                )
+            ))
+        .then_some(SymbolKind::Value)
+    })
+}
+
+/// Map grammar-owned declaration nodes to their raw graph kind.
 fn declaration_kind(kind: &str) -> Option<SymbolKind> {
     match kind {
         "function_item"
@@ -4826,8 +5062,13 @@ export const createWriter = () => createReader();
                 ),
                 "import {\nrun as first\n} from './a.js';".to_string(),
             ] {
+                let role = match language {
+                    "html" => "type=module",
+                    "svelte" => "module",
+                    _ => "",
+                };
                 let content = format!(
-                    "<script>\n{first} export {{first as again}}; import {{run as second}} from './b.js';\nfunction caller() {{first(); second();}}\n</script>\n<script lang=\"coffee\">\nimport missing from './unprojected.js';\n</script>"
+                    "<script {role}>\n{first} export {{first as again}}; import {{run as second}} from './b.js';\nfunction caller() {{first(); second();}}\n</script>\n<script lang=\"coffee\">\nimport missing from './unprojected.js';\n</script>"
                 );
                 let result = super::extract_symbol_graph_with_semantics_controlled(
                     path,

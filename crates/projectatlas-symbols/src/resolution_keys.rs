@@ -18,7 +18,7 @@ use std::fmt;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 12;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 13;
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -1987,7 +1987,12 @@ mod tests {
                     "export default function First() {{}}\n{second}\nexport function secondary() {{}}"
                 );
                 let content = if matches!(language, "vue" | "svelte" | "html") {
-                    format!("<script type=\"module\">{script}</script>")
+                    let role = match language {
+                        "html" => "type=module",
+                        "svelte" => "module",
+                        _ => "",
+                    };
+                    format!("<script {role}>{script}</script>")
                 } else {
                     script
                 };
@@ -2334,7 +2339,14 @@ mod tests {
             caller.graph(),
             ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
         )?;
-        for (language, extension) in [("vue", "vue"), ("svelte", "svelte"), ("html", "html")] {
+        for (language, attributes, admits_default) in [
+            ("vue", "", true),
+            ("vue", "setup", false),
+            ("svelte", "module", false),
+            ("svelte", "", false),
+            ("html", "type=module", true),
+            ("html", "", false),
+        ] {
             for (source, valid) in [
                 ("export default function Actual() {}", true),
                 (
@@ -2343,9 +2355,9 @@ mod tests {
                 ),
             ] {
                 let target = crate::extract_symbol_graph_with_semantics_controlled(
-                    &format!("src/target.{extension}"),
+                    &format!("src/target.{language}"),
                     Some(language),
-                    &format!("<script>{source}</script>"),
+                    &format!("<script {attributes}>{source}</script>"),
                     &control,
                 )?;
                 let keys = derive_resolution_keys_with_context(
@@ -2358,7 +2370,7 @@ mod tests {
                 let actual = symbol_keys(target.graph(), &keys, "Actual");
                 require(
                     keys_intersect(relation_keys(caller.graph(), &caller_keys, "Entry"), actual)
-                        == valid,
+                        == (valid && admits_default),
                     "host default target correspondence changed",
                 )?;
                 require(
@@ -2374,6 +2386,80 @@ mod tests {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn component_export_targets_require_unambiguous_script_roles() -> Result<(), Box<dyn Error>> {
+        let project = project_id(90)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "caller.js",
+            Some("javascript"),
+            "import {run} from './target'; function caller(){run();}",
+            &control,
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        let verify = |language: &str, source: &str, valid: bool| -> Result<(), Box<dyn Error>> {
+            let target = crate::extract_symbol_graph_with_semantics_controlled(
+                &format!("target.{language}"),
+                Some(language),
+                source,
+                &control,
+            )?;
+            let keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                target.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+            )?;
+            require(
+                keys_intersect(
+                    relation_keys(caller.graph(), &caller_keys, "run"),
+                    symbol_keys(target.graph(), &keys, "run"),
+                ) == valid,
+                "host role changed its exported target authority",
+            )
+        };
+        for (language, attributes, valid) in [
+            ("svelte", "context=instance context=module", false),
+            ("svelte", "context=module context=module", false),
+            ("svelte", "module module", false),
+            ("svelte", "module context=instance", false),
+            ("svelte", "module='false'", false),
+            ("vue", "setup setup", false),
+            ("vue", "", true),
+            ("svelte", "module", true),
+            ("svelte", "context=module", true),
+            ("svelte", "module context=module", true),
+        ] {
+            verify(
+                language,
+                &format!("<script {attributes}>export function run(){{}}</script>"),
+                valid,
+            )?;
+        }
+        for (language, source) in [
+            (
+                "vue",
+                "<script>export function run(){}</script><script>function other(){}</script>",
+            ),
+            (
+                "svelte",
+                "<script module>export function run(){}</script><script module>function other(){}</script>",
+            ),
+        ] {
+            verify(language, source, false)?;
+        }
+
         Ok(())
     }
 
@@ -2433,17 +2519,20 @@ mod tests {
 
     #[test]
     fn semantic_resolution_contract_digest_is_bounded_and_deterministic() {
+        const PRE_SOURCE_CONTEXT_DIGEST: &str =
+            "784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424";
         const PRE_GENERATOR_DECLARATION_DIGEST: &str =
             "4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d";
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 12);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 13);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
         assert_ne!(first, PRE_MODULE_CALLBACK_DIGEST);
         assert_ne!(first, PRE_GENERATOR_DECLARATION_DIGEST);
+        assert_ne!(first, PRE_SOURCE_CONTEXT_DIGEST);
     }
 
     #[test]

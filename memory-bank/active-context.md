@@ -1,84 +1,199 @@
 # Active context
 
-## Goal and current ownership
+## Goal and exact checkout
 
-Continue through independently verified v0.5.1-rc1; stable0.5.0 stays Latest.
-Stable promotion/task7153.2 and milestone closure need later instruction.
-Primary alone writes; existing Luna Max reviewer read-only using custom Rust/DB
-skills and accepted spec. No permission pending. Preserve private stable050AtlasDB;
-next returns policy_drift after native gates, exact-owner source fallback allowed,
-no reset/downgrade/reindex for orientation. Full Atlas skill read this session.
+Continue until v0.5.1-rc1 is published and independently verified. Latest remains
+stable0.5.0; no stable publication, milestone closure or715task3.2 without later
+instruction. Primary alone implements; existing Luna reviewer is read-only
+GPT-6 Luna max using our custom Rust/database skills and accepted OpenSpec.
+No permission pending. User asked ETA: several hours minimum, no reliable time.
 
-## Issue731 final acceptance
+Primary root issue-731 / fix/static-bindings-731 / PR737. Public HEAD
+92b9bb6c6fc69d62972db910311ddd9088977870; reviewed source13 checkpoint and proof/spec
+changes below, preserve all; verify local commit state through git status/log. Installed complete050Atlas skill+short CLI read after
+compaction; exact-root MCP brief returned policy_drift/full refresh. Preserve this
+private database, no reset/downgrade/reindex solely for orientation; exact known
+owners read directly. Shared target leased731; source /tmp/projectatlas-rc1-test-env.sh
+(clean PATH, physical TMPDIR, shared715target), no sibling builds/E2Es or indexing
+while benchmarks run. Resume live handles rather than restarting timed observations.
 
-Exact root issue-731 / fix/static-bindings-731 / PR737 / public8715bc6b30d2e43e549c8856f497533fa838c77f.
-Production source581f3df05114db4d23d442f2125bf4e384c7c5d5 DER12/SEM12 remains unchanged.
-Accepted main3ef603aad39c435cf130545a555f8d746ec745ba; PR includes accepted740map.
-Native push retry58110 TERMINAL0/PASS/uploaded8715, full workspace/E2E/docs/deps/source/
-Atlas. Log/receipt /tmp/projectatlas-731-contract12-native-push-retry{.log,-session.json}.
-Current SOURCE CI40838751161 at8715 COMPLETEDSUCCESS: Rust/repository/verify and all4
-platforms. All7CodeQL analyzers passed, aggregate inherited findings include separately
-owned confirmed244->738; no alert dismissed or supported capability disabled.
-All8 review threads resolved inclgenerator xZA6c/reply4409945436; fresh finalLuna
-review confirms no actionable feedback or remaining731behavior/proofgap. PR body
-nowcontract12/currentcost; exacthead/bodyreadback retained in /tmp.
-Luna APPROVED all5 acceptance outcomes and task3.1 on exactsource/currenthostedproof.
-Primary synchronizing task3.1+all5acceptance then normal bookkeepingpush, currenthead
-checks/readback and protectedmerge/closure. No production/dependency/workflow/toolchain
-change in this acceptance update. Do not treat merged/closed until actualreadback.
-If a new defect or required gate fails, reopen affected task and allacceptance.
+## Current final source review checkpoint
 
-## Source and causal proof
+Primary remains in731; current source is DER13/SEM13, prepared as a reviewed
+local checkpoint (not pushed). Verify git status/log; no task checked,
+4/9 implementation and all5acceptance still open/reopened. No731merge/automerge.
+Final production hashes /tmp/projectatlas-731-role-cardinality-review-source.txt.
+Latest full symbols409PASS+1existingignore and workspace alltarget/allfeatureClippy
+PASS:62251 TERMINAL0, /tmp/projectatlas-731-role-cardinality-{symbols,clippy}.log.
+Final test-only extension/refactor component_export_targets_require_unambiguous_script_roles
+alsoPASS (19439): exact caller/target key negatives for conflicting attributes and
+DUPLICATE Vue normal/Svelte module blocks; valid normal/module/context/both positives.
+No production change after the full409/Clippy run. fmt/strictstrings/OpenSpecPASS.
+Scoped IssueOps PASS local9/remote9/checked4. Runtime fingerprint repair ACTUAL
+--bin selector 1testPASS (54372), seed12 plus older fingerprint guards. Earlier
+--lib invocation ran0tests, explicitly NOT counted as proof.
 
-Closed grammar lists omitted generator_function_declaration at lexical is_function,
-graph declaration_kind and callable-local ancestor ownership. All3 fixed; async
-uses samegrammar node, existing expressions/methods retain behavior. Causal negatives
-(leakedvar/missinggraphsymbol/promotedlocal) fail, restored positivePASS, static
-exports/default/named forwarding and JS/TS/TSX/Vue/Svelte/HTML matrix covered.
-No new provider/schema/wire/public graph shape. Native actual11 digest
-4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d seeds current12
-repair test; older10/9/8/7/6/5/4/stable comparisons retained. All supported static
-bindings/module identity/shadowing/occurrences/resources remain as prior reviewed.
+Luna final bounded review APPROVED current source slice: no remaining code blocker.
+It independently matched production hashes and reviewed final consumer-test refactor;
+no reviewer builds/tests. This is source-slice approval, not task/release acceptance.
+Confirmed additional corrections in this review loop:
+- Prefilter had rescanned whole host per region. Now explicit program_span, <=64KiB
+  UTF-8-safe overlapping scans and cancellation. Boundary/cancellation unitPASS.
+- Exact token edit is safe final-ASCII-byte uppercase via mutable str slice, no
+  replace_range/splice/suffix movement at density. Contextual dense cost still needed.
+- Reparsed programs accepted only when error-free; otherwise original tree/raw
+  evidence retained. Typed/optional/typed-rest malformed args negativePASS and valid
+  spread/nested calls positivePASS acrossJS/TS/TSX.
+- Script static imports and nested non-program imports had ESM authority. Causal
+  negative /tmp/projectatlas-731-script-import-causal-negative.log retained; producer
+  withholds module/references, binder installs negative shadows; restoredPASS.
+  JS.cjs is Script; legitimate TypeScript.cts retains content-based module detection
+  and a permanent positive control. Dynamic import/require not disabled.
+- Unique Vue setup/Svelte module/context attributes; Svelte module valueless,
+  context exactly module per official compiler. Compatible module+context=module
+  is supported. Invalid attrs cannot grant exported caller keys.
+- At most one each Vue normal/setup and Svelte module/instance role, counted BEFORE
+  external/language exclusion. Duplicate/ambiguous role groups mark batch incomplete
+  while retaining raw facts. HTML multi-script unchanged; valid two-block directional
+  fixtures corrected (old fixtures themselves duplicated invalid SFC roles).
+- Host batch incomplete was previously ignored. Now bindings/exports incomplete,
+  export authority cleared, retained callsUnresolved. Also covers omitted-region
+  ceiling/malformed remainder. Raw calls/symbols/static imports remain navigable.
 
-Affected fmt/check/Clippy/strictstrings, symbols395+1existingignore, runtime371,
-RustCLI/MCP4, expandedECMAenvironment1, inventory3, strictRustdoc/doctestsPASS.
-Existing permanent environment selector expanded without adding duplicate selectors;
-inventory216/navdigest037ec6d40e73db22b436f7c98af86c73f23b2c4e94b3ad008cf383b770899843.
-Clean optimized artifact ~/.cache/projectatlas-benchmarks/binding-731-581f3df-contract12-20261029/projectatlas,
+Sequential pipeline80402 TERMINAL0: workspace alltarget/allfeature checkPASS,
+strict workspace rustdocPASS, workspace doctestsPASS, regular nativeCLI buildPASS. Logs /tmp/projectatlas-731-source-context-{workspace-check,
+docs,doctests,native-build}.log. Earlier54372/62251/98118/19439 terminal0.
+Shared target still leased731. No sibling builds/indexing during measurements.
+No final RC1 source acceptance: permanent public CLI/MCP source-context/host-role
+controls, actual native12+older upgrades/full/state/noop/rollback, current optimized
+artifact/cost incl dense keywords, strict docs/runtime/current inventory/nativepush/
+hosted and finalrelease integration remain REQUIRED. Do not present prior12 proof
+as current13 or use it to waive708. No new E2E selector added this turn.
+
+## Reopened731 source-context implementation
+
+New public-head automated thread PRRT_kwDOQyFgJ86xfor4/comment4410820343 is open:
+https://github.com/styler-ai/ProjectAtlas/pull/737#discussion_r4410820343
+Strict module binding predicate had been reused for ordinary local bindings/reads,
+dropping legal Script eval/arguments and contextual names. Broader causal negatives
+also prove HTML module locals leak to classic scripts and unsupported host export
+roles gain targets. Reopened2.4/2.5/2.6/2.7/3.1 and ALL5 acceptance: still4/9 tasks,
+no merge/automerge. Earlier final approval is superseded, not final acceptance.
+
+Current uncommitted production:
+- EcmascriptNameContext now closed SourceMode (SloppyScript/StrictScript/Module),
+  independent Await/Yield/arguments bits and Binding/LexicalBinding/Reference roles.
+  Import bindings stay strict; strict reads may reference valid outer eval.
+- New semantic/ecmascript_context.rs shares Script/Module/directive/class/callable
+  name/formals/body/computed-key/field/static contexts between parser and binder.
+  Declaration-name admission cached by original graph ordinal+binding owner.
+  Async/generator declaration names use outer grammar; named expressions own it.
+- Non-arrow implicit arguments shadows, private class-expression names, invalid
+  binding/parameter/import shadows, invalid named initializer authority blocked.
+  Import local leaf helper distinguishes aliased export names/type-only bindings.
+- Embedded roles/spans stay private: HTMLclassic global sharing/local strictness,
+  HTMLmodule isolated root parentglobal, Vue normal/setup and Svelte module/instance
+  directional roots. Established setup/instance imports hoisted module-owned.
+- Raw exports retained, authority only Vue normal/HTMLmodule/Sveltemodule named;
+  Svelte component default cannot be inferred from source. Old role-invalid positive
+  fixtures corrected with unsupported-role consumer negatives retained.
+- One reused native parser per grammar parses each admitted region with ONE included
+  range, retaining <=64 trees for shared binding. Sorted endpoints scanned once,
+  original source offsets/hashes/text preserved; no fake delimiters/whole-host parse
+  per region. JS0.25 and TS0.23.2 scanner ASI behavior differ, separate programs needed.
+- Pinned grammars also lose raw calls for legal loose Script yield(), TS await()
+  and interface(). Node22 and official TS5.9.3 Script oracle verify validity.
+  A lazy same-length private buffer rewrites only proven ambiguous keyword tokens
+  then reparses only affected programs ONCE with the same parser/range/budget.
+  JS/TS native argument parsing remains sole owner, no fabricated CallFacts.
+  TS exact ERROR keyword/paren-prefix + one complete native formals shape admits
+  flattened nested await(await()) wrappers; arbitrary recovery remains a barrier.
+  Real interfaces, strings/comments, real generator/async/module operators untouched.
+  Module/yield-free/await-free/unambiguous paths allocate no auxiliary copy. Depth256,
+  same source-size/deadline/cancellation bounds; measure added pass/copy/parse cost.
+- Shared source_declaration_kind now owns JS variable_declaration admission for raw
+  producer and collector; this fixed a prototype bare-var callable regression.
+- Extraction DER13 and semantic SEM13 now REQUIRED/current. Actual12 digest from
+  linked current12 library:784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424.
+  Fingerprint unit now seeds predecessor12 and checks11/older. Actual native12
+  upgrade/full/state/noop/rollback and fresh source-bound cost still pending.
+
+Luna approved overall goal/context/host-role plan and bounded parser projection;
+current read-only source review is finishing, including final role/cardinality controls.
+No new public graph/schema/provider or compiler emulation. Mixed grammar/custom
+framework transforms have not been established as cross-region visibility support.
+
+## Earlier prototype proof (superseded by current checkpoint above)
+
+Causal negatives preserved:
+/tmp/projectatlas-731-script-mode-causal-negative.log
+/tmp/projectatlas-731-host-module-causal-negative.log
+/tmp/projectatlas-731-host-export-role-causal-negative.log
+/tmp/projectatlas-731-await-grammar-probe.log
+/tmp/projectatlas-731-nested-await-{causal-negative,ast}.log
+/tmp/projectatlas-731-class-name-causal-negative.log
+Official TS oracle /tmp/projectatlas-731-typescript-oracle/diagnostics-ts593.log has
+ONLY expected noLib missing-global errors, no reserved-name diagnostics. Modern7.0.2
+removed alwaysStrict=false; no claim to emulate arbitrary compiler configuration.
+
+Current substantive suite BEFORE final mechanical SourceMode refactor:
+- symbols403PASS +1 existingignore, doctests0PASS:
+  /tmp/projectatlas-731-source-context-symbols-restored.log (48394 terminal0).
+- lazy projection unit separatelyPASS (real interface/noncall/copy negatives).
+- host/classical/component/import direction and independent JS+TS same-line program
+  controls PASS, nested contextual calls+real operators PASS, invalid import shadows
+  and reserved export alias/type-only positives PASS.
+- workspace alltarget/allfeatures checkPASS before enum refactor.
+- workspace Clippy found docs/identical arms/excessive bools; corrected by docs,
+  merged match and typed SourceMode; rerun80984 terminalPASS,
+  log /tmp/projectatlas-731-source-context-clippy.log PASS. Prior67578 failed during the
+  staged refactor because an unqualified python command was unavailable; corrected
+  script uses explicit venv Python. No gate bypass/suppression.
+- Scope tasks remain open. Need final source review/fixes, focused enum regression,
+  full affected runtime/E2E/docs/strictstrings, current inventory/contract/proof,
+  permanent real CLI/MCP source-context and host-role controls, actual native12 and
+  all prior upgrades, clean optimized artifact/cost, normal native push and hosted
+  current-head gates. Keep old raw measurements; no708 SLO waiver.
+
+## Superseded contract12 baseline (reuse, do not call final13 proof)
+
+Production581f3df05114db4d23d442f2125bf4e384c7c5d5 /DER12/SEM12 had Luna approval,
+full native pushPASS and four-platform sourceCI PASS. Public92b bookkeeping normal
+push11298 terminal0; SOURCE run40851707774 exact92b was live, recover current status.
+Prior eight review threads resolved; the ninth above remains open for new fix.
+Artifact ~/.cache/projectatlas-benchmarks/binding-731-581f3df-contract12-20261029/projectatlas,
 SHA c8f6d7cfd6928f03c2f775a30fbcd2f2ec3dbd49b2c0f150c17aaffc6c47d8ac.
-Actual11->12 generator/host/forwarding native upgrade plus six earlier stable050/
-5/6/7/8/10 stages, optimizedCLI-MCP and full/identity/ALLapproved/noop/rollbackPASS:
+Prior native11->12 and six earlier stages, CLI/MCP/state/full/noop/rollbackPASS:
 /tmp/projectatlas-731-contract12-{generator-native-proof,native-proofs}.json.
-18 freshpaired cost report bound581 in docs/benchmarks/static-binding-cost.*:
-root4 .276970->.347707s/RSS30164->33404KiB;root64 .323980->.390011/31316->34304;
-dense .168489->.160716/29216->29340. Root20-26%slower/+10-11%RSS,dense5%faster/<1%RSS.
-No708SLOwaiver. Raw/logs/sourcebindings retained. Historical11proof in previousGit
-and /tmp/projectatlas-731-memory-before-final-acceptance.md, notcurrent12measurements.
+Prior18paired costs: roots20-26%slower/+10-11%RSS; dense5%faster/<1%RSS; not final13
+measurements or708waiver. Prior inventory216 derived; adding current unit tests alone
+requires no new public selectors, final permanent E2E modifications still pending.
 
-## Cross-lane release continuity
+## Release and other lanes
 
-Freshaudit /tmp/projectatlas-milestone-audit-with-741-current.json:37/root715parentless,
-exactchildrenANDblockers708/718/721/722/731/732/738/739/741, eachsoleparent715/m37.
-Closed718/721/722/732; PR728/737 also37. Descriptions nowexplicit741. Future41/root493
-owns310/314/388/490/563; correctdependencies, noopenissue/PRinclosedmilestones.
-725explicitlydeferredunscheduled;720historicaldevassessed. Partialsourcebranchmaps
-retain acceptedbase+ownowner; final715mustunionALLacceptedowners beforepublication.
-741 plan848+uncommittedearlyDB/generatedstateguard; currentClippy/362CLIunit/nativebuild
-PASS, real CLI/MCP/upgrade/remainingplatformproof pending. Read741memory; noissueclosure.
-7396eb+dirtyrootwatch/mapbudgetdelta needs accepted731+740integration/review/upgrade/
-cost.7388814prefixguard must protect sharedUNCACHEDDocinspector usedby739freshness;
-sharedlinkedpositive/finalcombinedproofpending.708PR728publicc65/local587 needsactual
-closureCLI/MCPandfinalcombined4OSperformance;120samplewarm1.127FAILretained,focused
-1.031526partialnobwaiver. FinalDER>FINAL73112/allprivate,retainSEM12.
-Security normalized368leads assessed individually in /tmp/projectatlas-rc1-codeql/batches;
-primaryunion/new-sourceanalysisand738/741fixes stillrequired. Noalertdismissed.
-715installedpublicsurface/packages/cleanparser/pins/upgradesincl045/security/performance/
-publication/downloadSHA/Latestreadbackpending. NoRCpublished;goalactive.
-
-## Execution
-
-Source /tmp/projectatlas-rc1-test-env.sh cleanPATH/physicalTMPDIR/sharedtarget.
-741 latest sequential18479 completed fmt/Clippy/362CLIunit/nativebuildPASS; sharedtarget
-can be leased for731mandatorynormalpush now. No sibling builds/E2Es while push owns
-it; primary may edit741tests without compiling. No build/index during measurements.
-Bounded calls/progress<60s; resume sessions not restart. No force/hook/protectionbypass.
+Milestone37/root715 parentless EXACT native children+blockers
+708/718/721/722/731/732/738/739/741; each soleparent715/m37. Closed718/721/722/732;
+PR728/737 in37. Milestone and715description explicitly741; audit
+/tmp/projectatlas-milestone-audit-with-741-current.json PASS. Future41/root493 exact
+310/314/388/490/563, native deps correct;725 explicitly deferred/unscheduled,
+720 assessed historical dev. No open issue/PR in closed milestones. Final715 union
+all accepted owner maps; each issue branch retains acceptedbase+ownslice.
+741 source320652f COMMITTED (not merely dirty),19files early DB/generated-state
+ownership guard; focused actual CLI/MCP compat,362CLIunits,Clippy/inventoryPASS.
+Still full registeredhydration/liveWAL/050upgrade/recovery/platform/docs/finalreview/
+normalnative+hosted proof/PR pending; read741memory. Artifact96b534552... current
+sourcebound unoptimized. No closure or acceptance claim.
+7396eb0dfd +UNCOMMITTED rootwatch/mapbudgetdelta; noPR/push. Needs accepted731+740
+integration/finaldeltaLuna/upgrade/cost/native+hosted/platformproof.
+7388814d6d component reviewed, needs739sharedlinkedpositive and guard in shared
+UNCACHED Doc inspector also serving739freshness. NoPR/push.
+708PR728 publicc65/local587 needs real same-seed CLI/MCP closure-guidance proof and
+final combined4OSperformance. Preserve120samplewarm1.127FAIL/9focused1.031526partial.
+Security normalized368 scanner leads reconciled exactlyonce/zerooverlap/remainder:
+seven alerts in two owners244->738,196/197/274/292/294/295->741;361notactionable/test.
+/tmp/projectatlas-rc1-codeql/current-reviewed-id-union.json current. No alert dismissed,
+no broad capability disabled; current finalsource analysis/dependency verification
+still required.715task2.2 open. Final DER newer than FINAL73113/allprivate, retain
+finalSEM13. Final715 versions/pins/cleanparser4OS/allinstalledCLI+MCP+plugin+hostsurface/
+upgradesincl045/recovery/concurrency/performance/packages/publication/tag/assets/
+downloadSHA/install/Latest050 readback pending. NoRC exists; goal active.
