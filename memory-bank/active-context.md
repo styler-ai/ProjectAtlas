@@ -1,5 +1,82 @@
 # Active context
 
+## Current readiness and integration checkpoint (2026-10-29)
+
+Public/local731head3c9ed8a has terminal exact SOURCE CI40772422347 SUCCESS:
+Rust, repository, all4platforms andverify. Latermetadata40773083945 verifySUCCESS
+is not a replacement for that source matrix. Fullnative70061 alsoPASS. Allseven
+PR737 threads resolved; freshGraphQLreadback no unresolved. AllsevenCodeQL analyzer
+jobsPASS; aggregateFAIL11 inheritedhighleads: ten confinedstagingcleanup reviewed
+baseline/nonnew, real244separateDocprefix defectowned738/directRC1blocker. Noalert
+wasdismissed; retain disposition and fix/reanalyze244beforeRC1.731doesnotchangeits
+mechanism. Luna finalsource/proof review found no newblocker; 3.1/allacceptance
+correctlyremainopen pending accepted-main conflictresolution/currentgates/readiness.
+
+Acceptedmain3ef603aad39c435cf130545a555f8d746ec745ba mergedfutureplanningPR740:
+allfourplatforms+verify+CodeQL/Codexgreen;490staysopen41/alltasksunchecked. Normal
+merge it into public731branch, with sameowner(#731) mergecommit, no rebase/force.
+Preserve this memory and all ownsource/plan. Then cheap/current IssueOps and normal
+native/hosted gate, resolvefeedback before finaltask/acceptance/normalmerge/closure.
+Source d0b08e77 DER11/SEM11 cleanopt/hash/6nativeupgrades/18costsample evidence
+below remains valid for unchangedbehavior; no source hash or SLO relaxation.
+
+739 meaningful reviewedsource checkpoint6eb0dfd is committed/clean locally,
+notpushed/accepted. It implements externalconfig/matcher/watch/observer fixes,
+policy-only Docfreshness and allnativeFIFOguards. CurrentFS46+DB242+CLIunit370,
+realCLI/MCP/linked/localprecedence/identity/noop/6boundedFIFOcases andClippyPASS;
+finalinventory209/strictstrings/fullworkspaceRustdoc/doctestsPASS; fivecausalmutants
+allfailasrequired thenbyte-identicalrestore/positivePASS. Lunaapprovedslices.
+Native050upgrades/cost/fullnative/hosted/finalcontract stillpending; tasksopen.
+No live localbuild remains after739checkpoint; sharedtargetlease willmove731
+for nativepublication. Exact739 privateAtlas stable050refreshPASS18parsed677reused.
+
+RC1native715children AND blockers exactly708/718/721/722/731/732/738/739, all37.
+718/721/722/732closed.708/731/738/739open, noRCyet, Latest050unchanged.738source
+8814d6d awaits739positive/combine; place its prefixguard in shareduncachedDoc
+inspector toprotect newfreshnessconsumer too, rerunsyscall/publicproof. FinalDER
+mustexceedallprivate andretainSEM11;708combinedperformance715release remain.
+Older checkpoint text below is history where inconsistent.
+
+## Published contract 11 checkpoint
+
+PR737 public/local head is3c9ed8a5712533aaf99ca22a0003fab258d9ed9c. Native push
+session70061 COMPLETED successfully (exit0), including the complete workspace,
+all E2E binaries, docs, dependency/source and Atlas scan/lint gates. The current
+clean-source optimized binary remains d0b08e77; later3c9ed8a changes only proof,
+tasks and memory. Native log /tmp/projectatlas-731-contract11-native-push.log and
+terminal receipt /tmp/projectatlas-731-contract11-native-push-session.json.
+The shared local target is now free; there is no live local build/test/push.
+
+All three new review threads were individually answered and resolved after source,
+proof and native validation. Fresh script readback confirms all seven threads
+resolved and no new unresolved thread at that observation. Replies4406315070,
+4406315721,4406316152 correspond to xSmDC/xSmDH/xSpgU. Readback:
+/tmp/projectatlas-737-contract11-after-resolution.json. PR body now describes final
+scope/contract11 and honest performance; readback exacthead/body verified in
+/tmp/projectatlas-737-contract11-after-body.json. No acceptance or closure yet.
+
+Current hosted SOURCE CI run40772422347 at exact3c9ed8a is live. Plan/repository
+passed; Rust job123112965987 and Linux123112966315, ARMmac123112966391,
+Intelmac123112966393, Windows123112966561 are in progress. Metadata-edit follow-up
+run40773083945 has intentionally skipped plan/source matrix and a verify job
+waiting for proof; do not mistake its literal skipped matrix name for missing
+source-platform proof. Run list /tmp/projectatlas-737-contract11-hosted-runs.json.
+CodeQL Rust analysis is still in progress, aggregate lastneutral. Re-read actual
+current alerts/results and automatic review feedback before readiness; old
+CodeQL relocated leads include separately owned738, do not blindly dismiss.
+
+Next work: while remote CI runs, implement739 in its own checkout (no production
+code/dependency selected there yet), then complete738 shared-linked positive.
+739 memory records fresh exact-root Atlas startup, accepted spec/context files
+and dependency/API research. Local runtime-info via short atlas with
+--require-version0.5.0 verified installed stable native runtime and CLI/MCP/SQLite/
+TOON capabilities. No private database was reset or needlessly reindexed.
+731 task3.1/all five acceptance rows remain open pending exact hosted/readiness
+review. Keep the goal active through remaining708/738/739/715 and RC publication;
+Latest remains stable0.5.0. The memory-only changes after push are intentional
+continuity; preserve them before checkout/merge and do not trigger duplicate CI
+merely to publish a status note.
+
 ## Current checkpoint: reviewed contract 11 ready for native push
 
 Source commit d0b08e77bc9ac1388e10534944d3a525b56ff581 is independently approved
