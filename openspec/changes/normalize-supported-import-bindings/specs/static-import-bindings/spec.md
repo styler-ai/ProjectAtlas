@@ -123,6 +123,11 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **THEN** body function declarations share the body var environment, parameter evaluation retains parameter bindings without seeing body locals, and genuine nested block declarations remain distinct
 - **AND** static class blocks and admitted TypeScript namespaces retain their own var environments, while var declarations reserve their owner separately from lexical writes through a valid catch binding, including destructuring and iteration
 
+#### Scenario: Generator declarations retain function and declaration ownership
+- **WHEN** supported JavaScript, TypeScript, TSX or admitted script hosts contain synchronous or asynchronous generator declarations
+- **THEN** their parameters and body vars retain function-local ownership without shadowing unrelated outer calls, parameter defaults cannot see body locals, and the generator declaration retains its graph, static export and canonical caller identity
+- **AND** callable local initializers do not become outer callable declarations, while generator expressions, starred methods, arrows and ordinary functions preserve their existing ownership
+
 #### Scenario: Bare ECMAScript var redeclarations preserve values
 - **WHEN** a bare var declaration repeats an existing function, parameter or initialized variable name, including a function-scoped block or ordinary for initializer
 - **THEN** it reserves the function-local name without replacing the existing value; canonical callers and explicit exported aliases retain proven callable targets

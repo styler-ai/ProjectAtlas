@@ -2089,6 +2089,7 @@ fn is_local_value_declaration(node: Node<'_>) -> bool {
             "function",
             "function_expression",
             "function_declaration",
+            "generator_function_declaration",
             "generator_function",
             "method_definition",
             "method_declaration",
@@ -2485,6 +2486,7 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
     match kind {
         "function_item"
         | "function_declaration"
+        | "generator_function_declaration"
         | "function_definition"
         | "function_declarator"
         | "func_literal" => Some(SymbolKind::Function),

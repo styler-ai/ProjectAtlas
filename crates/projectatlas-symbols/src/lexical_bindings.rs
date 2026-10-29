@@ -3398,6 +3398,7 @@ fn is_function(kind: &str) -> bool {
         kind,
         "function_item"
             | "function_declaration"
+            | "generator_function_declaration"
             | "function_definition"
             | "method_definition"
             | "method_declaration"
@@ -5435,6 +5436,89 @@ function caller() { renamed(); tools.work(); }
     }
 
     #[test]
+    fn ecmascript_generator_declarations_retain_callable_identity() {
+        for (language, path, host) in [
+            ("javascript", "main.js", false),
+            ("typescript", "main.ts", false),
+            ("tsx", "main.tsx", false),
+            ("vue", "main.vue", true),
+            ("svelte", "main.svelte", true),
+            ("html", "main.html", true),
+        ] {
+            for script in [
+                "function* run(){} function caller(){run();}",
+                "async function* run(){} function caller(){run();}",
+                "export function* run(){} function caller(){run();}",
+                "export default function* run(){} function caller(){run();}",
+                "function* run(){const local=()=>{};} function caller(){run();}",
+                "async function* run(){const local=function*(){};} function caller(){run();}",
+            ] {
+                let content = if host {
+                    format!("<script>{script}</script>")
+                } else {
+                    script.to_string()
+                };
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let (_, graph, facts) = extracted.into_parts();
+                assert_eq!(facts.calls.len(), 1, "{language}: {script}: {graph:?}");
+                assert!(
+                    matches!(
+                        facts.calls[0].binding,
+                        SourceCallBinding::LocalDeclaration(_)
+                    ),
+                    "{language}: {script}: {:?}: {graph:?}",
+                    facts.calls
+                );
+                let SourceCallBinding::LocalDeclaration(symbol) = facts.calls[0].binding else {
+                    return;
+                };
+                assert_eq!(graph.symbols[symbol].name, "run", "{language}: {script}");
+                assert_eq!(
+                    graph.symbols[symbol].kind,
+                    projectatlas_core::symbols::SymbolKind::Function,
+                    "{language}: {script}"
+                );
+                if script.starts_with("export ") {
+                    let export_name = if script.starts_with("export default ") {
+                        "default"
+                    } else {
+                        "run"
+                    };
+                    assert!(facts.exports.iter().any(|fact|
+                        fact.name == export_name
+                            && matches!(fact.binding, crate::SourceExportBinding::LocalDeclaration(target) if target == symbol)),
+                        "{language}: {script}: {:?}", facts.exports);
+                }
+                if script.contains("const local") {
+                    assert!(
+                        graph
+                            .symbols
+                            .iter()
+                            .filter(|symbol| symbol.name == "local")
+                            .all(|symbol| symbol.kind
+                                == projectatlas_core::symbols::SymbolKind::Value
+                                && symbol.parent.as_deref() == Some("run")),
+                        "{language}: {script}: {graph:?}"
+                    );
+                    if !host {
+                        assert!(
+                            graph.symbols.iter().any(|symbol| symbol.name == "local"),
+                            "{language}: {script}: missing native local value"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ecmascript_function_body_writes_own_their_var_bindings() {
         for (language, path, host) in [
             ("javascript", "main.js", false),
@@ -5445,6 +5529,56 @@ function caller() { renamed(); tools.work(); }
             ("html", "main.html", true),
         ] {
             for (script, resolved) in [
+                (
+                    "function run(){} function* unused(){var run=null;} run();",
+                    true,
+                ),
+                (
+                    "function run(){} async function* unused(){var run=null;} run();",
+                    true,
+                ),
+                ("function run(){} function* unused(run){} run();", true),
+                (
+                    "function run(){} function* caller(value=run()){var run=null;}",
+                    true,
+                ),
+                (
+                    "function run(){} async function* caller(value=run()){var run=null;}",
+                    true,
+                ),
+                (
+                    "function run(){} const unused=function*(){var run=null;}; run();",
+                    true,
+                ),
+                (
+                    "function run(){} const unused=async function*(){var run=null;}; run();",
+                    true,
+                ),
+                (
+                    "function run(){} const unused=function* run(){var run=null;}; run();",
+                    true,
+                ),
+                (
+                    "function run(){} class Example{*unused(){var run=null;}} run();",
+                    true,
+                ),
+                (
+                    "function run(){} class Example{async *unused(){var run=null;}} run();",
+                    true,
+                ),
+                (
+                    "function run(){} const example={*unused(){var run=null;}}; run();",
+                    true,
+                ),
+                (
+                    "function run(){} const unused=()=>{var run=null;}; run();",
+                    true,
+                ),
+                (
+                    "function* caller(replacement){function run(){} var run=replacement; run();}",
+                    false,
+                ),
+                ("function run(){} function* caller(run){run();}", false),
                 (
                     "function caller(replacement){function run(){} var run=replacement; run();}",
                     false,

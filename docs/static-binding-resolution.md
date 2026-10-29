@@ -130,8 +130,8 @@ An exhausted export-fact budget invalidates all export target proof, including
 previously captured slots; ordinal filtering and embedded-host remapping preserve
 this completeness boundary.
 
-Extraction derivation contract 11 and semantic resolution contract 11 invalidate
-older derived facts, including preceding development contracts 10/10, 9/9, 8/8, 7/7, 6/6, 5/6 and 4/5 and the
+Extraction derivation contract 12 and semantic resolution contract 12 invalidate
+older derived facts, including preceding development contracts 11/11, 10/10, 9/9, 8/8, 7/7, 6/6, 5/6 and 4/5 and the
 published 0.5.0 contract 3/3. An ordinary refresh repairs unchanged source through
 the existing bounded full-publication owner. This first reconciliation may parse
 the complete admitted source; later current-contract operations reuse unaffected
@@ -152,6 +152,12 @@ parameter evaluation. Parameter defaults retain outer bindings even when the bod
 has a same-name declaration. Class static blocks and admitted TypeScript namespaces
 keep their own vars. Declaration reservation and actual lexical writes remain
 separate, including writes through a valid catch binding.
+
+Synchronous and asynchronous generator declarations use this same function
+boundary in JavaScript, TypeScript, TSX and admitted script hosts. Their declarations
+retain graph/static-export identity, body-local callable values stay local, and
+unrelated outer calls survive body var declarations. Generator expressions,
+starred methods and arrows keep their existing owners.
 
 Native traversal stops at 256 AST levels. Lexical refinement retains at most
 16,384 environments and 16,384 binding transitions across value, method and type/module namespaces or pending writes per file,

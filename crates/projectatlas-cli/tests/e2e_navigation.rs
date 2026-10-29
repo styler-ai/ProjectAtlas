@@ -13802,13 +13802,16 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
 #[test]
 fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result<(), Box<dyn Error>>
 {
-    for extension in ["js", "ts"] {
+    for extension in ["js", "ts", "tsx"] {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
         let worker = format!("worker.{extension}");
         let barrel = format!("barrel.{extension}");
         let importer = format!("main.{extension}");
         let local = format!("local.{extension}");
+        let generator_worker = format!("generator_worker.{extension}");
+        let generator_barrel = format!("generator_barrel.{extension}");
+        let generator_importer = format!("generator_importer.{extension}");
         fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
         fs::write(
             root.join(&barrel),
@@ -13823,6 +13826,20 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
         fs::write(
             root.join(&local),
             "function run(){} var run; function caller(){run();}\n",
+        )?;
+        fs::write(
+            root.join(&generator_worker),
+            "export default function* generated(){} export async function* asynchronous(){}\n",
+        )?;
+        fs::write(
+            root.join(&generator_barrel),
+            format!("export {{default as sequence, asynchronous}} from './{generator_worker}';\n"),
+        )?;
+        fs::write(
+            root.join(&generator_importer),
+            format!(
+                "import {{sequence, asynchronous}} from './{generator_barrel}'; function generate(){{sequence();}} function asyncGenerate(){{asynchronous();}}\n"
+            ),
         )?;
         let mut environments = vec![
             (
@@ -13840,11 +13857,43 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                 "function run(){} class Example{static{var run=null;}} function caller(){run();}\n",
                 true,
             ),
+            (
+                format!("generator_scope.{extension}"),
+                "function run(){} function* unused(){var run=null;} function caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("async_generator_scope.{extension}"),
+                "function run(){} async function* unused(){var run=null;} function caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("generator_parameters.{extension}"),
+                "function run(){} function* caller(value=run()){var run=null;}\n",
+                true,
+            ),
+            (
+                format!("generator_calls.{extension}"),
+                "function run(){} function* caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("generator_shadow.{extension}"),
+                "function run(){} function* caller(run){run();}\n",
+                false,
+            ),
         ];
-        if extension == "ts" {
+        if matches!(extension, "ts" | "tsx") {
             environments.push((
                 format!("namespace.{extension}"),
                 "function run(){} namespace N{var run=null;} function caller(){run();}\n",
+                true,
+            ));
+        }
+        for host in ["vue", "svelte", "html"] {
+            environments.push((
+                format!("generator_host.{host}"),
+                "<script>function run(){} async function* unused(){var run=null;} function* caller(){run();}</script>\n",
                 true,
             ));
         }
@@ -13885,6 +13934,20 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                         ),
                         (importer.as_str(), "clean", worker.as_str(), "safe", true),
                         (local.as_str(), "caller", local.as_str(), "run", true),
+                        (
+                            generator_importer.as_str(),
+                            "generate",
+                            generator_worker.as_str(),
+                            "generated",
+                            true,
+                        ),
+                        (
+                            generator_importer.as_str(),
+                            "asyncGenerate",
+                            generator_worker.as_str(),
+                            "asynchronous",
+                            true,
+                        ),
                     ];
                     checks.extend(environments.iter().map(|(file, _, present)| {
                         (file.as_str(), "caller", file.as_str(), "run", *present)

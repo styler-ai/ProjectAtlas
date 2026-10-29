@@ -132,7 +132,12 @@ relation capacity. Other correspondence maps remain bounded by admitted facts.
 On exhaustion, preserve raw facts and proven prefix ownership, suppress all binding
 and export authority, and allow normal navigation, reduction and refresh repair.
 Concurrent workers multiply these fixed per-file bounds; no unbounded scope vector
-or per-call timeline scan is admitted. Contract 11/11 additionally repairs function
+or per-call timeline scan is admitted. Contract 12/12 additionally repairs missing
+synchronous/asynchronous generator declaration scopes, callable graph/export
+identity and generator-local value ownership in unchanged private11/11 indexes.
+All locked ECMAScript grammar variants use their existing AST-owned function
+boundary; expressions, ordinary/async functions, arrows and starred methods retain
+their established owners. This includes the earlier contract11 repair of function
 body/parameter/static/namespace environments in unchanged private10/10 indexes,
 retaining bare-var reservation, malformed initializer, Python directive and earlier
 private9/9,8/8,7/7 and6/6 repairs
