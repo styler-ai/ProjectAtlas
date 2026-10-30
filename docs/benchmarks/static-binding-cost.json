@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "date": "2026-10-29",
-  "source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
-  "derivation_contract": 14,
-  "semantic_contract": 14,
+  "date": "2026-10-30",
+  "source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
+  "derivation_contract": 15,
+  "semantic_contract": 15,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
+  "candidate_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -34,8 +34,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.29100097401533276,
-          "peak_rss_kib": 27800,
+          "wall_seconds": 0.28865725500509143,
+          "peak_rss_kib": 27544,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -47,8 +47,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.34574258301290683,
-          "peak_rss_kib": 33660,
+          "wall_seconds": 0.3498875370132737,
+          "peak_rss_kib": 33912,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -67,8 +67,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.3334017060115002,
-          "peak_rss_kib": 28800,
+          "wall_seconds": 0.32803498799330555,
+          "peak_rss_kib": 28880,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -80,8 +80,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.38861294800881296,
-          "peak_rss_kib": 34512,
+          "wall_seconds": 0.3907855619909242,
+          "peak_rss_kib": 34988,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -100,8 +100,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.1699748270038981,
-          "peak_rss_kib": 26484,
+          "wall_seconds": 0.16597716600517742,
+          "peak_rss_kib": 26716,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -113,8 +113,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.16327839001314715,
-          "peak_rss_kib": 29552,
+          "wall_seconds": 0.1651649859850295,
+          "peak_rss_kib": 29592,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -133,8 +133,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.10127518000081182,
-          "peak_rss_kib": 23188,
+          "wall_seconds": 0.10082341099041514,
+          "peak_rss_kib": 23016,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -146,8 +146,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11635323299560696,
-          "peak_rss_kib": 25696,
+          "wall_seconds": 0.11767399098607711,
+          "peak_rss_kib": 26052,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -166,8 +166,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.11304260999895632,
-          "peak_rss_kib": 24372,
+          "wall_seconds": 0.11789339501410723,
+          "peak_rss_kib": 23572,
           "work": {
             "candidates": 1,
             "parsed": 1,
@@ -179,8 +179,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14304742100648582,
-          "peak_rss_kib": 26884,
+          "wall_seconds": 0.14407142100390047,
+          "peak_rss_kib": 27448,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -234,5 +234,29 @@
       }
     },
     "scope": "Targeted storage regression, separate from 0.5.0 affected-work comparison and release SLOs."
+  },
+  "reopened_containers": {
+    "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
+    "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
+    "candidate_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
+    "candidate_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
+    "logical_namespaces": 256,
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 0.18412380499648862,
+        "peak_rss_kib": 30908
+      },
+      "candidate": {
+        "wall_seconds": 0.18719534599222243,
+        "peak_rss_kib": 31668
+      }
+    },
+    "source_hashes": {
+      "main.cpp": "3c160cd546f1068e5257afcc4f4027ca14e58fb8346cfd040a09b117fc84e1de",
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "Cargo.toml": "6cd620ff096dd9d1f0c7d4917d6acd70116d99d9313304b98730080d2af5b4b8"
+    },
+    "scope": "same-file C++ reopened namespaces, selected exact caller positive and zero-parsed no-op each sample; candidate performs corrected work"
   }
 }
