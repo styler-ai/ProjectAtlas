@@ -266,6 +266,10 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** declarations share a name, node kind and source-line range but have distinct emitted parents or signatures
 - **THEN** their actual AST identities select the corresponding graph ordinals without per-call candidate rescans, and indistinguishable metadata remains ambiguous
 
+#### Scenario: Runtime forwarding queries preserve shared source module storage
+- **WHEN** many native calls reach aliases from one explicit re-export statement with a long static module literal
+- **THEN** query construction, cache hits and recursive frame clones retain shared module storage without copying its bytes, source ownership accounts those bytes once, value-based query identity and existing budget/cancellation refusal remain compatible, and ordinary valid navigation continues through CLI and MCP
+
 ### Requirement: Static re-export aliases retain explicit evidence
 Supported static Rust and ECMAScript re-export aliases SHALL preserve dependency and downstream imported-binding identity. Resolution SHALL abstain for ambiguous or unsupported runtime exports and terminate conservatively within existing work bounds for cyclic chains.
 

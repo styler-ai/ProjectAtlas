@@ -1695,7 +1695,7 @@ mod tests {
             let shared = &mut *resolver.shared;
             let query = super::super::BindingQuery {
                 source: "main.js".to_string(),
-                module: "./worker.js".to_string(),
+                module: "./worker.js".into(),
                 imported: Some("run".to_string()),
                 member: None,
             };
@@ -1711,7 +1711,7 @@ mod tests {
             let source = Arc::new(super::BindingSource {
                 source: super::SourceGraph::Persisted(graph),
                 slots: BTreeMap::new(),
-                modules: BTreeMap::from([(query.module.clone(), keys.clone())]),
+                modules: BTreeMap::from([(query.module.to_string(), keys.clone())]),
                 parents: Vec::new(),
             });
             shared.reserve_scratch(super::STAGED_GRAPH_ROW_BYTES * 8)?;
@@ -1777,7 +1777,7 @@ mod tests {
             let shared = &mut *resolver.shared;
             let query = super::super::BindingQuery {
                 source: "self.js".to_string(),
-                module: "./self.js".to_string(),
+                module: "./self.js".into(),
                 imported: Some("run".to_string()),
                 member: None,
             };
@@ -1814,7 +1814,7 @@ mod tests {
                     },
                 )),
                 slots: BTreeMap::from([("run".to_string(), vec![slot])]),
-                modules: BTreeMap::from([(query.module.clone(), vec![key.clone()])]),
+                modules: BTreeMap::from([(query.module.to_string(), vec![key.clone()])]),
                 parents: Vec::new(),
             });
             shared.reserve_scratch(super::STAGED_GRAPH_ROW_BYTES * 8)?;
@@ -1863,7 +1863,7 @@ mod tests {
             require_eq(&shared.retained_bytes, &retained)?;
             let missing = super::super::BindingQuery {
                 source: "missing.js".to_string(),
-                module: "./absent.js".to_string(),
+                module: "./absent.js".into(),
                 imported: Some("run".to_string()),
                 member: None,
             };

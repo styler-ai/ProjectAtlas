@@ -477,3 +477,16 @@ by a later declaration transition. This keeps later callers conservative after
 possible construction without changing the function flag or var ownership. The
 within-field write-then-call control already abstains through the stable-tail
 guard; the causal defect is a later enclosing caller or later class-field call.
+
+
+## Shared forwarding query modules
+
+The source reference already owns an immutable shared module, but converting it
+back to an owned String in BindingQuery duplicated the full literal before cache
+lookup for every alias call. Preserve the same Arc through query construction and
+frame clones. Shared module bytes remain accounted by source facts/source cache;
+query accounting retains its own text and node/handle headers. Value Eq/Ord remains
+canonical across distinct allocations. This changes allocation and work only, not
+facts, keys, schemas or semantic outcomes, so DER16/SEM16 remain unchanged. Existing
+resource/cancellation/cycle tests and actual long-module CLI/MCP controls protect
+the consumer boundary; no module-length rejection or capability removal is added.

@@ -146,8 +146,8 @@ pub(super) type CallBindings = BTreeMap<String, BTreeMap<usize, Arc<CallBindingR
 struct BindingQuery {
     /// Source whose import syntax owns this module reference.
     source: String,
-    /// Cooked module literal from that source's AST.
-    module: String,
+    /// Cooked module allocation retained and accounted by its source evidence.
+    module: Arc<str>,
     /// Explicit imported slot, absent for a namespace binding.
     imported: Option<String>,
     /// Remaining statically named namespace member.
@@ -159,17 +159,16 @@ impl BindingQuery {
     fn new(source: &str, reference: &ImportReference, member: Option<&str>) -> Self {
         Self {
             source: source.to_string(),
-            module: reference.module().to_string(),
+            module: reference.shared_module(),
             imported: reference.imported().map(ToString::to_string),
             member: member.map(ToString::to_string),
         }
     }
 
-    /// Count owned query text and map bookkeeping.
+    /// Count query-owned text and headers; source owners already charge shared module bytes.
     fn retained_bytes(&self) -> u64 {
         STAGED_GRAPH_ROW_BYTES
             .saturating_add(self.source.capacity() as u64)
-            .saturating_add(self.module.capacity() as u64)
             .saturating_add(self.imported.as_ref().map_or(0, String::capacity) as u64)
             .saturating_add(self.member.as_ref().map_or(0, String::capacity) as u64)
     }
@@ -727,7 +726,7 @@ impl<'g> BindingResolver<'_, 'g, '_> {
                 let source = this.source(&query.source)?;
                 let keys = source
                     .modules
-                    .get(&query.module)
+                    .get(query.module.as_ref())
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 for key in keys {
@@ -880,5 +879,63 @@ impl<'g> BindingResolver<'_, 'g, '_> {
         self.hydrated.insert(digest, entity.clone());
         self.check_budget()?;
         Ok(entity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BindingQuery;
+    use projectatlas_core::{IndexCancellation, IndexWorkControl};
+    use projectatlas_symbols::SourceExportBinding;
+    use std::error::Error;
+
+    #[test]
+    fn forwarding_query_module_identity_uses_values_across_allocations() {
+        let first = BindingQuery {
+            source: "barrel.js".to_string(),
+            module: "./target.js".into(),
+            imported: Some("run".to_string()),
+            member: None,
+        };
+        let mut second = first.clone();
+        second.module = std::sync::Arc::from(first.module.as_ref());
+        assert!(first == second);
+        assert_eq!(first.cmp(&second), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn forwarding_queries_share_source_modules_before_cache_lookup() -> Result<(), Box<dyn Error>> {
+        const SOURCE: &str = "barrel.js";
+        let module = format!("./{}", "x".repeat(262_144));
+        let slots = (0..32)
+            .map(|index| format!("run as e{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let content = format!("export {{{slots}}} from \"{module}\";");
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let (_, _, facts) = projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+            SOURCE,
+            Some("javascript"),
+            &content,
+            &control,
+        )?
+        .into_parts();
+        if facts.exports().len() != 32 {
+            return Err("native reexport slots missing".into());
+        }
+        for export in facts.exports() {
+            let SourceExportBinding::ReExport(reference) = &export.binding else {
+                return Err("native reexport evidence missing".into());
+            };
+            let query = BindingQuery::new(SOURCE, reference, None);
+            if query.module.as_ptr() != reference.module().as_ptr() {
+                return Err("query copied source-owned module before cache lookup".into());
+            }
+            let copied = query.clone();
+            if copied.module.as_ptr() != query.module.as_ptr() {
+                return Err("resolver frame copied shared query module".into());
+            }
+        }
+        Ok(())
     }
 }

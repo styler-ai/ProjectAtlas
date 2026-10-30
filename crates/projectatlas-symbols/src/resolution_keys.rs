@@ -628,6 +628,12 @@ impl ImportReference {
         &self.module
     }
 
+    /// Share the normalized module allocation without copying its source-owned bytes.
+    #[must_use]
+    pub fn shared_module(&self) -> Arc<str> {
+        Arc::clone(&self.module)
+    }
+
     /// Borrow the imported declaration name, or `None` for a module/namespace import.
     #[must_use]
     pub fn imported(&self) -> Option<&str> {

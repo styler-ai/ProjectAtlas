@@ -13802,6 +13802,7 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
 #[test]
 fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result<(), Box<dyn Error>>
 {
+    use std::fmt::Write as _;
     for extension in ["js", "ts", "tsx"] {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
@@ -13812,6 +13813,29 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
         let generator_worker = format!("generator_worker.{extension}");
         let generator_barrel = format!("generator_barrel.{extension}");
         let generator_importer = format!("generator_importer.{extension}");
+        let resource_barrel = format!("resource_barrel.{extension}");
+        let resource_importer = format!("resource_importer.{extension}");
+        let resource_target = format!("resource_target.{extension}");
+        let module = format!("./{}", "x".repeat(65_536));
+        let slots = (0..512)
+            .map(|index| format!("run as e{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        fs::write(
+            root.join(&resource_barrel),
+            format!("export {{{slots}}} from \"{module}\";"),
+        )?;
+        fs::write(root.join(&resource_target), "export function work(){}")?;
+        let mut member_calls = String::new();
+        for index in 0..256 {
+            write!(&mut member_calls, "ns.e{index}();")?;
+        }
+        fs::write(
+            root.join(&resource_importer),
+            format!(
+                "import * as ns from './{resource_barrel}'; import {{work}} from './{resource_target}'; function caller(){{{member_calls}}} function probe(){{ns.e0();}} function clean(){{work();}}"
+            ),
+        )?;
         fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
         fs::write(
             root.join(&barrel),
@@ -13924,6 +13948,19 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                     if rebuilt {
                         run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
                     }
+                    if rebuilt && extension == "js" && suffix == "var run;" {
+                        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+                        let path = root.join(&resource_importer);
+                        let mut content = fs::read_to_string(&path)?;
+                        content.push_str("\n// refresh forwarding source through MCP\n");
+                        fs::write(&path, content)?;
+                        session
+                            .call_tool("atlas_scan", &json!({"project_path": root, "path": "."}))?;
+                        rust_binding_require(
+                            AtlasStore::open_read_only(&database)?.index_publication()? != before,
+                            "MCP forwarding refresh did not publish its changed source",
+                        )?;
+                    }
                     let mut checks = vec![
                         (
                             importer.as_str(),
@@ -13949,6 +13986,22 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                             true,
                         ),
                     ];
+                    checks.extend([
+                        (
+                            resource_importer.as_str(),
+                            "probe",
+                            resource_target.as_str(),
+                            "work",
+                            false,
+                        ),
+                        (
+                            resource_importer.as_str(),
+                            "clean",
+                            resource_target.as_str(),
+                            "work",
+                            true,
+                        ),
+                    ]);
                     checks.extend(environments.iter().map(|(file, _, present)| {
                         (file.as_str(), "caller", file.as_str(), "run", *present)
                     }));
