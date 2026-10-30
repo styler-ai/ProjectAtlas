@@ -1843,6 +1843,9 @@ impl LexicalCollector<'_> {
                             | "expression_switch_statement"
                             | "type_switch_statement"
                             | "communication_case"
+                            | "expression_case"
+                            | "type_case"
+                            | "default_case"
                     ))
                 || (self.language == "cpp"
                     && matches!(
@@ -7554,6 +7557,190 @@ function caller() { renamed(); tools.work(); }
             );
             assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
         }
+    }
+
+    #[test]
+    fn go_clause_scopes_share_scope_admission_and_preserve_raw_navigation() {
+        use std::fmt::Write as _;
+        for (clauses, complete) in [
+            (super::MAX_LEXICAL_SCOPES - 16, true),
+            (super::MAX_LEXICAL_SCOPES + 1, false),
+        ] {
+            let mut source =
+                String::from("package main\nfunc run(){}\nfunc caller(x int){switch x{");
+            for index in 0..clauses {
+                assert!(write!(&mut source, "case {index}:").is_ok());
+            }
+            source.push_str("};run()}\n");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "scope-budget.go",
+                Some("go"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(
+                graph.symbols.len() < crate::MAX_SYMBOLS_PER_FILE
+                    && graph.relations.len() < crate::MAX_RELATIONS_PER_FILE
+            );
+            assert_eq!(facts.calls().len(), 1);
+            assert_eq!(!facts.bindings_incomplete, complete);
+            assert_eq!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                complete
+            );
+            assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
+        }
+    }
+
+    #[test]
+    fn go_clause_scopes_preserve_sibling_and_enclosing_bindings() {
+        let cases: &[(&str, &str, &[bool])] = &[
+            (
+                "expression",
+                "func caller(x int){switch x{case 0:run:=func(){};run();case 1:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "expression-default-first",
+                "func caller(x int){switch x{default:run:=func(){};run();case 1:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "expression-var",
+                "func caller(x int){switch x{case 0:var run=func(){};run();default:run()}}",
+                &[false, true],
+            ),
+            (
+                "type-cases",
+                "func caller(x any){switch x.(type){case int:run:=func(){};run();case string:run();default:run()};run()}",
+                &[false, true, true, true],
+            ),
+            (
+                "type-default-first",
+                "func caller(x any){switch x.(type){default:run:=func(){};run();case int:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "select-default-first",
+                "func caller(ch chan int){select{default:run:=func(){};run();case <-ch:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "select-communication",
+                "func caller(ch chan int){select{case <-ch:run:=func(){};run();default:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "receive-binding",
+                "func caller(ch chan func()){select{case run:= <-ch:run();default:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "switch-initializer",
+                "func caller(x int){switch run:=func(){};x{case 0:run();default:run()};run()}",
+                &[false, false, true],
+            ),
+            (
+                "type-alias",
+                "func caller(x any){switch run:=x.(type){case func():run();case func()int:run();default:_=run};run()}",
+                &[false, false, true],
+            ),
+            (
+                "fallthrough",
+                "func caller(x int){switch x{case 0:run:=func(){};run();fallthrough;case 1:run()};run()}",
+                &[false, true, true],
+            ),
+            (
+                "same-clause",
+                "func caller(x int){switch x{case 0:run();run:=func(){};run();default:run()}}",
+                &[true, false, true],
+            ),
+            (
+                "nested-switch",
+                "func caller(x int){switch x{case 0:run:=func(){};switch x{case 1:run();default:run()};case 1:run()};run()}",
+                &[false, false, true, true],
+            ),
+            (
+                "case-expression",
+                "func caller(x int){switch x{case run():run:=func(){};run();case 1:run()}}",
+                &[true, false, true],
+            ),
+            (
+                "unicode-crlf",
+                "func caller(x int){switch x{case 0:run:=func(){};run();case 1:run()};run()}",
+                &[false, true, true],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (label, body, expected) in cases {
+            let source = format!("package main\nfunc run()int{{return 0}}\n{body}\n");
+            let source = if *label == "unicode-crlf" {
+                source.replace("run", "rún").replace('\n', "\r\n")
+            } else {
+                source
+            };
+            let callee = if *label == "unicode-crlf" {
+                "rún"
+            } else {
+                "run"
+            };
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "clauses.go",
+                Some("go"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{label}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(!facts.bindings_incomplete, "{label}");
+            let actual = facts
+                .calls()
+                .iter()
+                .filter_map(|call| {
+                    if graph.relations[call.relation].target_name != callee {
+                        return None;
+                    }
+                    if *label == "unicode-crlf" {
+                        assert_eq!(source.get(call.span.start..call.span.end), Some("rún()"));
+                        assert_eq!(
+                            call.source_span
+                                .map(projectatlas_core::graph::SourceSpan::start_line),
+                            Some(3)
+                        );
+                        let column = source[..call.span.start]
+                            .rsplit('\n')
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .count();
+                        assert_eq!(
+                            call.source_span
+                                .map(projectatlas_core::graph::SourceSpan::start_column),
+                            column.try_into().ok()
+                        );
+                    }
+                    Some(match call.binding {
+                        SourceCallBinding::LocalDeclaration(target) => {
+                            assert_eq!(graph.symbols[target].name, callee);
+                            assert!(graph.symbols[target].parent.is_none());
+                            true
+                        }
+                        _ => false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if actual != *expected {
+                failures.push(format!("{label}: expected {expected:?}, actual {actual:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

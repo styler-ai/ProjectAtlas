@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 21;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 22;
 /// Disjoint ECMAScript lookup namespaces for explicit files and inferred modules.
 const ECMA_FILE_SCOPE: &str = "file:";
 /// Legacy extensionless and package-entry aliases never identify an explicit file.
@@ -2594,7 +2594,7 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 21);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 22);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());

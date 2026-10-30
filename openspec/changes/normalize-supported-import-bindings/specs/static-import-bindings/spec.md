@@ -373,3 +373,19 @@ release handoff.
 #### Scenario: An accepted planner retains a retired image pin
 - **WHEN** the trusted accepted-base planner selects macOS ARM contracts using an image undergoing retirement
 - **THEN** current workflow provisioning selects a supported explicit ARM image without changing trusted selected contracts, retains separate Intel coverage, and keeps CI, package/install/post-publication and unsupported parser-pack matrices consistent
+
+### Requirement: Go implicit clauses retain independent bindings
+The system SHALL keep each Go switch and select clause in its grammar-declared
+implicit block without changing other languages' switch scoping contracts.
+
+#### Scenario: Sibling Go clauses contain a same-name local
+- **WHEN** an expression switch, type switch or select clause declares a local name also used by another clause
+- **THEN** local calls retain conservative local ownership, sibling and outer calls retain their actual package or enclosing binding, and switch initializers, type-switch alias visibility, receive-case locals, fallthrough and source coordinates remain compatible
+
+### Requirement: Cached forwarding lookup reuses admitted module identity
+The system SHALL reuse exact module identity for cached forwarding and visited
+queries without re-reading long module text on repeated lookups after admission.
+
+#### Scenario: Equal module literals have different source allocations
+- **WHEN** supported source statements contain equal long module literals and repeated callers require the same forwarded binding
+- **THEN** one resolver assigns the same exact value identity, repeated lookups compare bounded identity fields, unequal strings remain distinct, retained metadata is admitted before insertion, and positive callers, cycles, cancellation, resource refusals and long-module support remain intact

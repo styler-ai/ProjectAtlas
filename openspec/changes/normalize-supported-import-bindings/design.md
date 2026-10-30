@@ -746,3 +746,46 @@ and its129-file source/build/test binding at3e81518. The109 non-test build/sourc
 inputs stay byte-identical; refresh the two modified CI-test identities separately
 and reuse the verified product upgrade/cost evidence.
 The source/publication architecture remains unchanged; this is CI provisioning.
+
+### Go clause scope and forwarding query key cost
+
+Fresh review and the real native CLI reproduce a Go regression: the original
+sibling-switch-case caller has one exact package-function occurrence in stable
+0.5.0, while contract21 retains two unresolved occurrences. A checksum-verified
+Go1.27.3 executable invokes the package function in the second case. The Go-only
+scope predicate handles communication_case but omits expression_case, type_case
+and default_case. Add those grammar-declared implicit clause blocks through the
+existing admitted/cancellable scope owner. Preserve switch initializers, ordinary
+outer calls, source positions, same-clause declarations and receive-case locals.
+Type-switch aliases remain inherited conservative shadows; do not claim distinct
+per-clause variable target identity that the current graph does not represent.
+Other languages retain their own switch scope rules. Prove expression/type/default
+and select clauses, fallthrough, nested scopes, alias/initializer compatibility and
+Unicode spans. Contract22 source/semantic fingerprints repair unchanged21 and
+older indexes; captured21 semantic digest is
+e0bc8aa6d30d159c0e1eae3b80773fb0f4031398608b01e1bba31b6b8d6cbd04.
+
+The forwarding query cache and recursive visited map order BindingQuery keys by
+value, including their shared module strings. An actual parsed two-statement
+producer probe with equal near2MiB module literals confirms that repeated key
+lookups re-read the module:80,000 debug lookups took1.82s for the same allocation,
+5.29s for equal distinct source allocations, versus0.0066s for short literals.
+These are causal local probes, not optimized release or security-boundary claims.
+
+Use a small private per-resolver module-ID interner: a pointer-and-length memo
+retains each original Arc to prevent address reuse; a value-keyed standard HashMap
+assigns canonical IDs after exact string equality. First-seen allocations pay
+ordinary hashing/equality proportional to admitted source bytes. Repeated queries
+use the memo and compare short query fields plus a private module ID, independent
+of module length, including equal literals from separate source statements.
+Retain the text Arc for ordinary resolution. Both query and visited maps use IDs
+from the same resolver factory; IDs never enter persisted keys, public schemas or
+another resolver. No pointer-only identity, hash-only equality, per-query module
+hashing, global interner, text copy, new dependency or input restriction is added.
+Reserve each new memo/value-map node before insertion through existing staging
+budget and cancellation checks; source owners continue to account shared text.
+Include the interner header in retained workspace accounting. Preserve refusal
+atomicity, ordinary callers, exact equality across allocations, unequal long-prefix
+values, cycles and cancellation. Permanent causal controls and optimized real CLI
+costs must cover one and multiple equal-literal source statements. Keep required
+combined release performance and installed acceptance open.

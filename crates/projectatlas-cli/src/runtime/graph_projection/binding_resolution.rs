@@ -24,7 +24,8 @@ use projectatlas_symbols::{
     SourceCallBinding, SourceSemanticFacts, derive_resolution_keys_with_context,
 };
 use projectatlas_symbols::{ImportReference, SourceExportBinding, SourceExportNamespace};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Maximum explicit forwarding steps; longer chains remain unresolved.
@@ -141,13 +142,54 @@ impl<'a> CauseWorkspace<'a> {
 /// Per-graph, per-occurrence forwarding outcomes.
 pub(super) type CallBindings = BTreeMap<String, BTreeMap<usize, Arc<CallBindingResolution>>>;
 
+/// Canonical module value identity, valid only within one binding resolver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ModuleId(usize);
+
+/// Intern module values once per source allocation, retaining witnesses until drop.
+#[derive(Default)]
+struct ModuleInterner {
+    /// The retained Arc prevents a remembered address from being reused.
+    allocations: BTreeMap<(usize, usize), (Arc<str>, ModuleId)>,
+    /// Standard value equality handles equal allocations and hash collisions exactly.
+    values: HashMap<Arc<str>, ModuleId>,
+}
+
+impl ModuleInterner {
+    /// Admit metadata before insertion; hot allocations never hash module bytes again.
+    fn intern<E>(
+        &mut self,
+        module: Arc<str>,
+        admit: impl FnOnce(u64) -> Result<(), E>,
+    ) -> Result<ModuleId, E> {
+        let allocation = (module.as_ptr() as usize, module.len());
+        if let Some((_, id)) = self.allocations.get(&allocation) {
+            return Ok(*id);
+        }
+        let existing = self.values.get(module.as_ref()).copied();
+        let entries = if existing.is_some() { 1 } else { 2 };
+        admit(STAGED_GRAPH_ROW_BYTES.saturating_mul(entries))?;
+        let id = if let Some(id) = existing {
+            id
+        } else {
+            let id = ModuleId(self.values.len());
+            self.values.insert(Arc::clone(&module), id);
+            id
+        };
+        self.allocations.insert(allocation, (module, id));
+        Ok(id)
+    }
+}
+
 /// A typed module/export/member request; canonical key witnesses remain opaque.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone)]
 struct BindingQuery {
     /// Source whose import syntax owns this module reference.
     source: String,
     /// Cooked module allocation retained and accounted by its source evidence.
     module: Arc<str>,
+    /// Exact value identity from the same resolver used by both query/visited maps.
+    module_id: ModuleId,
     /// Explicit imported slot, absent for a namespace binding.
     imported: Option<String>,
     /// Remaining statically named namespace member.
@@ -155,14 +197,33 @@ struct BindingQuery {
 }
 
 impl BindingQuery {
-    /// Preserve the source provider's explicit binding roles.
-    fn new(source: &str, reference: &ImportReference, member: Option<&str>) -> Self {
-        Self {
+    /// Preserve binding roles and exact module values through one resolver's interner.
+    fn new<E>(
+        source: &str,
+        reference: &ImportReference,
+        member: Option<&str>,
+        modules: &mut ModuleInterner,
+        admit: impl FnOnce(u64) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let module = reference.shared_module();
+        let module_id = modules.intern(Arc::clone(&module), admit)?;
+        Ok(Self {
             source: source.to_string(),
-            module: reference.shared_module(),
+            module,
+            module_id,
             imported: reference.imported().map(ToString::to_string),
             member: member.map(ToString::to_string),
-        }
+        })
+    }
+
+    /// Compare short fields and one canonical ID; text stays available for resolution.
+    fn identity(&self) -> (&str, Option<&str>, Option<&str>, ModuleId) {
+        (
+            &self.source,
+            self.imported.as_deref(),
+            self.member.as_deref(),
+            self.module_id,
+        )
     }
 
     /// Count query-owned text and headers; source owners already charge shared module bytes.
@@ -171,6 +232,26 @@ impl BindingQuery {
             .saturating_add(self.source.capacity() as u64)
             .saturating_add(self.imported.as_ref().map_or(0, String::capacity) as u64)
             .saturating_add(self.member.as_ref().map_or(0, String::capacity) as u64)
+    }
+}
+
+impl PartialEq for BindingQuery {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+    }
+}
+
+impl Eq for BindingQuery {}
+
+impl PartialOrd for BindingQuery {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BindingQuery {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.identity().cmp(&other.identity())
     }
 }
 
@@ -262,6 +343,8 @@ struct BindingResolver<'a, 'g, 'n> {
     context: BTreeMap<String, Arc<BindingSource<'g>>>,
     /// Exact target hydration cached by stable identity, including absent owners.
     hydrated: BTreeMap<String, Option<GraphEntity>>,
+    /// Canonical IDs and retained allocation witnesses for this resolver only.
+    modules: ModuleInterner,
     /// Finished outcomes shared by repeated identical binding queries.
     queries: BTreeMap<BindingQuery, BTreeMap<usize, Arc<CallBindingResolution>>>,
     /// Conservative bytes owned by this resolver's additional indexes and outcomes.
@@ -349,10 +432,12 @@ pub(super) fn resolve_source_bindings<'g>(
         replaced,
         loaded: loaded.cloned(),
         context: BTreeMap::new(),
+        modules: ModuleInterner::default(),
         queries: BTreeMap::new(),
         hydrated: BTreeMap::new(),
         retained_bytes: (graphs.len() as u64)
             .saturating_mul(STAGED_GRAPH_ROW_BYTES)
+            .saturating_add(std::mem::size_of::<ModuleInterner>() as u64)
             .saturating_add(loaded.map_or(0, |keys| {
                 keys.iter().fold(0_u64, |bytes, key| {
                     bytes
@@ -402,7 +487,7 @@ pub(super) fn resolve_source_bindings<'g>(
             if !needs_forwarding(ordinary, resolver.candidates) {
                 continue;
             }
-            let query = BindingQuery::new(&raw.path, reference, member.as_deref());
+            let query = resolver.query(&raw.path, reference, member.as_deref())?;
             let outcome = resolver.resolve(query, &mut BTreeMap::new(), 0)?;
             if !outcome.followed_export {
                 continue;
@@ -439,6 +524,26 @@ pub(super) fn resolve_source_bindings<'g>(
 }
 
 impl<'g> BindingResolver<'_, 'g, '_> {
+    /// Bind every query to this resolver's IDs and reserve retained metadata atomically.
+    fn query(
+        &mut self,
+        source: &str,
+        reference: &ImportReference,
+        member: Option<&str>,
+    ) -> Result<BindingQuery, CliError> {
+        self.check_budget()?;
+        let before = self.retained_staging_bytes();
+        let limit = self.retained_limit;
+        let control = self.control;
+        let retained = &mut self.retained_bytes;
+        BindingQuery::new(source, reference, member, &mut self.modules, |bytes| {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            enforce_resolution_registry_budget_with_limit(before.saturating_add(bytes), limit)?;
+            *retained = retained.saturating_add(bytes);
+            Ok(())
+        })
+    }
+
     /// Include every simultaneously live owner in the staging memory boundary.
     fn check_budget(&self) -> Result<(), CliError> {
         self.control.check(IndexWorkStage::SymbolParsing)?;
@@ -762,7 +867,7 @@ impl<'g> BindingResolver<'_, 'g, '_> {
                                 outcome.target = this.target(&target, *index)?;
                             }
                             SourceExportBinding::ReExport(reference) => {
-                                let forwarded_query = BindingQuery::new(path, reference, member);
+                                let forwarded_query = this.query(path, reference, member)?;
                                 if let Some(first) = visited.get(&forwarded_query).copied() {
                                     // The parent owns cycle causes directly; no uncached set escapes
                                     // with a charge that outlives its temporary result.
@@ -884,23 +989,102 @@ impl<'g> BindingResolver<'_, 'g, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::BindingQuery;
+    use super::{BindingQuery, ModuleInterner, STAGED_GRAPH_ROW_BYTES};
     use projectatlas_core::{IndexCancellation, IndexWorkControl};
     use projectatlas_symbols::SourceExportBinding;
     use std::error::Error;
 
     #[test]
-    fn forwarding_query_module_identity_uses_values_across_allocations() {
-        let first = BindingQuery {
-            source: "barrel.js".to_string(),
-            module: "./target.js".into(),
-            imported: Some("run".to_string()),
-            member: None,
+    fn forwarding_query_module_identity_uses_values_across_allocations()
+    -> Result<(), Box<dyn Error>> {
+        let mut modules = ModuleInterner::default();
+        let first =
+            projectatlas_symbols::parse_import_references("import {run} from './target.js';");
+        let second =
+            projectatlas_symbols::parse_import_references("import {run} from './target.js';");
+        let first_reference = first.first().ok_or("first native import missing")?;
+        let second_reference = second.first().ok_or("second native import missing")?;
+        if std::sync::Arc::ptr_eq(
+            &first_reference.shared_module(),
+            &second_reference.shared_module(),
+        ) {
+            return Err("independent imports unexpectedly share one allocation".into());
+        }
+        let first = BindingQuery::new("barrel.js", first_reference, None, &mut modules, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        })?;
+        let second = BindingQuery::new("barrel.js", second_reference, None, &mut modules, |_| {
+            Ok::<(), std::convert::Infallible>(())
+        })?;
+        if first != second || first.cmp(&second) != std::cmp::Ordering::Equal {
+            return Err("equal module values did not retain exact query identity".into());
+        }
+        let mut cache = std::collections::BTreeMap::new();
+        cache.insert(first.clone(), 7);
+        if cache.get(&second) != Some(&7) {
+            return Err("equal allocation missed query cache".into());
+        }
+        let mut visited = std::collections::BTreeMap::new();
+        visited.insert(first, 3);
+        if visited.get(&second) != Some(&3)
+            || modules.values.len() != 1
+            || modules.allocations.len() != 2
+        {
+            return Err("visited identity or retained module witnesses changed".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn module_identity_admission_preserves_exact_values_and_owned_allocations()
+    -> Result<(), Box<dyn Error>> {
+        let mut modules = ModuleInterner::default();
+        let first: std::sync::Arc<str> = format!("./{}a", "x".repeat(262_144)).into();
+        let rejected = modules.intern(std::sync::Arc::clone(&first), |bytes| {
+            super::enforce_resolution_registry_budget_with_limit(bytes, STAGED_GRAPH_ROW_BYTES)
+        });
+        if rejected.is_ok() || !modules.values.is_empty() || !modules.allocations.is_empty() {
+            return Err("refused module admission retained metadata".into());
+        }
+        let mut admitted = Vec::new();
+        let mut admit = |bytes| {
+            admitted.push(bytes);
+            Ok::<(), std::convert::Infallible>(())
         };
-        let mut second = first.clone();
-        second.module = std::sync::Arc::from(first.module.as_ref());
-        assert!(first == second);
-        assert_eq!(first.cmp(&second), std::cmp::Ordering::Equal);
+        let id = modules.intern(std::sync::Arc::clone(&first), &mut admit)?;
+        if modules.intern(std::sync::Arc::clone(&first), &mut admit)? != id {
+            return Err("repeated allocation changed module identity".into());
+        }
+        let equal: std::sync::Arc<str> = std::sync::Arc::from(first.as_ref());
+        let retained = std::sync::Arc::downgrade(&equal);
+        if modules.intern(equal, &mut admit)? != id || retained.upgrade().is_none() {
+            return Err("equal value or retained allocation witness changed".into());
+        }
+        let different: std::sync::Arc<str> = format!("./{}b", "x".repeat(262_144)).into();
+        if modules.intern(different, &mut admit)? == id {
+            return Err("different module values acquired one identity".into());
+        }
+        if admitted
+            != [
+                STAGED_GRAPH_ROW_BYTES * 2,
+                STAGED_GRAPH_ROW_BYTES,
+                STAGED_GRAPH_ROW_BYTES * 2,
+            ]
+            || modules.values.len() != 2
+            || modules.allocations.len() != 3
+        {
+            return Err("module metadata admission changed".into());
+        }
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let control = IndexWorkControl::new(cancellation, None);
+        let result = modules.intern(std::sync::Arc::from("./canceled.js"), |_| {
+            control.check(projectatlas_core::IndexWorkStage::SymbolParsing)
+        });
+        if result.is_ok() || modules.values.len() != 2 || modules.allocations.len() != 3 {
+            return Err("canceled module admission retained metadata".into());
+        }
+        Ok(())
     }
 
     #[test]
@@ -923,11 +1107,14 @@ mod tests {
         if facts.exports().len() != 32 {
             return Err("native reexport slots missing".into());
         }
+        let mut modules = ModuleInterner::default();
         for export in facts.exports() {
             let SourceExportBinding::ReExport(reference) = &export.binding else {
                 return Err("native reexport evidence missing".into());
             };
-            let query = BindingQuery::new(SOURCE, reference, None);
+            let query = BindingQuery::new(SOURCE, reference, None, &mut modules, |_| {
+                Ok::<(), std::convert::Infallible>(())
+            })?;
             if query.module.as_ptr() != reference.module().as_ptr() {
                 return Err("query copied source-owned module before cache lookup".into());
             }

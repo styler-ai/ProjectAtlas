@@ -1454,8 +1454,9 @@ mod tests {
             loaded: None,
             context: BTreeMap::new(),
             hydrated: BTreeMap::new(),
+            modules: super::super::ModuleInterner::default(),
             queries: BTreeMap::new(),
-            retained_bytes: 128,
+            retained_bytes: 128 + std::mem::size_of::<super::super::ModuleInterner>() as u64,
             retained_limit: 64 * 1_024,
             control: &control,
         };
@@ -1693,12 +1694,12 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         with_empty_resolver(|resolver, _| {
             let shared = &mut *resolver.shared;
-            let query = super::super::BindingQuery {
-                source: "main.js".to_string(),
-                module: "./worker.js".into(),
-                imported: Some("run".to_string()),
-                member: None,
-            };
+            let references =
+                projectatlas_symbols::parse_import_references("import {run} from './worker.js';");
+            let reference = references
+                .first()
+                .ok_or_else(|| io::Error::other("native import reference missing"))?;
+            let query = shared.query("main.js", reference, None)?;
             let graph = projectatlas_symbols::extract_symbol_graph(
                 "main.js",
                 Some("javascript"),
@@ -1775,12 +1776,6 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         with_empty_resolver(|resolver, _| {
             let shared = &mut *resolver.shared;
-            let query = super::super::BindingQuery {
-                source: "self.js".to_string(),
-                module: "./self.js".into(),
-                imported: Some("run".to_string()),
-                member: None,
-            };
             let (_, graph, facts) =
                 projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
                     "self.js",
@@ -1794,6 +1789,12 @@ mod tests {
                 .iter()
                 .position(|export| export.name == "run")
                 .ok_or_else(|| io::Error::other("native reexport slot missing"))?;
+            let projectatlas_symbols::SourceExportBinding::ReExport(reference) =
+                &facts.exports()[slot].binding
+            else {
+                return Err(io::Error::other("native reexport reference missing").into());
+            };
+            let query = shared.query("self.js", reference, None)?;
             let key = super::document_file_resolution_key(shared.project, "self.js")?;
             let entity = super::GraphEntity::new(
                 shared.project,
@@ -1861,12 +1862,14 @@ mod tests {
                 "cycle did not reuse completed root outcome",
             )?;
             require_eq(&shared.retained_bytes, &retained)?;
-            let missing = super::super::BindingQuery {
-                source: "missing.js".to_string(),
-                module: "./absent.js".into(),
-                imported: Some("run".to_string()),
-                member: None,
-            };
+            let references =
+                projectatlas_symbols::parse_import_references("import {run} from './absent.js';");
+            let reference = references
+                .first()
+                .ok_or_else(|| io::Error::other("native missing-source import absent"))?;
+            let missing = shared.query("missing.js", reference, None)?;
+            // Module identity metadata is a completed resolver owner before frame admission.
+            let retained = shared.retained_bytes;
             require(
                 shared.resolve(missing, &mut visited, 0).is_err(),
                 "missing source unexpectedly resolved",

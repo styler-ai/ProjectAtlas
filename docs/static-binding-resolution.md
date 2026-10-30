@@ -423,3 +423,31 @@ Scope layout grows320 to336 bytes, at most256KiB extra for16,384 scopes per live
 collector; NameBindings remains56 bytes. Other-platform layout and total RSS are
 separate measurements. Contract21 repairs prior20 and earlier compatible indexes
 through ordinary refresh, retaining identity, approved purposes and rollback.
+
+Contract22 gives Go expression-switch, type-switch and default clauses their own
+implicit lexical blocks, including select defaults. A declaration in one clause
+cannot hide the package function in another clause or after the enclosing select.
+Switch initializers, receive declarations, same-clause order, fallthrough and
+nested switches retain their existing ownership. Type-switch aliases remain
+conservative inherited shadows; separate per-clause variable target identity is
+not represented. Source coordinates and other languages' switch rules are unchanged.
+
+Forwarding cache and recursive visited keys use exact resolver-local module IDs.
+An allocation memo retains original module Arcs, and a standard value-keyed map
+interns equal strings from independent statements. Cold admission hashes and checks
+text; repeated queries compare short fields and an ID without reading module text.
+The original text remains shared for ordinary resolution. Metadata is admitted
+through the existing staging estimate and cancellation boundary before insertion,
+and the interner header is counted. IDs never enter stored graph keys or public
+responses. Long modules, ordinary callers, refusal atomicity and cycles remain
+supported without a new provider, schema, public API or input restriction.
+
+The Go CLI/MCP selector checks source occurrences, canonical targets and summary
+callers through incremental shadow removal/restoration, full rebuilds, identity
+preservation and a no-op. Native Go controls cover all registered clause kinds,
+existing alias/initializer/receive behavior, Unicode CRLF and scope-cap refusal
+without losing raw navigation. Module tests cover equal independent allocations,
+unequal long-prefix values, cache/visited reuse, retained witnesses and admission
+failure/cancellation; the existing forwarding selector observes both source
+allocations across JavaScript, TypeScript and TSX. Contract22 repairs prior21 and
+older compatible indexes through the normal fingerprint refresh.

@@ -57,3 +57,10 @@ across CI, package/install/post-publication and parser-pack verification. Preser
 trusted-base proof selection and all platform contracts while current workflows
 provision a supported ARM image, including when the accepted planner retains an
 older image pin. Intel coverage and product/runtime compatibility remain unchanged.
+
+Fresh final review also confirms Go switch/select clause shadows leaking between
+implicit blocks and repeated forwarding-cache key comparisons scaling with a shared
+module literal's length. Isolate the registered Go clause scopes and intern module
+identity within one resolver, preserving exact cross-allocation value equality,
+existing resource/cancellation limits, long-module support and ordinary callers.
+Contract22 repairs prior21 and older projections; no provider or public schema is added.

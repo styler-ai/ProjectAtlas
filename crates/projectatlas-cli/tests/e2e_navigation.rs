@@ -13566,6 +13566,252 @@ fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
 }
 
 #[test]
+fn go_clause_bindings_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    let cases: &[(&str, &str, &[bool])] = &[
+        (
+            "expression",
+            "func caller(x int){switch x{case 0:run:=func(){};run();case 1:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "type-cases",
+            "func caller(x any){switch x.(type){case int:run:=func(){};run();case string:run();default:run()};run()}",
+            &[false, true, true, true],
+        ),
+        (
+            "select-default-first",
+            "func caller(ch chan int){select{default:run:=func(){};run();case <-ch:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "receive-binding",
+            "func caller(ch chan func()){select{case run:= <-ch:run();default:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "switch-initializer",
+            "func caller(x int){switch run:=func(){};x{case 0:run();default:run()};run()}",
+            &[false, false, true],
+        ),
+        (
+            "type-alias",
+            "func caller(x any){switch run:=x.(type){case func():run();case func()int:run();default:_=run};run()}",
+            &[false, false, true],
+        ),
+        (
+            "same-clause",
+            "func caller(x int){switch x{case 0:run();run:=func(){};run();default:run()}}",
+            &[true, false, true],
+        ),
+        (
+            "unicode-crlf",
+            "func caller(x int){switch x{case 0:run:=func(){};run();case 1:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "only-shadow",
+            "func caller(x int){switch run:=func(){};x{case 0:run();default:run()}}",
+            &[false, false],
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    let sources = cases
+        .iter()
+        .map(|(label, body, _)| {
+            let source = format!("package fixture\nfunc run()int{{return 0}}\n{body}\n");
+            if *label == "unicode-crlf" {
+                source.replace("run", "rún").replace('\n', "\r\n")
+            } else {
+                source
+            }
+        })
+        .collect::<Vec<_>>();
+    for ((label, _, _), source) in cases.iter().zip(&sources) {
+        fs::create_dir_all(root.join(label))?;
+        fs::write(root.join(label).join("calls.go"), source)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let shadow_index = cases
+            .iter()
+            .position(|case| case.0 == "only-shadow")
+            .ok_or_else(|| io::Error::other("Go mutation fixture missing"))?;
+        for renamed in [false, true, false] {
+            let shadow_source = if renamed {
+                sources[shadow_index]
+                    .replace("run:=func(){}", "other:=func(){}")
+                    .replace("case 0:", "case 0:_=other;")
+            } else {
+                sources[shadow_index].clone()
+            };
+            fs::write(root.join("only-shadow/calls.go"), &shadow_source)?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuilt in [false, true] {
+                if rebuilt {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                for ((label, _, expected), source) in cases.iter().zip(&sources) {
+                    let file = format!("{label}/calls.go");
+                    let callee = if *label == "unicode-crlf" {
+                        "rún"
+                    } else {
+                        "run"
+                    };
+                    let current = if *label == "only-shadow" {
+                        &shadow_source
+                    } else {
+                        source
+                    };
+                    let expected = if *label == "only-shadow" && renamed {
+                        vec![true, true]
+                    } else {
+                        expected.to_vec()
+                    };
+                    let mut positions = Vec::new();
+                    for (byte, _) in current.match_indices(&format!("{callee}()")) {
+                        let prefix = &current[..byte];
+                        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+                        if line <= 2 {
+                            continue;
+                        }
+                        let column = prefix.rsplit('\n').next().unwrap_or("").chars().count();
+                        positions.push((u64::try_from(line)?, u64::try_from(column)?));
+                    }
+                    rust_binding_equal(&positions.len(), &expected.len())?;
+                    let expected_sites = positions
+                        .into_iter()
+                        .zip(&expected)
+                        .map(|((line, column), resolved)| (line, column, *resolved))
+                        .collect::<Vec<_>>();
+                    let cli = run_packaged_cli_json(
+                        &executable,
+                        root,
+                        &database,
+                        &[
+                            "symbols",
+                            "relations",
+                            "--view",
+                            "detailed",
+                            "--file",
+                            &file,
+                            "--symbol",
+                            "caller",
+                            "--relation",
+                            "calls",
+                            "--include-occurrences",
+                            "--occurrence-limit",
+                            "100",
+                            "--occurrence-total-limit",
+                            "100",
+                            "--limit",
+                            "10",
+                        ],
+                    )?;
+                    let text = session.call_tool(
+                        "atlas_symbol_relations",
+                        &json!({
+                            "project_path":root, "view":"detailed", "file":file, "symbol":"caller",
+                            "relation":"calls", "include_occurrences":true, "occurrence_limit":100,
+                            "occurrence_total_limit":100, "limit":10
+                        }),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    for response in [cli, mcp] {
+                        rust_binding_equal(
+                            &response["symbol_relations"]["truncated"],
+                            &json!(false),
+                        )?;
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| io::Error::other("Go clause call rows missing"))?;
+                        let mut sites = Vec::new();
+                        for row in rows {
+                            rust_binding_equal(&row["occurrences_truncated"], &json!(false))?;
+                            let resolved = row["relation"]["resolution"]["status"] == "resolved";
+                            if resolved {
+                                let symbol = &row["target"]["entity"]["selector"]["symbol"];
+                                rust_binding_equal(&symbol["file"], &json!(file))?;
+                                rust_binding_equal(&symbol["name"], &json!(callee))?;
+                                rust_binding_equal(&symbol["parent"], &Value::Null)?;
+                            }
+                            for occurrence in row["occurrences"]
+                                .as_array()
+                                .ok_or_else(|| io::Error::other("Go clause occurrences missing"))?
+                            {
+                                let line = occurrence["span"]["start_line"]
+                                    .as_u64()
+                                    .ok_or_else(|| io::Error::other("Go source line missing"))?;
+                                let column = occurrence["span"]["start_column"]
+                                    .as_u64()
+                                    .ok_or_else(|| io::Error::other("Go source column missing"))?;
+                                sites.push((line, column, resolved));
+                            }
+                        }
+                        sites.sort_unstable();
+                        if sites != expected_sites {
+                            return Err(io::Error::other(format!(
+                                "{label}: expected {expected_sites:?}, actual {sites:?}"
+                            ))
+                            .into());
+                        }
+                    }
+                    let cli =
+                        run_packaged_cli_json(&executable, root, &database, &["summary", &file])?;
+                    let text = session.call_tool(
+                        "atlas_file_summary",
+                        &json!({"project_path":root,"file":file}),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    for summary in [cli, mcp["file_summary"].clone()] {
+                        let function = summary["functions"]
+                            .as_array()
+                            .and_then(|functions| {
+                                functions.iter().find(|function| {
+                                    function["name"] == callee
+                                        && function["parent"].as_str().unwrap_or("").is_empty()
+                                })
+                            })
+                            .ok_or_else(|| {
+                                io::Error::other("Go package function summary missing")
+                            })?;
+                        let caller = format!("{file}::caller");
+                        let present = function["called_by"]
+                            .as_array()
+                            .ok_or_else(|| io::Error::other("Go summary callers missing"))?
+                            .iter()
+                            .any(|entry| entry == &caller);
+                        rust_binding_equal(&present, &expected.iter().any(|resolved| *resolved))?;
+                    }
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
 fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
     type ExpectedComprehensionTarget<'a> = (&'a str, &'a str, Option<&'a str>);
     const WORKER_FILE: &str = "worker.py";
@@ -14131,21 +14377,25 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
         let module = format!("./{}", "x".repeat(65_536));
         let slots = (0..512)
             .map(|index| format!("run as e{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
+            .collect::<Vec<_>>();
+        let (first, second) = slots.split_at(slots.len() / 2);
         fs::write(
             root.join(&resource_barrel),
-            format!("export {{{slots}}} from \"{module}\";"),
+            format!(
+                "export {{{}}} from \"{module}\";export {{{}}} from \"{module}\";",
+                first.join(","),
+                second.join(","),
+            ),
         )?;
         fs::write(root.join(&resource_target), "export function work(){}")?;
         let mut member_calls = String::new();
-        for index in 0..256 {
+        for index in (0..512).step_by(2) {
             write!(&mut member_calls, "ns.e{index}();")?;
         }
         fs::write(
             root.join(&resource_importer),
             format!(
-                "import * as ns from './{resource_barrel}'; import {{work}} from './{resource_target}'; function caller(){{{member_calls}}} function probe(){{ns.e0();}} function clean(){{work();}}"
+                "import * as ns from './{resource_barrel}'; import {{work}} from './{resource_target}'; function caller(){{{member_calls}}} function probe(){{ns.e0();}} function secondProbe(){{ns.e256();}} function clean(){{work();}}"
             ),
         )?;
         fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
@@ -14308,6 +14558,13 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                         ),
                         (
                             resource_importer.as_str(),
+                            "secondProbe",
+                            resource_target.as_str(),
+                            "work",
+                            false,
+                        ),
+                        (
+                            resource_importer.as_str(),
                             "clean",
                             resource_target.as_str(),
                             "work",
@@ -14333,6 +14590,7 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                                 caller,
                                 "--relation",
                                 "calls",
+                                "--include-occurrences",
                                 "--limit",
                                 "10",
                             ],
@@ -14341,7 +14599,7 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                             "atlas_symbol_relations",
                             &json!({
                                 "project_path": root, "view": "detailed", "file": file,
-                                "symbol": caller, "relation": "calls", "limit": 10,
+                                "symbol": caller, "relation": "calls", "limit": 10, "include_occurrences": true,
                             }),
                         )?;
                         let mcp: Value = toon_format::decode_default(&text)?;
@@ -14357,6 +14615,19 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
                                 .ok_or_else(|| io::Error::other("bare var caller rows missing"))?;
                             rust_binding_equal(&rows.len(), &1)?;
                             rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                            if file == resource_importer
+                                && matches!(caller, "probe" | "secondProbe")
+                            {
+                                rust_binding_equal(
+                                    &rows[0]["occurrences_truncated"],
+                                    &json!(false),
+                                )?;
+                                let occurrences =
+                                    rows[0]["occurrences"].as_array().ok_or_else(|| {
+                                        io::Error::other("forwarding probe occurrence missing")
+                                    })?;
+                                rust_binding_equal(&occurrences.len(), &1)?;
+                            }
                         }
                         // Nested body declarations are proved by exact graph targets above.
                         if file.starts_with("body.") {
