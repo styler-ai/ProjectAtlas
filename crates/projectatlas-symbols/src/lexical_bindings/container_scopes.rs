@@ -57,12 +57,7 @@ impl LexicalCollector<'_> {
         let mut winner = None;
         while let Some(scope) = current {
             check()?;
-            if self
-                .cpp_inline_names
-                .get(&scope)
-                .and_then(|names| names.get(name))
-                .is_some_and(|from| *from <= offset)
-            {
+            if self.cpp_inline_names.visible(scope, name, offset) {
                 return Ok(Some(&BindingTarget::Unresolved));
             }
             if self.scopes[scope].cpp_container == super::cpp_owners::CppContainer::Namespace

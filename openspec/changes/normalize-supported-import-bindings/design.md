@@ -676,3 +676,50 @@ contributors. No promoted target is inferred. Earlier lookup, explicit direct
 paths and unrelated global names remain available; same-name contributors block
 false outer targets. Propagation shares global name admission and copies no
 qualified prefix; ordinary lookup uses one borrowed-name query per scope.
+
+### Python comprehension assignment-expression ordering
+
+Stable0.5.0 resolves the original valid module/global-wrapper iterable call; the
+current20 candidate incorrectly drops it because the output walrus appears before
+its iterable physically. The first iterable executes in the enclosing environment
+before the comprehension body. The containing binding must retain that pre-body
+state, while ordinary local reservation and global/nonlocal ownership remain.
+Repeated loop regions cannot infer a single first-iteration target for a name that
+the comprehension can rewrite. Unmodified names retain normal exact lookup.
+Keep raw spans, coordinates, relation context and selectors unchanged; repair only
+internal lexical write/loop ownership. Nested comprehensions, filters, later loops,
+list/set/dictionary/generator, nested lambdas, source coordinates, malformed/class
+negative controls and shared name/scope/cancellation limits need bounded proof.
+No general compiler, loop-count/value-flow or runtime inference is added. Current21
+fingerprints must repair public20 and all earlier compatible indexes. The independently approved mechanism activates the containing write at the
+outermost comprehension end and retains charged, deduplicated name-specific
+Shadows in loop scopes. The initial iterable remains outside those scopes;
+subsequent iterables/filters/body cannot assume a first-iteration value for a
+rewritten name. Physical source positions and deferred floors are unchanged.
+Compiler-invalid iterable/iteration-target/class-walrus cases withdraw authority
+only for their comprehension and do not poison independent outer bindings;
+lambda-owned walruses and ordinary class directive workflows remain supported.
+Actual CPython3.14 rejects class-body comprehension walruses even with global or
+nonlocal directives; class-method function comprehensions remain valid. Keep that
+compiler-negative evidence separate from ordinary directive-positive proof.
+
+Compatibility retains the existing eager singleton read-before-write workflow: an
+error-free eager list/set/dictionary comprehension with exactly one for-clause, no
+filters and an explicit one-element non-starred list iterable uses body write
+positions within its own loop; the containing write still activates at comp end.
+An enclosing proven singleton sees a nested comprehension write at that nested
+expression end. Other/repeated/generator loops use zero-offset name barriers.
+This grammar-shape proof preserves existing exact RHS calls without a general
+iterable evaluator; multi-element, starred, dynamic and filtered controls remain
+conservative for rewritten names.
+
+Propagation storage is shared by value: a single 32,768-byte name copied into48
+Python/C++ ancestor barriers retained1,572,864 text bytes in a bounded causal probe.
+Use one Arc-backed name per propagation for both new Python loop barriers and the
+analogous published20 inline-name barrier. Retain admitted per-scope slots and
+earliest visibility without duplicating identifier bytes; no identifier-length
+limit or normal alias capability is removed. The x86_64 Rust1.98 layout probe
+measures Scope320→336 bytes and unchanged NameBindings56 bytes: at16,384 scopes
+this adds at most256KiB per live collector, scaling with the shared active-worker
+budget. Actual affected RSS/cost proof remains required; other targets must not
+inherit an unmeasured size claim.

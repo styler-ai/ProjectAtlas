@@ -400,3 +400,26 @@ ancestors never enter the qualification stack; signature padding is not trimmed 
 an admitted competitor. Existing typed rejection/remapping semantics remain intact.
 This repairs the broader navigation failure caught before contract18 publication;
 prior18 private projections require ordinary compatible repair, without reset.
+
+Contract21 preserves Python comprehension execution order without changing source
+coordinates: the initial iterable uses its enclosing environment, while assignment
+expression writes become visible outside the outermost comprehension at its end.
+Loop scopes retain name-specific uncertainty for rewritten names, preserving exact
+unrelated calls and ordinary local reservation, global/nonlocal ownership and
+lambda-local writes. Invalid iterable, iteration-target or class-scope walruses
+withdraw only comprehension authority and discard pending enclosing writes.
+
+Existing eager singleton RHS calls retain exact pre-write bindings only for the
+bounded grammar shape of one for-clause, no filters, and an explicit one-element
+non-starred list iterable in a list/set/dictionary comprehension. Other iterables
+and generators retain conservative rewritten-name barriers. This does not evaluate
+arbitrary iterables or infer iteration counts.
+
+Python loop barriers and C++ inline-name barriers share identifier text across
+ancestor entries while retaining charged per-scope slots and earliest visibility.
+A 32KiB identifier propagated through48 scopes retains32KiB of shared text instead
+of1.5MiB; pointer and per-scope map storage remain. The measured x86_64 Rust1.98
+Scope layout grows320 to336 bytes, at most256KiB extra for16,384 scopes per live
+collector; NameBindings remains56 bytes. Other-platform layout and total RSS are
+separate measurements. Contract21 repairs prior20 and earlier compatible indexes
+through ordinary refresh, retaining identity, approved purposes and rollback.

@@ -15,7 +15,9 @@ use crate::{SourceCallBinding, SourceSemanticFacts, declaration_kind, node_name}
 mod container_scopes;
 mod cpp_owners;
 mod declaration_collisions;
+mod name_barriers;
 mod native_identifiers;
+mod python_comprehensions;
 
 /// One actual parsed program, borrowing its tree until binding has completed.
 pub(super) struct SourceSyntaxRoot<'tree> {
@@ -142,6 +144,8 @@ struct Binding {
 /// A precomputed visibility timeline with constant-time reservation evidence.
 #[derive(Default)]
 struct NameBindings {
+    /// A Python comprehension iteration target cannot be rebound by a walrus.
+    python_role: python_comprehensions::BindingRole,
     /// Whether any declaration reserves this name before initialization.
     reserves_scope: bool,
     /// One grouped target for each ordered visibility transition.
@@ -357,7 +361,7 @@ struct Scope {
     /// Kotlin instance ownership and constructor-only lookup view.
     native_container: NativeContainerScope,
     /// Python iteration variables stay inside their comprehension environment.
-    comprehension: bool,
+    comprehension: Option<python_comprehensions::ComprehensionScope>,
     /// Earliest outer lookup phase for deferred code; zero keeps immediate order.
     enclosing_visibility_floor: usize,
     /// Exact enclosing callable declaration, independent of its display name.
@@ -408,6 +412,10 @@ struct CallSite {
 
 /// One parse's bounded environment and ordinal indexes; discarded after binding.
 struct LexicalCollector<'a> {
+    /// Current Python comprehension syntax context, restored around nested visits.
+    python_comprehension: Option<python_comprehensions::VisitState>,
+    /// Admitted containing writes wait until their complete comprehension is valid.
+    python_walrus_writes: Vec<python_comprehensions::PendingWrite>,
     /// Registry-selected native language.
     language: &'a str,
     /// Current visit's syntax profile, restored around recursive visits.
@@ -425,7 +433,9 @@ struct LexicalCollector<'a> {
     /// Exact same-file identities, bounded by their admitted logical environments.
     container_scopes: BTreeMap<container_scopes::ContainerScopeKey, usize>,
     /// Charged inline contributor names, allocated only for affected C++ scopes.
-    cpp_inline_names: BTreeMap<usize, BTreeMap<String, usize>>,
+    cpp_inline_names: name_barriers::NameBarriers,
+    /// Python loop contributors share names across enclosing comprehension scopes.
+    python_loop_names: name_barriers::NameBarriers,
     /// Exact C++ source children; duplicate type owners remain ambiguous.
     cpp_owners: BTreeMap<usize, BTreeMap<String, Option<usize>>>,
     /// Only an explicit namespace export redirects its owning block's bindings.
@@ -505,6 +515,8 @@ pub(super) fn bind_calls<E>(
     };
     let bindings_incomplete = facts.bindings_incomplete;
     let mut collector = LexicalCollector {
+        python_comprehension: None,
+        python_walrus_writes: Vec::new(),
         language,
         ecma_context: EcmascriptNameContext::default(),
         ecma_root: 0,
@@ -527,7 +539,8 @@ pub(super) fn bind_calls<E>(
         binding_count: 0,
         container_scopes: BTreeMap::new(),
         cpp_owners: BTreeMap::new(),
-        cpp_inline_names: BTreeMap::new(),
+        cpp_inline_names: name_barriers::NameBarriers::default(),
+        python_loop_names: name_barriers::NameBarriers::default(),
         namespace_export_binding: None,
         python_directive_names: BTreeSet::new(),
         incomplete: false,
@@ -1369,6 +1382,19 @@ impl LexicalCollector<'_> {
         if !self.admit_binding() {
             return;
         }
+        self.insert_admitted_binding(scope, name, from, reserves_scope, target, namespace);
+    }
+
+    /// Transfer one already charged retained-name slot into its owning environment.
+    fn insert_admitted_binding(
+        &mut self,
+        scope: usize,
+        name: String,
+        from: usize,
+        reserves_scope: bool,
+        target: BindingTarget,
+        namespace: BindingNamespace,
+    ) {
         let scope = self.binding_scope(scope);
         if self.language == "cpp" {
             let visible = match &target {
@@ -3184,13 +3210,11 @@ impl LexicalCollector<'_> {
                 .parent()
                 .is_some_and(|parent| parent.kind() == "variable_declaration");
         if python || var {
-            if python && node.kind() == "named_expression" {
-                while self.scopes[scope].comprehension {
-                    let Some(parent) = self.scopes[scope].parent else {
-                        break;
-                    };
-                    scope = parent;
-                }
+            if python
+                && node.kind() == "named_expression"
+                && self.python_comprehension_write(node, pattern, scope, check)?
+            {
+                return Ok(());
             }
             scope = self.value_declaration_scope(scope);
         }
@@ -3318,60 +3342,6 @@ impl LexicalCollector<'_> {
             } else if child.is_named() {
                 self.visit(child, scope, check)?;
             }
-        }
-        Ok(())
-    }
-
-    /// Evaluate each iterable outside its own binder and the body inside all binders.
-    fn python_comprehension_scope<E>(
-        &mut self,
-        node: Node<'_>,
-        parent: usize,
-        check: &mut impl FnMut() -> Result<(), E>,
-    ) -> Result<(), E> {
-        let body = node.child_by_field_name("body");
-        let mut scope = parent;
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            check()?;
-            if body.is_some_and(|body| body.id() == child.id()) {
-                continue;
-            }
-            if child.kind() != "for_in_clause" {
-                self.visit(child, scope, check)?;
-                continue;
-            }
-            let previous = scope;
-            if !self.admit_scope() {
-                return Ok(());
-            }
-            scope = self.scopes.len();
-            let lookup_parent = self.python_closure_parent(previous);
-            self.scopes.push(Scope {
-                parent: Some(lookup_parent),
-                function: true,
-                comprehension: true,
-                enclosing_visibility_floor: if node.kind() == "generator_expression" {
-                    node.end_byte()
-                } else {
-                    0
-                },
-                owner: self.scopes[previous].owner,
-                ..Scope::default()
-            });
-            if let Some(pattern) = child.child_by_field_name("left") {
-                self.pattern_names(pattern, scope, 0, false, check)?;
-            }
-            let mut clause_cursor = child.walk();
-            for expression in child.named_children(&mut clause_cursor) {
-                let binding = child
-                    .child_by_field_name("left")
-                    .is_some_and(|left| left.id() == expression.id());
-                self.visit(expression, if binding { scope } else { previous }, check)?;
-            }
-        }
-        if let Some(body) = body {
-            self.visit(body, scope, check)?;
         }
         Ok(())
     }
@@ -4173,6 +4143,15 @@ impl LexicalCollector<'_> {
                 cpp_opaque |= self.scopes[scope].cpp_lookup.is_opaque_at(offset);
                 current = self.scopes[scope].parent;
                 continue;
+            }
+            if self.language == "python"
+                && self.python_loop_names.visible(
+                    scope,
+                    name,
+                    if deferred { usize::MAX } else { offset },
+                )
+            {
+                return Ok(SourceCallBinding::Shadowed);
             }
             if site.method_name
                 && let Some(arity) = self.scopes[scope].java_implicit_methods.get(name)
@@ -7500,6 +7479,375 @@ function caller() { renamed(); tools.work(); }
             projectatlas_core::symbols::SymbolKind::Method
         );
         assert_eq!(graph.symbols[*outer].parent.as_deref(), Some("Api"));
+    }
+
+    #[test]
+    fn propagated_long_names_preserve_independent_python_and_cpp_navigation() {
+        let name = "x".repeat(32_768);
+        let mut expression = format!("({name}:=None)");
+        for _ in 0..48 {
+            expression = format!("({expression} for _ in [1])");
+        }
+        let python = format!("def keep():pass\ngen={expression}\nkeep()\n");
+        let mut cpp = String::from("void keep(){}\n");
+        for index in 0..48 {
+            cpp.push_str("inline namespace N");
+            cpp.push_str(&index.to_string());
+            cpp.push('{');
+        }
+        cpp.push_str("struct ");
+        cpp.push_str(&name);
+        cpp.push_str("{};");
+        cpp.push_str(&"}".repeat(48));
+        cpp.push_str("\nvoid caller(){keep();}\n");
+        for (path, language, source) in [("large.py", "python", python), ("large.cpp", "cpp", cpp)]
+        {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                path,
+                Some(language),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{language}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(!facts.bindings_incomplete);
+            assert_eq!(facts.calls().len(), 1);
+            assert!(
+                matches!(facts.calls()[0].binding, SourceCallBinding::LocalDeclaration(target) if graph.symbols[target].name=="keep" && graph.symbols[target].parent.is_none()),
+                "{language}: {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn python_comprehension_writes_share_admission_without_poisoning_navigation() {
+        use std::fmt::Write as _;
+        for (writes, complete) in [(6000, true), (9000, false)] {
+            let mut source = String::from("def run():return [0]\ndef keep():return [0]\n[(keep(),");
+            for index in 0..writes {
+                assert!(write!(&mut source, "(slot{index}:=0),").is_ok());
+            }
+            source.push_str(") for _ in run()]\nkeep()\n");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "budget.py",
+                Some("python"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(
+                graph.symbols.len() < crate::MAX_SYMBOLS_PER_FILE
+                    && graph.relations.len() < crate::MAX_RELATIONS_PER_FILE
+            );
+            assert_eq!(facts.calls().len(), 3);
+            assert_eq!(!facts.bindings_incomplete, complete, "{writes}");
+            assert_eq!(
+                facts
+                    .calls()
+                    .iter()
+                    .all(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_))),
+                complete,
+                "{writes}"
+            );
+            assert!(graph.symbols.iter().any(|symbol| symbol.name == "run"));
+        }
+    }
+
+    #[test]
+    fn python_comprehension_writes_preserve_eager_iterables_and_loop_uncertainty() {
+        type Expected = (&'static str, &'static str);
+        let cases: &[(&str, &str, &[Expected])] = &[
+            (
+                "list",
+                "[(run:=None) for _ in run()]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "set",
+                "{(run:=None) for _ in run()}",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "dict-key",
+                "{(run:=None):keep() for _ in run()}",
+                &[("keep", "local:"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "dict-value",
+                "{keep():(run:=None) for _ in run()}",
+                &[("keep", "local:"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "generator",
+                "gen=((run:=None) for _ in run())",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "global",
+                "def caller():\n global run\n [(run:=None) for _ in run()]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "local-prior",
+                "def caller():\n def run():return [0]\n [(run:=None) for _ in run()]",
+                &[("run", "local:caller"), ("keep", "local:")],
+            ),
+            (
+                "local-unbound",
+                "def caller():\n [(run:=None) for _ in run()]",
+                &[("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "nonlocal",
+                "def outer():\n def run():return [0]\n def caller():\n  nonlocal run\n  [(run:=None) for _ in run()]",
+                &[("run", "local:outer"), ("keep", "local:")],
+            ),
+            (
+                "import",
+                "from worker import run\n[(run:=None) for _ in run()]",
+                &[("run", "import:worker"), ("keep", "local:")],
+            ),
+            (
+                "filter-write",
+                "[run() for _ in keep() if (run:=lambda:[1])]",
+                &[("run", "unknown"), ("keep", "local:"), ("keep", "local:")],
+            ),
+            (
+                "body-write-filter-read",
+                "[(run:=None) for _ in keep() if run()]",
+                &[("keep", "local:"), ("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "later-for",
+                "[(run:=None) for _ in keep() for _ in run()]",
+                &[("keep", "local:"), ("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "body-prior-unknown",
+                "[(run(),(run:=None)) for _ in keep()]",
+                &[("run", "unknown"), ("keep", "local:"), ("keep", "local:")],
+            ),
+            (
+                "body-later-unknown",
+                "[((run:=None),run()) for _ in keep()]",
+                &[("run", "unknown"), ("keep", "local:"), ("keep", "local:")],
+            ),
+            (
+                "singleton-rhs",
+                "[(run:=run()) for _ in [1]]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "singleton-set-rhs",
+                "{(run:=run()) for _ in [1]}",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "singleton-dict-rhs",
+                "{0:(run:=run()) for _ in [1]}",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "singleton-before",
+                "[(run(),(run:=None)) for _ in [1]]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "singleton-after",
+                "[((run:=None),run()) for _ in [1]]",
+                &[("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "multiple-rhs",
+                "[(run:=run()) for _ in [1,2]]",
+                &[("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "starred-rhs",
+                "[(run:=run()) for _ in [*[1]]]",
+                &[("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "filtered-singleton",
+                "[(run:=run()) for _ in [1] if True]",
+                &[("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "generator-singleton",
+                "gen=((run:=run()) for _ in [1])",
+                &[("run", "unknown"), ("keep", "local:")],
+            ),
+            (
+                "nested-body",
+                "[[(run:=None) for _ in run()] for _ in keep()]",
+                &[("run", "unknown"), ("keep", "local:"), ("keep", "local:")],
+            ),
+            (
+                "nested-initial",
+                "[(run:=None) for _ in [x for x in run()]]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "nested-singleton",
+                "[[(run:=None) for _ in run()] for _ in [1]]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "lambda-local",
+                "[(lambda:(run:=None)) for _ in run()]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "lambda-local-read",
+                "[(lambda:(run(),(run:=None))) for _ in run()]",
+                &[("run", "unknown"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "lambda-default",
+                "[lambda x=(run:=None):keep() for _ in run()]",
+                &[("keep", "local:"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "class-local-invalid",
+                "class C:\n [(run:=None) for _ in run()]\nrun()",
+                &[("run", "unknown"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "class-global-invalid",
+                "class C:\n global run\n [(run:=None) for _ in run()]\nrun()",
+                &[("run", "unknown"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "class-nonlocal-invalid",
+                "def outer():\n def run():return [0]\n class C:\n  nonlocal run\n  [(run:=None) for _ in run()]\n run()",
+                &[
+                    ("run", "unknown"),
+                    ("run", "local:outer"),
+                    ("keep", "local:"),
+                ],
+            ),
+            (
+                "class-method-global",
+                "class C:\n def caller(self):\n  global run\n  [(run:=None) for _ in run()]",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "class-lambda-local",
+                "class C:\n funcs=[lambda:(run:=None) for _ in run()]\nrun()",
+                &[("run", "local:"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "target-invalid",
+                "[(run:=None) for run in run()]\nrun()",
+                &[("run", "unknown"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "iterable-invalid",
+                "[keep() for _ in (run:=run())]\nrun()",
+                &[
+                    ("keep", "unknown"),
+                    ("run", "unknown"),
+                    ("run", "local:"),
+                    ("keep", "local:"),
+                ],
+            ),
+            (
+                "iterable-lambda-invalid",
+                "[keep() for _ in (lambda:(run:=run()))()]\nrun()",
+                &[
+                    ("keep", "unknown"),
+                    ("run", "unknown"),
+                    ("run", "local:"),
+                    ("keep", "local:"),
+                ],
+            ),
+            (
+                "iterable-nested-invalid",
+                "[keep() for _ in [(run:=None) for _ in run()]]\nrun()",
+                &[
+                    ("keep", "unknown"),
+                    ("run", "unknown"),
+                    ("run", "local:"),
+                    ("keep", "local:"),
+                ],
+            ),
+            (
+                "invalid-after-valid-write",
+                "[((changed:=None),(run:=None)) for run in run()]\nrun()",
+                &[("run", "unknown"), ("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "unicode-crlf",
+                "def rún():return [0]\r\n[(rún:=None) for _ in rún()]\r\n",
+                &[("rún", "local:"), ("keep", "local:")],
+            ),
+            (
+                "ordinary-class-global",
+                "class C:\n global run\n run=run()",
+                &[("run", "local:"), ("keep", "local:")],
+            ),
+            (
+                "ordinary-class-nonlocal",
+                "def outer():\n def run():return [0]\n class C:\n  nonlocal run\n  run=run()",
+                &[("run", "local:outer"), ("keep", "local:")],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (label, body, expected) in cases {
+            let source = format!("def run():return [0]\ndef keep():return [0]\n{body}\nkeep()\n");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "order.py",
+                Some("python"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{label}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let actual = facts
+                .calls()
+                .iter()
+                .filter_map(|call| {
+                    let name = graph.relations[call.relation].target_name.as_str();
+                    if !matches!(name, "run" | "keep" | "rún") {
+                        return None;
+                    }
+                    let lookup = match call.binding {
+                        SourceCallBinding::LocalDeclaration(target) => format!(
+                            "local:{}",
+                            graph.symbols[target].parent.as_deref().unwrap_or("")
+                        ),
+                        SourceCallBinding::Imported {
+                            import, reference, ..
+                        } => format!(
+                            "import:{}",
+                            facts.imports[import].references[reference].module()
+                        ),
+                        _ => "unknown".to_string(),
+                    };
+                    if name == "rún" {
+                        assert_eq!(source.get(call.span.start..call.span.end), Some("rún()"));
+                        assert_eq!(
+                            call.source_span
+                                .map(projectatlas_core::graph::SourceSpan::start_line),
+                            Some(4)
+                        );
+                    }
+                    Some((name, lookup))
+                })
+                .collect::<Vec<_>>();
+            let expected = expected
+                .iter()
+                .map(|(name, lookup)| (*name, (*lookup).to_string()))
+                .collect::<Vec<_>>();
+            if actual != expected {
+                failures.push(format!("{label}: expected {expected:?}, actual {actual:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

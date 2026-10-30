@@ -325,6 +325,11 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** many native calls reach aliases from one explicit re-export statement with a long static module literal
 - **THEN** query construction, cache hits and recursive frame clones retain shared module storage without copying its bytes, source ownership accounts those bytes once, value-based query identity and existing budget/cancellation refusal remain compatible, and ordinary valid navigation continues through CLI and MCP
 
+#### Scenario: Comprehension walrus writes preserve the first iterable's prior binding
+- **WHEN** a valid Python comprehension assigns a containing name in its body or filter
+- **THEN** its first iterable uses the containing environment before comprehension writes, function-local reservation and global/nonlocal redirects remain accurate, later outer lookups retain conservative writes, and repeated loop regions cannot fabricate a unique prior target for a name the comprehension rewrites
+- **AND** the existing eager unfiltered one-for-clause/one-element non-starred literal-list workflow preserves its RHS read before its write, while multi-element/starred/dynamic/filtered and deferred loops remain conservative; list/set/dictionary/generator and nested/lambda variants preserve unrelated exact calls, original coordinates, raw navigation, shared limits/cancellation and unchanged-index repair without general iterable/value-flow inference
+
 ### Requirement: Static re-export aliases retain explicit evidence
 Supported static Rust and ECMAScript re-export aliases SHALL preserve dependency and downstream imported-binding identity. Resolution SHALL abstain for ambiguous or unsupported runtime exports and terminate conservatively within existing work bounds for cyclic chains.
 

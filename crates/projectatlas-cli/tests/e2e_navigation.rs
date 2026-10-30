@@ -13567,6 +13567,7 @@ fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
 
 #[test]
 fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    type ExpectedComprehensionTarget<'a> = (&'a str, &'a str, Option<&'a str>);
     const WORKER_FILE: &str = "worker.py";
     let temp = tempfile::tempdir()?;
     let root = temp.path();
@@ -13589,6 +13590,156 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
             "def caller():\n global launch\n from worker import run as launch\n launch()\n launch = unknown\n launch()\ndef clean():\n from worker import safe\n safe()\n",
         ),
     ] {
+        fs::write(root.join(file), source)?;
+    }
+    let comprehension_cases: &[(
+        &str,
+        &str,
+        Option<&str>,
+        &[ExpectedComprehensionTarget<'_>],
+        usize,
+        usize,
+    )] = &[
+        (
+            "comp_module.py",
+            "def run():return [0]\ndef keep():return 0\n[(run:=None) for _ in run()]\n",
+            None,
+            &[("comp_module.py", "run", None)],
+            1,
+            1,
+        ),
+        (
+            "comp_global.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run:=None) for _ in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_global.py", "run", None),
+                ("comp_global.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_local.py",
+            "def keep():return 0\ndef caller():\n def run():return [0]\n [(run:=None) for _ in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_local.py", "run", Some("caller")),
+                ("comp_local.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_nonlocal.py",
+            "def keep():return 0\ndef outer():\n def run():return [0]\n def caller():\n  nonlocal run\n  [(run:=None) for _ in run()]\n  run()\n  keep()\n",
+            Some("caller"),
+            &[
+                ("comp_nonlocal.py", "run", Some("outer")),
+                ("comp_nonlocal.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_imported.py",
+            "from comprehension_worker import run as launch, keep\ndef caller():\n global launch\n [(launch:=None) for _ in launch()]\n launch()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comprehension_worker.py", "run", None),
+                ("comprehension_worker.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_repeated.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run(),keep(),(run:=None)) for _ in [0,1]]\n run()\n",
+            Some("caller"),
+            &[("comp_repeated.py", "keep", None)],
+            3,
+            1,
+        ),
+        (
+            "comp_filter.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run(),keep()) for _ in [0] if (run:=lambda:[1])]\n",
+            Some("caller"),
+            &[("comp_filter.py", "keep", None)],
+            2,
+            1,
+        ),
+        (
+            "comp_singleton.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run:=run()) for _ in [1]]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_singleton.py", "run", None),
+                ("comp_singleton.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_nested.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [[(run:=None) for _ in run()] for _ in [1]]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_nested.py", "run", None),
+                ("comp_nested.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_class_invalid.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n class C:\n  [(run:=None) for _ in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_class_invalid.py", "run", None),
+                ("comp_class_invalid.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_target_invalid.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run:=None) for run in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_target_invalid.py", "run", None),
+                ("comp_target_invalid.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_iterable_invalid.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [keep() for _ in (run:=run())]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_iterable_invalid.py", "run", None),
+                ("comp_iterable_invalid.py", "keep", None),
+            ],
+            4,
+            2,
+        ),
+        (
+            "comp_unicode.py",
+            "def rún():return [0]\r\ndef keep():return 0\r\ndef caller():\r\n global rún\r\n [(rún:=None) for _ in rún()]\r\n rún()\r\n keep()\r\n",
+            Some("caller"),
+            &[
+                ("comp_unicode.py", "rún", None),
+                ("comp_unicode.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+    ];
+    fs::write(
+        root.join("comprehension_worker.py"),
+        "def run():return [0]\ndef keep():return 0\n",
+    )?;
+    for (file, source, ..) in comprehension_cases {
         fs::write(root.join(file), source)?;
     }
     let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
@@ -13783,6 +13934,167 @@ fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<d
                 &AtlasStore::open_read_only(&database)?.project_instance_id()?,
                 &identity,
             )?;
+        }
+        for restored in [false, true, false] {
+            let (file, source, ..) = comprehension_cases
+                .iter()
+                .find(|case| case.0 == "comp_global.py")
+                .ok_or_else(|| io::Error::other("comprehension mutation fixture missing"))?;
+            fs::write(
+                root.join(file),
+                if restored {
+                    source.replace("(run:=None)", "(other:=None)")
+                } else {
+                    (*source).to_string()
+                },
+            )?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuilt in [false, true] {
+                if rebuilt {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                for (file, _, caller, expected, expected_rows, resolved) in comprehension_cases {
+                    let mut args = vec![
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--relation",
+                        "calls",
+                        "--include-occurrences",
+                        "--limit",
+                        "10",
+                    ];
+                    if let Some(caller) = caller {
+                        args.extend(["--symbol", *caller]);
+                    }
+                    let cli = run_packaged_cli_json(&executable, root, &database, &args)?;
+                    let text=session.call_tool("atlas_symbol_relations",&json!({"project_path":root,"view":"detailed","file":file,"symbol":caller,"relation":"calls","limit":10,"include_occurrences":true}))?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    let targets = expected
+                        .iter()
+                        .map(|(file, name, _)| ((*file).to_string(), (*name).to_string()))
+                        .collect::<BTreeSet<_>>();
+                    let resolved = if *file == "comp_global.py" && restored {
+                        3
+                    } else {
+                        *resolved
+                    };
+                    for response in [cli, mcp] {
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| io::Error::other("comprehension rows missing"))?;
+                        let mut occurrences = 0;
+                        let mut resolved_occurrences = 0;
+                        for row in rows {
+                            rust_binding_equal(&row["occurrences_truncated"], &json!(false))?;
+                            let count = row["occurrences"]
+                                .as_array()
+                                .ok_or_else(|| io::Error::other("call occurrences missing"))?
+                                .len();
+                            occurrences += count;
+                            if row["relation"]["resolution"]["status"] == "resolved" {
+                                resolved_occurrences += count;
+                            }
+                        }
+                        if occurrences != *expected_rows {
+                            return Err(io::Error::other(format!(
+                                "{file}: expected {expected_rows} source calls, actual {occurrences}"
+                            ))
+                            .into());
+                        }
+                        rust_binding_equal(&rust_binding_targets(rows), &targets)?;
+                        rust_binding_equal(&resolved_occurrences, &resolved)?;
+                        for row in rows
+                            .iter()
+                            .filter(|row| row["relation"]["resolution"]["status"] == "resolved")
+                        {
+                            let symbol = &row["target"]["entity"]["selector"]["symbol"];
+                            let parent = expected
+                                .iter()
+                                .find(|(target, name, _)| {
+                                    symbol["file"] == *target && symbol["name"] == *name
+                                })
+                                .ok_or_else(|| io::Error::other("unexpected comprehension target"))?
+                                .2;
+                            rust_binding_equal(&symbol["parent"], &json!(parent))?;
+                        }
+                    }
+                    if let Some(caller) = caller {
+                        for (target, name, parent) in *expected {
+                            let cli = run_packaged_cli_json(
+                                &executable,
+                                root,
+                                &database,
+                                &["summary", target],
+                            )?;
+                            let text = session.call_tool(
+                                "atlas_file_summary",
+                                &json!({"project_path":root,"file":target}),
+                            )?;
+                            let mcp: Value = toon_format::decode_default(&text)?;
+                            for summary in [cli, mcp["file_summary"].clone()] {
+                                let function = summary["functions"]
+                                    .as_array()
+                                    .and_then(|functions| {
+                                        functions.iter().find(|function| {
+                                            function["name"] == *name
+                                                && function["parent"].as_str().unwrap_or("")
+                                                    == parent.unwrap_or("")
+                                        })
+                                    })
+                                    .ok_or_else(|| {
+                                        io::Error::other(format!(
+                                            "{file}: summary target missing {name}"
+                                        ))
+                                    })?;
+                                let callers =
+                                    function["called_by"].as_array().ok_or_else(|| {
+                                        io::Error::other("comprehension summary callers missing")
+                                    })?;
+                                rust_binding_require(
+                                    callers
+                                        .iter()
+                                        .any(|entry| entry == &format!("{file}::{caller}")),
+                                    "comprehension summary omitted caller",
+                                )?;
+                            }
+                        }
+                        if matches!(*file, "comp_repeated.py" | "comp_filter.py") {
+                            let text = session.call_tool(
+                                "atlas_file_summary",
+                                &json!({"project_path":root,"file":file}),
+                            )?;
+                            let summary: Value = toon_format::decode_default(&text)?;
+                            let run = summary["file_summary"]["functions"]
+                                .as_array()
+                                .and_then(|functions| {
+                                    functions.iter().find(|function| {
+                                        function["name"] == "run" && function["parent"] == ""
+                                    })
+                                })
+                                .ok_or_else(|| {
+                                    io::Error::other("loop negative summary target missing")
+                                })?;
+                            rust_binding_require(
+                                !run["called_by"].as_array().is_some_and(|callers| {
+                                    callers
+                                        .iter()
+                                        .any(|entry| entry == &format!("{file}::{caller}"))
+                                }),
+                                "loop-carried unknown gained a caller",
+                            )?;
+                        }
+                    }
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
         }
         let before = AtlasStore::open_read_only(&database)?.index_publication()?;
         let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;

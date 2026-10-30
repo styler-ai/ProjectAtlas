@@ -45,3 +45,9 @@ High-priority #731 belongs to `v0.5.1-00`, directly under and blocking #715, and
 ## Non-Goals
 
 No new semantic provider or language-support claim, execution or runtime inference, arbitrary default-expression resolution, wildcard expansion, parser framework, database reset, relaxed cancellation or bounds, or unrelated v0.6.0 work.
+
+Confirmed review regression: Python comprehension walrus writes currently use
+physical source order and can suppress a valid first-iterable call before the body
+executes. Repair the owning comprehension boundary while preserving containing
+local/global/nonlocal ownership, source evidence and conservative loop/deferred
+behavior. No general iteration-count, runtime value or control-flow inference.

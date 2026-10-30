@@ -1,6 +1,7 @@
 //! Purpose: Attach C++ declaration bodies to exact source container environments.
 
 use super::{BindingNamespace, BindingTarget, LexicalCollector};
+use std::sync::Arc;
 use tree_sitter::Node;
 
 /// Namespace/type containers are distinct from lexical statement environments.
@@ -64,22 +65,17 @@ impl LexicalCollector<'_> {
     /// Each new name is charged before copying; lexical depth and the shared name
     /// budget bound propagation. Consumers use one borrowed-name lookup per scope.
     pub(super) fn cpp_inline_blockers(&mut self, mut scope: usize, name: &str, mut from: usize) {
+        let mut shared_name = None;
         while let Some(parent) = self.scopes[scope].parent {
             if let Some(inline) = self.scopes[scope].cpp_inline_from {
                 from = from.max(inline);
-                if let Some(existing) = self
-                    .cpp_inline_names
-                    .get_mut(&parent)
-                    .and_then(|names| names.get_mut(name))
-                {
-                    *existing = (*existing).min(from);
-                } else if self.admit_binding() {
+                if !self.cpp_inline_names.update_existing(parent, name, from) {
+                    if !self.admit_binding() {
+                        break;
+                    }
+                    let shared = shared_name.get_or_insert_with(|| Arc::<str>::from(name));
                     self.cpp_inline_names
-                        .entry(parent)
-                        .or_default()
-                        .insert(name.to_owned(), from);
-                } else {
-                    break;
+                        .insert_admitted(parent, Arc::clone(shared), from);
                 }
             } else if self.scopes[parent].anonymous_namespace != Some(scope) {
                 break;
@@ -482,12 +478,7 @@ impl LexicalCollector<'_> {
         let mut winner = None;
         while let Some(scope) = context {
             check()?;
-            if self
-                .cpp_inline_names
-                .get(&scope)
-                .and_then(|names| names.get(name))
-                .is_some_and(|from| *from <= offset)
-            {
+            if self.cpp_inline_names.visible(scope, name, offset) {
                 return Ok(ChildOwner::Unresolved);
             }
             if self.scopes[scope].cpp_container == CppContainer::Namespace
