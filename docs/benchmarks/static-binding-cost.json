@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-30",
-  "source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-  "derivation_contract": 19,
-  "semantic_contract": 19,
+  "source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+  "derivation_contract": 20,
+  "semantic_contract": 20,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+  "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -25,8 +25,8 @@
     "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance",
     "fixture_digest": "SHA256 of compact sorted JSON mapping relative authored paths to SHA256",
     "parse_counters": "source-file candidates, not native parser invocation counts",
-    "binary_samples": 66,
-    "baseline_candidate_pairs": 33,
+    "binary_samples": 72,
+    "baseline_candidate_pairs": 36,
     "timed_sample_scope": "initialization; per-sample no-op and query probes excluded from this count"
   },
   "cases": {
@@ -37,8 +37,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.2852342900005169,
-          "peak_rss_kib": 29644,
+          "wall_seconds": 0.28379855601815507,
+          "peak_rss_kib": 26940,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -50,8 +50,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3553046660090331,
-          "peak_rss_kib": 33408,
+          "wall_seconds": 0.3472001390182413,
+          "peak_rss_kib": 32900,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -70,8 +70,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.32582944197929464,
-          "peak_rss_kib": 30640,
+          "wall_seconds": 0.3325049899867736,
+          "peak_rss_kib": 28092,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -83,8 +83,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.38831438100896776,
-          "peak_rss_kib": 34672,
+          "wall_seconds": 0.3905715189757757,
+          "peak_rss_kib": 34164,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -103,8 +103,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.16707549200509675,
-          "peak_rss_kib": 28924,
+          "wall_seconds": 0.1662583529832773,
+          "peak_rss_kib": 26024,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -116,8 +116,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.1609064619988203,
-          "peak_rss_kib": 29392,
+          "wall_seconds": 0.16212291101692244,
+          "peak_rss_kib": 29680,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -136,8 +136,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.10178480201284401,
-          "peak_rss_kib": 25352,
+          "wall_seconds": 0.10016407299553975,
+          "peak_rss_kib": 22892,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -149,8 +149,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11620513297384605,
-          "peak_rss_kib": 25296,
+          "wall_seconds": 0.11846843699458987,
+          "peak_rss_kib": 24732,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -169,8 +169,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.1169206679915078,
-          "peak_rss_kib": 25744,
+          "wall_seconds": 0.11420781695051119,
+          "peak_rss_kib": 23488,
           "work": {
             "candidates": 1,
             "parsed": 1,
@@ -182,8 +182,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14292516000568867,
-          "peak_rss_kib": 27640,
+          "wall_seconds": 0.14091737003764138,
+          "peak_rss_kib": 26392,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -208,8 +208,9 @@
     "host_programs": 64,
     "host_named_callers_verified": 63,
     "contextual_baseline": "selected named caller anchors unavailable in both native and host cases; not merely zero call rows",
-    "sample_assertions": "Every candidate sample checks resolved calls and expected occurrences; current-artifact post-measurement probes check exact Cargo-root targets, baseline anchor state and all63host callers.",
-    "invalid_identity_neighbors": "Permanent container CLI/MCP selector preserves the explicit cross-file caller and summary beside invalid NUL imports while true local collisions remain unresolved through incremental/full/no-op phases."
+    "sample_assertions": "Every candidate sample checks resolved calls and expected occurrences; current-artifact post-measurement probes check exact Cargo-root targets, baseline anchor state and all 63host callers.",
+    "invalid_identity_neighbors": "Permanent container CLI/MCP selector preserves the explicit cross-file caller and summary beside invalid NUL imports while true local collisions remain unresolved through incremental/full/no-op phases.",
+    "qualified_cpp_owners": "Actual qualified bodies select exact source namespace/type parents, unknown/base/local shadow barriers remain unresolved, and qualified definitions do not leak file bindings across CLI/MCP and incremental/full/no-op phases."
   },
   "reexport_storage": {
     "protocol": "Three alternating paired rounds, same semantic14 source, fresh fixture/process, GNU time RSS maximum and median elapsed initialization; ordinary exact caller target and zero-parsed no-op verified after every sample. Long missing module remains unresolved, not falsely resolved.",
@@ -242,18 +243,18 @@
   "reopened_containers": {
     "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
     "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
-    "candidate_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-    "candidate_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
     "logical_namespaces": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.187659460993018,
-        "peak_rss_kib": 32516
+        "wall_seconds": 0.18517451197840273,
+        "peak_rss_kib": 30652
       },
       "candidate": {
-        "wall_seconds": 0.18714850000105798,
-        "peak_rss_kib": 31604
+        "wall_seconds": 0.19192135700723156,
+        "peak_rss_kib": 31092
       }
     },
     "source_hashes": {
@@ -266,18 +267,18 @@
   "instance_fields": {
     "baseline_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
     "baseline_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
-    "candidate_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-    "candidate_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
     "classes": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.11745042601251043,
-        "peak_rss_kib": 27116
+        "wall_seconds": 0.11961526999948546,
+        "peak_rss_kib": 26376
       },
       "candidate": {
-        "wall_seconds": 0.11623431701445952,
-        "peak_rss_kib": 25528
+        "wall_seconds": 0.1213079720037058,
+        "peak_rss_kib": 24888
       }
     },
     "source_hashes": {
@@ -290,8 +291,8 @@
   "forwarding_query_modules": {
     "baseline_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
     "baseline_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
-    "candidate_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-    "candidate_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
     "export_slots": 8000,
     "member_calls": 7997,
     "module_bytes": 1800002,
@@ -310,32 +311,32 @@
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 3.715219085017452,
-        "max_peak_rss_kib": 131880
+        "wall_seconds": 3.651695931039285,
+        "max_peak_rss_kib": 131348
       },
       "candidate": {
-        "wall_seconds": 2.066264927998418,
-        "max_peak_rss_kib": 130720
+        "wall_seconds": 2.0353024619980715,
+        "max_peak_rss_kib": 129900
       }
     },
     "normal_positive_each_sample": true,
     "complete_calls_each_sample": 7998,
     "noop_parsed_each_sample": 0,
     "same_contract_compatibility": {
-      "baseline_contract": 18,
-      "candidate_contract": 19,
+      "baseline_contract": 19,
+      "candidate_contract": 20,
       "repair_identity_and_all_approved_purposes_preserved": true,
       "same_contract_noop": true,
       "full_rebuild_positive": true,
       "final_noop": true
     },
-    "scope": "Source-owned module storage survives query/cache/frame consumers, no public key/fact/schema change, current17 native owner contracts; cumulative module copies removed, peak parser memory not materially reduced; no release SLO waiver"
+    "scope": "Source-owned module storage survives query/cache/frame consumers, no public key/fact/schema change, current20 native owner contracts; cumulative module copies removed, peak parser memory not materially reduced; no release SLO waiver"
   },
   "native_member_owners": {
-    "baseline_source_commit": "42b9d56954926f3d5fb469a1e6a96ad6c5bf9de3",
-    "baseline_binary_sha256": "886742f26c2d3104e518fd7e613786300dbca99f5671a86a9384c6db8bca9e5f",
-    "candidate_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-    "candidate_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+    "baseline_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
+    "baseline_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
     "samples_per_binary_per_fixture": 3,
     "query_budget": {
       "output_bytes": 32768,
@@ -353,12 +354,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.223157340020407,
-            "peak_rss_kib": 44304
+            "wall_seconds": 0.2244984680437483,
+            "peak_rss_kib": 40788
           },
           "candidate": {
-            "wall_seconds": 0.2161510250007268,
-            "peak_rss_kib": 42872
+            "wall_seconds": 0.21915815799729899,
+            "peak_rss_kib": 42108
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -370,12 +371,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.16053697699680924,
-            "peak_rss_kib": 33700
+            "wall_seconds": 0.16039848001673818,
+            "peak_rss_kib": 31120
           },
           "candidate": {
-            "wall_seconds": 0.16450723898014985,
-            "peak_rss_kib": 31960
+            "wall_seconds": 0.16189954901346937,
+            "peak_rss_kib": 31588
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -387,22 +388,40 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.22710521100088954,
-            "peak_rss_kib": 39496
+            "wall_seconds": 0.2277494299924001,
+            "peak_rss_kib": 36544
           },
           "candidate": {
-            "wall_seconds": 0.227095501992153,
-            "peak_rss_kib": 38072
+            "wall_seconds": 0.22594579198630527,
+            "peak_rss_kib": 36492
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true,
         "candidate_implicit_value_and_primary_shadow_negatives_each_sample": true
+      },
+      "cpp-qualified-owners": {
+        "fixture_digest": "d63ef87f9d3ce8dfba223de8d91ad150c5a5d542c569954cd150ed38db09808c",
+        "source_hashes": {
+          "namespaces.cpp": "38c1f23d8c5cdc83b4ee03796e417b9542653a55dbff0aafb63c56edaf545c59",
+          "types.cpp": "d5798cc9e0c1191572efd5385124263500a6ac9b9668aaff98372e00cb39680e"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.17101290699793026,
+            "peak_rss_kib": 30952
+          },
+          "candidate": {
+            "wall_seconds": 0.17384162702364847,
+            "peak_rss_kib": 31312
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
       }
     }
   },
   "upgrade_validation": {
-    "candidate_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-    "candidate_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
+    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
     "native_baselines": [
       {
         "contract": "stable050",
@@ -435,6 +454,10 @@
       {
         "contract": "contract18",
         "binary_sha256": "886742f26c2d3104e518fd7e613786300dbca99f5671a86a9384c6db8bca9e5f"
+      },
+      {
+        "contract": "contract19",
+        "binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf"
       },
       {
         "contract": "contract5",

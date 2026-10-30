@@ -1,13 +1,13 @@
 # Static binding cost and release handoff
 
-The current Linux measurements bind reviewed contract19 source `f7daa7a4fb96ec083322afd2acabe992f31bbccb` and
-optimized binary `cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf`. Exact baseline identities, fixture hashes, work counters
+The current Linux measurements bind reviewed contract20 source `b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27` and
+optimized binary `02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea`. Exact baseline identities, fixture hashes, work counters
 and protocol are in [the compact result](static-binding-cost.json). The published
 0.5.0 baseline archive and extracted binary were checksum verified.
 
-There are66 initialization measurements in33 baseline/candidate pairs: three
-alternating pairs for each of11 fixtures. Each initializes a fresh non-Git fixture
-in a fresh process on the same Ryzen7 5700U host. Telemetry is disabled; ordinary
+There are 72 initialization measurements in 36 baseline/candidate pairs: three
+alternating pairs for each of 12 fixtures. Each initializes a fresh non-Git fixture
+in a fresh process on the same Ryzen 7 5700U host. Telemetry is disabled; ordinary
 filesystem/page caches remain warm. Wall time includes GNU time; RSS is the process
 maximum. Per-sample no-op and target probes are separate from that sample count.
 Source-file counters do not claim native parser invocation counts.
@@ -16,72 +16,76 @@ These are bounded affected-work measurements, not exceptions to issue708 SLOs or
 issue715 installed release acceptance. Baselines can perform incorrect or incomplete
 work, so timing differences do not establish a general speedup or asymptotic bound.
 
-| Fixture | 0.5.0 median seconds | Current19 median seconds | 0.5.0 max RSS KiB | Current19 max RSS KiB |
+| Fixture | 0.5.0 median seconds | Current20 median seconds | 0.5.0 max RSS KiB | Current20 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2852 | 0.3553 | 29644 | 33408 |
-| 64 Cargo roots, 256 callers | 0.3258 | 0.3883 | 30640 | 34672 |
-| Dense/comment/nested Rust | 0.1671 | 0.1609 | 28924 | 29392 |
-| 256 contextual-keyword calls | 0.1018 | 0.1162 | 25352 | 25296 |
-| 64 script programs, 63 callers | 0.1169 | 0.1429 | 25744 | 27640 |
+| Four Cargo roots, 256 callers | 0.2838 | 0.3472 | 26940 | 32900 |
+| 64 Cargo roots, 256 callers | 0.3325 | 0.3906 | 28092 | 34164 |
+| Dense/comment/nested Rust | 0.1663 | 0.1621 | 26024 | 29680 |
+| 256 contextual-keyword calls | 0.1002 | 0.1185 | 22892 | 24732 |
+| 64 script programs, 63 callers | 0.1142 | 0.1409 | 23488 | 26392 |
 
-The root fixtures hold256 worker callers constant and add60 root files when moving
-from four to64 explicit Cargo targets (261 versus321 parsed candidates). Each
+The root fixtures hold 256 worker callers constant and add 60 root files when moving
+from four to 64 explicit Cargo targets (261 versus321 parsed candidates). Each
 worker imports its actual root's run. Every candidate sample checks resolution;
 a fresh current-artifact probe confirms exact root targets and baseline unresolved
-state. Dense Rust has12 nested modules,256 flat aliases, one nested grouped alias,
-a large comment and257 same-line call occurrences. Candidate samples retain every
+state. Dense Rust has 12 nested modules, 256 flat aliases, one nested grouped alias,
+a large comment and 257 same-line call occurrences. Candidate samples retain every
 occurrence. All following unchanged refreshes report zero parsed candidates.
 
-The native contextual fixture has256 await calls in one non-strict TypeScript
-function. The host fixture has one classic declaration and63 classic script callers,
+The native contextual fixture has 256 await calls in one non-strict TypeScript
+function. The host fixture has one classic declaration and 63 classic script callers,
 each with a large comment. Candidate samples retain the expected resolved calls;
-a fresh probe checks all63 exact host targets. The selected named caller anchors
+a fresh probe checks all 63 exact host targets. The selected named caller anchors
 are absent in the baseline contextual cases, rather than merely returning no calls.
 These cases preserve existing roles and recovery bounds without compiler inference.
 
 ## Additional current comparisons
 
-| Fixture | Baseline contract | Baseline median seconds | Current19 median seconds | Baseline max RSS KiB | Current19 max RSS KiB |
+| Fixture | Baseline contract | Baseline median seconds | Current20 median seconds | Baseline max RSS KiB | Current20 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 256 reopened C++ namespaces | 14 | 0.1877 | 0.1871 | 32516 | 31604 |
-| 256 deferred instance fields | 15 | 0.1175 | 0.1162 | 27116 | 25528 |
-| Shared forwarding query modules | 16 | 3.7152 | 2.0663 | 131880 | 130720 |
+| 256 reopened C++ namespaces | 14 | 0.1852 | 0.1919 | 30652 | 31092 |
+| 256 deferred instance fields | 15 | 0.1196 | 0.1213 | 26376 | 24888 |
+| Shared forwarding query modules | 16 | 3.6517 | 2.0353 | 131348 | 129900 |
 
 The namespace fixture checks selected exact callers and no-op. The field fixture
-checks256 resolved occurrences to a unique later callable and no-op; its older
+checks 256 resolved occurrences to a unique later callable and no-op; its older
 baseline does incorrect unresolved work. Source controls retain immediate class
 syntax, captured writes, decorators and host roles.
 
-The forwarding fixture has8,000 aliases, a1,902,910-byte exporter and1,800,002-byte
-module shared by7,997 namespace-member calls plus one ordinary positive call. Every
-sample checks the complete7,998-call summary, normal incoming caller and no-op.
+The forwarding fixture has 8,000 aliases, a 1,902,910-byte exporter and 1,800,002-byte
+module shared by 7,997 namespace-member calls plus one ordinary positive call. Every
+sample checks the complete 7,998-call summary, normal incoming caller and no-op.
 A bounded one-row query reports an at_least total and is not a completeness oracle.
 The improvement removes cumulative module copying; it does not claim a material
-peak-memory reduction. The resource fixture also passes native18→19 repair, full
-convergence, identity/all-approved-purpose preservation and current19 no-op.
+peak-memory reduction. The resource fixture also passes native19→20 repair, full
+convergence, identity/all-approved-purpose preservation and current20 no-op.
 
 ## Native owner and admission costs
 
-Each fixture repeats128 containers. Native owners span C++, Rust, Kotlin, Java and
-Zig. Kotlin classes have16 constructor parameters and initializer/member calls.
-C# classes have16 primary parameters, initializer closures, setter/local functions,
+Each fixture repeats 128 containers. Native owners span C++, Rust, Kotlin, Java and
+Zig. Kotlin classes have 16 constructor parameters and initializer/member calls.
+C# classes have 16 primary parameters, initializer closures, setter/local functions,
 unknown value/parameter calls and normal outer callers. Every candidate sample
 checks selected normal exact targets and no-op; C# samples also check shadow
-negatives. These compare against the preceding optimized contract18 binary.
+negatives. The C++ qualified fixture has 128 namespace bodies and 128 type bodies;
+selected calls must use their exact owner rather than the same-name global. Its
+baseline performs incorrect binding work, so additional time is not a regression
+comparison between equivalent results. These compare against optimized contract19.
 
-| Fixture | Contract18 median seconds | Current19 median seconds | Contract18 max RSS KiB | Current19 max RSS KiB |
+| Fixture | Contract19 median seconds | Current20 median seconds | Contract19 max RSS KiB | Current20 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Native member containers | 0.2232 | 0.2162 | 44304 | 42872 |
-| Kotlin constructor views | 0.1605 | 0.1645 | 33700 | 31960 |
-| C# accessor and constructor views | 0.2271 | 0.2271 | 39496 | 38072 |
+| Native member containers | 0.2245 | 0.2192 | 40788 | 42108 |
+| Kotlin constructor views | 0.1604 | 0.1619 | 31120 | 31588 |
+| C# accessor and constructor views | 0.2277 | 0.2259 | 36544 | 36492 |
+| C++ qualified namespace and type bodies | 0.1710 | 0.1738 | 30952 | 31312 |
 
 The per-record admission vector replaces the previous all-row sort order; it does
 not copy source graphs. Additional borrowed field validation remains bounded by
 the existing raw-symbol cap and identity limits. Timing/RSS variations over these
 three pairs are local observations, not a general optimization claim.
 
-Dense owner queries preserve the default32KiB output envelope and request1MiB
-intermediate headroom for anchor hydration. Earlier default128KiB intermediate
+Dense owner queries preserve the default 32KiB output envelope and request 1MiB
+intermediate headroom for anchor hydration. Earlier default 128KiB intermediate
 refusals on contract16/17 remain bounded-refusal controls. No public default,
 maximum resource limit or normal navigation capability was relaxed.
 
@@ -148,34 +152,36 @@ separately checks JSON/TOON/MCP coverage and unchanged full reuse. Bad/reserved
 name/parent, invalid/oversized/padded signature and rejected-ancestor source-model
 controls prevent rejected rows from poisoning valid declarations or parent stacks.
 No Java/Kotlin/C# compiler oracle or receiver/inheritance inference is claimed.
-Qualified C++ definitions remain separately represented; compatibility selects the
-actual in-class Method prototype rather than guessing class-vs-namespace ownership.
+Qualified C++ definitions remain separately represented. Exact source owner paths,
+unknown/alias/base/inline barriers, later-directive ordering and parenthesized
+wrappers pass the same installed override; compatibility also preserves the actual
+in-class Method prototype. No qualified-call or receiver inference is added.
 
 ## Combined release requirements
 
-Issue708 must consume final accepted731/732/738/739/741 source and retain its declared
+Issue 708 must consume final accepted731/732/738/739/741 source and retain its declared
 latency/RSS targets across initial/full/rebuild, sparse/dense changes, current no-op,
 unaffected navigation and supported upgrades on all four platforms. Report one-time
 contract reconciliation separately from current-contract reuse. Recover each required
 unchanged source once per operation, reuse captured sidecars and account work honestly.
 No measurement here waives that acceptance.
 
-Current DER19/SEM19 repairs compatible private indexes, including the contract18
+Current DER20/SEM20 repairs compatible private indexes, including the contract18
 invalid-neighbor regression caught before publication. The optimized candidate passes
-15 actual native baselines: stable0.5.0 and contracts5–18. Those prove unchanged-source
+16 actual native baselines: stable 0.5.0 and contracts5–19. Those prove unchanged-source
 repair, full convergence, all-approved-purpose/project-identity preservation, no-op,
 early deadline/publication preservation, compatible rollback and re-upgrade. Early
 deadline proof is separate from the unit control that cancels after staging.
 
-Issue715 must run these permanent selectors against exact installed candidate packages
+Issue 715 must run these permanent selectors against exact installed candidate packages
 on Linux, Windows, macOS Intel and macOS ARM, retain complete CLI/MCP/plugin/host route
-acceptance, and reconcile the final combined source. Its derivation must exceed19 and
-retain SEM19 so old private candidates cannot bypass corrected facts. Keep separate
+acceptance, and reconcile the final combined source. Its derivation must exceed20 and
+retain SEM20 so old private candidates cannot bypass corrected facts. Keep separate
 0.4.5 schema-upgrade proof, clean parser-pack construction, exact RC version/pins,
 checksums and non-draft prerelease/Latest=false readback. Stable0.5.0 stays Latest.
 
 The retained reexport_storage entry in the compact result is historical contract14
 allocation evidence with its original source/binary identities and three paired
 rounds. Its shared-module ownership, clone/accounting and cancellation controls
-remain useful causal evidence; it is not a current19 timing campaign. The existing
+remain useful causal evidence; it is not a current20 timing campaign. The existing
 source-evidence/publication/read-boundary architecture diagram remains accurate.
