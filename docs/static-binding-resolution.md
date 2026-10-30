@@ -377,3 +377,11 @@ Qualified C++ definitions retain the existing separate Function selector; choosi
 between arbitrary class and namespace qualifiers and coalescing their declarations
 is outside this lexical repair. The compatibility control selects the actual in-class
 Method prototype and verifies its canonical and summary caller links remain intact.
+
+Contract19 applies the same per-record name/parent/raw-signature admission before
+lexical collision qualification as publication. Invalid identities neither suppress
+valid neighboring calls/exports nor disable genuine collision protection. Rejected
+ancestors never enter the qualification stack; signature padding is not trimmed into
+an admitted competitor. Existing typed rejection/remapping semantics remain intact.
+This repairs the broader navigation failure caught before contract18 publication;
+prior18 private projections require ordinary compatible repair, without reset.

@@ -7424,6 +7424,44 @@ function caller() { renamed(); tools.work(); }
     }
 
     #[test]
+    fn invalid_identity_neighbors_preserve_valid_calls_and_collision_blockers() {
+        for prefix in [
+            "import './bad\0identity';\n",
+            "function invalid(value='bad\0identity'){}\n",
+        ] {
+            for (body, expected_exact) in [
+                ("function run(){}function caller(){run();}", true),
+                (
+                    "function caller(){\n{function run(){}\nrun();}\n{function run(){}\nrun();}\n}",
+                    false,
+                ),
+            ] {
+                let source = format!("'use strict';\n{prefix}{body}");
+                let result = extract_symbol_graph_with_semantics_controlled(
+                    "neighbors.js",
+                    Some("javascript"),
+                    &source,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(result.is_ok(), "{result:?}");
+                let Ok(extracted) = result else { return };
+                let facts = extracted.semantics();
+                assert_eq!(facts.calls().len(), if expected_exact { 1 } else { 2 });
+                for call in facts.calls() {
+                    assert_eq!(
+                        matches!(call.binding, SourceCallBinding::LocalDeclaration(_)),
+                        expected_exact,
+                        "{source:?}: {facts:?}"
+                    );
+                    if !expected_exact {
+                        assert_eq!(call.binding, SourceCallBinding::Unresolved);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rust_competing_imports_cannot_override_colliding_call_owners_or_targets() {
         for (body, expected_candidates) in [
             (

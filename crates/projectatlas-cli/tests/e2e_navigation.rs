@@ -14113,6 +14113,7 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
         root.join("module-info.java"),
         "module atlas.core { exports atlas.api; }\n",
     )?;
+    fs::write(root.join("valid_worker.ts"), "export function run(){}\n")?;
     let cases = [
         (
             "reopened.cpp",
@@ -14408,6 +14409,20 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
             "Run",
             true,
         ),
+        (
+            "invalid_neighbor.ts",
+            "import {helper} from './LeakedIdentity\0one';\nimport './LeakedIdentity\0two';\nimport * as worker from './valid_worker.ts';\nexport function caller(){worker.run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "invalid_collision.js",
+            "import './bad\0identity';\nfunction caller(){\n{function run(){}\nrun();}\n{function run(){}\nrun();}\n}\n",
+            "caller",
+            "run",
+            false,
+        ),
     ];
     for (file, content, _, _, _) in cases {
         fs::write(root.join(file), content)?;
@@ -14482,8 +14497,13 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                         }),
                     )?;
                     let mcp: Value = toon_format::decode_default(&text)?;
+                    let target_file = if file == "invalid_neighbor.ts" {
+                        "valid_worker.ts"
+                    } else {
+                        file
+                    };
                     let targets = if expected {
-                        BTreeSet::from([(file.to_string(), target.to_string())])
+                        BTreeSet::from([(target_file.to_string(), target.to_string())])
                     } else {
                         BTreeSet::new()
                     };
@@ -14527,7 +14547,7 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                     }
                     let text = session.call_tool(
                         "atlas_file_summary",
-                        &json!({"project_path": root, "file": file}),
+                        &json!({"project_path": root, "file": target_file}),
                     )?;
                     let summary: Value = toon_format::decode_default(&text)?;
                     if file == "partial.cs" {

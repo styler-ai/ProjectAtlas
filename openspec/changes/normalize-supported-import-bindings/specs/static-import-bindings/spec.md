@@ -310,6 +310,11 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **THEN** calls to those declarations and calls from colliding caller owners remain unresolved, raw source declarations remain navigable, and export metadata cannot re-admit an unsafe exact target
 - **AND** actual logical namespace redeclarations, C++ free prototype/definition and existing in-class prototype calls beside separately represented qualified definitions, and C# partial members retain their compatible shared ownership; unrelated qualified type owners remain distinct
 
+#### Scenario: Rejected identities do not poison valid neighboring declarations
+- **WHEN** raw parser rows include invalid name, parent or signature identities beside independently valid declarations and calls
+- **THEN** lexical collision qualification uses the same per-record identity admission as publication, rejected rows cannot enter its active parent stack or become trimmed valid competitors, and independent caller/export evidence survives
+- **AND** genuine distinct-owner collisions in that same file still remain unresolved, rejected declaration targets remain unavailable through source-fact remapping, and typed CLI/TOON/MCP rejection coverage and unchanged-index reuse remain intact
+
 #### Scenario: Runtime forwarding queries preserve shared source module storage
 - **WHEN** many native calls reach aliases from one explicit re-export statement with a long static module literal
 - **THEN** query construction, cache hits and recursive frame clones retain shared module storage without copying its bytes, source ownership accounts those bytes once, value-based query identity and existing budget/cancellation refusal remain compatible, and ordinary valid navigation continues through CLI and MCP

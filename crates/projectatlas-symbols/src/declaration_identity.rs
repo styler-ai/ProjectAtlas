@@ -18,11 +18,18 @@ use std::collections::BTreeMap;
 pub fn qualified_symbol_parents(
     graph: &SymbolGraph,
 ) -> Result<Vec<Option<GraphIdentityText>>, GraphContractError> {
+    qualified_symbol_parents_selected(graph, (0..graph.symbols.len()).collect())
+}
+
+/// Derive only admitted raw ordinals, without retaining rejected scope ancestors.
+pub(crate) fn qualified_symbol_parents_selected(
+    graph: &SymbolGraph,
+    mut order: Vec<usize>,
+) -> Result<Vec<Option<GraphIdentityText>>, GraphContractError> {
     let is_php = graph
         .language
         .as_deref()
         .is_some_and(|language| language.eq_ignore_ascii_case("php"));
-    let mut order = (0..graph.symbols.len()).collect::<Vec<_>>();
     order.sort_by_key(|&index| (graph.symbols[index].line_start, index));
     let mut active_by_name = BTreeMap::<&str, Vec<usize>>::new();
     let mut qualified_names = vec![None::<GraphIdentityText>; graph.symbols.len()];
@@ -74,17 +81,32 @@ pub fn qualified_symbol_parents(
     Ok(parents)
 }
 
+/// Validate borrowed parser identity text using the publication admission policy.
+///
+/// # Errors
+/// Returns the graph contract error for invalid text or the reserved scope prefix.
+pub fn validate_source_symbol_identity(value: &str) -> Result<(), GraphContractError> {
+    GraphIdentityText::validate(value)?;
+    validate_source_scope_namespace(value)
+}
+
+/// Reject the private derived-scope namespace without changing source spelling.
+fn validate_source_scope_namespace(value: &str) -> Result<(), GraphContractError> {
+    if value.starts_with(QUALIFIED_SYMBOL_SCOPE_PREFIX) {
+        return Err(GraphContractError::InvalidIdentityText {
+            reason: "source symbol identity uses the reserved derived-scope namespace",
+        });
+    }
+    Ok(())
+}
+
 /// Admit one parser-owned symbol identity outside the derived-scope namespace.
 ///
 /// # Errors
 /// Returns the graph contract error for invalid text or the reserved scope prefix.
 pub fn source_symbol_identity(value: String) -> Result<GraphIdentityText, GraphContractError> {
     let identity = GraphIdentityText::new(value)?;
-    if identity.as_str().starts_with(QUALIFIED_SYMBOL_SCOPE_PREFIX) {
-        return Err(GraphContractError::InvalidIdentityText {
-            reason: "source symbol identity uses the reserved derived-scope namespace",
-        });
-    }
+    validate_source_scope_namespace(identity.as_str())?;
     Ok(identity)
 }
 

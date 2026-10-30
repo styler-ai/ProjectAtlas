@@ -619,3 +619,25 @@ signatures/selectors. This repair does not infer whether an arbitrary qualifier 
 class or namespace, coalesce those rows, or add qualified-definition body lookup.
 Its real CLI/MCP assertion selects the existing Method declaration, including summary
 callers, rather than accidentally inspecting the separate Function row by name.
+
+## Invalid identity neighbors retain independent binding evidence
+
+The complete native navigation suite causally found that contract18's strict raw
+parent calculation treated any invalid import identity as a file-wide collision.
+The typed identity-rejection CLI/MCP fixture lost its valid worker.run caller. This
+was caught before source18 publication. Source admission is per record: the lexical
+index now shares the exact borrowed name/parent/raw-signature validator with graph
+publication and qualifies only admitted raw ordinals. Rejected rows cannot enter
+the active parent stack or contaminate an independent declaration group. Do not
+trim a rejected signature into a valid competitor, or disable collision detection
+for the whole file. Rejected declarations remain unavailable and existing source-
+fact remapping stays conservative. Strict post-admission projection remains strict.
+
+One additional admitted-ordinal vector is bounded by the existing raw-symbol cap;
+no graph/source copies, new parser, persistence schema or resource limit is added.
+Controls combine actual invalid imports/signatures with normal calls and genuine
+local collisions, and exercise reserved/control-bearing name/parent fields,
+oversized/padded signatures and rejected container ancestors. The existing typed
+rejection E2E verifies JSON/TOON/MCP diagnostics, unchanged full reuse and valid
+neighbor navigation. DER19/SEM19 repair prior18 private candidates; immutable18
+proof is historical and final issue715 derivation must exceed19 retaining SEM19.

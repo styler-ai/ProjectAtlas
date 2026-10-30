@@ -2,6 +2,9 @@
 
 mod binding_resolution;
 
+#[cfg(test)]
+use projectatlas_core::graph::QUALIFIED_SYMBOL_SCOPE_PREFIX;
+
 use super::{
     CliError, INDEX_FRESHNESS_SAMPLE_LIMIT, IndexReadStatus, IndexRefreshReason,
     IndexRefreshRequired, IndexRefreshScope, IndexWorkControl, IndexWorkFailure, IndexWorkResource,
@@ -16,9 +19,8 @@ use projectatlas_core::graph::{
     ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphIdentityField,
     GraphIdentityRejection, GraphIdentityRejectionReason, GraphIdentityText, GraphLimitKind,
     GraphLimits, GraphRelationKind, LogicalRelation, LogicalRelationKey, PackageSelector,
-    ProjectInstanceId, QUALIFIED_SYMBOL_SCOPE_PREFIX, RelationDependencyKey, RelationOccurrence,
-    RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan,
-    SymbolSelector,
+    ProjectInstanceId, RelationDependencyKey, RelationOccurrence, RelationResolution,
+    RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan, SymbolSelector,
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
@@ -7047,13 +7049,7 @@ fn record_identity_failure(
 
 /// Validate one source identity without allocating on the valid hot path.
 fn source_symbol_identity_error(value: &str) -> Result<(), GraphContractError> {
-    GraphIdentityText::validate(value)?;
-    if value.starts_with(QUALIFIED_SYMBOL_SCOPE_PREFIX) {
-        return Err(GraphContractError::InvalidIdentityText {
-            reason: "source symbol identity uses the reserved derived-scope namespace",
-        });
-    }
-    Ok(())
+    projectatlas_symbols::declaration_identity::validate_source_symbol_identity(value)
 }
 
 /// Validate derived canonical keys before the entity projection requests them.

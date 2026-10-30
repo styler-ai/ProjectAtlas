@@ -1,5 +1,9 @@
 # Static binding cost and release handoff
 
+Contract18 measurements below are historical after the native invalid-identity
+neighbor test exposed a required contract19 correction. Current19 proof is pending;
+these results do not accept task2.7 or the release.
+
 This Linux measurement checks the bounded cost of the repaired static bindings and
 source occurrences. It compares optimized default-feature binaries on the same
 Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checksum
