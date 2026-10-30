@@ -268,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "15";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "16";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -12661,6 +12661,8 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d";
         const PRE_SOURCE_CONTEXT_DIGEST: &str =
             "784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424";
+        const PRE_INSTANCE_FIELD_DIGEST: &str =
+            "1b695fb9372249524c55c19c6969478f8a10b0414471de4eb8e467249c4baaf1";
         const PRE_REOPENED_CONTAINER_DIGEST: &str =
             "6a6912198f2cc054d76072375eb328f285f5c232710a6dc2d698169b3e7ef65a";
         const PRE_ARROW_CONTEXT_DIGEST: &str =
@@ -12702,6 +12704,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         run_scan_pipeline(&mut store, &plan, &symbol_options)?;
         let current_fingerprint = plan.publication_contract_fingerprint();
         let prior_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "15",
+            PRE_INSTANCE_FIELD_DIGEST,
+        );
+        let container_projection_fingerprint = index_derivation_fingerprint_for_contract(
             &plan.scan_options,
             text_index_options(plan.config.as_ref(), None),
             #[cfg(feature = "optional-parser-supervisor")]
@@ -12814,6 +12824,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             STABLE_050_SEMANTIC_DIGEST,
         );
         if prior_projection_fingerprint == current_fingerprint
+            || container_projection_fingerprint == current_fingerprint
             || arrow_projection_fingerprint == current_fingerprint
             || source_context_projection_fingerprint == current_fingerprint
             || generator_projection_fingerprint == current_fingerprint

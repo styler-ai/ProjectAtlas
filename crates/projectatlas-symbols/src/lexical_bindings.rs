@@ -330,7 +330,7 @@ struct Scope {
     class: bool,
     /// Python iteration variables stay inside their comprehension environment.
     comprehension: bool,
-    /// Earliest enclosing lookup phase for a deferred body; zero keeps immediate order.
+    /// Earliest outer lookup phase for deferred code; zero keeps immediate order.
     enclosing_visibility_floor: usize,
     /// Exact enclosing callable declaration, independent of its display name.
     owner: Option<usize>,
@@ -1068,7 +1068,8 @@ impl LexicalCollector<'_> {
                 let Some(parent) = self.scopes[scope].parent else {
                     break;
                 };
-                captured |= self.scopes[scope].function;
+                captured |= self.scopes[scope].function
+                    || self.scopes[scope].enclosing_visibility_floor != 0;
                 scope = parent;
             }
             let binding = self.scopes[scope].bindings.entry(name).or_default();
@@ -1754,9 +1755,10 @@ impl LexicalCollector<'_> {
                         EcmascriptVarEnvironment::Enclosing
                     },
                     class,
-                    enclosing_visibility_floor: if function
+                    enclosing_visibility_floor: if (function
                         && (self.language == "python" || self.ecmascript())
-                        && !immediately_invoked_function(node)
+                        && !immediately_invoked_expression(node))
+                        || (self.ecmascript() && deferred_instance_field(node))
                     {
                         node.end_byte()
                     } else {
@@ -2040,6 +2042,11 @@ impl LexicalCollector<'_> {
                 && node
                     .child_by_field_name("name")
                     .is_some_and(|name| name.id() == child.id());
+            let immediate_field_syntax = self.ecmascript()
+                && matches!(node.kind(), "field_definition" | "public_field_definition")
+                && node
+                    .child_by_field_name("value")
+                    .is_none_or(|value| value.id() != child.id());
             let python_definition_header = self.language == "python"
                 && (function || class)
                 && node
@@ -2047,7 +2054,7 @@ impl LexicalCollector<'_> {
                     .is_none_or(|body| body.id() != child.id());
             self.visit(
                 child,
-                if python_definition_header || computed_method_key {
+                if python_definition_header || computed_method_key || immediate_field_syntax {
                     enclosing_scope
                 } else {
                     scope
@@ -3824,8 +3831,27 @@ fn python_identifier_is_read(mut node: Node<'_>) -> bool {
     true
 }
 
-/// Direct IIFEs execute at their source position, including transparent syntax wrappers.
-fn immediately_invoked_function(mut node: Node<'_>) -> bool {
+/// Instance field values execute at construction, unless their class is constructed here.
+fn deferred_instance_field(node: Node<'_>) -> bool {
+    if !matches!(node.kind(), "field_definition" | "public_field_definition") {
+        return false;
+    }
+    let mut cursor = node.walk();
+    if node
+        .children(&mut cursor)
+        .any(|child| child.kind() == "static")
+    {
+        return false;
+    }
+    node.parent()
+        .filter(|body| body.kind() == "class_body")
+        .and_then(|body| body.parent())
+        .filter(|class| matches!(class.kind(), "class" | "class_declaration"))
+        .is_some_and(|class| !immediately_invoked_expression(class))
+}
+
+/// Direct calls/constructions execute at their source position through transparent wrappers.
+fn immediately_invoked_expression(mut node: Node<'_>) -> bool {
     while let Some(parent) = node.parent() {
         match parent.kind() {
             "parenthesized_expression"
@@ -6221,6 +6247,180 @@ function caller() { renamed(); tools.work(); }
                 return;
             };
             assert_eq!(graph.symbols[target].name, "run", "{language}: {content}");
+        }
+    }
+
+    #[test]
+    fn instance_field_values_defer_without_deferring_class_evaluation() {
+        for language in ["javascript", "typescript", "tsx"] {
+            for (source, expected) in [
+                (
+                    "class Api { @run() value=0; } const run=()=>{};",
+                    vec![false],
+                ),
+                (
+                    "const run=()=>{}; class Api { @run() value=0; }",
+                    vec![true],
+                ),
+                (
+                    "new (class {value=run();})(); const run=()=>{};",
+                    vec![false],
+                ),
+                (
+                    "class Api { value = run(); } const run = () => {};",
+                    vec![true],
+                ),
+                (
+                    "class Api { #value = run(); } const run = () => {};",
+                    vec![true],
+                ),
+                (
+                    "const Api = class { value = run(); }; const run = () => {};",
+                    vec![true],
+                ),
+                (
+                    "class Api { static = run(); } const run = () => {};",
+                    vec![true],
+                ),
+                (
+                    "class Api { [run()] = run(); } const run = () => {};",
+                    vec![false, true],
+                ),
+                (
+                    "class Api { static value = run(); } const run = () => {};",
+                    vec![false],
+                ),
+                (
+                    "class Api { static {run();} } const run = () => {};",
+                    vec![false],
+                ),
+                (
+                    "class Api extends run() {} const run = () => {};",
+                    vec![false],
+                ),
+                (
+                    "new class { value = run(); }; const run = () => {};",
+                    vec![false],
+                ),
+                (
+                    "class Api { value = run(); } const run = () => {}; run = unknown;",
+                    vec![false],
+                ),
+                (
+                    "const unknown=()=>{}; var run=()=>{}; class Api { value=(run=unknown); } var run=()=>{}; function caller(){run();}",
+                    vec![false],
+                ),
+                (
+                    "class Api { value = (run = unknown, run()); } let run = () => {};",
+                    vec![false],
+                ),
+                (
+                    "class Api { value = (run = unknown); } let run = () => {}; function caller(){run();}",
+                    vec![false],
+                ),
+                (
+                    "class Mutator {value=(run=unknown);} let run=()=>{}; class Api {value=run();}",
+                    vec![false],
+                ),
+            ] {
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    "fields.source",
+                    Some(language),
+                    source,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{language}: {source}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let actual: Vec<_> = extracted
+                    .semantics()
+                    .calls()
+                    .iter()
+                    .map(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_)))
+                    .collect();
+                assert_eq!(
+                    actual,
+                    expected,
+                    "{language}: {source}: {:?}",
+                    extracted.semantics()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn instance_field_evaluation_preserves_admitted_script_hosts_and_callbacks() {
+        for (path, open) in [
+            ("main.html", "<script>"),
+            ("main.htm", "<script type=module>"),
+            ("main.vue", "<script lang=ts>"),
+            ("main.vue", "<script setup lang=ts>"),
+            ("main.svelte", "<script module lang=ts>"),
+            ("main.svelte", "<script context=module>"),
+            ("main.svelte", "<script>"),
+        ] {
+            for (source, expected) in [
+                (
+                    "class Mutator {value=(run=unknown);} let run=()=>{}; class Api {value=run();}",
+                    false,
+                ),
+                ("class Api { value = run(); } const run = () => {};", true),
+                (
+                    "class Api { static value = run(); } const run = () => {};",
+                    false,
+                ),
+                ("class Api { [run()] = 0; } const run = () => {};", false),
+                ("new class { value = run(); }; const run = () => {};", false),
+                (
+                    "class Api { static value = () => run(); } const run = () => {};",
+                    true,
+                ),
+            ] {
+                let source = format!("{open}{source}</script>");
+                let extracted = extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    None,
+                    &source,
+                    &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+                );
+                assert!(extracted.is_ok(), "{path}: {source}: {extracted:?}");
+                let Ok(extracted) = extracted else { return };
+                let calls = extracted.semantics().calls();
+                assert_eq!(calls.len(), 1, "{path}: {source}");
+                assert_eq!(
+                    matches!(calls[0].binding, SourceCallBinding::LocalDeclaration(_)),
+                    expected,
+                    "{path}: {source}: {calls:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_field_writes_withhold_mutated_export_authority() {
+        for language in ["javascript", "typescript", "tsx"] {
+            let source =
+                "class Api { value=(run=1); } export let run=()=>{}; export {run as launch};";
+            let extracted = extract_symbol_graph_with_semantics_controlled(
+                "fields.source",
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(extracted.is_ok(), "{language}: {extracted:?}");
+            let Ok(extracted) = extracted else { return };
+            assert!(!extracted.semantics().exports().is_empty(), "{language}");
+            assert!(
+                extracted
+                    .semantics()
+                    .exports()
+                    .iter()
+                    .all(|export| !matches!(
+                        export.binding,
+                        crate::SourceExportBinding::LocalDeclaration(_)
+                    )),
+                "{language}: {:?}",
+                extracted.semantics()
+            );
         }
     }
 

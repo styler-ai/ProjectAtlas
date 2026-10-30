@@ -453,3 +453,27 @@ the existing collector-wide lexical budget before allocation; many individually
 bounded keys cannot exceed the shared retained-name ceiling. Causal aggregate and
 single overflow cases withdraw all binding/export authority while preserving raw
 navigation, and a near-limit positive retains exact calls.
+
+
+## Instance field evaluation ownership
+
+ECMAScript field syntax has two evaluation phases. Only an ordinary instance-field
+value executes at later construction; its existing initializer environment receives
+the same bounded deferred enclosing lookup used by function bodies. Static fields
+and blocks remain immediate. Computed names, decorators and type syntax visit the
+enclosing class environment, and direct construction of a class expression keeps
+its value immediate through the existing transparent-wrapper invocation check.
+Nested callbacks retain their own function boundary. This repairs the shared
+JS/TS/TSX and admitted host collector without runtime constructor-flow inference,
+new providers, retained state or parsing. Competing later writes remain unresolved.
+The existing architecture diagram is unchanged. Extraction/semantic contract16
+invalidates unchanged15 indexes; native prior-contract repair, canonical CLI/MCP
+summary agreement, no-op, state preservation and affected costs must be repeated.
+
+Writes crossing an initializer with a nonzero deferred visibility floor use the
+existing captured-mutation owner, just like writes crossing a function boundary.
+They must not be inserted at class-declaration source time and then be overwritten
+by a later declaration transition. This keeps later callers conservative after
+possible construction without changing the function flag or var ownership. The
+within-field write-then-call control already abstains through the stable-tail
+guard; the causal defect is a later enclosing caller or later class-field call.

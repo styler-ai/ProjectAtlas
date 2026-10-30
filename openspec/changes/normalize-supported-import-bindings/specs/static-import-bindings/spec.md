@@ -235,6 +235,10 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **THEN** proven unqualified calls retain that owner's visible declarations without merging unrelated parents, ordinary types or different generic identities
 - **AND** anonymous namespace members remain visible from their enclosing namespace while source order, local shadows, constructor/value precedence and competing candidates preserve conservative authority; cross-file merging, arbitrary using-directive expansion, inline namespace promotion and qualified C++ dispatch remain outside this bounded contract
 
+#### Scenario: Instance field values retain deferred outer bindings
+- **WHEN** JavaScript, TypeScript, TSX or an admitted script host initializes an instance field from a unique later enclosing callable
+- **THEN** only its value uses deferred lookup; static field values, static blocks, computed member names, decorators and class headers retain immediate source order, direct construction of a class expression retains immediate field evaluation, competing writes remain conservative, and graph and caller summaries agree after unchanged-index repair
+
 #### Scenario: Container names exclude declaration bodies
 - **WHEN** native C# namespace or Java module declarations have a body
 - **THEN** their grammar-owned name field determines package, parent and selector identity without incorporating that body or inventing a name from a missing/malformed required field

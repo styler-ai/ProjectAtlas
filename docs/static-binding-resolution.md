@@ -299,3 +299,11 @@ while preserving supported siblings. The same Rust provider handles build script
 the checked provider/host boundary, measured affected-work costs, permanent installed
 selectors, and the combined #708/#715 requirements. Source-level proof and local
 measurements do not substitute for the exact candidate's installed platform gates.
+
+
+Instance-field initializer values in JavaScript, TypeScript, TSX and admitted script
+hosts retain unique later enclosing callable bindings. Static field values and
+blocks, computed names, decorators and class headers retain immediate order;
+direct construction of a class expression also keeps its field values immediate.
+Nested callbacks retain their own deferred boundary, and competing writes abstain.
+This uses the shared bounded lexical collector and contract16 unchanged-index repair.

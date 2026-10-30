@@ -14455,6 +14455,35 @@ fn ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles() -> Resul
     for (file, source, ..) in &cases {
         fs::write(root.join(file), source)?;
     }
+    let mut field_cases = Vec::new();
+    for (extension, open, close) in [
+        ("js", "", ""),
+        ("ts", "", ""),
+        ("tsx", "", ""),
+        ("html", "<script>", "</script>"),
+        ("htm", "<script type=module>", "</script>"),
+        ("vue", "<script lang=ts>", "</script>"),
+        ("svelte", "<script>", "</script>"),
+    ] {
+        for (kind, member, present) in [
+            ("instance", "value = run()", true),
+            ("static", "static value = run()", false),
+            ("computed", "[run()] = 0", false),
+            ("capture", "value=(run=unknown)", false),
+        ] {
+            let file = format!("field_{kind}.{extension}");
+            let source = format!("{open}class Api {{ {member}; }} const run = () => {{}};{close}");
+            let source = if kind == "capture" {
+                format!(
+                    "{open}class Mutator {{value=(run=unknown);}} let run=()=>{{}}; class Api {{value=run();}}{close}"
+                )
+            } else {
+                source
+            };
+            fs::write(root.join(&file), &source)?;
+            field_cases.push((file, source, present));
+        }
+    }
     let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
     let executable = mcp_contract_executable();
     run_packaged_cli_json(&executable, root, &database, &["init"])?;
@@ -14467,6 +14496,10 @@ fn ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles() -> Resul
                 source.push_str("\nexport {};\n");
                 fs::write(root.join(file), source)?;
                 *present = false;
+                let (file, source, present) = &mut field_cases[0];
+                *source = source.replace("value = run()", "static value = run()");
+                *present = false;
+                fs::write(root.join(file), source)?;
                 run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
             } else if phase == 2 {
                 run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
@@ -14556,6 +14589,57 @@ fn ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles() -> Resul
                             .any(|value| value == &format!("{file}::caller")),
                         present,
                     )?;
+                }
+            }
+            for (file, _, present) in &field_cases {
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    root,
+                    &database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ],
+                )?;
+                let text = session.call_tool("atlas_symbol_relations",
+                    &json!({"project_path":root,"view":"detailed","file":file,"relation":"calls","limit":10}))?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                let expected = if *present {
+                    BTreeSet::from([(file.clone(), "run".to_string())])
+                } else {
+                    BTreeSet::new()
+                };
+                for response in [cli, mcp] {
+                    let rows = response
+                        .pointer("/symbol_relations/rows")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| io::Error::other("field caller rows missing"))?;
+                    rust_binding_equal(&rows.len(), &1)?;
+                    rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                }
+                let cli = run_packaged_cli_json(&executable, root, &database, &["summary", file])?;
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path":root,"file":file}),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                for summary in [&cli, &mcp["file_summary"]] {
+                    let callers = summary["functions"]
+                        .as_array()
+                        .and_then(|functions| {
+                            functions.iter().find(|function| function["name"] == "run")
+                        })
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| io::Error::other("field target summary missing"))?;
+                    rust_binding_equal(&!callers.is_empty(), present)?;
                 }
             }
         }

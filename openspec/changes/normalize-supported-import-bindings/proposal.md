@@ -6,6 +6,8 @@ Valid imports can retain parser facts while losing persisted dependencies and al
 
 ## What Changes
 
+Preserve deferred ECMAScript instance-field value lookup and captured writes through the shared lexical boundary, while retaining immediate class syntax and direct construction. Repair unchanged prior projections and verify all admitted script hosts and canonical callers.
+
 - Normalize supported static imports from existing parsed syntax, treating comments and formatting as trivia while preserving literal contents, source evidence, trust and resource limits.
 - Preserve Rust nested use-tree bindings and supported siblings; preserve ECMAScript mixed default/named/namespace bindings without inventing targets for unsupported default expressions.
 - Cover Python comment-bearing static imports and admitted JavaScript/TypeScript embedded regions, deriving the affected matrix from the semantic-provider registry.
