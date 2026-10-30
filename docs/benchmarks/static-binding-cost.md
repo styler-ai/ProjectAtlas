@@ -6,13 +6,14 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-The measurements use the optimized contract 17/17 source, including source goals,
+The measurements use the optimized contract 18/18 source, including source goals,
 host roles, contextual-keyword/arrow recovery and exact module identities, alongside
 the preceding declaration, binding, occurrence and bounded-forwarding repairs,
 shared re-export module storage before staging admission, and reopened native
 container/identifier ownership, deferred instance-field values/writes, and shared
 module storage through runtime forwarding queries, plus native member/statement
-and Kotlin construction/linked-scope ownership.
+and Kotlin construction/linked-scope ownership, accessor/primary-parameter views,
+real record/local owners and canonical collision guards.
 The source and binary identities are recorded in the compact result. The original
 contract-12 fixtures and raw measurements remain preserved; the three shared fixture
 source sets are unchanged. This evidence remains separate from release acceptance.
@@ -25,20 +26,20 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2837 | 0.3469 | 27796 | 33124 |
-| 64 Cargo roots, 256 callers | 0.3312 | 0.3860 | 28496 | 34480 |
-| Dense/comment/nested source | 0.1664 | 0.1647 | 26920 | 29572 |
-| 256 contextual-keyword calls | 0.1003 | 0.1141 | 23100 | 25848 |
-| 64 script programs, 63 callers | 0.1122 | 0.1428 | 23932 | 27084 |
+| Four Cargo roots, 256 callers | 0.2809 | 0.3464 | 28420 | 33104 |
+| 64 Cargo roots, 256 callers | 0.3278 | 0.3939 | 28812 | 34040 |
+| Dense/comment/nested source | 0.1641 | 0.1627 | 27144 | 29236 |
+| 256 contextual-keyword calls | 0.1006 | 0.1153 | 24084 | 25640 |
+| 64 script programs, 63 callers | 0.1117 | 0.1423 | 24220 | 26992 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-The root initial-time ratios are 1.223 and 1.166; maximum-RSS ratios
-are 1.192 and 1.210. Dense Rust time/RSS ratios are
-0.990/1.099. Native contextual time/RSS ratios are
-1.138/1.119, and host ratios are 1.273/1.132.
+The root initial-time ratios are 1.233 and 1.202; maximum-RSS ratios
+are 1.165 and 1.181. Dense Rust time/RSS ratios are
+0.992/1.077. Native contextual time/RSS ratios are
+1.146/1.065, and host ratios are 1.274/1.114.
 Both contextual fixtures lack the selected named caller anchor in the baseline;
 these compare different successfully extracted work. They establish neither a
 general speedup nor a root-count asymptotic bound beyond these inputs.
@@ -133,12 +134,13 @@ not exceptions to those release targets.
 matrix and fixture inventory, preserve the public CLI/MCP/plugin/host routes, and
 exercise stable 0.5.0 plus preceding development-contract repair, identity,
 approved-purpose status, no-op and rollback. Current derivation and semantic
-contracts 17/17 repair the source-context, occurrence-owner, arrow recovery and
+contracts 18/18 repair the source-context, occurrence-owner, arrow recovery and
 explicit module-identity defects and reopened-container/identifier and deferred-field/write defects while
 retaining the preceding ownership repairs and correcting native member, constructor,
-nested-class and C++ condition ownership.
+nested-class and C++ condition ownership, native accessor/primary-parameter phases
+and declaration collision abstention.
 The current optimized default-feature candidate passes actual native upgrades from
-stable 0.5.0 and contracts 5 through 16, including unchanged-source repair, approved
+stable 0.5.0 and contracts 5 through 17, including unchanged-source repair, approved
 purposes and identity, full convergence, no-op, early deadline refusal, rollback
 and re-upgrade. An early deadline does not establish mid-publication cancellation.
 The combined #738/#739/#741 derivation must be strictly newer
@@ -165,10 +167,10 @@ retained-byte accounting across JavaScript, TypeScript, TSX, Vue, Svelte and HTM
 This targeted repair does not waive the separate release performance gates.
 
 
-The current contract-17 comparison adds 256 same-file C++ namespaces, each reopened
+The current contract-18 comparison adds 256 same-file C++ namespaces, each reopened
 with a caller of its original declaration. Three alternating paired rounds against
-the preceding optimized contract-14 source measured 0.1855 versus
-0.1862 seconds median and 32,572 versus 31,156 KiB maximum RSS.
+the preceding optimized contract-14 source measured 0.1877 versus
+0.1939 seconds median and 32,068 versus 31,156 KiB maximum RSS.
 Every candidate sample verifies the selected resolved call and zero-parsed no-op.
 Source-unit and CLI/MCP controls cover nested/anonymous C++ visibility, ambiguity,
 canonical C# partial owners, TypeScript shared/private owners, source edits, full
@@ -177,7 +179,7 @@ budget, with overflow and near-limit controls. No release SLO exception is grant
 
 The field regression adds 256 classes with instance-field calls to a unique later
 enclosing callable. Against contract15, three alternating paired rounds measured
-0.1220 versus 0.1169 seconds median and 26,652 versus 25,408 KiB maximum RSS.
+0.1240 versus 0.1162 seconds median and 24,296 versus 24,952 KiB maximum RSS.
 Every candidate sample checks all 256 resolved occurrences and a zero-parsed no-op.
 The baseline performs incorrect unresolved work, so this establishes no general
 speedup. Causal controls cover captured writes/exports, immediate class syntax,
@@ -190,8 +192,8 @@ cache hits and frame clones. A 1,902,910-byte exporter with 8,000 aliases and a
 1,800,002-byte module feeds 7,997 namespace-member calls plus one normal positive
 call; two imports keep the caller exactly within its existing 8,000-relation cap.
 Three alternating paired optimized rounds against the preceding contract16 source
-measured 3.7392 versus 2.0427 seconds median
-(45.4% less elapsed time), with maximum RSS 130,084 versus 130,244 KiB.
+measured 3.7700 versus 2.0385 seconds median
+(45.9% less elapsed time), with maximum RSS 131,980 versus 130,140 KiB.
 This removes cumulative copying; it does not claim a material peak-memory reduction.
 Every sample verifies all 7,998 calls via the canonical summary, a normal exact
 caller and a zero-parsed no-op. A one-row graph query correctly reports an
@@ -209,8 +211,8 @@ restriction or speculative rewrite. Source-fact/cache ownership charges shared
 bytes; query-owned text and headers remain accounted before retained growth.
 
 The storage-only repair preserved16 key values. Native member/statement changes
-now require DER17/SEM17. The large resource fixture passes16-to17 repair, then
-same17 no-op/full rebuild with identity/all-approved-purpose preservation and
+now require DER18/SEM18. The large resource fixture passes17-to18 repair, then
+same18 no-op/full rebuild with identity/all-approved-purpose preservation and
 normal navigation. The earlier re-export storage comparison above keeps
 its exact contract-14 source/binary identities as historical causal evidence.
 All current table/namespace/field/query comparisons bind the source and binary
@@ -218,29 +220,38 @@ recorded in the compact result. Full combined #708 and installed #715 proof rema
 mandatory before RC1 publication.
 
 
-The contract17 owner comparison adds128 repeated container groups across C++, Rust,
-Kotlin, Java and Zig, plus a separate128-class Kotlin fixture with16 constructor
-parameters, initializer closures and member calls per class. These compare against
-the preceding optimized contract16 source and verify exact selected targets plus
-zero-parsed no-ops in every candidate sample.
+The contract18 owner comparison repeats128 container groups across C++, Rust,
+Kotlin, Java and Zig and128 Kotlin classes with16 constructor parameters and
+initializer/member calls. It also adds128 C# primary constructors with16 parameters,
+initializer closures, setters/local functions, unknown value/parameter calls and
+normal outer callers. Every candidate sample checks selected exact normal targets,
+C# shadow negatives and a zero-parsed no-op against the preceding contract17 binary.
 
-| Current owner fixture | Contract16 median seconds | Contract17 median seconds | Contract16 max RSS KiB | Contract17 max RSS KiB |
+| Current owner fixture | Contract17 median seconds | Contract18 median seconds | Contract17 max RSS KiB | Contract18 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Native member containers | 0.2220 | 0.2090 | 41120 | 39664 |
-| Kotlin constructor views | 0.1556 | 0.1612 | 29932 | 28448 |
+| Native member containers | 0.2087 | 0.2171 | 40520 | 41916 |
+| Kotlin constructor views | 0.1608 | 0.1627 | 28924 | 31700 |
+| C# accessor and constructor views | 0.2050 | 0.2224 | 33296 | 36972 |
 
-All60 current paired samples bind the same contract17 source/binary. The owner
-selector preserves its default32KiB output envelope and requests1MiB intermediate
-headroom for dense symbol-anchor hydration. The initial dense Java query correctly
-refused its default128KiB intermediate budget on both contract16 and17; this is a
-bounded refusal, not a binding regression or timing sample. Existing32MiB maximum
-intermediate admission remains unchanged. The source/resource and native-CLI proofs
-do not waive issue708's combined performance or issue715's installed release gates.
+All66 binary samples in33 baseline/candidate pairs bind the same reviewed
+contract18 source/binary.
+The additional C# correctness work costs about8.5% elapsed time and11% maximum RSS
+on this fixture. These measurements claim bounded local cost, not a release SLO
+exception or a general speedup. The owner selector keeps its default32KiB output
+envelope and requests1MiB intermediate headroom for dense anchor hydration. Earlier
+default128KiB refusals on contract16/17 remain retained bounded-refusal controls;
+no default or maximum resource limit changed.
 
-The permanent container selector now also checks native member bodies, associated
-constant qualification, Kotlin constructor/nested/property shadows and C++ while
-scope through CLI/MCP targets and summary callers, incremental/full convergence,
-identity preservation and no-op. Native source controls cover additional body and
-capture variants and aggregate constructor-view overflow. No Kotlin/Java compiler
-oracle or arbitrary receiver/inheritance analysis is claimed. The existing diagram's
-source-fact, bounded recovery, publication and canonical read boundaries still apply.
+The permanent container CLI/MCP selector additionally checks accessor implicit
+values, primary/partial-record parameter ownership, actual record/union/local-function
+parents, Java generated-method blockers, canonical collision abstention including
+Rust mixed-import candidates, and normal namespace/partial/prototype controls.
+It checks summaries, incremental/full convergence, identity and no-op. Qualified
+C++ definitions remain separately represented; the compatibility control selects the
+actual in-class Method prototype. Source tests cover declaration groups, arity,
+positive static/getter/outer cases and constructor scope/binding near-cap overflow.
+No Java/Kotlin/C# compiler oracle or receiver/inheritance inference is claimed.
+Current14 native upgrades preserve identity/all approved purposes and unchanged-source
+repair/full/no-op/failure/compatible rollback behavior; cancellation after staging is
+separate unit proof. Combined issue708 performance and issue715 installed release
+acceptance remain required. The existing architecture diagram remains accurate.
