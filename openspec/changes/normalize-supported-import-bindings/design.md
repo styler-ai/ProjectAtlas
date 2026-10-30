@@ -633,7 +633,8 @@ trim a rejected signature into a valid competitor, or disable collision detectio
 for the whole file. Rejected declarations remain unavailable and existing source-
 fact remapping stays conservative. Strict post-admission projection remains strict.
 
-One additional admitted-ordinal vector is bounded by the existing raw-symbol cap;
+The admitted-ordinal vector replaces the prior all-row sort order and stays bounded
+by the existing raw-symbol cap;
 no graph/source copies, new parser, persistence schema or resource limit is added.
 Controls combine actual invalid imports/signatures with normal calls and genuine
 local collisions, and exercise reserved/control-bearing name/parent fields,
