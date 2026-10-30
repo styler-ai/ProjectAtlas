@@ -13,11 +13,11 @@ independent read-only GPT-6 Luna Max reviewer. Preserve all parked work.
 
 Checkout `.worktrees/issue-731`, branch `fix/static-bindings-731`.
 Public HEAD: `50fcf24f9f0739c705040862a45138f13b84f67f` (contract21).
-Local committed HEAD: `ea86e0381d850579b696a82a83952b747e3312d6` (runner repair).
+Local production source: `232186edd902a7dd7538fc80c8d934bef7bae41d` (source22; includes runner repair).
 Current reviewed production advances DER22/SEM22 for Go clause scopes and a private
-forwarding module interner. No contract22 source commit or artifact exists yet.
-Local/live task2.4 is complete after source/driver review and current gates:6/9.
-Tasks2.6/2.7 remain open. Task3.1 and all five acceptance rows
+forwarding module interner. Immutable contract22 build succeeded in54.52s; binary SHA74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504.
+Local/live tasks2.6/2.7 are complete after current upgrade/cost/documentation proof:8/9.
+Independent areas1–4 APPROVED; final area5 remains open. Task3.1 and all five acceptance rows
 are OPEN. OpenSpec owner: `normalize-supported-import-bindings`.
 
 Fresh PR feedback:21 threads, two unresolved:
@@ -128,16 +128,26 @@ Current benchmark docs still describe21 and must become a truthful22 handoff.
 Earlier immutable artifacts and source20/19 evidence remain in their cache and
 `/tmp/projectatlas-731-qualified20-*` / `admission19-*` receipts; reuse verified controls.
 
-Next: source commit after current strict strings/spec/IssueOps. Final second-probe
-readback, current22 support docs and independent source/driver approval are complete. Build immutable22 from committed bytes.
-Extend current proof to18 native baselines (include21), new Go cases, exact normalized
-incremental/full tables, large forwarding compatibility and optimized affected costs
-including same/allocation-distinct modules and a Go fixture. Keep combined708 SLOs
-and715 exact installed four-platform acceptance required. Then current docs/proof
-review, task mirror as each proof passes, clean NORMAL native push (hooks enabled),
-actual four-platform hosted/CodeQL/fresh feedback, resolve published Go/cache threads,
-independent final area5, task3.1/five acceptance, normal final checks and normal737
-merge. Verify BOTH731 and737 CLOSED before resuming741.
+Current22 campaign2469 TERMINALPASS all15tasks. Four optimized CLI/MCP E2Es,
+18 unique native stable050/contracts5..21 upgrades, resource21→22 compatibility,
+all16 normalized semantic tables incremental/full equal for every baseline,
+identity/all-approved purposes, deadline/rollback/reupgrade and no-op PASS.
+96 initialization samples/48pairs/16fixtures, immutable source/binary bound before
+and after. Two-source forwarding21→22 median1.99451→1.87129s (6.18%local decrease),
+maxRSS128424→129448KiB; ordinaryPython.13420→.13471s, no general speedup/SLOwaiver.
+Current docs/benchmarks/static-binding-cost.{md,json} updated; independent whole
+areas1–4 delta/readback APPROVED. Failed first upgrade oracle used unique target
+sets and masked the Go sibling difference; corrected all exact occurrence spans,
+status and targets. Second attempt had an offset1 column mismatch; independently
+caught/corrected before approved retry. Both failed receipts retained as*.attempt1/2.
+Source/permanent tests unchanged; four passed E2Es safely reused with exact arg,
+name, exit and input guards. Receipts /tmp/projectatlas-731-clause-cache22-
+{proof-session,proof-manifest,upgrade-proof,stage-upgrade-proof,convergence-proof}.json.
+Next: commit current docs/proof after8/9 mirror and cheap gates, then CLEAN NORMAL
+native push (hooks enabled). Then actualfour-platform
+hosted/CodeQL/fresh feedback, published Go/cache replies/resolution, finalindependent
+area5, task3.1/five acceptance, finalnormalchecks and normal737merge. Verify BOTH
+731 and737CLOSED before741. Goal remainsactive; noissueclosed/noRCpublished.
 
 ## Operating discipline and parked owners
 

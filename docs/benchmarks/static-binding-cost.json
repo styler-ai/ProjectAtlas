@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-30",
-  "source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-  "derivation_contract": 21,
-  "semantic_contract": 21,
+  "source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+  "derivation_contract": 22,
+  "semantic_contract": 22,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+  "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -25,8 +25,8 @@
     "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance",
     "fixture_digest": "SHA256 of compact sorted JSON mapping relative authored paths to SHA256",
     "parse_counters": "source-file candidates, not native parser invocation counts",
-    "binary_samples": 84,
-    "baseline_candidate_pairs": 42,
+    "binary_samples": 96,
+    "baseline_candidate_pairs": 48,
     "timed_sample_scope": "initialization; per-sample no-op and query probes excluded from this count"
   },
   "cases": {
@@ -37,8 +37,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.28513953200308606,
-          "peak_rss_kib": 27260,
+          "wall_seconds": 0.28106841701082885,
+          "peak_rss_kib": 27452,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -50,8 +50,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3478003659984097,
-          "peak_rss_kib": 32876,
+          "wall_seconds": 0.3537656780099496,
+          "peak_rss_kib": 32636,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -70,8 +70,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.3296727489796467,
-          "peak_rss_kib": 27876,
+          "wall_seconds": 0.32618393597658724,
+          "peak_rss_kib": 28568,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -83,8 +83,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3932418310432695,
-          "peak_rss_kib": 34712,
+          "wall_seconds": 0.38439361099153757,
+          "peak_rss_kib": 34212,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -103,8 +103,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.1690813680179417,
-          "peak_rss_kib": 26152,
+          "wall_seconds": 0.16941930894972757,
+          "peak_rss_kib": 26708,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -116,8 +116,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.16036802699090913,
-          "peak_rss_kib": 29232,
+          "wall_seconds": 0.16308751195902005,
+          "peak_rss_kib": 29208,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -136,8 +136,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.10196414904203266,
-          "peak_rss_kib": 22992,
+          "wall_seconds": 0.10105402499902993,
+          "peak_rss_kib": 23228,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -149,8 +149,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11592579900752753,
-          "peak_rss_kib": 25848,
+          "wall_seconds": 0.11458644602680579,
+          "peak_rss_kib": 25160,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -169,8 +169,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.11639548902167007,
-          "peak_rss_kib": 23320,
+          "wall_seconds": 0.11537262797355652,
+          "peak_rss_kib": 23528,
           "work": {
             "candidates": 1,
             "parsed": 1,
@@ -182,8 +182,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14292345801368356,
-          "peak_rss_kib": 27060,
+          "wall_seconds": 0.14679811900714412,
+          "peak_rss_kib": 26820,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -244,18 +244,18 @@
   "reopened_containers": {
     "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
     "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
-    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
     "logical_namespaces": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.19108873000368476,
-        "peak_rss_kib": 32384
+        "wall_seconds": 0.18265756900655106,
+        "peak_rss_kib": 31968
       },
       "candidate": {
-        "wall_seconds": 0.19405753997853026,
-        "peak_rss_kib": 31152
+        "wall_seconds": 0.19059544894844294,
+        "peak_rss_kib": 31284
       }
     },
     "source_hashes": {
@@ -268,18 +268,18 @@
   "instance_fields": {
     "baseline_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
     "baseline_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
-    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
     "classes": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.11906129500130191,
-        "peak_rss_kib": 26176
+        "wall_seconds": 0.1166102170245722,
+        "peak_rss_kib": 26860
       },
       "candidate": {
-        "wall_seconds": 0.12028222996741533,
-        "peak_rss_kib": 25020
+        "wall_seconds": 0.11835274402983487,
+        "peak_rss_kib": 24932
       }
     },
     "source_hashes": {
@@ -292,8 +292,8 @@
   "forwarding_query_modules": {
     "baseline_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
     "baseline_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
-    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
     "export_slots": 8000,
     "member_calls": 7997,
     "module_bytes": 1800002,
@@ -312,20 +312,20 @@
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 3.790639692975674,
-        "max_peak_rss_kib": 131408
+        "wall_seconds": 3.747754340991378,
+        "max_peak_rss_kib": 131632
       },
       "candidate": {
-        "wall_seconds": 2.0344432570273057,
-        "max_peak_rss_kib": 130428
+        "wall_seconds": 1.8772584500256926,
+        "max_peak_rss_kib": 129844
       }
     },
     "normal_positive_each_sample": true,
     "complete_calls_each_sample": 7998,
     "noop_parsed_each_sample": 0,
     "same_contract_compatibility": {
-      "baseline_contract": 20,
-      "candidate_contract": 21,
+      "baseline_contract": 21,
+      "candidate_contract": 22,
       "repair_identity_and_all_approved_purposes_preserved": true,
       "same_contract_noop": true,
       "full_rebuild_positive": true,
@@ -334,10 +334,10 @@
     "scope": "Source-owned module storage survives query/cache/frame consumers, no public key/fact/schema change, current20 native owner contracts; cumulative module copies removed, peak parser memory not materially reduced; no release SLO waiver"
   },
   "native_member_owners": {
-    "baseline_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-    "baseline_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
-    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "baseline_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "baseline_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
     "samples_per_binary_per_fixture": 3,
     "query_budget": {
       "output_bytes": 32768,
@@ -355,12 +355,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.22171374002937227,
-            "peak_rss_kib": 41772
+            "wall_seconds": 0.21891298599075526,
+            "peak_rss_kib": 40888
           },
           "candidate": {
-            "wall_seconds": 0.21452579699689522,
-            "peak_rss_kib": 42856
+            "wall_seconds": 0.21733607503119856,
+            "peak_rss_kib": 42448
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -372,12 +372,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.1624067479860969,
-            "peak_rss_kib": 31604
+            "wall_seconds": 0.1644094229559414,
+            "peak_rss_kib": 30908
           },
           "candidate": {
-            "wall_seconds": 0.16128901997581124,
-            "peak_rss_kib": 32096
+            "wall_seconds": 0.16283075499814004,
+            "peak_rss_kib": 31664
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -389,12 +389,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.23632307100342587,
-            "peak_rss_kib": 36652
+            "wall_seconds": 0.2314097440103069,
+            "peak_rss_kib": 36060
           },
           "candidate": {
-            "wall_seconds": 0.2303466969751753,
-            "peak_rss_kib": 37596
+            "wall_seconds": 0.22874526400119066,
+            "peak_rss_kib": 37352
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true,
@@ -408,12 +408,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.17280504800146446,
-            "peak_rss_kib": 30824
+            "wall_seconds": 0.17210972495377064,
+            "peak_rss_kib": 30720
           },
           "candidate": {
-            "wall_seconds": 0.16984984400914982,
-            "peak_rss_kib": 31868
+            "wall_seconds": 0.17002200800925493,
+            "peak_rss_kib": 31244
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -425,12 +425,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.1448932159692049,
-            "peak_rss_kib": 27184
+            "wall_seconds": 0.14842917304486036,
+            "peak_rss_kib": 27372
           },
           "candidate": {
-            "wall_seconds": 0.14332201902288944,
-            "peak_rss_kib": 28056
+            "wall_seconds": 0.14977855200413615,
+            "peak_rss_kib": 28136
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -442,12 +442,29 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.13763122202362865,
-            "peak_rss_kib": 25932
+            "wall_seconds": 0.1342033669934608,
+            "peak_rss_kib": 26292
           },
           "candidate": {
-            "wall_seconds": 0.13490429701050743,
-            "peak_rss_kib": 26860
+            "wall_seconds": 0.13471408700570464,
+            "peak_rss_kib": 26948
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "go-clause-scopes": {
+        "fixture_digest": "d1eaad4e5f4fbfe3c24b120ec7d3bfbdf4d40ef2e96518b0851f1d6b80349e5a",
+        "source_hashes": {
+          "owners.go": "9ae6ece307a7e03d466dc3a2113c60d7e413df78c6ee9d41bea37dc0f6f1c901"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.1274984980118461,
+            "peak_rss_kib": 25328
+          },
+          "candidate": {
+            "wall_seconds": 0.12964421598007903,
+            "peak_rss_kib": 25964
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -455,8 +472,8 @@
     }
   },
   "upgrade_validation": {
-    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
     "native_baselines": [
       {
         "contract": "stable050",
@@ -499,6 +516,10 @@
         "binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea"
       },
       {
+        "contract": "contract21",
+        "binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339"
+      },
+      {
         "contract": "contract5",
         "binary_sha256": "fba3406a59f624e55f6731d722024f75b7a4f0c00671c432d59ab9e0a745d8e7"
       },
@@ -534,7 +555,7 @@
     "compatible_rollback_and_reupgrade": true,
     "staging_cancellation": "separate projection_contract_revisions_force_full_projection_refresh unit control",
     "normalized_projection_convergence": {
-      "baselines": 17,
+      "baselines": 18,
       "tables": [
         "file_content_classifications",
         "file_texts",
@@ -566,8 +587,8 @@
     }
   },
   "propagated_name_storage": {
-    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
-    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
     "controlled_source_identifier_bytes": 32768,
     "ancestor_scopes": 48,
     "before_retained_identifier_bytes_per_producer": 1572864,
@@ -586,5 +607,41 @@
     "maximum_added_scope_bytes_per_live_collector": 262144,
     "retained_scope_slots_and_map_nodes": "still admitted and charged; identifier text sharing does not remove slot costs",
     "verification": "actual before/after producer probes; permanent64scope Arc allocation identity unit and actual48nested32KiB Python/C++ navigation unit"
+  },
+  "forwarding_cache_module_identities": {
+    "candidate_source_commit": "232186edd902a7dd7538fc80c8d934bef7bae41d",
+    "candidate_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
+    "baseline_contract": 21,
+    "baseline_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "source_hashes": {
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "barrel.js": "fb6d8c1c1782b95ebfe06f12c0e3ec917b87057fb3119d99b98e9e763b0f9743",
+      "target.js": "daf7c1ff3c305ff0d909f412f001c3ccf10944e05854f628b777b2e0a0908816",
+      "caller.js": "8f8fb02ae8b18d812a42ae86942c572710720fb5b70a9863e7f6fc4159e84b65"
+    },
+    "source_sizes": {
+      ".gitignore": 15,
+      "barrel.js": 1902930,
+      "target.js": 25,
+      "caller.js": 86953
+    },
+    "export_slots": 8000,
+    "member_calls": 7997,
+    "module_bytes_per_statement": 900002,
+    "independent_equal_source_allocations": 2,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 1.994512990990188,
+        "max_peak_rss_kib": 128424
+      },
+      "candidate": {
+        "wall_seconds": 1.87129218300106,
+        "max_peak_rss_kib": 129448
+      }
+    },
+    "complete_call_summary_each_sample": true,
+    "normal_inbound_caller_each_sample": true,
+    "zero_parsed_noop_each_sample": true,
+    "scope": "Whole native initialization; repeated cache/visited-key lookups use local module IDs, cold interning and module resolution retain ordinary exact text work; no general speedup or security claim."
   }
 }
