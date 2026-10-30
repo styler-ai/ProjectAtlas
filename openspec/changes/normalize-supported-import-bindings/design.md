@@ -616,7 +616,7 @@ inference or invented generated target entities.
 The qualified C++ definition control preserves the existing source representation:
 an in-class Method prototype and a qualified Function definition have different
 signatures/selectors. This repair does not infer whether an arbitrary qualifier is a
-class or namespace, coalesce those rows, or add qualified-definition body lookup.
+class or namespace, coalesce those rows, or infer unknown qualified owners.
 Its real CLI/MCP assertion selects the existing Method declaration, including summary
 callers, rather than accidentally inspecting the separate Function row by name.
 
@@ -642,3 +642,37 @@ oversized/padded signatures and rejected container ancestors. The existing typed
 rejection E2E verifies JSON/TOON/MCP diagnostics, unchanged full reuse and valid
 neighbor navigation. DER19/SEM19 repair prior18 private candidates; immutable18
 proof is historical and final issue715 derivation must exceed19 retaining SEM19.
+
+
+## C++ qualified definition lookup owners
+
+Fresh review and native stable050/current19 controls found a false exact fallback:
+with both global run and N::run, the ordinary run call inside N::caller resolves the
+global function because the syntactic definition sits at file scope. The missing-
+member-only probe was already unresolved in stable050 and accepted main; it is not
+a new regression. The confirmed wrong-global case must be repaired under731.
+
+Index exact same-file namespace and named class/struct/union bodies under their
+existing logical parent scope and cooked AST identifier components. Resolve a
+qualified definition's namespace/type owner before creating its function environment;
+retain parameter/local scopes. Unknown/ambiguous/template/alias owners cannot borrow
+file scope. Known owners preserve genuine enclosing/global fallback when no member
+or opaque lookup contributor blocks it. Unsupported using/base/inline-namespace lookup gets a position-aware bounded
+barrier rather than a guessed target. Qualified definitions do not inject their bare
+name into the physical file namespace or coalesce their separate raw selectors.
+Pure global owner syntax and nested/relative/absolute named owner paths are separate
+controls; this does not add qualified call dispatch or receiver/type-flow inference.
+
+Owner-index entries and AST traversal use existing global scope/name admission and
+cancellation checks, without per-call graph scans or copied qualified prefixes.
+Shared namespace/type lookup, unknown barriers, local shadows, global positives,
+definition leakage, logical namespace reopening, linkage wrappers and cap exhaustion
+need causal source and real CLI/MCP/refresh/full/upgrade proof. DER20/SEM20 must repair
+private19 projections; final715 derivation must exceed20 retaining SEM20.
+
+Inline namespace tokens attach charged name blockers only to their actual
+component parent, including nested inline components and anonymous namespace
+contributors. No promoted target is inferred. Earlier lookup, explicit direct
+paths and unrelated global names remain available; same-name contributors block
+false outer targets. Propagation shares global name admission and copies no
+qualified prefix; ordinary lookup uses one borrowed-name query per scope.

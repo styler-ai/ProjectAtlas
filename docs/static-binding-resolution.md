@@ -373,10 +373,25 @@ CLI/MCP tests cover these cases through incremental/full refresh, summary caller
 project identity preservation and a second-refresh no-op. Source tests additionally
 cover shared constructor-view near-cap/overflow admission and callable variants.
 
-Qualified C++ definitions retain the existing separate Function selector; choosing
-between arbitrary class and namespace qualifiers and coalescing their declarations
-is outside this lexical repair. The compatibility control selects the actual in-class
-Method prototype and verifies its canonical and summary caller links remain intact.
+Qualified C++ definitions retain their separate Function selectors. Their bodies use
+an exact same-file namespace/class/struct/union environment when parsed owner
+components uniquely select an actual body. Nested, relative, absolute and anonymous
+namespace paths, local/parameter shadows and genuine global fallback are covered.
+Missing, ambiguous, alias and template owners retain local facts behind a lookup
+barrier; using/base/inline-namespace contributors cannot authorize an outer homonym.
+Inline namespace promotion remains unsupported. Charged, position-aware name
+blockers prevent false outer targets while preserving explicit direct paths,
+earlier calls and unrelated global names. No qualified
+call dispatch, inheritance inference or prototype/definition coalescing is added.
+Nested qualified declarators retain the terminal function name. The compatibility
+control also preserves the actual in-class Method prototype caller links.
+
+Contract20 repairs prior19 source and semantic projections through the ordinary
+compatible refresh. The owner registry shares existing name admission and
+cancellation; it does not scan the graph per call or copy qualified prefixes.
+Canonical selector collisions remain unresolved, including indistinguishable
+same-line nested declarations. Grammar-ambiguous expression recovery does not gain
+declaration authority; the local-shadow control uses a parsed auto declaration.
 
 Contract19 applies the same per-record name/parent/raw-signature admission before
 lexical collision qualification as publication. Invalid identities neither suppress

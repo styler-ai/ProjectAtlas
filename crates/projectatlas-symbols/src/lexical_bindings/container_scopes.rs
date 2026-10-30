@@ -57,6 +57,19 @@ impl LexicalCollector<'_> {
         let mut winner = None;
         while let Some(scope) = current {
             check()?;
+            if self
+                .cpp_inline_names
+                .get(&scope)
+                .and_then(|names| names.get(name))
+                .is_some_and(|from| *from <= offset)
+            {
+                return Ok(Some(&BindingTarget::Unresolved));
+            }
+            if self.scopes[scope].cpp_container == super::cpp_owners::CppContainer::Namespace
+                && self.scopes[scope].cpp_lookup.is_opaque_at(offset)
+            {
+                return Ok(Some(&BindingTarget::Unresolved));
+            }
             // Values hide constructor names inside one environment. Distinct
             // anonymous/enclosing environments must instead retain competition.
             for bindings in self.scopes[scope]
@@ -92,6 +105,12 @@ impl LexicalCollector<'_> {
                 }
                 winner = Some(target);
                 break;
+            }
+            if winner.is_none()
+                && self.scopes[scope].cpp_container == super::cpp_owners::CppContainer::Type
+                && self.scopes[scope].cpp_lookup.is_opaque_at(offset)
+            {
+                return Ok(Some(&BindingTarget::Unresolved));
             }
             current = self.scopes[scope].anonymous_namespace;
         }
@@ -141,14 +160,31 @@ impl LexicalCollector<'_> {
             if names.is_empty() {
                 return Ok(None);
             }
+            let inline_parts = if self.language == "cpp" {
+                Self::cpp_inline_namespace_parts(node, names.len(), check)?
+            } else {
+                Vec::new()
+            };
             let mut shared = self.binding_scope(parent);
-            for name in names {
+            for (index, name) in names.into_iter().enumerate() {
                 check()?;
+                let cpp_name = if self.language == "cpp" {
+                    name.clone()
+                } else {
+                    None
+                };
+                let parent = shared;
                 let Some(scope) =
                     self.intern_container(shared, ContainerName::Namespace(name), false)
                 else {
                     return Ok(None);
                 };
+                if let Some(name) = cpp_name {
+                    self.register_cpp_owner(parent, name, scope, node.start_byte());
+                }
+                if inline_parts.get(index) == Some(&true) {
+                    self.scopes[scope].cpp_inline_from = Some(node.start_byte());
+                }
                 shared = scope;
             }
             let scope = if self.ecmascript() {
@@ -322,6 +358,11 @@ impl LexicalCollector<'_> {
         }
         let scope = self.scopes.len();
         self.scopes.push(Scope {
+            cpp_container: if self.language == "cpp" {
+                super::cpp_owners::CppContainer::Namespace
+            } else {
+                super::cpp_owners::CppContainer::Lexical
+            },
             parent: Some(parent),
             ecma_context: self.scopes[parent].ecma_context,
             ecma_root: self.scopes[parent].ecma_root,

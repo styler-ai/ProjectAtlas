@@ -315,6 +315,12 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **THEN** lexical collision qualification uses the same per-record identity admission as publication, rejected rows cannot enter its active parent stack or become trimmed valid competitors, and independent caller/export evidence survives
 - **AND** genuine distinct-owner collisions in that same file still remain unresolved, rejected declaration targets remain unavailable through source-fact remapping, and typed CLI/TOON/MCP rejection coverage and unchanged-index reuse remain intact
 
+#### Scenario: Qualified C++ definitions retain lexical owners
+- **WHEN** an ordinary unqualified call occurs inside a namespace/type-qualified definition with an exact same-file source owner
+- **THEN** the function environment uses that owner, local/parameter shadows remain effective, ordinary enclosing/global fallback remains available only when proven, and the definition does not inject a bare name into its physical enclosing scope
+- **AND** unknown, ambiguous or unsupported owner/lookup contributors remain unresolved rather than selecting a global homonym; namespace/class/struct/union, nested/relative/absolute, linkage, shadowing, positive global and bounded-exhaustion controls preserve the existing raw-selector and unsupported qualified-dispatch boundaries
+- **AND** typedef/using aliases and inline contributor names block only affected lookup, later directives do not alter earlier calls, and explicit direct paths, unrelated globals and grammar-owned declarator wrappers retain their positive controls
+
 #### Scenario: Runtime forwarding queries preserve shared source module storage
 - **WHEN** many native calls reach aliases from one explicit re-export statement with a long static module literal
 - **THEN** query construction, cache hits and recursive frame clones retain shared module storage without copying its bytes, source ownership accounts those bytes once, value-based query identity and existing budget/cancellation refusal remain compatible, and ordinary valid navigation continues through CLI and MCP

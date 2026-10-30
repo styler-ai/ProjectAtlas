@@ -3795,6 +3795,17 @@ fn first_variable_declarator_name(node: Node<'_>, content: &str) -> Option<Strin
 
 /// Extract the declared name from a declarator subtree.
 fn declarator_name(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "qualified_identifier" {
+        // A nested C++ qualifier is an owner path, not the declared leaf name.
+        let mut name = node;
+        for _ in 0..MAX_TREE_SITTER_AST_DEPTH {
+            if name.kind() != "qualified_identifier" {
+                return declarator_name(name, content);
+            }
+            name = name.child_by_field_name("name")?;
+        }
+        return None;
+    }
     if let Some(name_node) = node.child_by_field_name("name")
         && let Some(name) = named_text(name_node, content)
     {

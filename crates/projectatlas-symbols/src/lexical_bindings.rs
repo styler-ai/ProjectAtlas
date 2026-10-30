@@ -13,6 +13,7 @@ use crate::semantic::{EcmascriptNameContext, EcmascriptNameRole};
 use crate::{SourceCallBinding, SourceSemanticFacts, declaration_kind, node_name};
 
 mod container_scopes;
+mod cpp_owners;
 mod declaration_collisions;
 mod native_identifiers;
 
@@ -335,6 +336,12 @@ struct Scope {
     namespace_exports: Option<usize>,
     /// C++ implicitly makes its single anonymous child visible here.
     anonymous_namespace: Option<usize>,
+    /// Inline namespace activation; its lexical parent owns injected-name blockers.
+    cpp_inline_from: Option<usize>,
+    /// Actual C++ declaration container, separate from statement scopes.
+    cpp_container: cpp_owners::CppContainer,
+    /// Unknown C++ lookup contributors cannot grant outer-name authority.
+    cpp_lookup: cpp_owners::CppLookup,
     /// Source grammar context, separate from lexical lookup parentage.
     ecma_context: EcmascriptNameContext,
     /// File/region environment that owns this scope's host role.
@@ -417,6 +424,10 @@ struct LexicalCollector<'a> {
     scopes: Vec<Scope>,
     /// Exact same-file identities, bounded by their admitted logical environments.
     container_scopes: BTreeMap<container_scopes::ContainerScopeKey, usize>,
+    /// Charged inline contributor names, allocated only for affected C++ scopes.
+    cpp_inline_names: BTreeMap<usize, BTreeMap<String, usize>>,
+    /// Exact C++ source children; duplicate type owners remain ambiguous.
+    cpp_owners: BTreeMap<usize, BTreeMap<String, Option<usize>>>,
     /// Only an explicit namespace export redirects its owning block's bindings.
     namespace_export_binding: Option<(usize, usize)>,
     /// Admitted transitions, pending writes and retained container identity components.
@@ -501,6 +512,11 @@ pub(super) fn bind_calls<E>(
         graph,
         facts,
         scopes: vec![Scope {
+            cpp_container: if language == "cpp" {
+                cpp_owners::CppContainer::Namespace
+            } else {
+                cpp_owners::CppContainer::Lexical
+            },
             rust_item_owner: if language == "rust" {
                 RustItemOwner::Module
             } else {
@@ -510,6 +526,8 @@ pub(super) fn bind_calls<E>(
         }],
         binding_count: 0,
         container_scopes: BTreeMap::new(),
+        cpp_owners: BTreeMap::new(),
+        cpp_inline_names: BTreeMap::new(),
         namespace_export_binding: None,
         python_directive_names: BTreeSet::new(),
         incomplete: false,
@@ -1207,7 +1225,7 @@ impl LexicalCollector<'_> {
 
     /// Decode only grammar-owned identifier leaves, never an arbitrary snippet.
     fn identifier(&self, node: Node<'_>) -> Option<String> {
-        if !matches!(
+        if !(matches!(
             node.kind(),
             "identifier"
                 | "type_identifier"
@@ -1216,7 +1234,8 @@ impl LexicalCollector<'_> {
                 | "property_identifier"
                 | "shorthand_property_identifier_pattern"
                 | "shorthand_field_identifier"
-        ) {
+        ) || self.language == "cpp" && node.kind() == "namespace_identifier")
+        {
             return None;
         }
         let text = self.content.get(node.byte_range())?;
@@ -1351,6 +1370,17 @@ impl LexicalCollector<'_> {
             return;
         }
         let scope = self.binding_scope(scope);
+        if self.language == "cpp" {
+            let visible = match &target {
+                BindingTarget::Declaration(symbol) => self
+                    .cpp_function_visibility
+                    .get(symbol)
+                    .copied()
+                    .unwrap_or(from),
+                _ => from,
+            };
+            self.cpp_inline_blockers(scope, &name, visible);
+        }
         let scope = &mut self.scopes[scope];
         let names = match namespace {
             BindingNamespace::Value => &mut scope.bindings,
@@ -1561,6 +1591,14 @@ impl LexicalCollector<'_> {
                     node.kind(),
                     "enum_item" | "trait_item" | "union_item" | "type_item"
                 );
+        let cpp_owner = if self.language == "cpp" {
+            self.cpp_declaration_owner(node, scope, check)?
+        } else {
+            cpp_owners::CppDeclarationOwner::Unqualified
+        };
+        if self.language == "cpp" {
+            self.cpp_using(node, scope, check)?;
+        }
         let declaration = crate::source_declaration_kind(node.kind(), Some(self.language))
             .and_then(|_| self.declaration(node));
         if self.ecmascript()
@@ -1569,7 +1607,11 @@ impl LexicalCollector<'_> {
             self.admit_declaration_name(node, symbol, scope, check)?;
         }
         if let Some(symbol) = declaration {
-            let owner = if self.ecmascript() {
+            let owner = if let cpp_owners::CppDeclarationOwner::Known(owner) = cpp_owner {
+                owner
+            } else if matches!(cpp_owner, cpp_owners::CppDeclarationOwner::Global) {
+                0
+            } else if self.ecmascript() {
                 match self.declaration_names.get(symbol) {
                     Some(DeclarationBindingName::Admitted { scope, .. }) => *scope,
                     _ => scope,
@@ -1611,6 +1653,11 @@ impl LexicalCollector<'_> {
             && declaration.is_none()
             && declaration_kind(node.kind()) == Some(SymbolKind::Function)
             && crate::should_emit_declaration_symbol(node, self.content)
+            && matches!(
+                cpp_owner,
+                cpp_owners::CppDeclarationOwner::Unqualified
+                    | cpp_owners::CppDeclarationOwner::Global
+            )
             && let Some(name) = node_name(node, self.content)
         {
             self.bind(
@@ -1692,6 +1739,11 @@ impl LexicalCollector<'_> {
                     | SymbolKind::Module
                     | SymbolKind::Type
             ) && self.declaration_is_lexical_value(node, fact.kind)
+                && !matches!(
+                    cpp_owner,
+                    cpp_owners::CppDeclarationOwner::Known(_)
+                        | cpp_owners::CppDeclarationOwner::Unresolved
+                )
                 && !(self.language == "java" && fact.kind == SymbolKind::Method)
                 && !(matches!(self.language, "c" | "objective-c")
                     && fact.kind == SymbolKind::Struct)
@@ -1738,7 +1790,13 @@ impl LexicalCollector<'_> {
                 }
             }
         }
-        let block = self.scopes[scope].container_body != Some(node.id())
+        let cpp_linkage_body = self.language == "cpp"
+            && node.kind() == "declaration_list"
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "linkage_specification");
+        let block = !cpp_linkage_body
+            && self.scopes[scope].container_body != Some(node.id())
             && ((self.language != "python"
                 && matches!(
                     node.kind(),
@@ -1787,7 +1845,12 @@ impl LexicalCollector<'_> {
                 if !self.admit_scope() {
                     return Ok(());
                 }
-                let mut parent = scope;
+                let mut parent = match cpp_owner {
+                    cpp_owners::CppDeclarationOwner::Known(owner) => owner,
+                    cpp_owners::CppDeclarationOwner::Global => 0,
+                    cpp_owners::CppDeclarationOwner::Unqualified
+                    | cpp_owners::CppDeclarationOwner::Unresolved => scope,
+                };
                 if self.language == "kotlin"
                     && matches!(node.kind(), "class_body" | "enum_class_body")
                     && node.parent().is_some_and(|owner| {
@@ -1854,7 +1917,13 @@ impl LexicalCollector<'_> {
                     rust_item_owner = RustItemOwner::UnsupportedModule;
                 }
                 self.scopes.push(Scope {
-                    parent: Some(parent),
+                    parent: if function
+                        && matches!(cpp_owner, cpp_owners::CppDeclarationOwner::Unresolved)
+                    {
+                        None
+                    } else {
+                        Some(parent)
+                    },
                     ecma_context: self.child_ecma_context(node, function, class, check)?,
                     ecma_root: self.scopes[parent].ecma_root,
                     function,
@@ -1944,6 +2013,9 @@ impl LexicalCollector<'_> {
                 self.parameters(node, scope, check)?;
                 self.ecma_context = body_context;
             }
+        }
+        if self.language == "cpp" && class {
+            self.register_cpp_type(node, enclosing_scope, scope, check)?;
         }
         if self.csharp()
             && matches!(
@@ -4086,12 +4158,19 @@ impl LexicalCollector<'_> {
         let mut offset = site.offset;
         let mut deferred = false;
         let mut python_writer = None;
+        let mut cpp_opaque = false;
         'lookup: while let Some(scope) = current {
             check()?;
             if self.language == "cpp" {
+                if cpp_opaque
+                    && self.scopes[scope].cpp_container != cpp_owners::CppContainer::Lexical
+                {
+                    return Ok(SourceCallBinding::Unresolved);
+                }
                 if let Some(target) = self.cpp_namespace_target(scope, name, offset, check)? {
                     return Ok(self.call_binding(target, site, name));
                 }
+                cpp_opaque |= self.scopes[scope].cpp_lookup.is_opaque_at(offset);
                 current = self.scopes[scope].parent;
                 continue;
             }
@@ -7421,6 +7500,341 @@ function caller() { renamed(); tools.work(); }
             projectatlas_core::symbols::SymbolKind::Method
         );
         assert_eq!(graph.symbols[*outer].parent.as_deref(), Some("Api"));
+    }
+
+    #[test]
+    fn cpp_qualified_bodies_use_their_declared_owner_without_global_leakage() {
+        let cases = [
+            (
+                "namespace",
+                "namespace N{void run(){}void caller();}void N::caller(){run();}",
+                Some("N"),
+            ),
+            (
+                "class",
+                "class C{public:void run(){}void caller();};void C::caller(){run();}",
+                Some("C"),
+            ),
+            (
+                "struct",
+                "struct C{void run(){}void caller();};void C::caller(){run();}",
+                Some("C"),
+            ),
+            (
+                "union",
+                "union C{void run(){}void caller();};void C::caller(){run();}",
+                Some("C"),
+            ),
+            (
+                "nested",
+                "namespace A::B{void run(){}void caller();}void A::B::caller(){run();}",
+                Some("A::B"),
+            ),
+            (
+                "relative",
+                "namespace A{namespace B{void run(){}void caller();}void B::caller(){run();}}",
+                Some("A::B"),
+            ),
+            (
+                "absolute",
+                "namespace N{void run(){}void caller();}void ::N::caller(){run();}",
+                Some("N"),
+            ),
+            (
+                "type path",
+                "namespace A{struct C{void run(){}};}namespace B{struct C{void run(){}void caller();};}void B::C::caller(){run();}",
+                Some("B::C"),
+            ),
+            (
+                "global fallback",
+                "namespace N{void caller();}void N::caller(){run();}",
+                Some(""),
+            ),
+            (
+                "parameter",
+                "namespace N{void run(){}void caller(void(*run)());}void N::caller(void(*run)()){run();}",
+                None,
+            ),
+            (
+                "local",
+                "namespace N{void run(){}void caller();}void N::caller(){auto run = []{};run();}",
+                None,
+            ),
+            (
+                "anonymous owner",
+                "namespace {namespace N{void run(){}void caller();}}void N::caller(){run();}",
+                Some("N"),
+            ),
+            (
+                "constructor",
+                "struct C{void run(){}C();};C::C(){run();}",
+                Some("C"),
+            ),
+            (
+                "destructor",
+                "struct C{void run(){}~C();};C::~C(){run();}",
+                Some("C"),
+            ),
+            (
+                "unicode",
+                "namespace 名{void run(){}void caller();}void 名::caller(){run();}",
+                Some("名"),
+            ),
+            (
+                "forward then body",
+                "struct C;struct C{void run(){}void caller();};void C::caller(){run();}",
+                Some("C"),
+            ),
+            (
+                "inherited with own member",
+                "struct B{void run(){}};struct C:B{void run(){}void caller();};void C::caller(){run();}",
+                Some("C"),
+            ),
+            (
+                "inner forward hides owner",
+                "struct C{void run(){}void caller();};namespace N{struct C;void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "inner alias hides owner",
+                "namespace C{void run(){}void caller();}namespace Other{void caller();}namespace N{namespace C=Other;void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "later root directive",
+                "namespace M{}namespace N{void run(){}void caller();}void N::caller(){run();}using namespace M;",
+                Some("N"),
+            ),
+            (
+                "later namespace directive",
+                "namespace M{}namespace N{void run(){}void caller();}void N::caller(){run();}namespace N{using namespace M;}",
+                Some("N"),
+            ),
+            (
+                "later local directive",
+                "namespace M{}namespace N{void run(){}void caller();}void N::caller(){run();using namespace M;}",
+                Some("N"),
+            ),
+            (
+                "typedef hides owner",
+                "struct C{void run(){}void caller();};namespace N{struct Other{void run(){}void caller();};typedef Other C;void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "secondary typedef hides owner",
+                "struct C{void run(){}void caller();};namespace N{struct Other{void run(){}void caller();};typedef Other First,C;void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "using alias hides owner",
+                "struct C{void run(){}void caller();};namespace N{struct Other{void run(){}void caller();};using C=Other;void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "inline owner barrier",
+                "struct C{void run(){}void caller();};namespace N{inline namespace V{struct C{void run(){}void caller();};}void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "nested inline parent",
+                "struct C{void run(){}void caller();};namespace A::inline B::inline D{struct C{void run(){}void caller();};}namespace A{void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "inline explicit path",
+                "namespace N{inline namespace V{struct C{void run(){}void caller();};}}void N::V::C::caller(){run();}",
+                Some("N::V::C"),
+            ),
+            (
+                "inline anonymous contributor",
+                "struct C{void run(){}void caller();};namespace N{inline namespace V{namespace{struct C{void run(){}void caller();};}}void C::caller(){run();}}",
+                None,
+            ),
+            (
+                "inline global conflict",
+                "inline namespace V{void run(){}}void caller(){run();}",
+                None,
+            ),
+            (
+                "inline anonymous global conflict",
+                "inline namespace V{namespace{void run(){}}}void caller(){run();}",
+                None,
+            ),
+            (
+                "parenthesized owner",
+                "namespace N{void run(){}void caller();}void (N::caller)(){run();}",
+                Some("N"),
+            ),
+            (
+                "pointer return",
+                "namespace N{void run(){}int* caller();}int* N::caller(){run();return nullptr;}",
+                Some("N"),
+            ),
+            ("unknown owner", "void External::caller(){run();}", None),
+            (
+                "template owner",
+                "template<class T>struct C{void run(){}void caller();};template<class T>void C<T>::caller(){run();}",
+                None,
+            ),
+            (
+                "namespace alias",
+                "namespace N{void run(){}void caller();}namespace Alias=N;void Alias::caller(){run();}",
+                None,
+            ),
+            (
+                "ambiguous owner",
+                "struct C{void run(){}void caller();};struct C{void run(){}void caller();};void C::caller(){run();}",
+                None,
+            ),
+            (
+                "base lookup",
+                "struct B{void run(){}};struct C:B{void caller();};void C::caller(){run();}",
+                None,
+            ),
+            (
+                "using namespace",
+                "namespace M{void run(){}}namespace N{using namespace M;void caller();}void N::caller(){run();}",
+                None,
+            ),
+            (
+                "local using parameter",
+                "namespace M{void run(){}}namespace N{void caller(void(*run)());}void N::caller(void(*run)()){using namespace M;run();}",
+                None,
+            ),
+            (
+                "using name sibling",
+                "namespace M{struct Value{};}using M::Value;namespace N{void caller();}void N::caller(){run();}",
+                Some(""),
+            ),
+            (
+                "linkage namespace",
+                "extern \"C\" {namespace N{void run(){}void caller();}}void N::caller(){run();}",
+                Some("N"),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, body, parent) in cases {
+            let source = format!("void run(){{}}\n{body}\nvoid normal(){{run();}}\n")
+                .replace('{', "{\n")
+                .replace('}', "}\n");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cpp",
+                Some("cpp"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .collect::<Vec<_>>();
+            if calls.len() != 2 {
+                failures.push(format!("{name}: missing calls: {graph:?}"));
+                continue;
+            }
+            let parents = crate::declaration_identity::qualified_symbol_parents(&graph);
+            assert!(parents.is_ok(), "{parents:?}");
+            let Ok(parents) = parents else { return };
+            let normal_parent = if matches!(
+                name,
+                "later root directive"
+                    | "inline global conflict"
+                    | "inline anonymous global conflict"
+            ) {
+                None
+            } else {
+                Some("")
+            };
+            for (call, expected) in [(calls[0], parent), (calls[1], normal_parent)] {
+                let actual = match call.binding {
+                    SourceCallBinding::LocalDeclaration(target) => Some(
+                        parents[target]
+                            .as_ref()
+                            .map_or("", projectatlas_core::graph::GraphIdentityText::as_str),
+                    ),
+                    SourceCallBinding::Shadowed | SourceCallBinding::Unresolved => None,
+                    _ => Some("ambiguous"),
+                };
+                if actual != expected {
+                    failures.push(format!(
+                        "{name}: expected{expected:?}, got{actual:?}: {call:?} graph {graph:?}"
+                    ));
+                }
+            }
+        }
+        for source in [
+            "void run(){}namespace N{void run();}void N::run(){}void normal(){run();}",
+            "extern \"C\" {void run(){}}void normal(){run();}",
+            "void run(){}void normal(){run();}namespace M{}using namespace M;",
+            "void run(){}void normal(){run();}inline namespace V{void other(){}}",
+            "void run(){}namespace A::inline B::D{void other(){}}void normal(){run();}",
+            "inline namespace V{void other(){}}void run(){}void normal(){run();}",
+            "void run(){}inline namespace V{namespace{void other(){}}}void normal(){run();}",
+            "void run(){}inline namespace V{void normal(){run();}}",
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cpp",
+                Some("cpp"),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            if facts.calls().len() != 1
+                || !matches!(facts.calls()[0].binding, SourceCallBinding::LocalDeclaration(target) if graph.symbols[target].parent.is_none() && !graph.symbols[target].signature.contains("::"))
+            {
+                failures.push(format!("definition/linkage leakage: {source}: {facts:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn cpp_owner_registry_shares_binding_admission() {
+        use std::fmt::Write as _;
+        for (classes, inline, complete) in [
+            (1300, false, true),
+            (1500, false, false),
+            (1300, true, true),
+            (1500, true, false),
+        ] {
+            let mut source = String::from("void run(){}\nvoid caller(){run();}\n");
+            if inline {
+                source.push_str("inline namespace V{\n");
+            }
+            for index in 0..classes {
+                assert!(writeln!(&mut source, "struct Owner{index}{{void work(int a,int b,int c,int d,int e,int f,int g,int h){{}}}};").is_ok());
+            }
+            if inline {
+                source.push('}');
+            }
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cpp",
+                Some("cpp"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(
+                graph.symbols.len() < crate::MAX_SYMBOLS_PER_FILE
+                    && graph.relations.len() < crate::MAX_RELATIONS_PER_FILE
+            );
+            assert_eq!(!facts.bindings_incomplete, complete, "{classes}");
+            assert_eq!(facts.calls().len(), 1);
+            assert_eq!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                complete
+            );
+        }
     }
 
     #[test]

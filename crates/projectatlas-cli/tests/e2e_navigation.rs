@@ -14114,6 +14114,106 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
         "module atlas.core { exports atlas.api; }\n",
     )?;
     fs::write(root.join("valid_worker.ts"), "export function run(){}\n")?;
+    let qualified = [
+        (
+            "qualified_parenthesized.cpp",
+            "void run(){}\nnamespace N{void run(){}\nvoid caller();}\nvoid (N::caller)(){run();}\n",
+            "void ( N :: caller ) ( )",
+            Some("N"),
+            true,
+        ),
+        (
+            "qualified_inline.cpp",
+            "void run(){}\nnamespace N{inline namespace V{struct C{void run(){}\nvoid caller();};}}\nvoid N::V::C::caller(){run();}\n",
+            "void N :: V :: C :: caller ( )",
+            Some("N::V::C"),
+            true,
+        ),
+        (
+            "qualified_inline_barrier.cpp",
+            "void run(){}\nstruct C{void run(){}void caller();};\nnamespace N{inline namespace V{struct C{void run(){}\nvoid caller();};}\nvoid C::caller(){run();}}\n",
+            "void C :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_typedef.cpp",
+            "void run(){}\nstruct C{void run(){}void caller();};\nnamespace N{struct Other{void run(){}\nvoid caller();};typedef Other First,C;\nvoid C::caller(){run();}}\n",
+            "void C :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_late.cpp",
+            "void run(){}\nnamespace M{}\nnamespace N{void run(){}\nvoid caller();}\nvoid N::caller(){run();}\nusing namespace M;\n",
+            "void N :: caller ( )",
+            Some("N"),
+            true,
+        ),
+        (
+            "qualified_inline_global.cpp",
+            "inline namespace V{void other(){}}\nvoid run(){}\nvoid caller(){run();}\n",
+            "void caller ( )",
+            None,
+            true,
+        ),
+        (
+            "qualified_namespace.cpp",
+            "void run(){}\nnamespace N {void run(){}\nvoid caller();}\nvoid N::caller(){run();}\n",
+            "void N :: caller ( )",
+            Some("N"),
+            true,
+        ),
+        (
+            "qualified_class.cpp",
+            "void run(){}\nstruct C {void run(){}\nvoid caller();};\nvoid C::caller(){run();}\n",
+            "void C :: caller ( )",
+            Some("C"),
+            true,
+        ),
+        (
+            "qualified_nested.cpp",
+            "void run(){}\nnamespace B {struct C {void run(){}\nvoid caller();};}\nvoid B::C::caller(){run();}\n",
+            "void B :: C :: caller ( )",
+            Some("B::C"),
+            true,
+        ),
+        (
+            "qualified_global.cpp",
+            "void run(){}\nnamespace N {void caller();}\nvoid N::caller(){run();}\n",
+            "void N :: caller ( )",
+            None,
+            true,
+        ),
+        (
+            "qualified_unknown.cpp",
+            "void run(){}\nvoid External::caller(){run();}\n",
+            "void External :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_base.cpp",
+            "void run(){}\nstruct B {void run(){}};\nstruct C:B {void caller();};\nvoid C::caller(){run();}\n",
+            "void C :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_shadow.cpp",
+            "void run(){}\nnamespace N {void run(){}\nvoid caller();}\nvoid N::caller(){auto run=[]{};run();}\n",
+            "void N :: caller ( )",
+            Some("N"),
+            false,
+        ),
+        (
+            "qualified_leak.cpp",
+            "void run(){}\nnamespace N {void run();}\nvoid N::run(){}\nvoid caller(){run();}\n",
+            "void caller ( )",
+            None,
+            true,
+        ),
+    ];
     let cases = [
         (
             "reopened.cpp",
@@ -14423,8 +14523,8 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
             "run",
             false,
         ),
-    ];
-    for (file, content, _, _, _) in cases {
+    ].into_iter().chain(qualified.iter().map(|(file, source, _, _, expected)| (*file, *source, "caller", "run", *expected))).collect::<Vec<_>>();
+    for (file, content, _, _, _) in &cases {
         fs::write(root.join(file), content)?;
     }
     let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
@@ -14470,30 +14570,31 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                         (TS_NAMESPACE_FILE, "caller", "run", present),
                     ]);
                 for (file, caller, target, expected) in checks {
-                    let cli = run_packaged_cli_json(
-                        &executable,
-                        root,
-                        &database,
-                        &[
-                            "symbols",
-                            "relations",
-                            "--view",
-                            "detailed",
-                            "--file",
-                            file,
-                            "--symbol",
-                            caller,
-                            "--relation",
-                            "calls",
-                            "--limit",
-                            "10",
-                        ],
-                    )?;
+                    let qualified_case = qualified.iter().find(|case| case.0 == file);
+                    let mut query = vec![
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--symbol",
+                        caller,
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ];
+                    if let Some((_, _, signature, _, _)) = qualified_case {
+                        query.extend(["--symbol-signature", *signature]);
+                    }
+                    let cli = run_packaged_cli_json(&executable, root, &database, &query)?;
                     let text = session.call_tool(
                         "atlas_symbol_relations",
                         &json!({
                             "project_path": root, "view": "detailed", "file": file,
                             "symbol": caller, "relation": "calls", "limit": 10,
+                            "symbol_signature": qualified_case.map(|case| case.2),
                         }),
                     )?;
                     let mcp: Value = toon_format::decode_default(&text)?;
@@ -14520,6 +14621,14 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                             .into());
                         }
                         rust_binding_equal(&rust_binding_targets(rows), &targets)?;
+                        if expected && let Some((_, _, _, parent, _)) = qualified_case {
+                            for row in rows {
+                                rust_binding_equal(
+                                    &row["target"]["entity"]["selector"]["symbol"]["parent"],
+                                    &json!(parent),
+                                )?;
+                            }
+                        }
                         if expected && (file.starts_with("owner") || file == "local_function.cs") {
                             let parent = if matches!(
                                 file,
@@ -14570,6 +14679,10 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                         .flatten()
                         .find(|function| {
                             function["name"] == target
+                                && qualified_case.is_none_or(|case| {
+                                    function["parent"].as_str().unwrap_or("")
+                                        == case.3.unwrap_or("").rsplit("::").next().unwrap_or("")
+                                })
                                 && (file != "out_of_class.cpp" || function["parent"] == "Api")
                                 && (!matches!(file, "local_function.cs" | "mixed_import.rs")
                                     || function["parent"] == "caller")
