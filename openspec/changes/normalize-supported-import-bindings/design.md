@@ -723,3 +723,26 @@ measures Scope320→336 bytes and unchanged NameBindings56 bytes: at16,384 scope
 this adds at most256KiB per live collector, scaling with the shared active-worker
 budget. Actual affected RSS/cost proof remains required; other targets must not
 inherit an unmeasured size claim.
+
+### Hosted runner provisioning preserves trusted proof selection
+
+The current hosted macOS ARM job was canceled before runner allocation because
+macos-14 is in a scheduled image brownout and retires on November2,2026. The same
+active image pin occurs in CI fallback planning, the accepted/submitted planner,
+release package/install/post-publication matrices and unsupported parser-pack
+verification. Use the supported explicit macos-15 ARM image; retain the separate
+macos-15-intel x64 profile and every existing logical platform/contract.
+
+CI deliberately executes the accepted-base planner. Updating only the submitted
+planner cannot repair an existing base that emits macos-14. Current workflow
+runner provisioning must select the supported ARM image for the trusted logical
+macos-arm64 row while preserving its full contracts and selection. This does not
+execute an untrusted planner or let submitted code narrow proof obligations.
+Extend the existing macOS warning-gate selector to cover all active static ARM
+matrices, submitted planner, bootstrap fallback and this inherited-plan execution
+boundary. Verify the corrected real hosted ARM path; do not retry a retired pin or
+skip the platform. Product source and DER21/SEM21 remain unchanged; retain the immutable artifact
+and its129-file source/build/test binding at3e81518. The109 non-test build/source
+inputs stay byte-identical; refresh the two modified CI-test identities separately
+and reuse the verified product upgrade/cost evidence.
+The source/publication architecture remains unchanged; this is CI provisioning.

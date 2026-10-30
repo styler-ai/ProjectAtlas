@@ -216,6 +216,14 @@ RELEASE_VERSION=v0.5.0
 
 ## CI behavior
 
+- The accepted-base planner owns logical platform and contract selection; the
+  current workflow owns supported runner provisioning. CI provisions the
+  `macos-arm64` row on the explicit `macos-15` ARM image even when an older
+  accepted planner retains a retiring image pin. Intel stays on
+  `macos-15-intel`. The submitted planner, bootstrap matrix, release package,
+  installed/post-publication and unsupported parser-pack matrices retain those
+  same separate architectures. Image maintenance does not narrow proof coverage.
+
 - `01-CI` plans from the exact base-to-head diff, runs selected repository,
   affected Rust package or test-target, and platform contracts concurrently, and
   accepts omissions only through the always-run fail-closed `verify` aggregate.

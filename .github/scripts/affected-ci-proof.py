@@ -112,7 +112,7 @@ PLATFORM_OS = {
     "linux": "ubuntu-latest",
     "windows": "windows-latest",
     "macos-x64": "macos-15-intel",
-    "macos-arm64": "macos-14",
+    "macos-arm64": "macos-15",
 }
 OS_PLATFORM_LABELS = ("linux", "windows", "macos-arm64")
 PLUGIN_PLATFORM_LABELS = ("linux", "windows", "macos-x64", "macos-arm64")

@@ -1,5 +1,53 @@
 # Active context
 
+## Current runner-image gate repair (supersedes readiness below)
+
+Only731/PR737 active; noissueclosed/noRC. Public/localHEAD50fcf24, production3e81518
+DER21/SEM21. Normalnativepush75836 TERMINALPASSall34suites0fail,373CLIunits,
+449symbols+1ignored,53navigation218.18s;docs/security/fullscan/lintPASS.14existing
+untrackedassetadvisories exit0,zerosource/purposefindings. Pythonthreadreplied+
+resolvedafterpublication;19/19resolvedatreadback. PRbodyupdatedsoleFixes731.
+
+Hostedsource41120100367 HEAD50fc: ARMjob124284418474 CANCELLEDbeforeallocation,
+runner_id0/no steps. Exactannotation: scheduledmacos14brownout; retiresNov2,2026.
+/tmp/projectatlas-731-comprehension21-arm-{job,check,annotations}.json.
+Officialgithub.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/
+andactions/runner-images13518 verifyOct30brownout/macOS15ARM supported.
+CodeQL41120094258 running/freshanalyses50fc; open11IDs282/278/277/276/244/243/242/
+241/221/220/216 unchanged. Cleanupownergraph_projection.rs byte-identicalf7→HEAD;
+priorcounterevidenceretained,244confirmedowner738. Noalertdismissals/finalheadwaiver.
+Prstate41120095769PASS; metadataCIafterPRbodyeditmaywaitoldfailedARMsource.
+
+Reopened2.7forrepair; nowrestoredlocal/live8/9 afterlocalhandoffproof,3.1/allacceptanceOPEN. Specdesign/proposal/
+newhosted-runner scenarioupdatedFIRST; strictOpenSpec+IssueOps7/9PASS; independent
+Luna approvedboundedplanbeforeimplementation. PrimarycurrentDIRTYrunnerfix:
+6activepinuses planner1/CIbootstrap1/release3/parserpack1 nowmacos-15; x64stays
+macos-15-intel/contractsunchanged. CRITICALacceptedBASEplanner3efstillproduces14;
+CIe2e-smoke uses `matrix.label == 'macos-arm64' && 'macos-15' || matrix.os` so
+currentworkflowprovisionssupportedARMwithoutnarrowingtrustedbasecoverage.
+Existingmacos_all_features_warning_gate_contract_is_exact extended67lines toassert
+planner/bootstrappairs/exactadapter/allstaticARM+Intelrows. No newselector.
+CausalbeforeFAILoldplanner; pinsonlyFAILmissingadapter; afteradapterPASS.06s;
+planner selftest,3inventory2.62s/Clippy6.47s/fmtPASS. Reviewerapprovedsource, found
+minorbootstrap-pairassertiongap: nowfixedviaadjacenttrimmedlabel/runnerpairsforARM
+ANDIntel, notonlyliteralpresence. 30473 TERMINALPASS refocusedmacOS.06s/3inventory/Clippy6.09s/fmt/
+strictspec onlasttestchange; independentLuna runnerdeltaAPPROVED; logs /tmp/projectatlas-731-runner-image-*.log.
+Nootherlocalbuild/index/timinglease. Docsworkflowupdatedtrust/provisioningboundary.
+
+Immutable214bca/measurement3e staysvalid:129boundfilesinclude20tests/fixtures,
+ALL109non-testproduction/buildinputsverifiedUNCHANGED. TwoCItestidentitieschanged
+(delivery/supportsourcecontract), frozeninventorySHAupdatedafterfmt. Do notclaim
+129productionfiles/all129unchanged. Runtime/DER/SEM/benchfixturesunchanged; reuse
+terminal9970+23846(17upgrades/16normalizedtables/84samples42pairs14fixtures) below.
+
+LatestdeliverySHA8b6cfc1b705f558effc8aac49aa66785de8db6b73b3edb66839a5c183d09751c.
+Next currentmemory/sourcecommit, normalCLEANnativepush
+NOglobalNO_TELEMETRY. Newnormalhooksmayrepeatfullrequiredproof; nobypass. Current
+50fcCI ARMbrownoutisnotsourcefailure, donotretryretiring14. Newhostedjobmustactually
+allocateARMmacos15 fromoldacceptedplan; x64muststayIntel. Finalnative/hosted/security/
+freshfeedback/independentarea5/3.1+fiveacceptance/finalnormalchecks/normalmerge737+
+BOTHclosedreadback before741. Stablepublicationoutsideauthority; goaluntilRC1verified.
+
 ## Current contract21 checkpoint (supersedes historical20 readiness)
 
 Only731/PR737 active; noissueclosed/noRC. PublicHEADb915ebe/sourceb9 DER20/SEM20.
@@ -28,7 +76,7 @@ NavigationSHA70eb69a7bd96f78c1b638deaf1eca243e512158434d17bc6648362597f64789d.
 43caseCPython3.14oracle35compile/29execute,8syntax+6runtimecontrols;workerstubvalid.
 Onlyinvokedbodiesclaimedexecuted. Prior20digestcaptured9d16d41a80b1115f4d0706d7046f1be092fd2bd4a2abc41ba5d78749970d0eb6.
 
-OptimizeddefaultlockedbuildPASS54.31s;129committedproductionfilesverified.
+OptimizeddefaultlockedbuildPASS54.31s;129committedsource/build/testfilesverified.
 Immutable21 ~/.cache/projectatlas-benchmarks/binding-731-comprehension-contract21-20261030/projectatlas
 SHA4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339.
 Buildhelperrelativepath correctedafterbuild, nobuildrepeat;build-session receipt.

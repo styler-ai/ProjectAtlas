@@ -364,3 +364,12 @@ Supported static Rust and ECMAScript re-export aliases SHALL preserve dependency
 #### Scenario: Toolchain names follow actual bindings
 - **WHEN** a local Rust module or imported alias shares a toolchain-root spelling, or an absolute path has edition-dependent ownership
 - **THEN** static external identity follows source binding and owning target edition rather than the alias spelling, preserves genuine standard-toolchain positives, and abstains when absolute ownership is unproved
+
+### Requirement: Hosted acceptance retains supported logical platforms
+The system SHALL retain required logical platform and contract selections while
+provisioning supported runner images for corrected-binding acceptance and its
+release handoff.
+
+#### Scenario: An accepted planner retains a retired image pin
+- **WHEN** the trusted accepted-base planner selects macOS ARM contracts using an image undergoing retirement
+- **THEN** current workflow provisioning selects a supported explicit ARM image without changing trusted selected contracts, retains separate Intel coverage, and keeps CI, package/install/post-publication and unsupported parser-pack matrices consistent

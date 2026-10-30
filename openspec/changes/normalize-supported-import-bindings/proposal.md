@@ -51,3 +51,9 @@ physical source order and can suppress a valid first-iterable call before the bo
 executes. Repair the owning comprehension boundary while preserving containing
 local/global/nonlocal ownership, source evidence and conservative loop/deferred
 behavior. No general iteration-count, runtime value or control-flow inference.
+
+Final hosted-gate compatibility also replaces the retiring macos-14 ARM runner
+across CI, package/install/post-publication and parser-pack verification. Preserve
+trusted-base proof selection and all platform contracts while current workflows
+provision a supported ARM image, including when the accepted planner retains an
+older image pin. Intel coverage and product/runtime compatibility remain unchanged.
