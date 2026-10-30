@@ -10,7 +10,8 @@ The measurements use the optimized contract 16/16 source, including source goals
 host roles, contextual-keyword/arrow recovery and exact module identities, alongside
 the preceding declaration, binding, occurrence and bounded-forwarding repairs,
 shared re-export module storage before staging admission, and reopened native
-container/identifier ownership and deferred instance-field values/writes.
+container/identifier ownership, deferred instance-field values/writes, and shared
+module storage through runtime forwarding queries.
 The source and binary identities are recorded in the compact result. The original
 contract-12 fixtures and raw measurements remain preserved; the three shared fixture
 source sets are unchanged. This evidence remains separate from release acceptance.
@@ -23,20 +24,20 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2867 | 0.3489 | 27800 | 33516 |
-| 64 Cargo roots, 256 callers | 0.3260 | 0.3839 | 28660 | 34596 |
-| Dense/comment/nested source | 0.1668 | 0.1572 | 26700 | 29444 |
-| 256 contextual-keyword calls | 0.0995 | 0.1166 | 23196 | 25644 |
-| 64 script programs, 63 callers | 0.1162 | 0.1443 | 23572 | 27276 |
+| Four Cargo roots, 256 callers | 0.2865 | 0.3446 | 29252 | 33172 |
+| 64 Cargo roots, 256 callers | 0.3304 | 0.3866 | 29960 | 34624 |
+| Dense/comment/nested source | 0.1642 | 0.1593 | 28000 | 29760 |
+| 256 contextual-keyword calls | 0.0978 | 0.1148 | 25048 | 25944 |
+| 64 script programs, 63 callers | 0.1128 | 0.1385 | 25232 | 27392 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-The root initial-time ratios are 1.217 and 1.178; maximum-RSS ratios
-are 1.206 and 1.207. Dense Rust time/RSS ratios are
-0.942/1.103. Native contextual time/RSS ratios are
-1.172/1.106, and host ratios are 1.242/1.157.
+The root initial-time ratios are 1.203 and 1.170; maximum-RSS ratios
+are 1.134 and 1.156. Dense Rust time/RSS ratios are
+0.970/1.063. Native contextual time/RSS ratios are
+1.174/1.036, and host ratios are 1.228/1.086.
 Both contextual fixtures lack the selected named caller anchor in the baseline;
 these compare different successfully extracted work. They establish neither a
 general speedup nor a root-count asymptotic bound beyond these inputs.
@@ -164,27 +165,51 @@ This targeted repair does not waive the separate release performance gates.
 
 The current contract-16 comparison adds 256 same-file C++ namespaces, each reopened
 with a caller of its original declaration. Three alternating paired rounds against
-the preceding optimized contract-14 source measured 0.1895 versus
-0.1864 seconds median and 32,276 versus 31,644 KiB maximum RSS.
+the preceding optimized contract-14 source measured 0.1883 versus
+0.1828 seconds median and 32,908 versus 31,484 KiB maximum RSS.
 Every candidate sample verifies the selected resolved call and zero-parsed no-op.
-The source-unit and real CLI/MCP selector additionally cover nested/anonymous C++
-visibility and conservative competition, canonical C# partial owners and generic
-identity, TypeScript exported/private closures and writes, source edits, full
-convergence, canonical summaries and project identity. Generic owner identity
-shares the existing aggregate lexical budget, with overflow and near-limit tests.
-This bounded local cost comparison grants no #708 SLO exception.
+Source-unit and CLI/MCP controls cover nested/anonymous C++ visibility, ambiguity,
+canonical C# partial owners, TypeScript shared/private owners, source edits, full
+convergence, summaries and identity. Generic identities share the existing lexical
+budget, with overflow and near-limit controls. No release SLO exception is granted.
 
 The field regression adds 256 classes with instance-field calls to a unique later
 enclosing callable. Against contract15, three alternating paired rounds measured
-0.1191 versus 0.1161 seconds median and 25,692 versus 25,532 KiB maximum RSS.
+0.1173 versus 0.1182 seconds median and 26,156 versus 25,644 KiB maximum RSS.
 Every candidate sample checks all 256 resolved occurrences and a zero-parsed no-op.
-The baseline performs incorrect unresolved work, so this does not establish a
-general speedup. Causal source controls cover captured writes, exports, static
-fields/blocks, computed names, decorators, class headers, immediate construction
-and nested callbacks across JS/TS/TSX and every admitted script role. The permanent
-source-context selector additionally checks 28 native/host field cases through
-CLI/MCP graph and caller-summary adapters, source edits, full convergence and no-op.
+The baseline performs incorrect unresolved work, so this establishes no general
+speedup. Causal controls cover captured writes/exports, immediate class syntax,
+decorators and callbacks across JS/TS/TSX and every admitted host role. The permanent
+source-context selector checks 28 field cases through CLI/MCP graph and summaries,
+source edits, full convergence, identity and no-op.
 
-The earlier re-export storage comparison above retains its exact contract-14
-source/binary identities in the compact result as historical causal evidence;
-the five-fixture table and reopened-container/field comparisons use current16.
+Runtime forwarding queries now retain the source module Arc through construction,
+cache hits and frame clones. A 1,902,910-byte exporter with 8,000 aliases and a
+1,800,002-byte module feeds 7,997 namespace-member calls plus one normal positive
+call; two imports keep the caller exactly within its existing 8,000-relation cap.
+Three alternating paired optimized rounds against the preceding contract16 source
+measured 3.6967 versus 2.0392 seconds median
+(44.8% less elapsed time), with maximum RSS 129,368 versus 130,632 KiB.
+This removes cumulative copying; it does not claim a material peak-memory reduction.
+Every sample verifies all 7,998 calls via the canonical summary, a normal exact
+caller and a zero-parsed no-op. A one-row graph query correctly reports an
+`at_least` total, not a full count; it was not used as the completeness oracle.
+
+The causal pointer test fails before the fix and passes afterward; a separate
+value-ordering control preserves cache identity across distinct allocations.
+Budget refusal, cycle/depth, cleanup and cancellation tests pass. The permanent
+bare-var forwarding selector adds a smaller long-module workload across JS/TS/TSX,
+including unresolved and normal positive CLI/MCP navigation and changed-source
+MCP indexing. Ordinary native imports retain their existing 240-character
+canonical-admission boundary; they cannot deliver this long module to the
+per-leaf import producer or import-scope cache. Those adjacent paths need no new
+restriction or speculative rewrite. Source-fact/cache ownership charges shared
+bytes; query-owned text and headers remain accounted before retained growth.
+
+The allocation-only fix retains DER16/SEM16. Current same-contract runtime reuse
+preserves publication, identity and all approved purposes, and a full rebuild
+retains normal navigation. The earlier re-export storage comparison above keeps
+its exact contract-14 source/binary identities as historical causal evidence.
+All current table/namespace/field/query comparisons bind the source and binary
+recorded in the compact result. Full combined #708 and installed #715 proof remains
+mandatory before RC1 publication.

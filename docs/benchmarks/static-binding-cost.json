@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-30",
-  "source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
+  "source_commit": "53df7de11dbfe92cad8be722bb12a3ac01888f24",
   "derivation_contract": 16,
   "semantic_contract": 16,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
+  "candidate_binary_sha256": "f3579e3cf67590e73744b3326a2076c7a36dd3a8da46c39294081b3d00959287",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -34,8 +34,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.2867430510232225,
-          "peak_rss_kib": 27800,
+          "wall_seconds": 0.28647581400582567,
+          "peak_rss_kib": 29252,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -47,8 +47,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3488813189906068,
-          "peak_rss_kib": 33516,
+          "wall_seconds": 0.34464578999904916,
+          "peak_rss_kib": 33172,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -67,8 +67,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.32600403201649897,
-          "peak_rss_kib": 28660,
+          "wall_seconds": 0.33036425500176847,
+          "peak_rss_kib": 29960,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -80,8 +80,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.38393060700036585,
-          "peak_rss_kib": 34596,
+          "wall_seconds": 0.38660955301020294,
+          "peak_rss_kib": 34624,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -100,8 +100,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.16679276098147966,
-          "peak_rss_kib": 26700,
+          "wall_seconds": 0.16416144798859023,
+          "peak_rss_kib": 28000,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -113,8 +113,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.15718423400539905,
-          "peak_rss_kib": 29444,
+          "wall_seconds": 0.15926673699868843,
+          "peak_rss_kib": 29760,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -133,8 +133,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.09950808400753886,
-          "peak_rss_kib": 23196,
+          "wall_seconds": 0.0977554339915514,
+          "peak_rss_kib": 25048,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -146,8 +146,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11659835898899473,
-          "peak_rss_kib": 25644,
+          "wall_seconds": 0.11479721800424159,
+          "peak_rss_kib": 25944,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -166,8 +166,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.1162025929952506,
-          "peak_rss_kib": 23572,
+          "wall_seconds": 0.11284464699565433,
+          "peak_rss_kib": 25232,
           "work": {
             "candidates": 1,
             "parsed": 1,
@@ -179,8 +179,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14428190400940366,
-          "peak_rss_kib": 27276,
+          "wall_seconds": 0.13854387399624102,
+          "peak_rss_kib": 27392,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -238,18 +238,18 @@
   "reopened_containers": {
     "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
     "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
-    "candidate_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
-    "candidate_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
+    "candidate_source_commit": "53df7de11dbfe92cad8be722bb12a3ac01888f24",
+    "candidate_binary_sha256": "f3579e3cf67590e73744b3326a2076c7a36dd3a8da46c39294081b3d00959287",
     "logical_namespaces": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.1895288759842515,
-        "peak_rss_kib": 32276
+        "wall_seconds": 0.1882645600126125,
+        "peak_rss_kib": 32908
       },
       "candidate": {
-        "wall_seconds": 0.18635384799563326,
-        "peak_rss_kib": 31644
+        "wall_seconds": 0.18277459300588816,
+        "peak_rss_kib": 31484
       }
     },
     "source_hashes": {
@@ -262,18 +262,18 @@
   "instance_fields": {
     "baseline_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
     "baseline_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
-    "candidate_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
-    "candidate_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
+    "candidate_source_commit": "53df7de11dbfe92cad8be722bb12a3ac01888f24",
+    "candidate_binary_sha256": "f3579e3cf67590e73744b3326a2076c7a36dd3a8da46c39294081b3d00959287",
     "classes": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.11911487000179477,
-        "peak_rss_kib": 25692
+        "wall_seconds": 0.11729076100164093,
+        "peak_rss_kib": 26156
       },
       "candidate": {
-        "wall_seconds": 0.11611516898847185,
-        "peak_rss_kib": 25532
+        "wall_seconds": 0.11819352800375782,
+        "peak_rss_kib": 25644
       }
     },
     "source_hashes": {
@@ -282,5 +282,45 @@
       "Cargo.toml": "6cd620ff096dd9d1f0c7d4917d6acd70116d99d9313304b98730080d2af5b4b8"
     },
     "scope": "Instance field calls to a unique later enclosing binding, all256 candidate occurrences and zero-parsed noop checked after each sample; baseline performs incorrect unresolved work, no release SLO exception"
+  },
+  "forwarding_query_modules": {
+    "baseline_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
+    "baseline_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
+    "candidate_source_commit": "53df7de11dbfe92cad8be722bb12a3ac01888f24",
+    "candidate_binary_sha256": "f3579e3cf67590e73744b3326a2076c7a36dd3a8da46c39294081b3d00959287",
+    "export_slots": 8000,
+    "member_calls": 7997,
+    "module_bytes": 1800002,
+    "source_sizes": {
+      ".gitignore": 15,
+      "barrel.js": 1902910,
+      "target.js": 25,
+      "caller.js": 86953
+    },
+    "source_hashes": {
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "barrel.js": "53e53a965fd7a9067dc5f6661611405188e75b5c4e3758f28bcbd9ab83044572",
+      "target.js": "daf7c1ff3c305ff0d909f412f001c3ccf10944e05854f628b777b2e0a0908816",
+      "caller.js": "8f8fb02ae8b18d812a42ae86942c572710720fb5b70a9863e7f6fc4159e84b65"
+    },
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 3.696656144980807,
+        "max_peak_rss_kib": 129368
+      },
+      "candidate": {
+        "wall_seconds": 2.0391937940148637,
+        "max_peak_rss_kib": 130632
+      }
+    },
+    "normal_positive_each_sample": true,
+    "complete_calls_each_sample": 7998,
+    "noop_parsed_each_sample": 0,
+    "same_contract_compatibility": {
+      "same_contract_noop": true,
+      "identity_and_approved_preserved": true
+    },
+    "scope": "Source-owned module storage survives query/cache/frame consumers, no public key/fact/schema change, same DER16/SEM16; cumulative copies removed, peak parser memory not materially reduced; no release SLO waiver"
   }
 }
