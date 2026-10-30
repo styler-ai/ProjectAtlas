@@ -13,6 +13,7 @@ use crate::semantic::{EcmascriptNameContext, EcmascriptNameRole};
 use crate::{SourceCallBinding, SourceSemanticFacts, declaration_kind, node_name};
 
 mod container_scopes;
+mod declaration_collisions;
 mod native_identifiers;
 
 /// One actual parsed program, borrowing its tree until binding has completed.
@@ -111,16 +112,21 @@ enum EcmaPatternEffect {
     Write(usize),
 }
 
-/// Kotlin instance membership and its constructor-only initialization view.
+/// Language-owned type and construction environments without runtime inference.
 #[derive(Clone, Copy, Default)]
-enum KotlinScope {
+enum NativeContainerScope {
     /// Lexical, callable or singleton-object environment without an instance boundary.
     #[default]
     Ordinary,
     /// Instance members require an outer receiver across inner-class boundaries.
-    Instance {
+    KotlinInstance {
         /// Constructor parameter view used by property expressions and init blocks.
         initialization: Option<usize>,
+    },
+    /// C# type members use a separate primary-parameter initialization view.
+    CSharpType {
+        /// Shared priority view, including partial parts before the primary declaration.
+        initialization: usize,
     },
 }
 
@@ -342,7 +348,7 @@ struct Scope {
     /// Whether Python function lookup must skip this class body.
     class: bool,
     /// Kotlin instance ownership and constructor-only lookup view.
-    kotlin: KotlinScope,
+    native_container: NativeContainerScope,
     /// Python iteration variables stay inside their comprehension environment.
     comprehension: bool,
     /// Earliest outer lookup phase for deferred code; zero keeps immediate order.
@@ -357,6 +363,8 @@ struct Scope {
     python_reads: BTreeMap<String, usize>,
     /// Java method names occupy a separate namespace from expression names.
     methods: BTreeMap<String, NameBindings>,
+    /// Mandatory Java methods with no source declaration, indexed by fixed arity.
+    java_implicit_methods: BTreeMap<String, usize>,
     /// Rust module names and C++ constructor types are separate from value names.
     namespaces: BTreeMap<String, NameBindings>,
     /// Actual Rust inline module path, independent from callable display parents.
@@ -381,6 +389,8 @@ struct CallSite {
     member: Option<String>,
     /// A Java simple method invocation is not a callable-value expression.
     method_name: bool,
+    /// Source argument count distinguishes disjoint implicit/explicit Java overloads.
+    argument_count: Option<usize>,
     /// Static path proof independent from the call's presentation text.
     qualified: Option<crate::ImportReference>,
     /// Exact callee or callback occurrence, rather than the enclosing invocation.
@@ -425,6 +435,8 @@ struct LexicalCollector<'a> {
     declarations: BTreeMap<(usize, usize, &'a str, &'a str), DeclarationOrdinals<'a>>,
     /// At most one bounded name admission per emitted ECMAScript declaration.
     declaration_names: Vec<DeclarationBindingName>,
+    /// Logical lexical owner captured before entering each declaration body.
+    declaration_scopes: Vec<Option<usize>>,
     /// Admitted calls awaiting visibility lookup after collection.
     sites: Vec<CallSite>,
     /// Explicit export slots collected from the same native tree.
@@ -510,6 +522,7 @@ pub(super) fn bind_calls<E>(
         } else {
             Vec::new()
         },
+        declaration_scopes: vec![None; graph.symbols.len()],
         sites: Vec::new(),
         exports: Vec::new(),
         export_scopes: Vec::new(),
@@ -691,6 +704,10 @@ pub(super) fn bind_calls<E>(
             }
         }
     }
+    let collisions = collector.declaration_identity_collisions(check)?;
+    if collisions.iter().any(|collision| *collision) {
+        declaration_collisions::guard_scope_bindings(&mut collector.scopes, &collisions, check)?;
+    }
     let mut decisions = Vec::with_capacity(collector.sites.len());
     for site in &collector.sites {
         check()?;
@@ -698,7 +715,11 @@ pub(super) fn bind_calls<E>(
             site.fact,
             site.owner,
             site.span,
-            collector.resolve(site, check)?,
+            if site.owner.is_some_and(|owner| collisions[owner]) {
+                SourceCallBinding::Unresolved
+            } else {
+                collector.resolve(site, check)?
+            },
         ));
     }
     let mut candidate_calls = Vec::new();
@@ -707,14 +728,22 @@ pub(super) fn bind_calls<E>(
         && collector.rust.as_ref().is_some_and(|rust| rust.complete)
     {
         for site in &collector.sites {
+            check()?;
+            if site.owner.is_some_and(|owner| collisions[owner]) {
+                continue;
+            }
             if let Some(bindings) = collector.rust_import_candidates(site, check)? {
+                // Colliding targets were withdrawn as whole winning groups
+                // before either ordinary or import-candidate lookup.
                 candidate_calls.push(bindings);
             }
         }
     }
     if let Some(rust) = &mut collector.rust {
         rust.candidate_calls = candidate_calls;
+        declaration_collisions::guard_rust_declarations(rust, &collisions, check)?;
     }
+    declaration_collisions::guard_exports(&mut collector.exports, &collisions, check)?;
     let exports = std::mem::take(&mut collector.exports);
     let exports_incomplete = collector.exports_incomplete;
     let rust = collector.rust.take();
@@ -1279,6 +1308,9 @@ impl LexicalCollector<'_> {
 
     /// Member names enter ordinary lexical values only where the language allows it.
     fn declaration_is_lexical_value(&self, node: Node<'_>, kind: SymbolKind) -> bool {
+        if self.csharp() && csharp_explicit_interface_member(node) {
+            return false;
+        }
         if self.language == "rust" && is_rust_associated_member(node) {
             return false;
         }
@@ -1488,7 +1520,17 @@ impl LexicalCollector<'_> {
         };
         let function = is_function(node.kind())
             || self.language == "kotlin"
-                && matches!(node.kind(), "secondary_constructor" | "getter" | "setter");
+                && matches!(node.kind(), "secondary_constructor" | "getter" | "setter")
+            || self.csharp()
+                && matches!(
+                    node.kind(),
+                    "accessor_declaration"
+                        | "indexer_declaration"
+                        | "local_function_statement"
+                        | "anonymous_method_expression"
+                        | "operator_declaration"
+                        | "conversion_operator_declaration"
+                );
         // Java bodies also own interface/enum/record and anonymous members.
         // Select the body rather than adding a second scope to named classes.
         let class = if self.language == "java" {
@@ -1502,6 +1544,9 @@ impl LexicalCollector<'_> {
                     node.kind(),
                     "class_body" | "enum_class_body" | "object_declaration" | "companion_object"
                 )
+        } else if self.csharp() {
+            is_class(node.kind())
+                || matches!(node.kind(), "record_declaration" | "interface_declaration")
         } else {
             is_class(node.kind())
         };
@@ -1522,6 +1567,18 @@ impl LexicalCollector<'_> {
             && let Some(symbol) = declaration
         {
             self.admit_declaration_name(node, symbol, scope, check)?;
+        }
+        if let Some(symbol) = declaration {
+            let owner = if self.ecmascript() {
+                match self.declaration_names.get(symbol) {
+                    Some(DeclarationBindingName::Admitted { scope, .. }) => *scope,
+                    _ => scope,
+                }
+            } else {
+                scope
+            };
+            let owner = self.binding_scope(owner);
+            self.declaration_scopes[symbol] = Some(owner);
         }
         if self.language == "rust"
             && self.scopes[scope].rust_item_owner != RustItemOwner::UnsupportedModule
@@ -1750,7 +1807,10 @@ impl LexicalCollector<'_> {
                     )
                     && !kotlin_inner_classifier(node, self.content)
                 {
-                    while matches!(self.scopes[parent].kotlin, KotlinScope::Instance { .. }) {
+                    while matches!(
+                        self.scopes[parent].native_container,
+                        NativeContainerScope::KotlinInstance { .. }
+                    ) {
                         check()?;
                         let Some(outer) = self.scopes[parent].parent else {
                             break;
@@ -1814,17 +1874,17 @@ impl LexicalCollector<'_> {
                         EcmascriptVarEnvironment::Enclosing
                     },
                     class,
-                    kotlin: if self.language == "kotlin"
+                    native_container: if self.language == "kotlin"
                         && matches!(node.kind(), "class_body" | "enum_class_body")
                         && node
                             .parent()
                             .is_some_and(|owner| owner.kind() == "class_declaration")
                     {
-                        KotlinScope::Instance {
+                        NativeContainerScope::KotlinInstance {
                             initialization: None,
                         }
                     } else {
-                        KotlinScope::Ordinary
+                        NativeContainerScope::Ordinary
                     },
                     enclosing_visibility_floor: if (function
                         && (self.language == "python" || self.ecmascript())
@@ -1885,6 +1945,23 @@ impl LexicalCollector<'_> {
                 self.ecma_context = body_context;
             }
         }
+        if self.csharp()
+            && matches!(
+                node.kind(),
+                "class_declaration"
+                    | "struct_declaration"
+                    | "record_declaration"
+                    | "interface_declaration"
+            )
+        {
+            self.csharp_type_scope(node, scope, check)?;
+        }
+        if self.language == "java" && class {
+            self.java_implicit_method_blockers(node, scope, check)?;
+        }
+        if self.language == "kotlin" && matches!(node.kind(), "getter" | "setter") {
+            self.bind(scope, "field".to_string(), 0, true, BindingTarget::Shadow);
+        }
         if self.language == "kotlin" {
             if node.kind() == "class_declaration" {
                 self.kotlin_constructor_bindings(node, scope, false, true, check)?;
@@ -1906,7 +1983,7 @@ impl LexicalCollector<'_> {
                         ..Scope::default()
                     });
                     self.kotlin_constructor_bindings(owner, initialization, false, false, check)?;
-                    self.scopes[scope].kotlin = KotlinScope::Instance {
+                    self.scopes[scope].native_container = NativeContainerScope::KotlinInstance {
                         initialization: Some(initialization),
                     };
                 }
@@ -2109,6 +2186,16 @@ impl LexicalCollector<'_> {
                     method_name: self.language == "java"
                         && node.kind() == "method_invocation"
                         && node.child_by_field_name("object").is_none(),
+                    argument_count: if self.language == "java" {
+                        node.child_by_field_name("arguments").map(|arguments| {
+                            arguments
+                                .named_children(&mut arguments.walk())
+                                .filter(|argument| !argument.is_extra())
+                                .count()
+                        })
+                    } else {
+                        None
+                    },
                     qualified,
                     span: target
                         .filter(|target| {
@@ -2150,10 +2237,13 @@ impl LexicalCollector<'_> {
                 && node
                     .child_by_field_name("body")
                     .is_none_or(|body| body.id() != child.id());
-            let initialization = match self.scopes[scope].kotlin {
-                KotlinScope::Instance { initialization } => initialization,
-                KotlinScope::Ordinary => None,
+            let initialization = match self.scopes[scope].native_container {
+                NativeContainerScope::KotlinInstance { initialization } => initialization,
+                NativeContainerScope::CSharpType { initialization } => Some(initialization),
+                NativeContainerScope::Ordinary => None,
             };
+            let csharp_initialization = initialization
+                .filter(|_| self.csharp() && csharp_initializer_child(node, child, self.content));
             let kotlin_initialization = initialization.filter(|_| {
                 self.language == "kotlin"
                     && (child.kind() == "anonymous_initializer"
@@ -2171,7 +2261,7 @@ impl LexicalCollector<'_> {
             });
             self.visit(
                 child,
-                if let Some(initialization) = kotlin_initialization {
+                if let Some(initialization) = kotlin_initialization.or(csharp_initialization) {
                     initialization
                 } else if python_definition_header || computed_method_key || immediate_field_syntax
                 {
@@ -2184,6 +2274,131 @@ impl LexicalCollector<'_> {
             if self.ecmascript() {
                 self.scopes[scope].ecma_context = saved_context;
             }
+        }
+        Ok(())
+    }
+
+    /// Known but unrepresented Java members cannot authorize an unrelated outer method.
+    fn java_implicit_method_blockers<E>(
+        &mut self,
+        body: Node<'_>,
+        scope: usize,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let Some(owner) = body.parent() else {
+            return Ok(());
+        };
+        if body.kind() == "enum_body" || owner.kind() == "enum_constant" {
+            for (name, arity) in [("values", 0), ("valueOf", 1)] {
+                check()?;
+                if !self.admit_binding() {
+                    return Ok(());
+                }
+                self.scopes[scope]
+                    .java_implicit_methods
+                    .insert(name.to_string(), arity);
+            }
+        }
+        if owner.kind() != "record_declaration" {
+            return Ok(());
+        }
+        let Some(parameters) = owner.child_by_field_name("parameters") else {
+            return Ok(());
+        };
+        if parameters.named_child_count() == 0 {
+            return Ok(());
+        }
+        let graph = self.graph;
+        let mut accessors = BTreeSet::new();
+        for method in body.named_children(&mut body.walk()) {
+            check()?;
+            if method.kind() == "method_declaration"
+                && !method.has_error()
+                && method
+                    .child_by_field_name("parameters")
+                    .is_some_and(|parameters| {
+                        parameters
+                            .named_children(&mut parameters.walk())
+                            .all(|parameter| parameter.kind() == "receiver_parameter")
+                    })
+                && let Some(symbol) = self.declaration(method)
+            {
+                let name = graph.symbols[symbol].name.as_str();
+                if !accessors.contains(name) {
+                    if !self.admit_binding() {
+                        return Ok(());
+                    }
+                    accessors.insert(name);
+                }
+            }
+        }
+        for parameter in parameters.named_children(&mut parameters.walk()) {
+            check()?;
+            let name = parameter.child_by_field_name("name").or_else(|| {
+                parameter
+                    .named_children(&mut parameter.walk())
+                    .find(|child| child.kind() == "variable_declarator")
+                    .and_then(|declarator| declarator.child_by_field_name("name"))
+            });
+            if let Some(name) = name.and_then(|name| self.identifier(name))
+                && !accessors.contains(name.as_str())
+            {
+                if !self.admit_binding() {
+                    return Ok(());
+                }
+                self.scopes[scope].java_implicit_methods.insert(name, 0);
+            }
+        }
+        Ok(())
+    }
+
+    /// The grammar registry already normalizes both C# spellings to this owner.
+    fn csharp(&self) -> bool {
+        matches!(self.language, "csharp" | "c_sharp")
+    }
+
+    /// Retain one shared member view and phase-specific primary-parameter precedence.
+    fn csharp_type_scope<E>(
+        &mut self,
+        node: Node<'_>,
+        scope: usize,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let initialization = if let NativeContainerScope::CSharpType { initialization } =
+            self.scopes[scope].native_container
+        {
+            initialization
+        } else {
+            if !self.admit_scope() {
+                return Ok(());
+            }
+            let initialization = self.scopes.len();
+            self.scopes.push(Scope {
+                parent: Some(scope),
+                owner: self.scopes[scope].owner,
+                ..Scope::default()
+            });
+            self.scopes[scope].native_container =
+                NativeContainerScope::CSharpType { initialization };
+            initialization
+        };
+        self.scopes[scope].container_body = node.child_by_field_name("body").map(|body| body.id());
+        if node
+            .named_children(&mut node.walk())
+            .any(|child| child.kind() == "parameter_list")
+        {
+            if !self.admit_scope() {
+                return Ok(());
+            }
+            let parameters = self.scopes.len();
+            self.scopes.push(Scope {
+                parent: self.scopes[scope].parent,
+                owner: self.scopes[scope].owner,
+                ..Scope::default()
+            });
+            self.scopes[scope].parent = Some(parameters);
+            self.parameters(node, parameters, check)?;
+            self.parameters(node, initialization, check)?;
         }
         Ok(())
     }
@@ -2556,6 +2771,15 @@ impl LexicalCollector<'_> {
         scope: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.csharp()
+            && function.kind() == "accessor_declaration"
+            && function
+                .child_by_field_name("name")
+                .is_some_and(|name| matches!(name.kind(), "set" | "init" | "add" | "remove"))
+        {
+            self.bind(scope, "value".to_string(), 0, true, BindingTarget::Shadow);
+            return Ok(());
+        }
         if self.language == "kotlin" && function.kind() == "setter" {
             let mut cursor = function.walk();
             if let Some(name) = function
@@ -2750,6 +2974,12 @@ impl LexicalCollector<'_> {
         mut scope: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.csharp()
+            && matches!(node.kind(), "property_declaration" | "event_declaration")
+            && csharp_explicit_interface_member(node)
+        {
+            return Ok(());
+        }
         if self.language == "rust" && node.kind() == "const_item" && is_rust_associated_member(node)
         {
             return Ok(());
@@ -2810,7 +3040,12 @@ impl LexicalCollector<'_> {
             | ("kotlin", "variable_declaration" | "catch_block")
             | (
                 "csharp" | "c_sharp",
-                "declaration_pattern" | "var_pattern" | "recursive_pattern" | "catch_declaration",
+                "property_declaration"
+                | "event_declaration"
+                | "declaration_pattern"
+                | "var_pattern"
+                | "recursive_pattern"
+                | "catch_declaration",
             )
             | ("zig", "variable_declaration")
             | ("rust", "const_item" | "static_item" | "const_parameter")
@@ -2938,7 +3173,12 @@ impl LexicalCollector<'_> {
             self.mutation_names(pattern, evaluation_scope, node.end_byte(), check)?;
             return Ok(());
         }
-        let from = if self.language == "kotlin" && (scope == 0 || self.scopes[scope].class) {
+        let from = if self.language == "kotlin" && (scope == 0 || self.scopes[scope].class)
+            || self.csharp()
+                && matches!(
+                    self.scopes[scope].native_container,
+                    NativeContainerScope::CSharpType { .. }
+                ) {
             // Kotlin declaration scopes reserve members independently of source order.
             0
         } else if matches!(self.language, "c" | "cpp" | "objective-c")
@@ -3855,6 +4095,13 @@ impl LexicalCollector<'_> {
                 current = self.scopes[scope].parent;
                 continue;
             }
+            if site.method_name
+                && let Some(arity) = self.scopes[scope].java_implicit_methods.get(name)
+                && (site.argument_count.is_none_or(|actual| actual == *arity)
+                    || !self.scopes[scope].methods.contains_key(name))
+            {
+                return Ok(SourceCallBinding::Shadowed);
+            }
             let bindings = if site.method_name {
                 self.scopes[scope].methods.get(name)
             } else if self.language == "rust" && site.member.is_some() {
@@ -4083,6 +4330,48 @@ fn is_function(kind: &str) -> bool {
             | "closure_expression"
             | "lambda"
     )
+}
+
+/// Explicit interface implementations are unavailable through ordinary class-name lookup.
+fn csharp_explicit_interface_member(node: Node<'_>) -> bool {
+    node.named_children(&mut node.walk())
+        .any(|child| child.kind() == "explicit_interface_specifier")
+}
+
+/// C# primary parameters outrank members only in instance initialization/base arguments.
+fn csharp_initializer_child(node: Node<'_>, child: Node<'_>, content: &str) -> bool {
+    let static_owner = |owner: Node<'_>| {
+        owner.named_children(&mut owner.walk()).any(|modifier| {
+            modifier.kind() == "modifier"
+                && modifier.utf8_text(content.as_bytes()).ok() == Some("static")
+        })
+    };
+    if matches!(
+        node.kind(),
+        "class_declaration" | "struct_declaration" | "record_declaration"
+    ) {
+        return child.kind() == "base_list";
+    }
+    if node.kind() == "property_declaration" {
+        return !static_owner(node)
+            && child.kind() != "arrow_expression_clause"
+            && node
+                .child_by_field_name("value")
+                .is_some_and(|value| value.id() == child.id());
+    }
+    node.kind() == "variable_declarator"
+        && node
+            .child_by_field_name("name")
+            .is_none_or(|name| name.id() != child.id())
+        && node
+            .parent()
+            .and_then(|declaration| declaration.parent())
+            .is_some_and(|owner| {
+                matches!(
+                    owner.kind(),
+                    "field_declaration" | "event_field_declaration"
+                ) && !static_owner(owner)
+            })
 }
 
 /// Only an explicit Kotlin inner modifier retains an enclosing instance environment.
@@ -4830,11 +5119,11 @@ function caller() { renamed(); tools.work(); }
             ),
             (
                 "namespace { void run() {} } void caller() { run(); } void run() {}",
-                true,
+                false,
             ),
             (
                 "void run() {} void caller() { run(); } namespace { void run() {} }",
-                true,
+                false,
             ),
             (
                 "namespace A { namespace { void run() {} } } namespace B { void caller() { run(); } }",
@@ -4845,8 +5134,8 @@ function caller() { renamed(); tools.work(); }
                 false,
             ),
         ] {
-            // Separate declaration rows so duplicate display metadata does not
-            // independently force the graph's conservative identity abstention.
+            // Keep rows distinct to exercise canonical selector collisions as
+            // well as lexical visibility, independent of same-line matching.
             let content = content.replace("} ", "}\n");
             let result = extract_symbol_graph_with_semantics_controlled(
                 "anonymous.cpp",
@@ -6426,6 +6715,12 @@ function caller() { renamed(); tools.work(); }
                 .collect::<Vec<_>>();
             assert!(targets.len() >= 2, "{source}: {graph:?}");
             for call in calls {
+                if source.starts_with("enum Both") {
+                    // Constant-specific members share raw enum parent metadata;
+                    // their distinct body scopes cannot grant one graph target.
+                    assert_eq!(call.binding, SourceCallBinding::Unresolved, "{call:?}");
+                    continue;
+                }
                 assert!(
                     matches!(call.binding, SourceCallBinding::LocalDeclaration(_)),
                     "{source}: {call:?}"
@@ -6753,6 +7048,639 @@ function caller() { renamed(); tools.work(); }
                 graph.symbols[target].kind,
                 projectatlas_core::symbols::SymbolKind::Method,
                 "{source}: {graph:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_accessor_and_parameter_environments_block_false_outer_calls() {
+        let mut failures = Vec::new();
+        for (label, language, name, source, shadowed) in [
+            (
+                "Kotlin backing getter",
+                "kotlin",
+                "field",
+                "fun field(){}\nclass Api {\nvar callback:()->Unit = {}\nget(){field();return field}\n}\nfun caller(){field()}\n",
+                true,
+            ),
+            (
+                "Kotlin backing setter",
+                "kotlin",
+                "field",
+                "fun field(){}\nclass Api {\nvar callback:()->Unit = {}\nset(next){field();field=next}\n}\nfun caller(){field()}\n",
+                true,
+            ),
+            (
+                "CSharp setter",
+                "csharp",
+                "value",
+                "using System;class Api {static void value(){} Action Callback {set{value();}} static void caller(){value();}}",
+                true,
+            ),
+            (
+                "CSharp arrow setter",
+                "csharp",
+                "value",
+                "using System;class Api {static void value(){} Action Callback {set=>value();} static void caller(){value();}}",
+                true,
+            ),
+            (
+                "CSharp init",
+                "csharp",
+                "value",
+                "using System;class Api {static void value(){} Action Callback {get=>()=>{};init{value();}} static void caller(){value();}}",
+                true,
+            ),
+            (
+                "CSharp event add",
+                "csharp",
+                "value",
+                "using System;class Api {static void value(){} event Action Callback {add{value();}remove{}} static void caller(){value();}}",
+                true,
+            ),
+            (
+                "CSharp event remove",
+                "csharp",
+                "value",
+                "using System;class Api {static void value(){} event Action Callback {add{}remove{value();}} static void caller(){value();}}",
+                true,
+            ),
+            (
+                "CSharp getter positive",
+                "csharp",
+                "value",
+                "using System;class Api {static void value(){} Action Callback {get{value();return()=>{};}} static void caller(){value();}}",
+                false,
+            ),
+            (
+                "CSharp indexer",
+                "csharp",
+                "run",
+                "using System;class Api {static void run(){} Action this[Action run] {get{run();return run;}} static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp local function",
+                "csharp",
+                "run",
+                "using System;class Api {static void run(){} void caller(){void inner(Action run){run();}run();}}",
+                true,
+            ),
+            (
+                "CSharp anonymous delegate",
+                "csharp",
+                "run",
+                "using System;class Api {static void run(){} void caller(){Action<Action> callback=delegate(Action run){run();};run();}}",
+                true,
+            ),
+            (
+                "CSharp operator",
+                "csharp",
+                "run",
+                "using System;class Api {static void run(){} public static Api operator+(Api self,Action run){run();return self;} static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp conversion",
+                "csharp",
+                "run",
+                "using System;class Api {static void run(){} public static implicit operator Api(Action run){run();return new Api();} static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp primary class",
+                "csharp",
+                "run",
+                "using System;class Outer {static void run(){} class Api(Action run){void inside(){run();}} static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp primary struct",
+                "csharp",
+                "run",
+                "using System;class Outer {static void run(){} struct Api(Action run){void inside(){run();}} static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp positional record",
+                "csharp",
+                "run",
+                "using System;class Outer {static void run(){} record Api(Action run){void inside(){run();}} static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp primary member precedence",
+                "csharp",
+                "run",
+                "using System;class Api(Func<int> run){Func<int> callback=()=>run();int run()=>0;void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp primary property initializer",
+                "csharp",
+                "run",
+                "using System;class Api(Func<int> run){Func<int> Callback{get;}=()=>run();int run()=>0;void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp primary event initializer",
+                "csharp",
+                "run",
+                "using System;class Api(Func<int> run){event Func<int> Callback=()=>run();int run()=>0;void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp primary base argument",
+                "csharp",
+                "run",
+                "using System;class Base{public Base(int x){}}class Api(Func<int> run):Base(run()){int run()=>0;void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp partial primary earlier initializer",
+                "csharp",
+                "run",
+                "using System;partial class Api{Func<int> callback=()=>run();void caller(){run();}}partial class Api(Func<int> run){int run()=>0;}",
+                true,
+            ),
+            (
+                "CSharp later field",
+                "csharp",
+                "run",
+                "using System;class Outer{static void run(){}class Api{void inside(){run();}Action run=()=>{};}static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp property value",
+                "csharp",
+                "run",
+                "using System;class Outer{static void run(){}class Api{void inside(){run();}Action run{get;}=()=>{};}static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp later event field",
+                "csharp",
+                "run",
+                "using System;class Outer{static void run(){}class Api{void inside(){run();}event Action run;}static void caller(){run();}}",
+                true,
+            ),
+            (
+                "CSharp static field initializer",
+                "csharp",
+                "run",
+                "using System;class Api(Func<int> run){static Func<int> callback=()=>run();static int run()=>0;static void caller(){run();}}",
+                false,
+            ),
+            (
+                "CSharp static property initializer",
+                "csharp",
+                "run",
+                "using System;class Api(Func<int> run){static Func<int> Callback{get;}=()=>run();static int run()=>0;static void caller(){run();}}",
+                false,
+            ),
+            (
+                "CSharp static event initializer",
+                "csharp",
+                "run",
+                "using System;class Api(Func<int> run){static event Func<int> Callback=()=>run();static int run()=>0;static void caller(){run();}}",
+                false,
+            ),
+            (
+                "CSharp partial positional record without body",
+                "csharp",
+                "run",
+                "using System;class Outer{static void run(){}partial record Api(Action run);partial record Api{void inside(){run();}}static void caller(){run();}}",
+                true,
+            ),
+            (
+                "Java record component blocker",
+                "java",
+                "run",
+                "class Outer{static void run(){}record Api(Runnable run){void inside(){run();}}static void caller(){run();}}",
+                true,
+            ),
+            (
+                "Java explicit component accessor",
+                "java",
+                "run",
+                "class Outer{static void run(){}record Api(Runnable run){public Runnable run(){return run;}void inside(){run();}}static void caller(){run();}}",
+                false,
+            ),
+            (
+                "Java enum values blocker",
+                "java",
+                "values",
+                "class Outer{static void values(){}enum Api{ONE;void inside(){values();}}static void caller(){values();}}",
+                true,
+            ),
+            (
+                "Java enum valueOf blocker",
+                "java",
+                "valueOf",
+                "class Outer{static void valueOf(String text){}enum Api{ONE;void inside(){valueOf(\"ONE\");}}static void caller(){valueOf(\"ONE\");}}",
+                true,
+            ),
+            (
+                "Java record disjoint-arity overload",
+                "java",
+                "value",
+                "class Outer{static void value(int n){}record Api(int value){void value(int n){}void inside(){value(1);}}static void caller(){value(1);}}",
+                false,
+            ),
+            (
+                "Java enum disjoint-arity overload",
+                "java",
+                "values",
+                "class Outer{static void values(int n){}enum Api{ONE;void values(int n){}void inside(){values(1);}}static void caller(){values(1);}}",
+                false,
+            ),
+            (
+                "Java enum unknown same-arity overload",
+                "java",
+                "valueOf",
+                "class Outer{static void valueOf(int n){}enum Api{ONE;void valueOf(int n){}void inside(){valueOf(1);}}static void caller(){valueOf(1);}}",
+                true,
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.source",
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{label}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == name)
+                .collect::<Vec<_>>();
+            if calls.len() != 2 {
+                failures.push(format!("{label}: unexpected call admission {calls:?}"));
+                continue;
+            }
+            if facts.bindings_incomplete
+                || matches!(calls[0].binding, SourceCallBinding::Shadowed) != shadowed
+                || !shadowed && !matches!(calls[0].binding, SourceCallBinding::LocalDeclaration(_))
+                || !matches!(calls[1].binding, SourceCallBinding::LocalDeclaration(_))
+            {
+                failures.push(format!("{label}: {calls:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn native_type_and_local_function_symbols_keep_actual_declaration_owners() {
+        for (language, source, expected_kind) in [
+            (
+                "java",
+                "record Left(){void run(){}} record Right(){void run(){} void caller(){run();}}",
+                projectatlas_core::symbols::SymbolKind::Class,
+            ),
+            (
+                "csharp",
+                "record Left{void run(){}} record Right{void run(){} void caller(){run();}}",
+                projectatlas_core::symbols::SymbolKind::Class,
+            ),
+            (
+                "csharp",
+                "record struct Left{void run(){}} record struct Right{void run(){} void caller(){run();}}",
+                projectatlas_core::symbols::SymbolKind::Struct,
+            ),
+            (
+                "cpp",
+                "union Left{void run(){}};union Right{void run(){}void caller(){run();}};",
+                projectatlas_core::symbols::SymbolKind::Struct,
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.source",
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                "{language}: {facts:?}"
+            );
+            let SourceCallBinding::LocalDeclaration(target) = facts.calls()[0].binding else {
+                return;
+            };
+            assert_eq!(
+                graph.symbols[target].parent.as_deref(),
+                Some("Right"),
+                "{language}: {graph:?}"
+            );
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == "Right" && symbol.kind == expected_kind),
+                "{language}: {graph:?}"
+            );
+        }
+        let source = "class Api{static void run(){}static void caller(){void run(){}run();}static void outside(){run();}}";
+        let result = extract_symbol_graph_with_semantics_controlled(
+            "owners.cs",
+            Some("csharp"),
+            source,
+            &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let Ok(extracted) = result else { return };
+        let (_, graph, facts) = extracted.into_parts();
+        let calls = facts.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            matches!(calls[0].binding, SourceCallBinding::LocalDeclaration(_))
+                && matches!(calls[1].binding, SourceCallBinding::LocalDeclaration(_)),
+            "{facts:?}"
+        );
+        let (
+            SourceCallBinding::LocalDeclaration(local),
+            SourceCallBinding::LocalDeclaration(outer),
+        ) = (&calls[0].binding, &calls[1].binding)
+        else {
+            return;
+        };
+        assert_eq!(
+            graph.symbols[*local].kind,
+            projectatlas_core::symbols::SymbolKind::Function
+        );
+        assert_eq!(graph.symbols[*local].parent.as_deref(), Some("caller"));
+        assert_eq!(
+            graph.symbols[*outer].kind,
+            projectatlas_core::symbols::SymbolKind::Method
+        );
+        assert_eq!(graph.symbols[*outer].parent.as_deref(), Some("Api"));
+    }
+
+    #[test]
+    fn rust_competing_imports_cannot_override_colliding_call_owners_or_targets() {
+        for (body, expected_candidates) in [
+            (
+                "fn outer(){\n{fn caller(){use crate::a::run;fn run(){}run();}}\n{fn caller(){use crate::a::run;fn run(){}run();}}\n}",
+                0,
+            ),
+            (
+                "fn outer(){\n{fn run(){}use crate::a::run;run();}\n{fn run(){}use crate::a::run;run();}\n}",
+                0,
+            ),
+            ("fn caller(){use crate::a::run;fn run(){}run();}", 1),
+        ] {
+            let source = format!("mod a{{pub struct run{{}}}}\n{body}");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "src/lib.rs",
+                Some("rust"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let facts = extracted.semantics();
+            let rust = facts.rust();
+            assert!(rust.is_some(), "{facts:?}");
+            let Some(rust) = rust else { return };
+            assert_eq!(
+                rust.candidate_calls.len(),
+                expected_candidates,
+                "{source}: {facts:?}"
+            );
+            if expected_candidates == 0 {
+                assert!(
+                    facts
+                        .calls()
+                        .iter()
+                        .all(|call| call.binding == SourceCallBinding::Unresolved),
+                    "{facts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_lexical_declarations_with_one_graph_identity_withdraw_call_authority() {
+        for (language, source) in [
+            (
+                "csharp",
+                "class Api { static void caller() {\n{ void run() {}\nrun(); }\n{ void run() {}\nrun(); }\n} }",
+            ),
+            (
+                "java",
+                "class Api { void caller() {\n{ record Box() { void run() { run(); } } }\n{ record Box() { void run() { run(); } } }\n} }",
+            ),
+            (
+                "javascript",
+                "'use strict'; function caller() {\n{ function run() {}\nrun(); }\n{ function run() {}\nrun(); }\n}",
+            ),
+            (
+                "rust",
+                "fn caller() {\n{ fn run() {}\nrun(); }\n{ fn run() {}\nrun(); }\n}",
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "scopes.source",
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert_eq!(facts.calls().len(), 2, "{language}: {graph:?}");
+            assert!(
+                facts
+                    .calls()
+                    .iter()
+                    .all(|call| call.binding == SourceCallBinding::Unresolved),
+                "{language}: {facts:?}"
+            );
+            assert_eq!(
+                graph
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.name == "run")
+                    .count(),
+                2,
+                "source navigation retains both declarations"
+            );
+        }
+        for (language, source) in [
+            (
+                "cpp",
+                "namespace N { void run(); }\nnamespace N { void run() {} void caller(){run();} }",
+            ),
+            (
+                "cpp",
+                "class Api { public: void run(); void caller(){run();} };\nvoid Api::run() {}",
+            ),
+            (
+                "csharp",
+                "partial class Api { partial void run(); }\npartial class Api { partial void run() {} void caller(){run();} }",
+            ),
+            (
+                "java",
+                "class Left { record Box(){void run(){run();}} }\nclass Right { record Box(){void run(){run();}} }",
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "scopes.source",
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let parents = crate::declaration_identity::qualified_symbol_parents(&graph);
+            assert!(parents.is_ok(), "{parents:?}");
+            let Ok(parents) = parents else { return };
+            for call in facts.calls() {
+                if let SourceCallBinding::LocalDeclarations(ordinals) = &call.binding {
+                    let keys = ordinals
+                        .iter()
+                        .map(|ordinal| {
+                            let symbol = &graph.symbols[*ordinal];
+                            (
+                                symbol.name.as_str(),
+                                symbol.kind.to_string(),
+                                parents[*ordinal].as_ref(),
+                                symbol.signature.trim(),
+                            )
+                        })
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(
+                        keys.len(),
+                        1,
+                        "equivalent declarations retain one graph identity: {language}: {graph:?}"
+                    );
+                }
+            }
+            assert!(!facts.calls().is_empty(), "{language}: {facts:?}");
+            assert!(
+                facts.calls().iter().all(|call| matches!(
+                    call.binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                        | SourceCallBinding::LocalDeclarations(_)
+                )),
+                "{language}: {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn csharp_explicit_interface_members_keep_ordinary_outer_calls() {
+        for member in [
+            "void I.run(){}",
+            "Action I.run {get=>()=>{};}",
+            "event Action I.run {add{}remove{}}",
+        ] {
+            let contract = if member.starts_with("void") {
+                "void run();"
+            } else if member.starts_with("event") {
+                "event Action run;"
+            } else {
+                "Action run{get;}"
+            };
+            let source = format!(
+                "using System;interface I{{{contract}}}class Outer{{static void run(){{}}class Api:I{{{member}void inside(){{run();}}}}static void caller(){{run();}}}}"
+            );
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cs",
+                Some("csharp"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 2, "{member}: {facts:?}");
+            assert!(
+                matches!(calls[0].binding, SourceCallBinding::LocalDeclaration(_))
+                    && matches!(calls[1].binding, SourceCallBinding::LocalDeclaration(_)),
+                "{member}: {calls:?}"
+            );
+            let (
+                SourceCallBinding::LocalDeclaration(inside),
+                SourceCallBinding::LocalDeclaration(outside),
+            ) = (&calls[0].binding, &calls[1].binding)
+            else {
+                return;
+            };
+            assert_eq!(inside, outside, "{member}: {calls:?}");
+            assert_eq!(graph.symbols[*inside].parent.as_deref(), Some("Outer"));
+        }
+    }
+
+    #[test]
+    fn csharp_constructor_views_share_scope_and_binding_admission() {
+        use std::fmt::Write as _;
+        for (scope_stress, amount, complete) in [
+            (false, super::MAX_LEXICAL_BINDINGS / 6 - 8, true),
+            (false, super::MAX_LEXICAL_BINDINGS / 6 + 1, false),
+            (true, 1600, true),
+            (true, 1700, false),
+        ] {
+            let mut source =
+                String::from("class Root{static void run(){}static void caller(){run();}");
+            let classes = if scope_stress { amount } else { 3 };
+            for index in 0..classes {
+                assert!(write!(&mut source, "class Owner{index}(").is_ok());
+                let parameters = if scope_stress { 1 } else { amount };
+                for parameter in 0..parameters {
+                    if parameter > 0 {
+                        source.push(',');
+                    }
+                    assert!(write!(&mut source, "int p{parameter}").is_ok());
+                }
+                source.push_str("){");
+                if scope_stress {
+                    source.push_str("void work(){{}{}{}{}{}}");
+                }
+                source.push('}');
+            }
+            source.push('}');
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cs",
+                Some("csharp"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert!(
+                graph.symbols.len() < crate::MAX_SYMBOLS_PER_FILE
+                    && graph.relations.len() < crate::MAX_RELATIONS_PER_FILE,
+                "fixture exhausted raw graph before lexical admission: symbols {}, relations {}",
+                graph.symbols.len(),
+                graph.relations.len()
+            );
+            assert_eq!(facts.calls().len(), 1);
+            assert_eq!(
+                !facts.bindings_incomplete, complete,
+                "{scope_stress}/{amount}"
+            );
+            assert_eq!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                complete,
+                "{scope_stress}/{amount}: {facts:?}"
             );
         }
     }

@@ -14106,6 +14106,10 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
     let root = temp.path();
     fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
     fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname=\"binding-owners\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[lib]\npath=\"mixed_import.rs\"\n[[bin]]\nname=\"collision\"\npath=\"collision_import.rs\"\n",
+    )?;
+    fs::write(
         root.join("module-info.java"),
         "module atlas.core { exports atlas.api; }\n",
     )?;
@@ -14250,6 +14254,160 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
             "run",
             false,
         ),
+        (
+            "accessor_field.kt",
+            "fun field(){}\nclass Api{val item:Int get(){fun inside(){field()};return 0}}\nfun caller(){field()}\n",
+            "inside",
+            "field",
+            false,
+        ),
+        (
+            "accessor_field.kt",
+            "fun field(){}\nclass Api{val item:Int get(){fun inside(){field()};return 0}}\nfun caller(){field()}\n",
+            "caller",
+            "field",
+            true,
+        ),
+        (
+            "accessor_value.cs",
+            "using System;class Api{static void value(){} Action Item{set{void inside(){value();}}get{void caller(){value();}return null;}}}\n",
+            "inside",
+            "value",
+            false,
+        ),
+        (
+            "accessor_value.cs",
+            "using System;class Api{static void value(){} Action Item{set{void inside(){value();}}get{void caller(){value();}return null;}}}\n",
+            "caller",
+            "value",
+            true,
+        ),
+        (
+            "primary.cs",
+            "using System;class Outer{static void run(){}record Api(Action run){void inside(){run();}}static void caller(){run();}}\n",
+            "inside",
+            "run",
+            false,
+        ),
+        (
+            "primary.cs",
+            "using System;class Outer{static void run(){}record Api(Action run){void inside(){run();}}static void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "component.java",
+            "class Outer{static void run(){}record Api(Runnable run){void inside(){run();}}static void caller(){run();}}\n",
+            "inside",
+            "run",
+            false,
+        ),
+        (
+            "component.java",
+            "class Outer{static void run(){}record Api(Runnable run){void inside(){run();}}static void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "enum_method.java",
+            "class Outer{static void values(){}enum Api{ONE;void inside(){values();}}static void caller(){values();}}\n",
+            "inside",
+            "values",
+            false,
+        ),
+        (
+            "enum_method.java",
+            "class Outer{static void values(){}enum Api{ONE;void inside(){values();}}static void caller(){values();}}\n",
+            "caller",
+            "values",
+            true,
+        ),
+        (
+            "collision.cs",
+            "class Api{static void caller(){\n{void run(){}\nrun();}\n{void run(){}\nrun();}\n}}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "owner_record.java",
+            "record Left(){void run(){}}\nrecord Right(){void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_record.cs",
+            "record Left{void run(){}}\nrecord Right{void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_record_struct.cs",
+            "record struct Left{void run(){}}\nrecord struct Right{void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_union.cpp",
+            "union Left{void run(){}};\nunion Right{void run(){}void caller(){run();}};\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "prototype.cpp",
+            "namespace N{void run();}\nnamespace N{void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "out_of_class.cpp",
+            "class Api{public:void run();void caller(){run();}};\nvoid Api::run(){}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "partial_method.cs",
+            "partial class Api{partial void run();}\npartial class Api{partial void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "collision.java",
+            "class Outer{void caller(){\n{record Box(){void run(){}void callerLeft(){run();}}}\n{record Box(){void run(){}void callerRight(){run();}}}\n}}\n",
+            "callerLeft",
+            "run",
+            false,
+        ),
+        (
+            "local_function.cs",
+            "class Api{static void run(){}static void caller(){void run(){}run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "collision_import.rs",
+            "mod a{pub struct run{}}\nfn outer(){\n{fn caller(){use crate::a::run;fn run(){}run();}}\n{fn caller(){use crate::a::run;fn run(){}run();}}\n}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "mixed_import.rs",
+            "mod a{pub struct Run{}}\nfn caller(){use crate::a::Run;fn Run(){}Run();}\n",
+            "caller",
+            "Run",
+            true,
+        ),
     ];
     for (file, content, _, _, _) in cases {
         fs::write(root.join(file), content)?;
@@ -14342,9 +14500,18 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                             .into());
                         }
                         rust_binding_equal(&rust_binding_targets(rows), &targets)?;
-                        if expected && file.starts_with("owner") {
-                            let parent = if file == "owner.java" {
+                        if expected && (file.starts_with("owner") || file == "local_function.cs") {
+                            let parent = if matches!(
+                                file,
+                                "owner.java"
+                                    | "owner_record.java"
+                                    | "owner_record.cs"
+                                    | "owner_record_struct.cs"
+                                    | "owner_union.cpp"
+                            ) {
                                 json!("Right")
+                            } else if file == "local_function.cs" {
+                                json!("Api::caller")
                             } else {
                                 Value::Null
                             };
@@ -14383,7 +14550,17 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                         .flatten()
                         .find(|function| {
                             function["name"] == target
-                                && (file != "owner.java" || function["parent"] == "Right")
+                                && (file != "out_of_class.cpp" || function["parent"] == "Api")
+                                && (!matches!(file, "local_function.cs" | "mixed_import.rs")
+                                    || function["parent"] == "caller")
+                                && (!matches!(
+                                    file,
+                                    "owner.java"
+                                        | "owner_record.java"
+                                        | "owner_record.cs"
+                                        | "owner_record_struct.cs"
+                                        | "owner_union.cpp"
+                                ) || function["parent"] == "Right")
                         })
                         .and_then(|function| function["called_by"].as_array())
                         .ok_or_else(|| {

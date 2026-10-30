@@ -332,3 +332,48 @@ existing schema and compatible unchanged-index repair. The named container CLI/M
 regression checks canonical targets and summary callers through edit, full rebuild,
 identity preservation and a no-op. The architecture diagram's source-owned evidence,
 bounded recovery and canonical publication/read boundaries remain unchanged.
+
+## Accessor values and canonical declaration collisions
+
+Extraction/semantic contract18 adds Kotlin backing-field shadows in accessors and
+C# implicit value shadows only in set/init/add/remove accessors. Generic callable
+parameter ownership includes C# accessors, indexers, local/anonymous functions,
+operators and conversions. C# primary parameters have initialization priority in
+instance field/property/event initializers and base arguments; ordinary bodies
+retain member priority. Static initialization retains ordinary static members.
+Bodyless partial positional records share the same logical type environment.
+Explicit interface implementations stay navigable without becoming ordinary bare
+value bindings. Positive getter, outer-call and static-member controls remain.
+
+Actual Java/C# records (including record structs), C++ unions and C# local functions
+retain emitted source owner symbols. Java record component accessors and enum
+values/valueOf names without source declarations are unknown targets. Their known
+arity preserves disjoint source overloads without argument-type inference.
+Bodyless method headers omit the terminating semicolon so compatible C# partial
+method declarations and implementations share their ordinary header identity.
+
+Graph selectors omit local block spans. Where identical name/kind/qualified-parent/
+signature selectors belong to distinct actual lexical owners, exact source ordinals
+cannot establish one graph target. Calls to those groups, calls from colliding
+owners, and their separate Rust import-candidate/export/associated evidence remain
+unresolved. Raw declarations retain navigation. Do not narrow a candidate group by
+removing a competitor. This also covers Java constant-specific enum bodies and
+C++ anonymous-versus-outer selectors whose raw parent metadata coincides.
+Logical namespace redeclarations, C++ free prototype/definition and in-class prototype
+calls beside separately represented qualified definitions, C# partial members and distinct qualified types retain compatibility.
+
+One shared parser-owned canonical parent calculation serves binding proof and graph
+projection, including existing bounded qualification compaction. A scratch index
+visits each capped raw declaration once; ambiguous binding groups are withdrawn once
+at their owning scope before call lookup. Work checks and existing graph/lexical
+limits apply. No persistent schema, public CLI/MCP shape, provider, inferred target,
+new limit or signature-encoded scope metadata is added. The existing source-evidence,
+publication and read-boundary architecture remains accurate. Permanent container
+CLI/MCP tests cover these cases through incremental/full refresh, summary callers,
+project identity preservation and a second-refresh no-op. Source tests additionally
+cover shared constructor-view near-cap/overflow admission and callable variants.
+
+Qualified C++ definitions retain the existing separate Function selector; choosing
+between arbitrary class and namespace qualifiers and coalescing their declarations
+is outside this lexical repair. The compatibility control selects the actual in-class
+Method prototype and verifies its canonical and summary caller links remain intact.

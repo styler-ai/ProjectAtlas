@@ -15,10 +15,10 @@ use projectatlas_core::graph::{
     CoverageState, DocumentTargetUnresolvedReason, EntityResolutionKey, EntitySelector,
     ExtendedRelationKind, ExternalSelector, GraphContractError, GraphEntity, GraphIdentityField,
     GraphIdentityRejection, GraphIdentityRejectionReason, GraphIdentityText, GraphLimitKind,
-    GraphLimits, GraphRelationKind, LogicalRelation, LogicalRelationKey, MAX_GRAPH_IDENTITY_BYTES,
-    PackageSelector, ProjectInstanceId, QUALIFIED_SYMBOL_SCOPE_PREFIX, RelationDependencyKey,
-    RelationOccurrence, RelationResolution, RepositoryFilePath, RepositoryNodePath,
-    ResolutionKeyDomain, SourceSpan, SymbolSelector,
+    GraphLimits, GraphRelationKind, LogicalRelation, LogicalRelationKey, PackageSelector,
+    ProjectInstanceId, QUALIFIED_SYMBOL_SCOPE_PREFIX, RelationDependencyKey, RelationOccurrence,
+    RelationResolution, RepositoryFilePath, RepositoryNodePath, ResolutionKeyDomain, SourceSpan,
+    SymbolSelector,
 };
 use projectatlas_core::language::{SemanticProviderOwner, SymbolParserOwner, language_capability};
 use projectatlas_core::symbols::{
@@ -2426,120 +2426,29 @@ fn is_cargo_manifest_path(path: &str) -> bool {
     path == "Cargo.toml" || path.ends_with("/Cargo.toml")
 }
 
-/// Qualify graph-only parent identity from the parser's existing containment rows.
-///
-/// Sorting and active-scope lookup are `O(n log n)`. Identity work is
-/// `O(n * MAX_GRAPH_IDENTITY_BYTES)`: every retained parent is bounded, and an
-/// overflowing candidate is hashed without materializing more than one bounded
-/// parent plus one admitted component.
+/// Use the parser-owned canonical parent calculation for graph publication.
 fn qualified_symbol_parents(
     graph: &SymbolGraph,
 ) -> Result<Vec<Option<GraphIdentityText>>, CliError> {
-    let is_php = graph
-        .language
-        .as_deref()
-        .is_some_and(|language| language.eq_ignore_ascii_case("php"));
-    let mut order = (0..graph.symbols.len()).collect::<Vec<_>>();
-    order.sort_by_key(|&index| (graph.symbols[index].line_start, index));
-    let mut active_by_name = BTreeMap::<&str, Vec<usize>>::new();
-    let mut qualified_names = vec![None::<GraphIdentityText>; graph.symbols.len()];
-    let mut parents = vec![None; graph.symbols.len()];
-    for index in order {
-        let symbol = &graph.symbols[index];
-        let name = source_symbol_identity(symbol.name.clone())?;
-        let mut parent = symbol
-            .parent
-            .clone()
-            .map(source_symbol_identity)
-            .transpose()?;
-        if let Some(immediate_parent) = parent.as_ref()
-            && let Some(candidates) = active_by_name.get_mut(immediate_parent.as_str())
-        {
-            while candidates.last().is_some_and(|&candidate_index| {
-                let candidate = &graph.symbols[candidate_index];
-                // Namespace headers may precede their body; concrete PHP scopes
-                // have exact ends even when the next declaration shares a line.
-                if is_php
-                    && candidate.kind != SymbolKind::Module
-                    && let Some((outer, inner)) =
-                        candidate.source_selector.zip(symbol.source_selector)
-                {
-                    outer.byte_end < inner.byte_end
-                } else {
-                    candidate.line_end < symbol.line_end
-                }
-            }) {
-                candidates.pop();
-            }
-            if let Some(qualified_parent) = candidates
-                .last()
-                .and_then(|&candidate_index| qualified_names[candidate_index].clone())
-            {
-                parent = Some(qualified_parent);
-            }
-        }
-        qualified_names[index] = Some(match parent.as_ref() {
-            Some(parent) => qualified_symbol_identity(parent, &name)?,
-            None => name,
-        });
-        parents[index] = parent;
-        active_by_name
-            .entry(symbol.name.as_str())
-            .or_default()
-            .push(index);
-    }
-    Ok(parents)
+    projectatlas_symbols::declaration_identity::qualified_symbol_parents(graph)
+        .map_err(invalid_graph_contract)
 }
 
-/// Admit one parser-owned symbol identity outside the derived-scope namespace.
+/// Admit parser-owned text through the same source identity boundary.
+#[cfg(test)]
 fn source_symbol_identity(value: String) -> Result<GraphIdentityText, CliError> {
-    let identity = GraphIdentityText::new(value).map_err(invalid_graph_contract)?;
-    if identity.as_str().starts_with(QUALIFIED_SYMBOL_SCOPE_PREFIX) {
-        return Err(invalid_graph_contract(
-            GraphContractError::InvalidIdentityText {
-                reason: "source symbol identity uses the reserved derived-scope namespace",
-            },
-        ));
-    }
-    Ok(identity)
+    projectatlas_symbols::declaration_identity::source_symbol_identity(value)
+        .map_err(invalid_graph_contract)
 }
 
-/// Derive one exact or compact qualified scope from validated components.
+/// Exercise the shared qualified identity owner from projection contract tests.
+#[cfg(test)]
 fn qualified_symbol_identity(
     parent: &GraphIdentityText,
     name: &GraphIdentityText,
 ) -> Result<GraphIdentityText, CliError> {
-    const SEPARATOR: &str = "::";
-    const DIGEST_DOMAIN: &str = "projectatlas.graph.qualified-symbol-scope.v1";
-    let qualified_len = parent.as_str().len() + SEPARATOR.len() + name.as_str().len();
-    if qualified_len <= MAX_GRAPH_IDENTITY_BYTES {
-        let mut qualified = String::with_capacity(qualified_len);
-        qualified.push_str(parent.as_str());
-        qualified.push_str(SEPARATOR);
-        qualified.push_str(name.as_str());
-        return GraphIdentityText::new(qualified).map_err(invalid_graph_contract);
-    }
-
-    let compact_len =
-        QUALIFIED_SYMBOL_SCOPE_PREFIX.len() + 64 + SEPARATOR.len() + name.as_str().len();
-    if compact_len > MAX_GRAPH_IDENTITY_BYTES {
-        return Err(invalid_graph_contract(
-            GraphContractError::InvalidIdentityText {
-                reason: "derived scope cannot retain its nearest admitted symbol name",
-            },
-        ));
-    }
-    let mut hasher = blake3::Hasher::new_derive_key(DIGEST_DOMAIN);
-    hasher.update(parent.as_str().as_bytes());
-    hasher.update(SEPARATOR.as_bytes());
-    hasher.update(name.as_str().as_bytes());
-    let digest = hasher.finalize().to_hex();
-    let mut compact = String::with_capacity(compact_len);
-    compact.push_str(QUALIFIED_SYMBOL_SCOPE_PREFIX);
-    compact.push_str(digest.as_str());
-    compact.push_str(SEPARATOR);
-    compact.push_str(name.as_str());
-    GraphIdentityText::new(compact).map_err(invalid_graph_contract)
+    projectatlas_symbols::declaration_identity::qualified_symbol_identity(parent, name)
+        .map_err(invalid_graph_contract)
 }
 
 /// Project file, symbol, package, and canonical export facts from parser graphs.

@@ -260,7 +260,7 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 
 #### Scenario: Java member bodies retain their own method environments
 - **WHEN** Java class, interface, enum, record or anonymous member bodies declare homonymous methods
-- **THEN** each unqualified call uses its own structural member environment without leaking sibling methods, while named declaration identity, normal class behavior and existing resource bounds remain compatible; no inheritance or generated-member inference is introduced
+- **THEN** each unqualified call uses its own structural member environment without leaking sibling methods, while named declaration identity, normal class behavior and existing resource bounds remain compatible; no inheritance or generated-member target inference is introduced
 
 #### Scenario: Native member containers isolate ordinary names
 - **WHEN** C++ union, Kotlin class/object/companion/enum-entry or Zig enum/union/opaque bodies contain members sharing a file-level function name
@@ -279,17 +279,36 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** a while condition declares a callable value sharing an outer function name
 - **THEN** the condition binding shadows only within the loop, the subsequent free call resolves normally, and existing if/switch/for initializer scope behavior remains compatible
 
+#### Scenario: Native accessors retain implicit and declared parameters
+- **WHEN** Kotlin accessors reference their backing field or C# set/init/add/remove accessors invoke their implicit value parameter, or C# indexers, local/anonymous functions and operator or conversion-operator declarations use declared callable parameters
+- **THEN** the actual parameter/implicit value blocks an unrelated same-name method, getter contexts without that parameter keep ordinary callers, calls to local functions select their emitted local-function declaration when its canonical selector identifies one logical owner, and independently valid outer calls remain available
+
+#### Scenario: C# primary constructor precedence stays phase-correct
+- **WHEN** class/struct primary parameters share a name with a same-type member
+- **THEN** same-type members win in ordinary member bodies, primary parameters win in instance field/property/event initializers and base arguments; static initializers keep ordinary member lookup, and all partial parts share the correct views regardless of source order
+- **AND** positional record parameters conservatively block unrelated outer targets without inventing generated property symbols, while explicit field/property/event value names retain declaration-scope shadowing
+
+#### Scenario: Native declarations retain real type and local owners
+- **WHEN** C++ unions, Java/C# records including C# record structs, or C# local functions own callable declarations
+- **THEN** emitted symbols retain the real source type/local parent and correct existing symbol family, distinguishing homonymous members of different qualified source types while remaining conservative for local owners whose canonical selectors still coincide
+- **AND** Java record component names and enum values/valueOf names without emitted method evidence block unrelated outer targets, explicit record accessors and disjoint-arity source overloads retain source targets, same-arity generated-method competition stays conservative, and no generated method/property entity is invented
+
 #### Scenario: Rust associated constants do not occupy ordinary lexical value scope
 - **WHEN** an impl or trait-associated constant has the same name as a free function used unqualified in a method
 - **THEN** the associated constant requires qualification and does not shadow the free call; module/function/block constants, local imports and const parameters retain their ordinary lexical blocking behavior
 
 #### Scenario: Member names retain their language-defined namespace
-- **WHEN** Rust impl or trait items, Go receiver methods, ECMAScript class or object methods, or Objective-C selectors share an ordinary function's name
+- **WHEN** Rust impl or trait items, Go receiver methods, ECMAScript class or object methods, or Objective-C selectors or C# explicit interface implementations share an ordinary function's name
 - **THEN** bare calls do not acquire those member declarations as lexical values, receiver parameters retain their local shadows, and supported implicit member lookup in Java, C++, C# and Kotlin remains available
 
 #### Scenario: Declaration correspondence uses existing identity evidence
 - **WHEN** declarations share a name, node kind and source-line range but have distinct emitted parents or signatures
 - **THEN** their actual AST identities select the corresponding graph ordinals without per-call candidate rescans, and indistinguishable metadata remains ambiguous
+
+#### Scenario: Distinct lexical declarations share one canonical selector
+- **WHEN** declarations in distinct source lexical owners have the same canonical file, name, kind, qualified parent and signature
+- **THEN** calls to those declarations and calls from colliding caller owners remain unresolved, raw source declarations remain navigable, and export metadata cannot re-admit an unsafe exact target
+- **AND** actual logical namespace redeclarations, C++ free prototype/definition and existing in-class prototype calls beside separately represented qualified definitions, and C# partial members retain their compatible shared ownership; unrelated qualified type owners remain distinct
 
 #### Scenario: Runtime forwarding queries preserve shared source module storage
 - **WHEN** many native calls reach aliases from one explicit re-export statement with a long static module literal

@@ -112,9 +112,13 @@ impl LexicalCollector<'_> {
         parent: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<Option<usize>, E> {
-        let Some(body) = node.child_by_field_name("body") else {
+        let body = node.child_by_field_name("body");
+        if body.is_none()
+            && !(matches!(self.language, "csharp" | "c_sharp")
+                && node.kind() == "record_declaration")
+        {
             return Ok(None);
-        };
+        }
         if node.has_error() {
             return Ok(None);
         }
@@ -123,6 +127,7 @@ impl LexicalCollector<'_> {
                 && node.kind() == "namespace_declaration")
             || (self.ecmascript() && matches!(node.kind(), "internal_module" | "module"));
         if namespace {
+            let Some(body) = body else { return Ok(None) };
             let mut names = Vec::new();
             if let Some(name) = node.child_by_field_name("name") {
                 if !self.container_name_parts(name, 0, &mut names, check)? {
@@ -223,7 +228,7 @@ impl LexicalCollector<'_> {
             true,
         );
         if let Some(scope) = scope {
-            self.scopes[scope].container_body = Some(body.id());
+            self.scopes[scope].container_body = body.map(|body| body.id());
         }
         Ok(scope)
     }

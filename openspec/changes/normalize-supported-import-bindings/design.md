@@ -541,3 +541,81 @@ parameter-like call and the subsequent free call; g++ validates the fixture synt
 A compact for-condition-declaration fixture produced no call facts in the pinned
 grammar and does not prove lexical resolution; the admitted for-initializer control
 is checked instead. No parser-pack or grammar change is introduced in this repair.
+
+
+## Accessor values and C# parameter owners
+
+Final actual CLI controls reproduce false outer-method targets for Kotlin backing
+field calls and C# implicit setter value calls. The same confirmed C# parameter-owner
+omission includes indexers, local/anonymous functions, operators/conversions and
+primary/positional constructor parameters; the causal table retains getter and outer
+positive controls. Reuse generic parameter collection at actual callable owners.
+Kotlin field is unknown only in accessor scope; C# value is implicit only in
+set/init/add/remove accessors. No backing-field target or runtime delegate is guessed.
+
+A closed native-container enum keeps Kotlin instance initialization and C# type
+initialization views under their language owners. C# member scopes retain their
+logical same-file partial identity. A shared initializer view places primary names
+ahead of members in instance initialization and base arguments; a fallback parameter scope below member bindings lets members win
+in ordinary bodies. All partial instance-initializer sites capture the shared view even when
+the primary part occurs later. Primary names/implicit values use the existing global
+transition admission, and views use the existing scope cap. Explicit field/property/
+event values are declaration-scope blockers. Native C# local functions use the owning
+AST declaration producer rather than acquiring an unrelated outer method target.
+This remains bounded source-scope evidence, not receiver, delegate-value, inheritance
+or compiler-version inference. Newer version-dependent keyword semantics are not
+blanket imposed on older valid source. Extraction/semantic18 must repair prior17
+private projections; accepted17 binaries/proof remain immutable comparison inputs.
+
+Static field/property/event initializers do not acquire primary-parameter priority.
+The fallback view remains conservative for unavailable/invalid references instead
+of fabricating an unrelated outer target. Normal same-type static members retain
+their calls, and Kotlin non-accessor field calls remain unchanged.
+
+The same producer audit causally found missing Java/C# record type owners: identical
+member signatures could lose their distinct parent or source declaration. Admit real
+record types (record structs remain Struct) and C++ union Struct-family owners at
+the existing declaration producer. Bodyless partial positional C# records retain
+logical identity so later parts see their parameters. Java explicit record component
+names and enum values/valueOf without emitted methods are unknown method blockers,
+not invented target entities; explicit zero-argument record accessors remain valid
+source targets. Borrowed accessor-name membership and blocker transitions charge
+the same global admission before retention, avoiding per-component body rescans.
+
+Explicit C# interface implementations retain declarations/navigation but do not
+occupy ordinary class value lookup; their accessor/parameter scopes still apply.
+Positive outer-call controls prevent property blockers from breaking that workflow.
+
+## Canonical declaration identity and distinct lexical owners
+
+Exact source ordinals are insufficient when the durable graph selector intentionally
+omits block spans. The same name, kind, qualified parent and signature can occur in
+separate C# local-function blocks, Java local records or constant-specific enum bodies,
+ECMAScript blocks and Rust local-item scopes. C++ anonymous and outer declarations
+can also share raw parent metadata. Keep raw declarations navigable; withdraw exact
+call authority when that selector has distinct actual logical declaration owners.
+This applies to both target candidate groups and colliding caller owners. Do not
+narrow an ambiguous group by dropping one competitor. Retain unresolved export-owner
+ordinals so metadata fallback cannot restore the disallowed target.
+
+The parser and CLI share the existing canonical parent calculation, including bounded
+qualified-scope compaction. One scratch index and one owner ordinal per already capped
+raw symbol are O(n) retained rows; construction is O(n log n), with cooperative checks
+per row/group. No per-call declaration scan, persistence/schema addition or signature
+metadata is needed. Capture owners before entering declaration bodies and reuse the
+existing namespace/partial-type logical scopes. C++ free prototype/definition, reopened
+namespaces, retained in-class prototype calls beside separately represented qualified
+definitions and C# partial-method compatibility are controls;
+distinct enclosing record types retain distinct qualified parent identities.
+
+Java implicit-method blockers retain known arity: zero-argument record getters and
+enum values, and one-argument enum valueOf. Source-declared disjoint-arity overloads
+remain eligible; same-arity competition stays conservative without argument-type
+inference or invented generated target entities.
+
+The qualified C++ definition control preserves the existing source representation:
+an in-class Method prototype and a qualified Function definition have different
+signatures/selectors. This repair does not infer whether an arbitrary qualifier is a
+class or namespace, coalesce those rows, or add qualified-definition body lookup.
+Its real CLI/MCP assertion selects the existing Method declaration, including summary
+callers, rather than accidentally inspecting the separate Function row by name.

@@ -1,6 +1,8 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
 mod configured_modules;
+/// Canonical source declaration scopes shared by parser proof and graph publication.
+pub mod declaration_identity;
 mod documents;
 mod import_source;
 mod languages;
@@ -2183,6 +2185,13 @@ fn capture_import_occurrences<E>(
 
 /// Refine a declaration kind using surrounding syntax context.
 fn effective_declaration_kind(node: Node<'_>, kind: SymbolKind) -> SymbolKind {
+    if node.kind() == "record_declaration"
+        && node
+            .children(&mut node.walk())
+            .any(|child| child.kind() == "struct")
+    {
+        return SymbolKind::Struct;
+    }
     if kind == SymbolKind::Function && declaration_is_method_context(node) {
         return SymbolKind::Method;
     }
@@ -2756,7 +2765,8 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "generator_function_declaration"
         | "function_definition"
         | "function_declarator"
-        | "func_literal" => Some(SymbolKind::Function),
+        | "func_literal"
+        | "local_function_statement" => Some(SymbolKind::Function),
         "method_definition"
         | "method_declarator"
         | "method_declaration"
@@ -2766,9 +2776,12 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         "class_declaration"
         | "class_definition"
         | "class_specifier"
+        | "record_declaration"
         | "class_interface"
         | "class_implementation" => Some(SymbolKind::Class),
-        "struct_item" | "struct_specifier" | "struct_declaration" => Some(SymbolKind::Struct),
+        "struct_item" | "struct_specifier" | "union_specifier" | "struct_declaration" => {
+            Some(SymbolKind::Struct)
+        }
         "enum_item" | "enum_declaration" | "enum_specifier" => Some(SymbolKind::Enum),
         "trait_item" | "trait_declaration" => Some(SymbolKind::Trait),
         "interface_declaration" | "interface_type" => Some(SymbolKind::Interface),
@@ -3829,7 +3842,19 @@ fn declaration_signature(node: Node<'_>, content: &str) -> String {
     if matches!(node.kind(), "property_element" | "const_element") {
         return php_element_signature(node, content);
     }
-    let header_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
+    let header_end = declaration_body_start(node)
+        .or_else(|| {
+            // A bodyless method header has the same source signature as its
+            // implementation. The terminating semicolon is not a signature token.
+            if node.kind() == "method_declaration" {
+                node.children(&mut node.walk())
+                    .find(|child| child.kind() == ";")
+                    .map(|semicolon| semicolon.start_byte())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| node.end_byte());
     let mut signature = String::new();
     append_declaration_tokens(node, content, header_end, &mut signature);
     if signature.is_empty() {
