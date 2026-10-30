@@ -14046,6 +14046,230 @@ fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result
 const ECMASCRIPT_WORKER_FILE_NAME: &str = "worker.js";
 
 #[test]
+fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    const CPP_NAMESPACE_FILE: &str = "toggle.cpp";
+    const TS_NAMESPACE_FILE: &str = "toggle.ts";
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join("module-info.java"),
+        "module atlas.core { exports atlas.api; }\n",
+    )?;
+    let cases = [
+        (
+            "reopened.cpp",
+            "namespace N { void run() {} }\nnamespace N { void caller() { run(); } }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "nested.cpp",
+            "namespace A::B { void run() {} }\nnamespace A { namespace B { void caller() { run(); } } }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "anonymous.cpp",
+            "namespace { void run() {} }\nvoid caller() { run(); }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "conflict.cpp",
+            "namespace { void run() {} }\nvoid run() {}\nvoid caller() { run(); }\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "future.cpp",
+            "namespace N { void caller() { run(); } }\nnamespace N { void run() {} }\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "partial.cs",
+            "namespace @N { partial class @C<@T> { static void @Run() {} } }\nnamespace N { partial class C<T> { static void Caller() { Run(); } } }\n",
+            "Caller",
+            "@Run",
+            true,
+        ),
+        (
+            "private.ts",
+            "namespace N { function run() {} }\nnamespace N { export function caller() { run(); } }\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "closure.ts",
+            "namespace N { function run() {} export function caller() { run(); } }\nnamespace N { export function unrelated() {} }\n",
+            "caller",
+            "run",
+            true,
+        ),
+    ];
+    for (file, content, _, _, _) in cases {
+        fs::write(root.join(file), content)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    // Both toggle files exist at init and are edited in each subsequent phase.
+    fs::write(
+        root.join(CPP_NAMESPACE_FILE),
+        "namespace N { void run() {} }\nnamespace N { void caller() { run(); } }\n",
+    )?;
+    fs::write(
+        root.join(TS_NAMESPACE_FILE),
+        "namespace N { export function run() {} }\nnamespace N { export function caller() { run(); } }\n",
+    )?;
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for present in [true, false, true] {
+            fs::write(
+                root.join(CPP_NAMESPACE_FILE),
+                format!(
+                    "namespace N {{ void run() {{}} }}\nnamespace {} {{ void caller() {{ run(); }} }}\n",
+                    if present { "N" } else { "Other" }
+                ),
+            )?;
+            fs::write(
+                root.join(TS_NAMESPACE_FILE),
+                format!(
+                    "namespace N {{ {}function run() {{}} }}\nnamespace N {{ export function caller() {{ run(); }} }}\n",
+                    if present { "export " } else { "" }
+                ),
+            )?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuild in [false, true] {
+                if rebuild {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                let checks = cases
+                    .iter()
+                    .map(|(file, _, caller, target, expected)| (*file, *caller, *target, *expected))
+                    .chain([
+                        (CPP_NAMESPACE_FILE, "caller", "run", present),
+                        (TS_NAMESPACE_FILE, "caller", "run", present),
+                    ]);
+                for (file, caller, target, expected) in checks {
+                    let cli = run_packaged_cli_json(
+                        &executable,
+                        root,
+                        &database,
+                        &[
+                            "symbols",
+                            "relations",
+                            "--view",
+                            "detailed",
+                            "--file",
+                            file,
+                            "--symbol",
+                            caller,
+                            "--relation",
+                            "calls",
+                            "--limit",
+                            "10",
+                        ],
+                    )?;
+                    let text = session.call_tool(
+                        "atlas_symbol_relations",
+                        &json!({
+                            "project_path": root, "view": "detailed", "file": file,
+                            "symbol": caller, "relation": "calls", "limit": 10,
+                        }),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    let targets = if expected {
+                        BTreeSet::from([(file.to_string(), target.to_string())])
+                    } else {
+                        BTreeSet::new()
+                    };
+                    for response in [cli, mcp] {
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| io::Error::other("container caller rows missing"))?;
+                        rust_binding_equal(&rows.len(), &1)?;
+                        rust_binding_equal(&rust_binding_targets(rows), &targets)?;
+                    }
+                    let text = session.call_tool(
+                        "atlas_file_summary",
+                        &json!({"project_path": root, "file": file}),
+                    )?;
+                    let summary: Value = toon_format::decode_default(&text)?;
+                    if file == "partial.cs" {
+                        rust_binding_equal(&summary["file_summary"]["package"], &json!("@N"))?;
+                        let classes = summary["file_summary"]["classes"]
+                            .as_array()
+                            .ok_or_else(|| io::Error::other("partial classes missing"))?;
+                        let parents = classes
+                            .iter()
+                            .map(|class| (class["name"].as_str(), class["parent"].as_str()))
+                            .collect::<BTreeSet<_>>();
+                        rust_binding_equal(
+                            &parents,
+                            &BTreeSet::from([(Some("@C"), Some("@N")), (Some("C"), Some("N"))]),
+                        )?;
+                    }
+                    let callers = ["functions", "methods"]
+                        .into_iter()
+                        .filter_map(|kind| summary["file_summary"][kind].as_array())
+                        .flatten()
+                        .find(|function| function["name"] == target)
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| {
+                            io::Error::other(format!(
+                                "container summary target missing: {file}: {summary}"
+                            ))
+                        })?;
+                    rust_binding_equal(
+                        &callers
+                            .iter()
+                            .any(|value| value == &format!("{file}::{caller}")),
+                        &expected,
+                    )?;
+                }
+                for (file, package) in [("module-info.java", "atlas.core"), ("partial.cs", "@N")] {
+                    let cli =
+                        run_packaged_cli_json(&executable, root, &database, &["summary", file])?;
+                    rust_binding_equal(&cli["package"], &json!(package))?;
+                    let text = session.call_tool(
+                        "atlas_file_summary",
+                        &json!({"project_path": root, "file": file}),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    rust_binding_equal(&mcp["file_summary"]["package"], &json!(package))?;
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
 fn ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles() -> Result<(), Box<dyn Error>>
 {
     let temp = tempfile::tempdir()?;

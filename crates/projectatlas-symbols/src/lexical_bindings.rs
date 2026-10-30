@@ -12,6 +12,9 @@ use crate::semantic::embedded_source::EmbeddedScriptRole;
 use crate::semantic::{EcmascriptNameContext, EcmascriptNameRole};
 use crate::{SourceCallBinding, SourceSemanticFacts, declaration_kind, node_name};
 
+mod container_scopes;
+mod native_identifiers;
+
 /// One actual parsed program, borrowing its tree until binding has completed.
 pub(super) struct SourceSyntaxRoot<'tree> {
     /// Native program with original source offsets.
@@ -307,6 +310,12 @@ enum EcmascriptVarEnvironment {
 struct Scope {
     /// Lexical lookup parent, independent from class presentation ownership.
     parent: Option<usize>,
+    /// Current physical body that reuses this logical container directly.
+    container_body: Option<usize>,
+    /// TypeScript exports shared with other parts; private lookup stays lexical.
+    namespace_exports: Option<usize>,
+    /// C++ implicitly makes its single anonymous child visible here.
+    anonymous_namespace: Option<usize>,
     /// Source grammar context, separate from lexical lookup parentage.
     ecma_context: EcmascriptNameContext,
     /// File/region environment that owns this scope's host role.
@@ -381,7 +390,11 @@ struct LexicalCollector<'a> {
     facts: &'a SourceSemanticFacts,
     /// Source-owned environment tree, addressed by ordinal.
     scopes: Vec<Scope>,
-    /// Admitted value, method and namespace transitions, including pending writes.
+    /// Exact same-file identities, bounded by their admitted logical environments.
+    container_scopes: BTreeMap<container_scopes::ContainerScopeKey, usize>,
+    /// Only an explicit namespace export redirects its owning block's bindings.
+    namespace_export_binding: Option<(usize, usize)>,
+    /// Admitted transitions, pending writes and retained container identity components.
     binding_count: usize,
     /// Only names actually declared by Python global/nonlocal need read-order evidence.
     python_directive_names: BTreeSet<String>,
@@ -469,6 +482,8 @@ pub(super) fn bind_calls<E>(
             ..Scope::default()
         }],
         binding_count: 0,
+        container_scopes: BTreeMap::new(),
+        namespace_export_binding: None,
         python_directive_names: BTreeSet::new(),
         incomplete: false,
         mutations: Vec::new(),
@@ -1027,7 +1042,7 @@ impl LexicalCollector<'_> {
         Ok(())
     }
 
-    /// Charge either a retained transition or a pending write before inserting it.
+    /// Charge retained lexical names and pending writes before inserting them.
     fn admit_binding(&mut self) -> bool {
         if self.incomplete || self.binding_count >= MAX_LEXICAL_BINDINGS {
             self.incomplete = true;
@@ -1044,6 +1059,12 @@ impl LexicalCollector<'_> {
             let mut captured = false;
             while !self.scopes[scope].bindings.contains_key(&name) {
                 check()?;
+                if let Some(shared) = self.scopes[scope].namespace_exports
+                    && self.scopes[shared].bindings.contains_key(&name)
+                {
+                    scope = shared;
+                    break;
+                }
                 let Some(parent) = self.scopes[scope].parent else {
                     break;
                 };
@@ -1095,6 +1116,7 @@ impl LexicalCollector<'_> {
             {
                 match effect {
                     EcmaPatternEffect::Reserve => {
+                        let scope = self.binding_scope(scope);
                         self.scopes[scope]
                             .bindings
                             .entry(name)
@@ -1155,6 +1177,10 @@ impl LexicalCollector<'_> {
         let text = self.content.get(node.byte_range())?;
         if self.ecmascript() {
             crate::semantic::ecmascript_identifier_value(text)
+        } else if matches!(self.language, "csharp" | "c_sharp") {
+            native_identifiers::csharp(text)
+        } else if self.language == "cpp" {
+            native_identifiers::cpp(text)
         } else {
             Some(text.to_string())
         }
@@ -1198,6 +1224,10 @@ impl LexicalCollector<'_> {
                 DeclarationBindingName::Admitted { name, .. } => Some(name.clone()),
                 DeclarationBindingName::Unseen | DeclarationBindingName::Rejected => None,
             }
+        } else if matches!(self.language, "csharp" | "c_sharp") {
+            native_identifiers::csharp(name)
+        } else if self.language == "cpp" {
+            native_identifiers::cpp(name)
         } else {
             Some(name.clone())
         }
@@ -1277,6 +1307,7 @@ impl LexicalCollector<'_> {
         if !self.admit_binding() {
             return;
         }
+        let scope = self.binding_scope(scope);
         let scope = &mut self.scopes[scope];
         let names = match namespace {
             BindingNamespace::Value => &mut scope.bindings,
@@ -1323,9 +1354,17 @@ impl LexicalCollector<'_> {
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
         let previous = self.ecma_context;
+        let previous_export = self.namespace_export_binding;
+        if self.ecmascript()
+            && node.kind() == "export_statement"
+            && let Some(shared) = self.scopes[scope].namespace_exports
+        {
+            self.namespace_export_binding = Some((scope, shared));
+        }
         self.ecma_context = self.scopes[scope].ecma_context;
         let result = self.visit_node(node, scope, check);
         self.ecma_context = previous;
+        self.namespace_export_binding = previous_export;
         result
     }
 
@@ -1609,124 +1648,130 @@ impl LexicalCollector<'_> {
                 }
             }
         }
-        let block = (self.language != "python"
-            && matches!(
-                node.kind(),
-                "block"
-                    | "statement_block"
-                    | "compound_statement"
-                    | "for_statement"
-                    | "for_in_statement"
-                    | "catch_clause"
-                    | "switch_body"
-                    | "declaration_list"
-            ))
-            || (self.language == "rust" && node.kind() == "match_arm")
-            || (self.language == "go"
+        let block = self.scopes[scope].container_body != Some(node.id())
+            && ((self.language != "python"
                 && matches!(
                     node.kind(),
-                    "if_statement"
-                        | "expression_switch_statement"
-                        | "type_switch_statement"
-                        | "communication_case"
+                    "block"
+                        | "statement_block"
+                        | "compound_statement"
+                        | "for_statement"
+                        | "for_in_statement"
+                        | "catch_clause"
+                        | "switch_body"
+                        | "declaration_list"
                 ))
-            || (self.language == "cpp"
-                && matches!(
-                    node.kind(),
-                    "if_statement" | "switch_statement" | "for_range_loop"
-                ))
-            || (matches!(self.language, "csharp" | "c_sharp")
-                && matches!(
-                    node.kind(),
-                    "foreach_statement"
-                        | "using_statement"
-                        | "switch_section"
-                        | "switch_expression_arm"
-                ))
-            || (self.language == "kotlin" && node.kind() == "catch_block");
+                || (self.language == "rust" && node.kind() == "match_arm")
+                || (self.language == "go"
+                    && matches!(
+                        node.kind(),
+                        "if_statement"
+                            | "expression_switch_statement"
+                            | "type_switch_statement"
+                            | "communication_case"
+                    ))
+                || (self.language == "cpp"
+                    && matches!(
+                        node.kind(),
+                        "if_statement" | "switch_statement" | "for_range_loop"
+                    ))
+                || (matches!(self.language, "csharp" | "c_sharp")
+                    && matches!(
+                        node.kind(),
+                        "foreach_statement"
+                            | "using_statement"
+                            | "switch_section"
+                            | "switch_expression_arm"
+                    ))
+                || (self.language == "kotlin" && node.kind() == "catch_block"));
         let ecma_initializer = self.ecmascript()
             && matches!(
                 node.kind(),
                 "field_definition" | "public_field_definition" | "class_static_block"
             );
-        if function || class || block || ecma_initializer {
-            if !self.admit_scope() {
-                return Ok(());
-            }
-            let mut parent = scope;
-            if (function || class) && self.language == "python" {
-                parent = self.python_closure_parent(parent);
-            }
-            scope = self.scopes.len();
-            let mut rust_item_owner =
-                if self.scopes[parent].rust_item_owner == RustItemOwner::UnsupportedModule {
-                    RustItemOwner::UnsupportedModule
-                } else {
-                    RustItemOwner::Local
-                };
-            let rust_module = if self.language == "rust"
-                && node.kind() == "declaration_list"
-                && node
-                    .parent()
-                    .is_some_and(|owner| owner.kind() == "mod_item")
-            {
-                match crate::rust_binding_source::module_owner(node, self.content) {
-                    Some(module) if rust_item_owner != RustItemOwner::UnsupportedModule => {
-                        rust_item_owner = RustItemOwner::Module;
-                        module
-                    }
-                    _ => {
-                        rust_item_owner = RustItemOwner::UnsupportedModule;
-                        Arc::clone(&self.scopes[parent].rust_module)
-                    }
-                }
+        let container = self.container_scope(node, scope, check)?;
+        if function || class || block || ecma_initializer || container.is_some() {
+            if let Some(container) = container {
+                scope = container;
             } else {
-                Arc::clone(&self.scopes[parent].rust_module)
-            };
-            if self.language == "rust"
-                && node.kind() == "mod_item"
-                && !crate::rust_binding_source::is_module_item(node)
-            {
-                rust_item_owner = RustItemOwner::UnsupportedModule;
-            }
-            self.scopes.push(Scope {
-                parent: Some(parent),
-                ecma_context: self.child_ecma_context(node, function, class, check)?,
-                ecma_root: self.scopes[parent].ecma_root,
-                function,
-                ecma_var_environment: if self.ecmascript()
-                    && node.parent().is_some_and(|owner| {
-                        (is_function(owner.kind())
-                            || matches!(
-                                owner.kind(),
-                                "class_static_block" | "internal_module" | "module"
-                            ))
-                            && owner
-                                .child_by_field_name("body")
-                                .is_some_and(|body| body.id() == node.id())
-                    }) {
-                    EcmascriptVarEnvironment::Local
-                } else {
-                    EcmascriptVarEnvironment::Enclosing
-                },
-                class,
-                enclosing_visibility_floor: if function
-                    && (self.language == "python" || self.ecmascript())
-                    && !immediately_invoked_function(node)
+                if !self.admit_scope() {
+                    return Ok(());
+                }
+                let mut parent = scope;
+                if (function || class) && self.language == "python" {
+                    parent = self.python_closure_parent(parent);
+                }
+                scope = self.scopes.len();
+                let mut rust_item_owner =
+                    if self.scopes[parent].rust_item_owner == RustItemOwner::UnsupportedModule {
+                        RustItemOwner::UnsupportedModule
+                    } else {
+                        RustItemOwner::Local
+                    };
+                let rust_module = if self.language == "rust"
+                    && node.kind() == "declaration_list"
+                    && node
+                        .parent()
+                        .is_some_and(|owner| owner.kind() == "mod_item")
                 {
-                    node.end_byte()
+                    match crate::rust_binding_source::module_owner(node, self.content) {
+                        Some(module) if rust_item_owner != RustItemOwner::UnsupportedModule => {
+                            rust_item_owner = RustItemOwner::Module;
+                            module
+                        }
+                        _ => {
+                            rust_item_owner = RustItemOwner::UnsupportedModule;
+                            Arc::clone(&self.scopes[parent].rust_module)
+                        }
+                    }
                 } else {
-                    0
-                },
-                owner: if function {
-                    callable_owner
-                } else {
-                    self.scopes[parent].owner
-                },
-                rust_module,
-                rust_item_owner,
-                ..Scope::default()
-            });
+                    Arc::clone(&self.scopes[parent].rust_module)
+                };
+                if self.language == "rust"
+                    && node.kind() == "mod_item"
+                    && !crate::rust_binding_source::is_module_item(node)
+                {
+                    rust_item_owner = RustItemOwner::UnsupportedModule;
+                }
+                self.scopes.push(Scope {
+                    parent: Some(parent),
+                    ecma_context: self.child_ecma_context(node, function, class, check)?,
+                    ecma_root: self.scopes[parent].ecma_root,
+                    function,
+                    ecma_var_environment: if self.ecmascript()
+                        && node.parent().is_some_and(|owner| {
+                            (is_function(owner.kind())
+                                || matches!(
+                                    owner.kind(),
+                                    "class_static_block" | "internal_module" | "module"
+                                ))
+                                && owner
+                                    .child_by_field_name("body")
+                                    .is_some_and(|body| body.id() == node.id())
+                        }) {
+                        EcmascriptVarEnvironment::Local
+                    } else {
+                        EcmascriptVarEnvironment::Enclosing
+                    },
+                    class,
+                    enclosing_visibility_floor: if function
+                        && (self.language == "python" || self.ecmascript())
+                        && !immediately_invoked_function(node)
+                    {
+                        node.end_byte()
+                    } else {
+                        0
+                    },
+                    owner: if function {
+                        callable_owner
+                    } else {
+                        self.scopes[parent].owner
+                    },
+                    rust_module,
+                    rust_item_owner,
+                    ..Scope::default()
+                });
+            }
             self.ecma_context = self.scopes[scope].ecma_context;
             if self.ecmascript()
                 && node.kind() == "class"
@@ -2676,7 +2721,7 @@ impl LexicalCollector<'_> {
             && let Some(name) = self.identifier(pattern)
             && self.declaration_binding_name(symbol).as_ref() == Some(&name)
         {
-            let mut write_scope = if var { evaluation_scope } else { scope };
+            let mut write_scope = self.binding_scope(if var { evaluation_scope } else { scope });
             while var && !self.scopes[write_scope].bindings.contains_key(&name) {
                 let Some(parent) = self.scopes[write_scope].parent else {
                     break;
@@ -3534,6 +3579,55 @@ impl LexicalCollector<'_> {
         Ok(None)
     }
 
+    /// Convert an already selected lexical target without changing its authority.
+    fn call_binding(
+        &self,
+        target: &BindingTarget,
+        site: &CallSite,
+        name: &str,
+    ) -> SourceCallBinding {
+        match target {
+            BindingTarget::Declaration(symbol) if site.member.is_none() => {
+                SourceCallBinding::LocalDeclaration(*symbol)
+            }
+            BindingTarget::Declarations(symbols) if site.member.is_none() => {
+                SourceCallBinding::LocalDeclarations(Arc::clone(symbols))
+            }
+            BindingTarget::Import { import, reference } => SourceCallBinding::Imported {
+                import: *import,
+                reference: *reference,
+                member: site.member.clone(),
+                rust_toolchain: self.toolchain_call_reference(
+                    *import,
+                    *reference,
+                    site.member.as_deref(),
+                ),
+            },
+            BindingTarget::RustModule(module) if site.member.is_some() => site
+                .member
+                .as_ref()
+                .and_then(|member| {
+                    crate::SourceRustPath::from_ast_path(&format!("self::{name}::{member}"))
+                })
+                .map_or(SourceCallBinding::Unresolved, |path| {
+                    SourceCallBinding::RustPath(crate::SourceRustCall {
+                        path,
+                        module: Arc::clone(module),
+                        origin: crate::SourceRustCallOrigin::DeclaredModule,
+                    })
+                }),
+            BindingTarget::Shadow => SourceCallBinding::Shadowed,
+            BindingTarget::Declaration(_)
+            | BindingTarget::Declarations(_)
+            | BindingTarget::PythonOwner(_)
+            | BindingTarget::RustModule(_)
+            | BindingTarget::RustNamespaceLookup(_)
+            | BindingTarget::RustValueLookup(_)
+            | BindingTarget::Unresolved
+            | BindingTarget::Imports { .. } => SourceCallBinding::Unresolved,
+        }
+    }
+
     /// Nearest visible binding wins; a missing or dynamic owner cannot authorize fallback.
     fn resolve<E>(
         &self,
@@ -3554,6 +3648,13 @@ impl LexicalCollector<'_> {
         let mut python_writer = None;
         'lookup: while let Some(scope) = current {
             check()?;
+            if self.language == "cpp" {
+                if let Some(target) = self.cpp_namespace_target(scope, name, offset, check)? {
+                    return Ok(self.call_binding(target, site, name));
+                }
+                current = self.scopes[scope].parent;
+                continue;
+            }
             let bindings = if site.method_name {
                 self.scopes[scope].methods.get(name)
             } else if self.language == "rust" && site.member.is_some() {
@@ -3561,10 +3662,10 @@ impl LexicalCollector<'_> {
             } else {
                 self.scopes[scope].bindings.get(name)
             };
-            let constructor = (self.language == "cpp")
-                .then(|| self.scopes[scope].namespaces.get(name))
-                .flatten();
-            for bindings in bindings.into_iter().chain(constructor) {
+            let exported = self.scopes[scope]
+                .namespace_exports
+                .and_then(|shared| self.scopes[shared].bindings.get(name));
+            for bindings in bindings.into_iter().chain(exported) {
                 if bindings.runtime_mutated
                     && (python_writer.is_none() || python_writer != bindings.python_writer)
                 {
@@ -3593,16 +3694,6 @@ impl LexicalCollector<'_> {
                         current = Some(*owner);
                         continue 'lookup;
                     }
-                    if self.language == "cpp"
-                        && let Some((first, last)) = self.cpp_value_visibility(target)
-                    {
-                        if offset < first {
-                            continue;
-                        }
-                        if offset < last {
-                            return Ok(SourceCallBinding::Unresolved);
-                        }
-                    }
                     if let BindingTarget::RustNamespaceLookup(module)
                     | BindingTarget::RustValueLookup(module) = target
                     {
@@ -3621,50 +3712,7 @@ impl LexicalCollector<'_> {
                             },
                         ));
                     }
-                    return Ok(match target {
-                        BindingTarget::Declaration(symbol) if site.member.is_none() => {
-                            SourceCallBinding::LocalDeclaration(*symbol)
-                        }
-                        BindingTarget::Declarations(symbols) if site.member.is_none() => {
-                            SourceCallBinding::LocalDeclarations(Arc::clone(symbols))
-                        }
-                        BindingTarget::Import { import, reference } => {
-                            SourceCallBinding::Imported {
-                                import: *import,
-                                reference: *reference,
-                                member: site.member.clone(),
-                                rust_toolchain: self.toolchain_call_reference(
-                                    *import,
-                                    *reference,
-                                    site.member.as_deref(),
-                                ),
-                            }
-                        }
-                        BindingTarget::RustModule(module) if site.member.is_some() => site
-                            .member
-                            .as_ref()
-                            .and_then(|member| {
-                                crate::SourceRustPath::from_ast_path(&format!(
-                                    "self::{name}::{member}"
-                                ))
-                            })
-                            .map_or(SourceCallBinding::Unresolved, |path| {
-                                SourceCallBinding::RustPath(crate::SourceRustCall {
-                                    path,
-                                    module: Arc::clone(module),
-                                    origin: crate::SourceRustCallOrigin::DeclaredModule,
-                                })
-                            }),
-                        BindingTarget::Shadow => SourceCallBinding::Shadowed,
-                        BindingTarget::Declaration(_)
-                        | BindingTarget::Declarations(_)
-                        | BindingTarget::PythonOwner(_)
-                        | BindingTarget::RustModule(_)
-                        | BindingTarget::RustNamespaceLookup(_)
-                        | BindingTarget::RustValueLookup(_)
-                        | BindingTarget::Unresolved
-                        | BindingTarget::Imports { .. } => SourceCallBinding::Unresolved,
-                    });
+                    return Ok(self.call_binding(target, site, name));
                 }
             }
             let floor = self.scopes[scope].enclosing_visibility_floor;
@@ -4217,6 +4265,364 @@ function caller() { renamed(); tools.work(); }
             if !matches!(facts.calls()[0].binding, SourceCallBinding::LocalDeclaration(symbol) if graph.symbols[symbol].kind == projectatlas_core::symbols::SymbolKind::Function)
             {
                 failures.push(format!("{language}: {facts:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn reopened_containers_preserve_member_visibility_without_sharing_private_blocks() {
+        let mut failures = Vec::new();
+        for (language, content, resolved) in [
+            (
+                "cpp",
+                "namespace N { void run() {} } namespace N { void caller() { run(); } }",
+                true,
+            ),
+            (
+                "cpp",
+                r"namespace \u03B1 { void run() {} } namespace α { void caller() { run(); } }",
+                true,
+            ),
+            (
+                "cpp",
+                r"namespace \u03B1 { void run() {} } namespace β { void caller() { run(); } }",
+                false,
+            ),
+            (
+                "cpp",
+                r"namespace N { void \u03B1() {} } namespace N { void caller() { α(); } }",
+                true,
+            ),
+            (
+                "cpp",
+                r"namespace N { void α() {} } namespace N { void caller() { auto \u03B1 = unknown; α(); } }",
+                false,
+            ),
+            (
+                "cpp",
+                "namespace N { void caller() { run(); } } namespace N { void run() {} }",
+                false,
+            ),
+            (
+                "cpp",
+                "namespace A { namespace B { void run() {} } } namespace A::B { void caller() { run(); } }",
+                true,
+            ),
+            (
+                "cpp",
+                "namespace A::B { void run() {} } namespace A { namespace B { void caller() { run(); } } }",
+                true,
+            ),
+            (
+                "cpp",
+                "namespace A { namespace N { void run() {} } } namespace B { namespace N { void caller() { run(); } } }",
+                false,
+            ),
+            (
+                "cpp",
+                "namespace { void run() {} } namespace { void caller() { run(); } }",
+                true,
+            ),
+            (
+                "cpp",
+                "inline namespace N { void run() {} } namespace N { void caller() { run(); } }",
+                true,
+            ),
+            (
+                "cpp",
+                "void run() {} namespace N { void caller() { run(); } void run() {} }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class C { static void Run() {} } partial class C { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "namespace N { partial class C { static void Run() {} } } namespace N { partial class C { static void Caller() { Run(); } } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class A { static void Run() {} } partial class B { static void Caller() { Run(); } }",
+                false,
+            ),
+            (
+                "typescript",
+                "namespace N { export function run() {} } namespace N { export function caller() { run(); } }",
+                true,
+            ),
+            (
+                "typescript",
+                "namespace N { function run() {} } namespace N { export function caller() { run(); } }",
+                false,
+            ),
+            (
+                "typescript",
+                "namespace N { function run() {} export function caller() { run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial struct C { static void Run() {} } partial struct C { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial record C { static void Run() {} } partial record C { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial interface C { static void Run() {} } partial interface C { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class C<T> { static void Run() {} } partial class C<T> { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "namespace @N { partial class @C<@T> { static void Run() {} } } namespace N { partial class C<T> { static void Caller() { Run(); } } }",
+                true,
+            ),
+            (
+                "csharp",
+                r"namespace \u004e { partial class \u0043<\u0054> { static void Run() {} } } namespace N { partial class C<T> { static void Caller() { Run(); } } }",
+                true,
+            ),
+            (
+                "csharp",
+                "namespace N\u{200d} { partial class C\u{200d}<T\u{200d}> { static void Run() {} } } namespace N { partial class C<T> { static void Caller() { Run(); } } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class C { static void @Run() {} } partial class C { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class C { static void Run() {} } partial class C { static void Caller(System.Action @Run) { Run(); } }",
+                false,
+            ),
+            (
+                "csharp",
+                "partial record struct C { static void Run() {} } partial record struct C { static void Caller() { Run(); } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class C<T> { static void Run() {} } partial class C<T,U> { static void Caller() { Run(); } }",
+                false,
+            ),
+            (
+                "csharp",
+                "namespace A { partial class C { static void Run() {} } } namespace B { partial class C { static void Caller() { Run(); } } }",
+                false,
+            ),
+            (
+                "csharp",
+                "namespace A.B { partial class C { static void Run() {} } } namespace A { namespace B { partial class C { static void Caller() { Run(); } } } }",
+                true,
+            ),
+            (
+                "csharp",
+                "partial class O { partial class C { static void Run() {} } } partial class O { partial class C { static void Caller() { Run(); } } }",
+                true,
+            ),
+            (
+                "csharp",
+                "class C { static void Run() {} } class C { static void Caller() { Run(); } }",
+                false,
+            ),
+            (
+                "csharp",
+                "class C { static void Run() {} } partial class C { static void Caller() { Run(); } }",
+                false,
+            ),
+            (
+                "typescript",
+                "namespace \\u004e { export function run() {} } namespace N { export function caller() { run(); } }",
+                true,
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "containers.source",
+                Some(language),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{language}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let actual = facts
+                .calls()
+                .iter()
+                .filter(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_)))
+                .count();
+            if facts.calls().len() != 1 || actual != usize::from(resolved) {
+                failures.push(format!("{language}: {content}: {graph:?}: {facts:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn partial_type_identity_components_share_the_lexical_retention_budget() {
+        use std::fmt::Write as _;
+        for (widths, complete) in [
+            (vec![super::MAX_LEXICAL_BINDINGS / 2 + 1; 2], false),
+            (vec![super::MAX_LEXICAL_BINDINGS + 1], false),
+            (vec![super::MAX_LEXICAL_BINDINGS / 2 - 8; 2], true),
+        ] {
+            let mut content = String::from(
+                "class Calls { static void Run() {} static void Caller() { Run(); } }\n",
+            );
+            for (owner, width) in widths.into_iter().enumerate() {
+                let parameters = (0..width)
+                    .map(|index| format!("T{index}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                assert!(writeln!(content, "partial class C{owner}<{parameters}> {{}}").is_ok());
+            }
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "Capacity.cs",
+                Some("csharp"),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert_eq!(facts.bindings_incomplete, !complete);
+            assert_eq!(facts.exports_incomplete, !complete);
+            assert_eq!(facts.calls().len(), 1);
+            assert!(graph.symbols.iter().any(|symbol| symbol.name == "Run"));
+            assert_eq!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                complete
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_exports_keep_private_closures_and_write_owners() {
+        for (content, expected) in [
+            (
+                "namespace N { function hidden() {} export function run(){hidden();} } namespace N { export function caller(){run();} }",
+                vec![true, true],
+            ),
+            (
+                "namespace N { function hidden() {} export function run(){hidden();} } namespace N { export function caller(){hidden();} }",
+                vec![true, false],
+            ),
+            (
+                "namespace N { export var run = ()=>{}; } namespace N { export function caller(){run();} }",
+                vec![true],
+            ),
+            (
+                "namespace N { export function run(){} } namespace N { run=null; export function caller(){run();} }",
+                vec![false],
+            ),
+            (
+                "namespace N { function hidden(){} export namespace M { export function run(){hidden();} } } namespace N.M { export function caller(){run();} }",
+                vec![true, true],
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "namespace.ts",
+                Some("typescript"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, _, facts) = extracted.into_parts();
+            let actual = facts
+                .calls()
+                .iter()
+                .map(|call| matches!(call.binding, SourceCallBinding::LocalDeclaration(_)))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{content}: {facts:?}");
+        }
+    }
+
+    #[test]
+    fn cpp_anonymous_namespace_lookup_preserves_visibility_and_competitors() {
+        let mut failures = Vec::new();
+        for (content, resolved) in [
+            ("namespace { void run() {} } void caller() { run(); }", true),
+            (
+                "namespace N { namespace { void run() {} } void caller() { run(); } }",
+                true,
+            ),
+            (
+                "namespace { namespace { void run() {} } } void caller() { run(); }",
+                true,
+            ),
+            (
+                "namespace { void run() {} } void caller() { auto run = unknown; run(); }",
+                false,
+            ),
+            (
+                "namespace { void run() {} } void run() {} void caller() { run(); }",
+                false,
+            ),
+            (
+                "void run() {} namespace { void run() {} } void caller() { run(); }",
+                false,
+            ),
+            (
+                "namespace { void run() {} } auto run = unknown; void caller() { run(); }",
+                false,
+            ),
+            (
+                "void caller() { run(); } namespace { void run() {} }",
+                false,
+            ),
+            (
+                "namespace { void run() {} } void caller() { run(); } void run() {}",
+                true,
+            ),
+            (
+                "void run() {} void caller() { run(); } namespace { void run() {} }",
+                true,
+            ),
+            (
+                "namespace A { namespace { void run() {} } } namespace B { void caller() { run(); } }",
+                false,
+            ),
+            (
+                "namespace { void run(int) {} } void caller() { run(1); } namespace { void run(char) {} }",
+                false,
+            ),
+        ] {
+            // Separate declaration rows so duplicate display metadata does not
+            // independently force the graph's conservative identity abstention.
+            let content = content.replace("} ", "}\n");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "anonymous.cpp",
+                Some("cpp"),
+                &content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            if facts.calls().len() != 1
+                || matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ) != resolved
+            {
+                failures.push(format!("{content}: {graph:?}: {facts:?}"));
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

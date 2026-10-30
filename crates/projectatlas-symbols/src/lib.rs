@@ -3673,6 +3673,19 @@ fn php_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Extract a declaration name by removing a language keyword prefix.
 fn prefixed_declaration_name(node: Node<'_>, content: &str, prefixes: &[&str]) -> Option<String> {
+    if let Some(name) = node.child_by_field_name("name") {
+        return (!name.is_missing() && !name.has_error())
+            .then(|| named_text(name, content))
+            .flatten()
+            .map(|name| name.trim_matches('"').to_string())
+            .filter(|name| !name.is_empty());
+    }
+    if matches!(
+        node.kind(),
+        "namespace_declaration" | "file_scoped_namespace_declaration" | "module_declaration"
+    ) {
+        return None;
+    }
     let text = compact_text(&node_text(node, content)?);
     for prefix in prefixes {
         let Some(rest) = text.strip_prefix(prefix) else {
@@ -5768,6 +5781,70 @@ func helper() {
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Imports && relation.target_name.contains("\"fmt\"")
         }));
+    }
+
+    #[test]
+    fn braced_container_names_exclude_bodies_and_retain_declaration_parents() {
+        for (language, source, namespace, child) in [
+            (
+                "csharp",
+                "namespace N { class C { static void Run() {} } }",
+                "N",
+                Some("C"),
+            ),
+            (
+                "csharp",
+                "namespace A.B {\n class C {}\n}",
+                "A.B",
+                Some("C"),
+            ),
+            ("csharp", "namespace @N { class C {} }", "@N", Some("C")),
+            ("csharp", "namespace N;\nclass C {}", "N", None),
+            (
+                "java",
+                "module atlas.core { exports atlas.api; }",
+                "atlas.core",
+                None,
+            ),
+            ("java", "package atlas.core; class C {}", "atlas.core", None),
+            ("go", "package atlas\nfunc run() {}", "atlas", None),
+            (
+                "kotlin",
+                "package atlas.core\nclass C {}",
+                "atlas.core",
+                None,
+            ),
+            ("cpp", "namespace N { class C {}; }", "N", Some("C")),
+        ] {
+            let graph = extract_symbol_graph("containers.source", Some(language), source);
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Module && symbol.name == namespace),
+                "{language}: {graph:?}"
+            );
+            if let Some(child) = child {
+                assert!(
+                    graph.symbols.iter().any(|symbol| symbol.name == child
+                        && symbol.parent.as_deref() == Some(namespace)),
+                    "{language}: {graph:?}"
+                );
+            }
+        }
+        for (language, source) in [
+            ("csharp", "namespace { class C {} }"),
+            ("java", "module { exports atlas.api; }"),
+        ] {
+            let graph = extract_symbol_graph("malformed.source", Some(language), source);
+            assert!(
+                !graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Module),
+                "{language}: {graph:?}"
+            );
+        }
     }
 
     #[test]

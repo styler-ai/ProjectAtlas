@@ -2110,6 +2110,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-zig",
  "unicode-ident",
+ "unicode-properties",
  "wasmi",
  "wasmi_core",
  "zip",

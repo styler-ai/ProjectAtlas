@@ -103,6 +103,26 @@ overload groups and lost or ambiguous declaration correspondence abstain; fully
 visible overloads retain their ambiguity. This is bounded lexical evidence, not a
 C++ compiler model for dependent templates, inheritance or qualified dispatch.
 
+Namespace and module declaration names come from their grammar-owned name fields,
+so C# namespace and Java module bodies cannot become display names, package names
+or class parents. Java/Go/Kotlin package forms without a name field retain their
+existing body-free prefix handling. Missing or malformed required names abstain.
+
+Same-file C++ namespace blocks reuse one logical environment, including nested
+namespace shorthand and repeated anonymous namespaces. Anonymous members remain
+visible in their enclosing namespace without copying names into it; conflicting
+candidates abstain, local values still shadow them, and declaration order remains
+significant. C# explicitly partial class, struct, interface and record parts share
+only the matching containing namespace/type and generic parameter identity.
+Ordinary types and unrelated namespace parents remain distinct. C#/C++ lexical
+keys use their admitted identifier values rather than escape spellings; C# also
+removes verbatim prefixes and formatting characters. Case, Unicode composition
+and original graph display names remain distinct and unchanged. TypeScript
+namespace parts share explicit exported members while each part retains its own
+private declarations and closures; writes invalidate their actual shared owner.
+This does not add cross-file merging, arbitrary using-directive expansion, inline
+namespace promotion, qualified C++ dispatch or runtime namespace inference.
+
 Member names follow each language's binding namespace. Rust impl/trait items,
 Go receiver methods, ECMAScript class/object methods and Objective-C selectors do
 not introduce ordinary lexical function names. Go receiver parameters remain
@@ -160,7 +180,8 @@ unrelated outer calls survive body var declarations. Generator expressions,
 starred methods and arrows keep their existing owners.
 
 Native traversal stops at 256 AST levels. Lexical refinement retains at most
-16,384 environments and 16,384 binding transitions across value, method and type/module namespaces or pending writes per file,
+16,384 environments and 16,384 retained binding/identity components across value,
+method and type/module namespaces, generic container keys or pending writes per file,
 independently of symbol/import/call caps. Exceeding these bounds removes binding
 and export authority while preserving raw admitted evidence, source navigation
 and already captured caller ownership. Unvisited ownership stays unproved.

@@ -230,6 +230,26 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** a class or struct and a function share a name, or a call precedes a competing declaration
 - **THEN** language-visible ordinary values take precedence, constructor fallback requires visible unambiguous type evidence, partially visible overloads or ambiguous correspondence remain unresolved, and wholly visible overloads remain ambiguous
 
+#### Scenario: Reopened containers preserve their logical member owner
+- **WHEN** supported same-file C++ namespaces, including nested shorthand and anonymous namespaces, or explicitly partial C# class, struct, interface or record declarations contribute separate blocks to the same logical owner
+- **THEN** proven unqualified calls retain that owner's visible declarations without merging unrelated parents, ordinary types or different generic identities
+- **AND** anonymous namespace members remain visible from their enclosing namespace while source order, local shadows, constructor/value precedence and competing candidates preserve conservative authority; cross-file merging, arbitrary using-directive expansion, inline namespace promotion and qualified C++ dispatch remain outside this bounded contract
+
+#### Scenario: Container names exclude declaration bodies
+- **WHEN** native C# namespace or Java module declarations have a body
+- **THEN** their grammar-owned name field determines package, parent and selector identity without incorporating that body or inventing a name from a missing/malformed required field
+- **AND** existing body-free Java, Go and Kotlin package fallback remains compatible
+
+#### Scenario: Partial type identities share the lexical retention budget
+- **WHEN** one or several partial type identities exhaust the existing retained lexical-name limit through generic parameter components
+- **THEN** admission stops before retaining each excess component, all binding/export authority is withdrawn and raw navigation survives
+- **AND** a near-limit valid source retains exact callable evidence
+
+#### Scenario: TypeScript namespace exports preserve private lexical closures
+- **WHEN** same-file TypeScript namespace parts export callable declarations or values, including nested exported namespaces
+- **THEN** exported members are shared across matching parts, their private declarations remain local to each original part and exported closures retain that private lexical parent
+- **AND** writes invalidate the actual shared exported owner without leaking non-exported names or combining unrelated namespace parents
+
 #### Scenario: Java member syntax does not become a class call
 - **WHEN** Java invokes a qualified method such as `Service.run()`, including a same-name field receiver or overloaded methods without member-target proof
 - **THEN** extraction retains the full method callee, neither detailed resolution nor summary callers fabricate a call to the `Service` class, and existing unqualified method navigation remains available

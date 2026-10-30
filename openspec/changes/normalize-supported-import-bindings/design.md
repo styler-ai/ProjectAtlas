@@ -408,3 +408,48 @@ imports are bounded by the existing display-target admission. Preserve that
 producer/consumer counterevidence rather than changing the key contract on the
 basis of the alert's multiplication. Reassess only if another reachable path is
 causally established.
+
+### Reopened native namespace environments
+
+Authoritative lexical evidence must preserve a same-file namespace's identity across
+separate declaration blocks. Current PR feedback causally targets C++ reopened
+namespaces: a later block must see earlier declarations in that namespace without
+seeing unrelated namespaces or later undeclared values. Reuse bounded semantic
+environments, keep source-order visibility and ambiguity, and inspect nested, inline
+and anonymous namespace forms plus actual analogous registry-owned containers. Do
+not share arbitrary classes/blocks or infer cross-file/runtime namespace behavior.
+Any changed binding facts require existing extraction/semantic fingerprint repair.
+
+The confirmed analogous cases are explicitly partial C# class/struct/interface/
+record environments and exported TypeScript namespace members. A concrete key of
+parent-scope ordinal and grammar-owned child name avoids storing qualified prefixes
+per declaration. Generic parameter identity and type family separate partial owners.
+TypeScript keeps one private lexical block per part with an additional shared export
+lookup layer; explicit export binding and subsequent writes use the shared owner,
+while an exported closure retains its original private parent. Anonymous C++ children
+are linked once per logical namespace; lookup borrows candidates with cooperative
+checks rather than copying every name into ancestor maps. Distinct candidates
+abstain and future-only declarations cannot hide already visible outer targets.
+The existing 16,384 scope/transition and AST depth bounds remain authoritative.
+No schema, provider, runtime model or global interner is introduced. C# identifier
+equality uses the already locked unicode-properties general-category tables through
+an explicit direct dependency; no dependency version changes. A small shared
+fixed-width Unicode escape decoder serves the C#/C++ grammar-owned binding and
+reference names, while each language retains its own identifier rules. C# removes
+verbatim prefixes and formatting characters; C++ preserves ordinary raw names and
+admits non-basic universal character names. Neither applies case folding or Unicode
+normalization, and graph display text remains unchanged.
+Extraction and semantic contracts advance from 14 to 15; actual unchanged native
+14-to-15 repair, full convergence, authored-state preservation and no-op are required.
+
+The actual namespace CLI/MCP proof additionally reproduced stable0.5.0 C# namespace
+and Java module names containing complete bodies. Prefer their AST name field in
+the existing shared declaration producer, refusing malformed/missing required
+names. Preserve Java/Go/Kotlin package prefix fallback (those nodes have no body
+or name field) and original identifier display spelling. This repairs package,
+parent, contains-edge and selector identity at the source owner under the same
+unpublished extraction15 invalidation. Partial generic identity components charge
+the existing collector-wide lexical budget before allocation; many individually
+bounded keys cannot exceed the shared retained-name ceiling. Causal aggregate and
+single overflow cases withdraw all binding/export authority while preserving raw
+navigation, and a near-limit positive retains exact calls.
