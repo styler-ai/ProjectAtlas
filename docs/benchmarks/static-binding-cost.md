@@ -6,11 +6,11 @@ Ryzen 7 5700U host. The published 0.5.0 archive and extracted binary were checks
 verified. Exact identities, fixture hashes, work counters and protocol are in
 [the compact result](static-binding-cost.json).
 
-The measurements use the optimized contract 15/15 source, including source goals,
+The measurements use the optimized contract 16/16 source, including source goals,
 host roles, contextual-keyword/arrow recovery and exact module identities, alongside
 the preceding declaration, binding, occurrence and bounded-forwarding repairs,
 shared re-export module storage before staging admission, and reopened native
-container/identifier ownership.
+container/identifier ownership and deferred instance-field values/writes.
 The source and binary identities are recorded in the compact result. The original
 contract-12 fixtures and raw measurements remain preserved; the three shared fixture
 source sets are unchanged. This evidence remains separate from release acceptance.
@@ -23,20 +23,20 @@ SLOs, unaffected navigation/upgrade comparisons, or #715's installed platform pr
 
 | Fixture | 0.5.0 median seconds | Candidate median seconds | 0.5.0 max RSS KiB | Candidate max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2887 | 0.3499 | 27544 | 33912 |
-| 64 Cargo roots, 256 callers | 0.3280 | 0.3908 | 28880 | 34988 |
-| Dense/comment/nested source | 0.1660 | 0.1652 | 26716 | 29592 |
-| 256 contextual-keyword calls | 0.1008 | 0.1177 | 23016 | 26052 |
-| 64 script programs, 63 callers | 0.1179 | 0.1441 | 23572 | 27448 |
+| Four Cargo roots, 256 callers | 0.2867 | 0.3489 | 27800 | 33516 |
+| 64 Cargo roots, 256 callers | 0.3260 | 0.3839 | 28660 | 34596 |
+| Dense/comment/nested source | 0.1668 | 0.1572 | 26700 | 29444 |
+| 256 contextual-keyword calls | 0.0995 | 0.1166 | 23196 | 25644 |
+| 64 script programs, 63 callers | 0.1162 | 0.1443 | 23572 | 27276 |
 
 The root cases add actual ownership and caller resolution. Each timing sample
 checks that its selected candidate call resolves. A separate post-measurement probe
 confirms the selected baseline caller is unresolved and the candidate targets its
 owning root's `run`; the permanent root E2Es also check exact target identity.
-The root initial-time ratios are 1.212 and 1.191; maximum-RSS ratios
-are 1.231 and 1.211. Dense Rust time/RSS ratios are
-0.995/1.108. Native contextual time/RSS ratios are
-1.167/1.132, and host ratios are 1.222/1.164.
+The root initial-time ratios are 1.217 and 1.178; maximum-RSS ratios
+are 1.206 and 1.207. Dense Rust time/RSS ratios are
+0.942/1.103. Native contextual time/RSS ratios are
+1.172/1.106, and host ratios are 1.242/1.157.
 Both contextual fixtures lack the selected named caller anchor in the baseline;
 these compare different successfully extracted work. They establish neither a
 general speedup nor a root-count asymptotic bound beyond these inputs.
@@ -131,11 +131,11 @@ not exceptions to those release targets.
 matrix and fixture inventory, preserve the public CLI/MCP/plugin/host routes, and
 exercise stable 0.5.0 plus preceding development-contract repair, identity,
 approved-purpose status, no-op and rollback. Current derivation and semantic
-contracts 15/15 repair the source-context, occurrence-owner, arrow recovery and
-explicit module-identity defects and reopened-container/identifier defects while
+contracts 16/16 repair the source-context, occurrence-owner, arrow recovery and
+explicit module-identity defects and reopened-container/identifier and deferred-field/write defects while
 retaining the preceding ownership repairs.
 The current optimized default-feature candidate passes actual native upgrades from
-stable 0.5.0 and contracts 5 through 14, including unchanged-source repair, approved
+stable 0.5.0 and contracts 5 through 15, including unchanged-source repair, approved
 purposes and identity, full convergence, no-op, early deadline refusal, rollback
 and re-upgrade. An early deadline does not establish mid-publication cancellation.
 The combined #738/#739/#741 derivation must be strictly newer
@@ -162,19 +162,29 @@ retained-byte accounting across JavaScript, TypeScript, TSX, Vue, Svelte and HTM
 This targeted repair does not waive the separate release performance gates.
 
 
-The current contract-15 comparison adds 256 same-file C++ namespaces, each reopened
+The current contract-16 comparison adds 256 same-file C++ namespaces, each reopened
 with a caller of its original declaration. Three alternating paired rounds against
-the preceding optimized contract-14 source measured 0.1841 versus
-0.1872 seconds median and 30,908 versus 31,668 KiB maximum RSS.
+the preceding optimized contract-14 source measured 0.1895 versus
+0.1864 seconds median and 32,276 versus 31,644 KiB maximum RSS.
 Every candidate sample verifies the selected resolved call and zero-parsed no-op.
 The source-unit and real CLI/MCP selector additionally cover nested/anonymous C++
 visibility and conservative competition, canonical C# partial owners and generic
 identity, TypeScript exported/private closures and writes, source edits, full
 convergence, canonical summaries and project identity. Generic owner identity
 shares the existing aggregate lexical budget, with overflow and near-limit tests.
-The candidate performs corrected namespace lookup work; this bounded local cost
-comparison establishes no general speedup and grants no #708 SLO exception.
+This bounded local cost comparison grants no #708 SLO exception.
+
+The field regression adds 256 classes with instance-field calls to a unique later
+enclosing callable. Against contract15, three alternating paired rounds measured
+0.1191 versus 0.1161 seconds median and 25,692 versus 25,532 KiB maximum RSS.
+Every candidate sample checks all 256 resolved occurrences and a zero-parsed no-op.
+The baseline performs incorrect unresolved work, so this does not establish a
+general speedup. Causal source controls cover captured writes, exports, static
+fields/blocks, computed names, decorators, class headers, immediate construction
+and nested callbacks across JS/TS/TSX and every admitted script role. The permanent
+source-context selector additionally checks 28 native/host field cases through
+CLI/MCP graph and caller-summary adapters, source edits, full convergence and no-op.
 
 The earlier re-export storage comparison above retains its exact contract-14
 source/binary identities in the compact result as historical causal evidence;
-the five-fixture table and reopened-container comparison use current contract15.
+the five-fixture table and reopened-container/field comparisons use current16.

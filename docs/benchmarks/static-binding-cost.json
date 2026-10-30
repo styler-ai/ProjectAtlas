@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-30",
-  "source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
-  "derivation_contract": 15,
-  "semantic_contract": 15,
+  "source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
+  "derivation_contract": 16,
+  "semantic_contract": 16,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
+  "candidate_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -34,8 +34,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.28865725500509143,
-          "peak_rss_kib": 27544,
+          "wall_seconds": 0.2867430510232225,
+          "peak_rss_kib": 27800,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -47,8 +47,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3498875370132737,
-          "peak_rss_kib": 33912,
+          "wall_seconds": 0.3488813189906068,
+          "peak_rss_kib": 33516,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -67,8 +67,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.32803498799330555,
-          "peak_rss_kib": 28880,
+          "wall_seconds": 0.32600403201649897,
+          "peak_rss_kib": 28660,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -80,8 +80,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3907855619909242,
-          "peak_rss_kib": 34988,
+          "wall_seconds": 0.38393060700036585,
+          "peak_rss_kib": 34596,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -100,8 +100,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.16597716600517742,
-          "peak_rss_kib": 26716,
+          "wall_seconds": 0.16679276098147966,
+          "peak_rss_kib": 26700,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -113,8 +113,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.1651649859850295,
-          "peak_rss_kib": 29592,
+          "wall_seconds": 0.15718423400539905,
+          "peak_rss_kib": 29444,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -133,8 +133,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.10082341099041514,
-          "peak_rss_kib": 23016,
+          "wall_seconds": 0.09950808400753886,
+          "peak_rss_kib": 23196,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -146,8 +146,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11767399098607711,
-          "peak_rss_kib": 26052,
+          "wall_seconds": 0.11659835898899473,
+          "peak_rss_kib": 25644,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -166,7 +166,7 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.11789339501410723,
+          "wall_seconds": 0.1162025929952506,
           "peak_rss_kib": 23572,
           "work": {
             "candidates": 1,
@@ -179,8 +179,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14407142100390047,
-          "peak_rss_kib": 27448,
+          "wall_seconds": 0.14428190400940366,
+          "peak_rss_kib": 27276,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -238,18 +238,18 @@
   "reopened_containers": {
     "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
     "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
-    "candidate_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
-    "candidate_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
+    "candidate_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
+    "candidate_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
     "logical_namespaces": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.18412380499648862,
-        "peak_rss_kib": 30908
+        "wall_seconds": 0.1895288759842515,
+        "peak_rss_kib": 32276
       },
       "candidate": {
-        "wall_seconds": 0.18719534599222243,
-        "peak_rss_kib": 31668
+        "wall_seconds": 0.18635384799563326,
+        "peak_rss_kib": 31644
       }
     },
     "source_hashes": {
@@ -258,5 +258,29 @@
       "Cargo.toml": "6cd620ff096dd9d1f0c7d4917d6acd70116d99d9313304b98730080d2af5b4b8"
     },
     "scope": "same-file C++ reopened namespaces, selected exact caller positive and zero-parsed no-op each sample; candidate performs corrected work"
+  },
+  "instance_fields": {
+    "baseline_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
+    "baseline_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
+    "candidate_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
+    "candidate_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
+    "classes": 256,
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 0.11911487000179477,
+        "peak_rss_kib": 25692
+      },
+      "candidate": {
+        "wall_seconds": 0.11611516898847185,
+        "peak_rss_kib": 25532
+      }
+    },
+    "source_hashes": {
+      "main.js": "7ef7247cb9e3b35a412d0f33153ef164d2517852a4bead2963d279ed47377e5e",
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "Cargo.toml": "6cd620ff096dd9d1f0c7d4917d6acd70116d99d9313304b98730080d2af5b4b8"
+    },
+    "scope": "Instance field calls to a unique later enclosing binding, all256 candidate occurrences and zero-parsed noop checked after each sample; baseline performs incorrect unresolved work, no release SLO exception"
   }
 }
