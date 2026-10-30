@@ -14166,6 +14166,90 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
             "run",
             true,
         ),
+        (
+            "owner.cpp",
+            "void run(){}\nunion Owner {void run(){}};\nvoid caller(){run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.kt",
+            "fun run()=1\nobject Owner {fun run()=2}\nfun caller(){run()}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_enum.zig",
+            "fn run() void {}\nconst Owner=enum {value, pub fn run() void {}};\npub fn caller() void {run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_union.zig",
+            "fn run() void {}\nconst Owner=union {value:u8, pub fn run() void {}};\npub fn caller() void {run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_opaque.zig",
+            "fn run() void {}\nconst Owner=opaque {pub fn run() void {}};\npub fn caller() void {run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.rs",
+            "fn run(){}\nstruct Api; impl Api {const run:u8=0;fn caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.java",
+            "interface Left {default void run(){}}\ninterface Right {default void run(){} default void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "constructor.kt",
+            "fun run(){}\nclass Api(val run:()->Unit){fun caller(){run()}}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "initializer.kt",
+            "fun run(){}\nclass Api(run:()->Unit){val value=run();fun caller(){run()}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_while.cpp",
+            "using Callback=void(*)(); void run(){}\nvoid caller(){while(auto run=static_cast<Callback>(nullptr)){} run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_nested.kt",
+            "fun run(){}\nclass Outer{\nfun run(){}\nclass Nested{fun caller(){run()}}\n}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "late_property.kt",
+            "fun run(){}\nclass Api{\nfun caller(){run()}\nval run:()->Unit={}\n}\n",
+            "caller",
+            "run",
+            false,
+        ),
     ];
     for (file, content, _, _, _) in cases {
         fs::write(root.join(file), content)?;
@@ -14250,8 +14334,29 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                             .pointer("/symbol_relations/rows")
                             .and_then(Value::as_array)
                             .ok_or_else(|| io::Error::other("container caller rows missing"))?;
-                        rust_binding_equal(&rows.len(), &1)?;
+                        let expected_rows = if file == "owner_while.cpp" { 2 } else { 1 };
+                        if rows.len() != expected_rows {
+                            return Err(io::Error::other(format!(
+                                "container call count for {file}: {rows:?}"
+                            ))
+                            .into());
+                        }
                         rust_binding_equal(&rust_binding_targets(rows), &targets)?;
+                        if expected && file.starts_with("owner") {
+                            let parent = if file == "owner.java" {
+                                json!("Right")
+                            } else {
+                                Value::Null
+                            };
+                            for row in rows.iter().filter(|row| {
+                                row["target"]["entity"]["selector"]["symbol"]["name"] == target
+                            }) {
+                                rust_binding_equal(
+                                    &row["target"]["entity"]["selector"]["symbol"]["parent"],
+                                    &parent,
+                                )?;
+                            }
+                        }
                     }
                     let text = session.call_tool(
                         "atlas_file_summary",
@@ -14276,7 +14381,10 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
                         .into_iter()
                         .filter_map(|kind| summary["file_summary"][kind].as_array())
                         .flatten()
-                        .find(|function| function["name"] == target)
+                        .find(|function| {
+                            function["name"] == target
+                                && (file != "owner.java" || function["parent"] == "Right")
+                        })
                         .and_then(|function| function["called_by"].as_array())
                         .ok_or_else(|| {
                             io::Error::other(format!(

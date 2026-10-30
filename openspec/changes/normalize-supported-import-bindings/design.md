@@ -490,3 +490,54 @@ canonical across distinct allocations. This changes allocation and work only, no
 facts, keys, schemas or semantic outcomes, so DER16/SEM16 remain unchanged. Existing
 resource/cancellation/cycle tests and actual long-module CLI/MCP controls protect
 the consumer boundary; no module-length rejection or capability removal is added.
+
+
+## Native member-body and constructor ownership
+
+A declaration-family allowlist incorrectly treated some member declarations as
+ordinary enclosing lexical values. Java now gives class/interface/enum/annotation,
+record and anonymous bodies their own method environment. C++ unions join the
+existing class/struct scope and method/prototype classifiers. Zig enum/union/opaque
+bodies use the existing container environment. Rust associated constants use the
+same impl/trait qualification boundary as associated functions; module, function,
+block constants and const parameters still block ordinary lexical lookup.
+
+Kotlin classifier bodies own members independently from their headers. Existing
+scope ordinals represent the constructor header, member body and initialization
+view. Ordered primary parameters bind header expressions; property parameters also
+bind members. The initialization view shares the body parent and adds constructor
+parameters only for property expressions/delegates and initializer blocks, so
+closures retain their actual initialization environment and accessors/member bodies
+do not capture plain parameters. Parameter transitions use the existing bounded
+bind owner; scope admission remains global and any exhaustion withdraws authority.
+No trait/provider, AST reparse, runtime receiver/type-flow inference or schema is
+introduced. The nearest alternative, a per-call ancestor/name scan, would repeat
+work and obscure capture ownership. Existing bounded maps and ordinal scopes keep
+collection linear in admitted syntax/transitions with logarithmic name insertion.
+
+Extraction/semantic contract17 replaces16 because these are changed call facts,
+not merely storage changes. Unchanged prior indexes require native refresh repair,
+full convergence, authored-state preservation, no-op and cancelled-publication proof.
+Registry-derived counterevidence: PHP uses its separate binder; Go/Objective-C
+methods are excluded from ordinary values, C has no member functions, and C# bodies
+already create declaration-list environments. Those mechanisms are unchanged.
+
+
+Kotlin non-inner member classifiers skip enclosing instance-member environments;
+explicit inner classes and object literals retain captures, named singleton object
+members and enclosing function locals remain visible. This follows the language's
+[linked-scope rules](https://kotlinlang.org/spec/scopes-and-identifiers.html#linked-scopes)
+and [nested/inner distinction](https://kotlinlang.org/docs/nested-classes.html), with
+source-fact causal and compatibility controls; no Kotlin compiler oracle is claimed
+on this host. Declaration-scope property blockers are independent of source order.
+Inheritance, receiver legality/type-flow checking and cross-body companion-member
+promotion remain outside the existing direct lexical subset. Invalid Java static
+nested/nonstatic-member calls provide no supported positive workflow and are not
+claimed as checked compiler semantics.
+
+C++ while-condition declarations also require the same statement-owned scope as
+if/switch/for declarations. The causal shared-owner control checks both an inner
+parameter-like call and the subsequent free call; g++ validates the fixture syntax.
+A compact for-condition-declaration fixture produced no call facts in the pinned
+grammar and does not prove lexical resolution; the admitted for-initializer control
+is checked instead. No parser-pack or grammar change is introduced in this repair.

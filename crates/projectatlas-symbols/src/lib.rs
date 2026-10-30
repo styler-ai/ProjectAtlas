@@ -2214,6 +2214,7 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
         || has_ancestor_kind(node.parent(), "class_body")
         || has_ancestor_kind(node.parent(), "class_specifier")
         || has_ancestor_kind(node.parent(), "struct_specifier")
+        || has_ancestor_kind(node.parent(), "union_specifier")
         || has_ancestor_kind(node.parent(), "interface_declaration")
         || has_ancestor_kind(node.parent(), "trait_declaration"))
 }
@@ -2256,7 +2257,8 @@ fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
 fn is_type_member_declarator(node: Node<'_>) -> bool {
     has_ancestor_kind(node.parent(), "field_declaration")
         && (has_ancestor_kind(node.parent(), "class_specifier")
-            || has_ancestor_kind(node.parent(), "struct_specifier"))
+            || has_ancestor_kind(node.parent(), "struct_specifier")
+            || has_ancestor_kind(node.parent(), "union_specifier"))
         && !has_ancestor_kind(node.parent(), "function_definition")
 }
 

@@ -111,6 +111,19 @@ enum EcmaPatternEffect {
     Write(usize),
 }
 
+/// Kotlin instance membership and its constructor-only initialization view.
+#[derive(Clone, Copy, Default)]
+enum KotlinScope {
+    /// Lexical, callable or singleton-object environment without an instance boundary.
+    #[default]
+    Ordinary,
+    /// Instance members require an outer receiver across inner-class boundaries.
+    Instance {
+        /// Constructor parameter view used by property expressions and init blocks.
+        initialization: Option<usize>,
+    },
+}
+
 /// A binding's visibility point and its pre-initialization shadow policy.
 struct Binding {
     /// First source offset at which this target is initialized.
@@ -328,6 +341,8 @@ struct Scope {
     ecma_var_environment: EcmascriptVarEnvironment,
     /// Whether Python function lookup must skip this class body.
     class: bool,
+    /// Kotlin instance ownership and constructor-only lookup view.
+    kotlin: KotlinScope,
     /// Python iteration variables stay inside their comprehension environment.
     comprehension: bool,
     /// Earliest outer lookup phase for deferred code; zero keeps immediate order.
@@ -1264,12 +1279,7 @@ impl LexicalCollector<'_> {
 
     /// Member names enter ordinary lexical values only where the language allows it.
     fn declaration_is_lexical_value(&self, node: Node<'_>, kind: SymbolKind) -> bool {
-        if self.language == "rust"
-            && node
-                .parent()
-                .and_then(|body| body.parent())
-                .is_some_and(|owner| matches!(owner.kind(), "impl_item" | "trait_item"))
-        {
+        if self.language == "rust" && is_rust_associated_member(node) {
             return false;
         }
         !(kind == SymbolKind::Method
@@ -1476,9 +1486,31 @@ impl LexicalCollector<'_> {
         } else {
             None
         };
-        let function = is_function(node.kind());
-        let class = is_class(node.kind());
+        let function = is_function(node.kind())
+            || self.language == "kotlin"
+                && matches!(node.kind(), "secondary_constructor" | "getter" | "setter");
+        // Java bodies also own interface/enum/record and anonymous members.
+        // Select the body rather than adding a second scope to named classes.
+        let class = if self.language == "java" {
+            matches!(
+                node.kind(),
+                "class_body" | "interface_body" | "enum_body" | "annotation_type_body"
+            )
+        } else if self.language == "kotlin" {
+            is_class(node.kind())
+                || matches!(
+                    node.kind(),
+                    "class_body" | "enum_class_body" | "object_declaration" | "companion_object"
+                )
+        } else {
+            is_class(node.kind())
+        };
         let class = class
+            || self.language == "zig"
+                && matches!(
+                    node.kind(),
+                    "enum_declaration" | "union_declaration" | "opaque_declaration"
+                )
             || self.language == "rust"
                 && matches!(
                     node.kind(),
@@ -1674,7 +1706,7 @@ impl LexicalCollector<'_> {
                 || (self.language == "cpp"
                     && matches!(
                         node.kind(),
-                        "if_statement" | "switch_statement" | "for_range_loop"
+                        "if_statement" | "switch_statement" | "while_statement" | "for_range_loop"
                     ))
                 || (matches!(self.language, "csharp" | "c_sharp")
                     && matches!(
@@ -1699,6 +1731,33 @@ impl LexicalCollector<'_> {
                     return Ok(());
                 }
                 let mut parent = scope;
+                if self.language == "kotlin"
+                    && matches!(node.kind(), "class_body" | "enum_class_body")
+                    && node.parent().is_some_and(|owner| {
+                        matches!(
+                            owner.kind(),
+                            "class_declaration" | "object_declaration" | "companion_object"
+                        )
+                    })
+                {
+                    // Member bodies exclude the primary-constructor header environment.
+                    parent = self.scopes[parent].parent.unwrap_or(parent);
+                }
+                if self.language == "kotlin"
+                    && matches!(
+                        node.kind(),
+                        "class_declaration" | "object_declaration" | "companion_object"
+                    )
+                    && !kotlin_inner_classifier(node, self.content)
+                {
+                    while matches!(self.scopes[parent].kotlin, KotlinScope::Instance { .. }) {
+                        check()?;
+                        let Some(outer) = self.scopes[parent].parent else {
+                            break;
+                        };
+                        parent = outer;
+                    }
+                }
                 if (function || class) && self.language == "python" {
                     parent = self.python_closure_parent(parent);
                 }
@@ -1755,6 +1814,18 @@ impl LexicalCollector<'_> {
                         EcmascriptVarEnvironment::Enclosing
                     },
                     class,
+                    kotlin: if self.language == "kotlin"
+                        && matches!(node.kind(), "class_body" | "enum_class_body")
+                        && node
+                            .parent()
+                            .is_some_and(|owner| owner.kind() == "class_declaration")
+                    {
+                        KotlinScope::Instance {
+                            initialization: None,
+                        }
+                    } else {
+                        KotlinScope::Ordinary
+                    },
                     enclosing_visibility_floor: if (function
                         && (self.language == "python" || self.ecmascript())
                         && !immediately_invoked_expression(node))
@@ -1812,6 +1883,33 @@ impl LexicalCollector<'_> {
                 }
                 self.parameters(node, scope, check)?;
                 self.ecma_context = body_context;
+            }
+        }
+        if self.language == "kotlin" {
+            if node.kind() == "class_declaration" {
+                self.kotlin_constructor_bindings(node, scope, false, true, check)?;
+            } else if matches!(node.kind(), "class_body" | "enum_class_body")
+                && let Some(owner) = node
+                    .parent()
+                    .filter(|owner| owner.kind() == "class_declaration")
+            {
+                self.kotlin_constructor_bindings(owner, scope, true, false, check)?;
+                if owner
+                    .named_children(&mut owner.walk())
+                    .any(|child| child.kind() == "primary_constructor")
+                    && self.admit_scope()
+                {
+                    let initialization = self.scopes.len();
+                    self.scopes.push(Scope {
+                        parent: Some(scope),
+                        owner: self.scopes[scope].owner,
+                        ..Scope::default()
+                    });
+                    self.kotlin_constructor_bindings(owner, initialization, false, false, check)?;
+                    self.scopes[scope].kotlin = KotlinScope::Instance {
+                        initialization: Some(initialization),
+                    };
+                }
             }
         }
         if self.language == "cpp" && node.kind() == "catch_clause" {
@@ -2052,9 +2150,31 @@ impl LexicalCollector<'_> {
                 && node
                     .child_by_field_name("body")
                     .is_none_or(|body| body.id() != child.id());
+            let initialization = match self.scopes[scope].kotlin {
+                KotlinScope::Instance { initialization } => initialization,
+                KotlinScope::Ordinary => None,
+            };
+            let kotlin_initialization = initialization.filter(|_| {
+                self.language == "kotlin"
+                    && (child.kind() == "anonymous_initializer"
+                        || node.kind() == "property_declaration"
+                            && !matches!(
+                                child.kind(),
+                                "variable_declaration"
+                                    | "multi_variable_declaration"
+                                    | "getter"
+                                    | "setter"
+                                    | "modifiers"
+                                    | "type_parameters"
+                                    | "type_constraints"
+                            ))
+            });
             self.visit(
                 child,
-                if python_definition_header || computed_method_key || immediate_field_syntax {
+                if let Some(initialization) = kotlin_initialization {
+                    initialization
+                } else if python_definition_header || computed_method_key || immediate_field_syntax
+                {
                     enclosing_scope
                 } else {
                     scope
@@ -2063,6 +2183,60 @@ impl LexicalCollector<'_> {
             )?;
             if self.ecmascript() {
                 self.scopes[scope].ecma_context = saved_context;
+            }
+        }
+        Ok(())
+    }
+
+    /// Primary-constructor names belong to header/initialization, or to property members.
+    fn kotlin_constructor_bindings<E>(
+        &mut self,
+        owner: Node<'_>,
+        scope: usize,
+        property_only: bool,
+        ordered: bool,
+        check: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut cursor = owner.walk();
+        let Some(constructor) = owner
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "primary_constructor")
+        else {
+            return Ok(());
+        };
+        let mut cursor = constructor.walk();
+        let Some(parameters) = constructor
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "class_parameters")
+        else {
+            return Ok(());
+        };
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            check()?;
+            if parameter.kind() != "class_parameter" {
+                continue;
+            }
+            let mut parameter_cursor = parameter.walk();
+            if property_only
+                && !parameter
+                    .children(&mut parameter_cursor)
+                    .any(|child| matches!(child.kind(), "val" | "var"))
+            {
+                continue;
+            }
+            if let Some(name) = parameter
+                .named_children(&mut parameter_cursor)
+                .find(|child| child.kind() == "identifier")
+                .and_then(|name| self.identifier(name))
+            {
+                self.bind(
+                    scope,
+                    name,
+                    if ordered { parameter.end_byte() } else { 0 },
+                    false,
+                    BindingTarget::Shadow,
+                );
             }
         }
         Ok(())
@@ -2382,6 +2556,18 @@ impl LexicalCollector<'_> {
         scope: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.language == "kotlin" && function.kind() == "setter" {
+            let mut cursor = function.walk();
+            if let Some(name) = function
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier")
+            {
+                self.parameter_names(name, scope, check)?;
+            } else {
+                self.bind(scope, "value".to_string(), 0, true, BindingTarget::Shadow);
+            }
+            return Ok(());
+        }
         if self.language == "go"
             && let Some(receiver) = function.child_by_field_name("receiver")
         {
@@ -2564,6 +2750,10 @@ impl LexicalCollector<'_> {
         mut scope: usize,
         check: &mut impl FnMut() -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.language == "rust" && node.kind() == "const_item" && is_rust_associated_member(node)
+        {
+            return Ok(());
+        }
         if self.ecmascript() && node.kind() == "for_in_statement" {
             if let Some(pattern) = node.child_by_field_name("left") {
                 let from = node
@@ -2748,7 +2938,10 @@ impl LexicalCollector<'_> {
             self.mutation_names(pattern, evaluation_scope, node.end_byte(), check)?;
             return Ok(());
         }
-        let from = if matches!(self.language, "c" | "cpp" | "objective-c")
+        let from = if self.language == "kotlin" && (scope == 0 || self.scopes[scope].class) {
+            // Kotlin declaration scopes reserve members independently of source order.
+            0
+        } else if matches!(self.language, "c" | "cpp" | "objective-c")
             || matches!(node.kind(), "except_clause" | "catch_block")
         {
             pattern.end_byte()
@@ -3892,6 +4085,27 @@ fn is_function(kind: &str) -> bool {
     )
 }
 
+/// Only an explicit Kotlin inner modifier retains an enclosing instance environment.
+fn kotlin_inner_classifier(node: Node<'_>, content: &str) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| child.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut cursor = modifiers.walk();
+            modifiers.named_children(&mut cursor).any(|modifier| {
+                modifier.kind() == "class_modifier"
+                    && modifier.utf8_text(content.as_bytes()).ok() == Some("inner")
+            })
+        })
+}
+
+/// Direct impl/trait members require qualification rather than ordinary lexical lookup.
+fn is_rust_associated_member(node: Node<'_>) -> bool {
+    node.parent()
+        .and_then(|body| body.parent())
+        .is_some_and(|owner| matches!(owner.kind(), "impl_item" | "trait_item"))
+}
+
 /// Type/module containers prevent member bindings from leaking into outer scopes.
 fn is_class(kind: &str) -> bool {
     matches!(
@@ -3902,6 +4116,7 @@ fn is_class(kind: &str) -> bool {
             | "class_specifier"
             | "struct_item"
             | "struct_specifier"
+            | "union_specifier"
             | "struct_declaration"
             | "impl_item"
             | "mod_item"
@@ -6172,6 +6387,417 @@ function caller() { renamed(); tools.work(); }
         });
         assert_eq!(result, Err("cancelled"));
         assert_eq!(checks, 100);
+    }
+
+    #[test]
+    fn java_member_bodies_isolate_homonymous_method_bindings() {
+        for source in [
+            "class Left { void run() {} void callerLeft(){run();} } class Right { void run() {} void callerRight(){run();} }",
+            "record Left() {\n void run() {}\n void callerLeft(){run();}\n}\nrecord Right() {\n void run() {}\n void callerRight(){run();}\n}",
+            "class Outer { Object left=new Object(){\n void run() {}\n void callerLeft(){run();}\n}; Object right=new Object(){\n void run() {}\n void callerRight(){run();}\n}; }",
+            "enum Both { LEFT {\n void run() {}\n void callerLeft(){run();}\n}, RIGHT {\n void run() {}\n void callerRight(){run();}\n}; abstract void run(); }",
+            "interface Left { default void run() {} default void callerLeft() { run(); } } interface Right { default void run() {} default void callerRight() { run(); } }",
+            "enum Left { VALUE; void run() {} void callerLeft(){run();} } enum Right { VALUE; void run() {} void callerRight(){run();} }",
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "Members.java",
+                Some("java"),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 2, "{source}: {facts:?}");
+            let targets = graph
+                .symbols
+                .iter()
+                .enumerate()
+                .filter(|(_, symbol)| {
+                    symbol.name == "run"
+                        && symbol.kind == projectatlas_core::symbols::SymbolKind::Method
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            assert!(targets.len() >= 2, "{source}: {graph:?}");
+            for call in calls {
+                assert!(
+                    matches!(call.binding, SourceCallBinding::LocalDeclaration(_)),
+                    "{source}: {call:?}"
+                );
+                let SourceCallBinding::LocalDeclaration(target) = call.binding else {
+                    return;
+                };
+                assert!(call.owner.is_some(), "missing call owner");
+                let Some(owner) = call.owner else { return };
+                assert_eq!(
+                    graph.symbols[target].parent, graph.symbols[owner].parent,
+                    "{source}: {graph:?}"
+                );
+                assert_eq!(graph.symbols[target].name, "run");
+                let expected = if graph.symbols[owner].name == "callerLeft" {
+                    targets[0]
+                } else {
+                    targets[1]
+                };
+                assert_eq!(target, expected, "{source}: {graph:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rust_associated_constants_do_not_shadow_lexical_free_calls() {
+        for source in [
+            "fn run() {} struct Api; impl Api { const run: u8 = 0; fn caller() { run(); } }",
+            "fn run() {} trait Api { const run: u8; fn caller() { run(); } }",
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "main.rs",
+                Some("rust"),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert_eq!(facts.calls().len(), 1, "{source}: {facts:?}");
+            assert!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                "{source}: {:?}",
+                facts.calls()
+            );
+            let SourceCallBinding::LocalDeclaration(target) = facts.calls()[0].binding else {
+                return;
+            };
+            assert_eq!(graph.symbols[target].name, "run");
+            assert!(graph.symbols[target].parent.is_none());
+        }
+    }
+
+    #[test]
+    fn rust_nonassociated_constants_and_const_parameters_remain_lexical_blockers() {
+        for source in [
+            "fn run(){} mod inner {const run:fn()=||{}; fn caller(){run();}}",
+            "fn run(){} struct Api; impl Api {fn caller(){const run:fn()=||{}; run();}}",
+            "fn run(){} fn caller(){ {const run:fn()=||{}; run();} }",
+            "fn run(){} fn caller<const run:bool>(){run();}",
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "main.rs",
+                Some("rust"),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            assert_eq!(extracted.semantics().calls().len(), 1, "{source}");
+            assert!(
+                !matches!(
+                    extracted.semantics().calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                "{source}: {:?}",
+                extracted.semantics()
+            );
+        }
+    }
+
+    #[test]
+    fn native_member_containers_do_not_capture_outer_free_calls() {
+        let mut failures = Vec::new();
+        for (language, source) in [
+            (
+                "cpp",
+                "void run(){}\nunion Owner {\n void run(){}\n};\nvoid outside(){run();}",
+            ),
+            (
+                "kotlin",
+                "fun run()=1\nobject Owner {\n fun run()=2\n}\nfun outside(){run()}",
+            ),
+            (
+                "kotlin",
+                "fun run()=1\nclass Owner {\ncompanion object {\nfun run()=2\n}\n}\nfun outside(){run()}",
+            ),
+            (
+                "kotlin",
+                "fun run()=1\nval owner=object {\nfun run()=2\n}\nfun outside(){run()}",
+            ),
+            (
+                "kotlin",
+                "fun run()=1\nenum class Owner {\nOne {\nfun run()=2\n};\n}\nfun outside(){run()}",
+            ),
+            (
+                "zig",
+                "fn run() void {}\nconst Owner=enum {value, pub fn run() void {}};\npub fn outside() void {run();}",
+            ),
+            (
+                "zig",
+                "fn run() void {}\nconst Owner=union {value:u8, pub fn run() void {}};\npub fn outside() void {run();}",
+            ),
+            (
+                "zig",
+                "fn run() void {}\nconst Owner=opaque {pub fn run() void {}};\npub fn outside() void {run();}",
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.source",
+                Some(language),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{language}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert_eq!(facts.calls().len(), 1, "{language}: {source}: {facts:?}");
+            let actual = match facts.calls()[0].binding {
+                SourceCallBinding::LocalDeclaration(target) => {
+                    Some(graph.symbols[target].line_start)
+                }
+                _ => None,
+            };
+            if actual != Some(1) {
+                failures.push(format!("{language}: {source}: {:?}", facts.calls()));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn kotlin_classifier_headers_and_constructor_names_have_distinct_visibility() {
+        let mut failures = Vec::new();
+        for (source, expected_line) in [
+            (
+                "fun run()=1\nopen class Base(val value:Int)\nclass Api:Base(run()){fun run()=2}",
+                Some(1),
+            ),
+            (
+                "fun run()=1\nopen class Base(val value:Int)\nobject Api:Base(run()){fun run()=2}",
+                Some(1),
+            ),
+            (
+                "fun run(){}\nclass Api(val run:()->Unit){fun caller(){run()}}",
+                None,
+            ),
+            (
+                "fun run(){}\nclass Api(run:()->Unit){fun caller(){run()}}",
+                Some(1),
+            ),
+            (
+                "fun run(){}\nclass Api(run:()->Unit){val value=run()}",
+                None,
+            ),
+            (
+                "fun run(){}\nclass Api {constructor(run:()->Unit){run()}}",
+                None,
+            ),
+            (
+                "fun run(){}\nclass Api {\nvar callback:()->Unit = {}\nset(run){run()}\n}",
+                None,
+            ),
+            (
+                "fun run(){}\nclass Api(run:()->Unit){val value get()=run()}",
+                Some(1),
+            ),
+            ("fun run(){}\nclass Api(run:()->Unit){init {run()}}", None),
+            (
+                "fun run(){}\nclass Api(run:()->Unit){val value={run()}}",
+                None,
+            ),
+            ("fun run(){}\nclass Api(run:()->Unit = {run()})", Some(1)),
+            (
+                "fun run()=1\nopen class Base(val value:Int)\nclass Api(run:()->Int):Base(run())",
+                None,
+            ),
+            (
+                "fun run(){}\nclass Outer {\nfun run(){}\nclass Nested {fun caller(){run()}}\n}",
+                Some(1),
+            ),
+            (
+                "fun run(){}\nclass Outer {\nfun run(){}\nobject Nested {fun caller(){run()}}\n}",
+                Some(1),
+            ),
+            (
+                "fun run(){}\nclass Outer {\nfun run(){}\ninner class Nested {fun caller(){run()}}\n}",
+                Some(3),
+            ),
+            (
+                "fun run(){}\nclass Outer {\nfun run(){}\nval nested=object {fun caller(){run()}}\n}",
+                Some(3),
+            ),
+            (
+                "fun run(){}\nclass Api {\nfun caller(){run()}\nval run:()->Unit = {}\n}",
+                None,
+            ),
+            (
+                "fun run(){}\nobject Outer {\nfun run(){}\nclass Nested {fun caller(){run()}}\n}",
+                Some(3),
+            ),
+            (
+                "fun run(){}\nfun outer(){\nfun run(){}\nclass Local {fun caller(){run()}}\n}",
+                Some(3),
+            ),
+            (
+                "fun run(){}\nobject Outer {\nfun run(){}\nobject Nested {fun caller(){run()}}\n}",
+                Some(3),
+            ),
+        ] {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.kt",
+                Some("kotlin"),
+                source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "{source}: {facts:?}");
+            assert!(!facts.bindings_incomplete, "{source}");
+            if expected_line.is_none() {
+                assert!(
+                    matches!(calls[0].binding, SourceCallBinding::Shadowed),
+                    "{source}: {:?}",
+                    calls[0].binding
+                );
+            }
+            let actual = match calls[0].binding {
+                SourceCallBinding::LocalDeclaration(target) => {
+                    Some(graph.symbols[target].line_start)
+                }
+                _ => None,
+            };
+            if actual != expected_line {
+                failures.push(format!(
+                    "{source}: expected {expected_line:?}, actual {actual:?}: {facts:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn cpp_condition_declarations_end_at_their_owning_statement() {
+        let mut failures = Vec::new();
+        for statement in [
+            "if(auto run=next()){run();}",
+            "switch(auto run=next();0){default:run();}",
+            "for(auto run=next();run;){run();}",
+            "while(auto run=next()){run();}",
+        ] {
+            let source = format!(
+                "using Callback=void(*)(); Callback next(){{return nullptr;}} void run(){{}} void caller(){{{statement} run();}}"
+            );
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cpp",
+                Some("cpp"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), 2, "{statement}: {facts:?}");
+            if !matches!(calls[0].binding, SourceCallBinding::Shadowed)
+                || !matches!(calls[1].binding, SourceCallBinding::LocalDeclaration(_))
+            {
+                failures.push(format!("{statement}: {calls:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn cpp_union_methods_and_prototypes_retain_member_identity() {
+        for member in ["void run();", "void run(){}"] {
+            let source =
+                format!("void run(){{}}\nunion Owner {{{member} void caller(){{run();}}}};");
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.cpp",
+                Some("cpp"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            assert_eq!(facts.calls().len(), 1, "{source}: {facts:?}");
+            assert!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                "{source}: {:?}",
+                facts.calls()
+            );
+            let SourceCallBinding::LocalDeclaration(target) = facts.calls()[0].binding else {
+                return;
+            };
+            assert_eq!(
+                graph.symbols[target].kind,
+                projectatlas_core::symbols::SymbolKind::Method,
+                "{source}: {graph:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kotlin_constructor_views_share_the_lexical_retention_budget() {
+        use std::fmt::Write as _;
+        for (classes, parameters, complete) in [
+            (2, super::MAX_LEXICAL_BINDINGS / 6 - 8, true),
+            (2, super::MAX_LEXICAL_BINDINGS / 6 + 1, false),
+            (1, super::MAX_LEXICAL_BINDINGS + 1, false),
+        ] {
+            let mut source = String::from("fun run(){}\nfun caller(){run()}\n");
+            for class in 0..classes {
+                assert!(write!(&mut source, "class Owner{class}(").is_ok());
+                for parameter in 0..parameters {
+                    if parameter > 0 {
+                        source.push(',');
+                    }
+                    assert!(write!(&mut source, "val p{parameter}:Int").is_ok());
+                }
+                source.push_str("){val initialized=0}\n");
+            }
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "owners.kt",
+                Some("kotlin"),
+                &source,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{result:?}");
+            let Ok(extracted) = result else { return };
+            let facts = extracted.semantics();
+            assert_eq!(facts.calls().len(), 1);
+            assert_eq!(
+                !facts.bindings_incomplete, complete,
+                "{classes} classes/{parameters} parameters"
+            );
+            assert_eq!(
+                matches!(
+                    facts.calls()[0].binding,
+                    SourceCallBinding::LocalDeclaration(_)
+                ),
+                complete
+            );
+        }
     }
 
     #[test]

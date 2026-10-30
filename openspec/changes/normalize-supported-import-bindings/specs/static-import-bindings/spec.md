@@ -258,6 +258,31 @@ Resolved callers SHALL require binding evidence valid at the call site. A local 
 - **WHEN** Java invokes a qualified method such as `Service.run()`, including a same-name field receiver or overloaded methods without member-target proof
 - **THEN** extraction retains the full method callee, neither detailed resolution nor summary callers fabricate a call to the `Service` class, and existing unqualified method navigation remains available
 
+#### Scenario: Java member bodies retain their own method environments
+- **WHEN** Java class, interface, enum, record or anonymous member bodies declare homonymous methods
+- **THEN** each unqualified call uses its own structural member environment without leaking sibling methods, while named declaration identity, normal class behavior and existing resource bounds remain compatible; no inheritance or generated-member inference is introduced
+
+#### Scenario: Native member containers isolate ordinary names
+- **WHEN** C++ union, Kotlin class/object/companion/enum-entry or Zig enum/union/opaque bodies contain members sharing a file-level function name
+- **THEN** the members remain in their owning body and do not compete with an outer free call; C++ union methods and prototypes retain method classification
+
+#### Scenario: Kotlin construction and member scopes remain distinct
+- **WHEN** Kotlin primary constructor parameters or classifier members share a callable name used in defaults, delegation, property initialization, initializer blocks or member callables
+- **THEN** headers do not see their own body members, plain constructor parameters bind construction-time expressions and their closures, property parameters also bind members, and ordinary member/accessor bodies do not inherit plain constructor parameters
+- **AND** secondary-constructor and setter parameters retain their own local shadowing, while lexical scope/name caps still withdraw all binding authority on exhaustion
+
+#### Scenario: Kotlin nested classifiers preserve allowed captures
+- **WHEN** a non-inner member class or named object has an enclosing class member sharing a file-level callable name
+- **THEN** lookup excludes the unavailable enclosing instance member, while explicit inner classes, object literals, singleton members and enclosing function locals retain their admitted lexical captures; declaration-scope property shadows apply independently of source order
+
+#### Scenario: C++ condition declarations remain statement-local
+- **WHEN** a while condition declares a callable value sharing an outer function name
+- **THEN** the condition binding shadows only within the loop, the subsequent free call resolves normally, and existing if/switch/for initializer scope behavior remains compatible
+
+#### Scenario: Rust associated constants do not occupy ordinary lexical value scope
+- **WHEN** an impl or trait-associated constant has the same name as a free function used unqualified in a method
+- **THEN** the associated constant requires qualification and does not shadow the free call; module/function/block constants, local imports and const parameters retain their ordinary lexical blocking behavior
+
 #### Scenario: Member names retain their language-defined namespace
 - **WHEN** Rust impl or trait items, Go receiver methods, ECMAScript class or object methods, or Objective-C selectors share an ordinary function's name
 - **THEN** bare calls do not acquire those member declarations as lexical values, receiver parameters retain their local shadows, and supported implicit member lookup in Java, C++, C# and Kotlin remains available

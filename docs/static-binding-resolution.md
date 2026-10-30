@@ -307,3 +307,28 @@ blocks, computed names, decorators and class headers retain immediate order;
 direct construction of a class expression also keeps its field values immediate.
 Nested callbacks retain their own deferred boundary, and competing writes abstain.
 This uses the shared bounded lexical collector and contract16 unchanged-index repair.
+
+
+## Native member and statement scopes
+
+Java class/interface/enum/record and anonymous bodies own their unqualified method
+bindings. C++ union members retain method identity, and while-condition declarations
+end with the loop, matching existing if/switch/for initializer ownership. Rust
+impl/trait-associated constants require qualification; ordinary module/local/block
+constants and const parameters retain lexical shadowing.
+
+Kotlin classifier bodies are separate from constructor headers. Plain primary
+parameters bind construction-time expressions and captured initializer closures;
+property parameters also bind members. Accessors and secondary constructors have
+callable parameter environments. Non-inner member classifiers exclude outer instance
+members, while explicit inner classes, object literals, singleton members and local
+function captures retain their lexical links. Declaration-scope properties shadow
+independently of source order. Scope/transition exhaustion withdraws binding proof.
+Inheritance, receiver/type-flow legality and cross-body companion promotion remain
+outside this direct lexical subset. No new cross-file provider is introduced.
+
+These call-fact changes advance extraction/semantic contracts to17, retaining the
+existing schema and compatible unchanged-index repair. The named container CLI/MCP
+regression checks canonical targets and summary callers through edit, full rebuild,
+identity preservation and a no-op. The architecture diagram's source-owned evidence,
+bounded recovery and canonical publication/read boundaries remain unchanged.
