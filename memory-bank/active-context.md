@@ -2,46 +2,56 @@
 
 ## Current contract21 checkpoint (supersedes historical20 readiness)
 
-Only731/PR737 active; no issueclosed. Publicb915ebe/sourceb9 DER20/SEM20.
-Current DIRTY21 source fixes confirmed Python comprehension ordering regression
-and aggregate identifier-copy amplification shared with published20 C++ inline
-barriers. No21 artifact/commit/publication yet. Local/live tasks5/9;3.1/allfive
-acceptanceOPEN. Pythonthread PRRT_kwDOQyFgJ86yFdGV/comment4426896046 remainsOPEN.
+Only731/PR737 active; noissueclosed/noRC. PublicHEADb915ebe/sourceb9 DER20/SEM20.
+Current committed production3e81518048dce82a987a53daed5381028fe2dfae DER21/SEM21.
+IndependentLuna APPROVEDsource+driver; finalcurrentproof/areas1–4delta reviewAPPROVED.
+Local/live8/9 exactmirror;3.1/allfiveacceptanceOPEN. Pythonthread
+PRRT_kwDOQyFgJ86yFdGV/comment4426896046 OPENuntilpublishedcorrectsourceproof.
+Source20CodeQL41103426633 PASS; source/metadata20CIcancelledforconfirmedPythonfix.
 
-Independent Luna approved mechanism/read-onlydelta pending fresh final gates:
-initial iterable staysparent; containingwrites atoutermostcomp.end; name-specific
-loopbarriers charged, pendingwrites discarded ifinvalid. Narrow eager singleton
-shape preserves existing RHSreadbeforewrite (onefor/nofilter/nonstarredoneelement
-list); other/repeated/generator loops conservative. Invalidclass/iterable/target
-walrus withdrawsonlycompsites. No syntheticcoordinates ornewlimits.
-NameBarriers sharesoneArc identifier perpropagation forPython+CPP. Actual48scope
-32KiBproducerbefore1,572,864textbytes; after32,768bytes/48sharedhandles. Permanent
-allocationidentity+actual48nestedlongnamepositiveunits. Scope320→336/NameBindings56
-onRust1.98x86_64, max256KiBextra/live16384scopecollector, actualRSSpending.
+Fix21: firstPythoncompiterable usesparent, containingwrites atoutermostcomp.end;
+chargedname-specificloopbarriers preserveunrelatedexactcalls. Narroweagerone-for/
+nofilter/nonstarredsinglelist shape preserves existing RHSbeforewrite; repeated/
+generatorloopsconservative. Invalidclass/iterable/iterationtarget walrusesdiscard
+pendingwritesandwithdrawonlycompsites. No syntheticcoordinates ornewlimits.
+SharedNameBarriers retainsoneArc identifier perpropagation forPython+CPP inline
+names. Actual48scope32KiBproducerbefore1,572,864textbytes→after32,768bytes/shared
+handles. Permanentallocationidentity+actual48nestedlongnamepositiveunits.
+Scope320→336/NameBindings56 onRust1.98x86_64, max256KiBextraScope storage/live
+16384scopecollector; per-scopebarriermaps/slots stilladmitted, nootherlayoutclaim.
 
-Current43caseCPython3.14 oracle:35compile/29execute,8syntax+6runtimecontrols;
-workerimportstubvalid. Invokedtop-levelcallerwherepresent; uninvokednestedbody
-notclaimedexecuted. Oracle /tmp/projectatlas-731-comprehension21-python-oracle.json.
-Prior20digestcaptured9d16d41a80b1115f4d0706d7046f1be092fd2bd4a2abc41ba5d78749970d0eb6.
-DER21/SEM21sourceandrepairunit written, prior19andearliercontrolsretained.
+PASS current449symbols+1ignored46.53s; workspaceClippy6.09s; expanded13fixture
+PythonDirectiveCLI/MCP44.27s; prior20repair+stagingcancel1unit0.27s;3inventory,
+strictstrings/fmt/diffchecks, strictOpenSpec+scopedIssueOps8/9. Sourcecallcounts
+useinclude_occurrences+noprune/truncation, preservingeverycallwithdedupgraph.
+NavigationSHA70eb69a7bd96f78c1b638deaf1eca243e512158434d17bc6648362597f64789d.
+43caseCPython3.14oracle35compile/29execute,8syntax+6runtimecontrols;workerstubvalid.
+Onlyinvokedbodiesclaimedexecuted. Prior20digestcaptured9d16d41a80b1115f4d0706d7046f1be092fd2bd4a2abc41ba5d78749970d0eb6.
 
-26632 TERMINAL symbols449PASS+1ignored46.53s; latest19215 TERMINAL PASS
-workspaceClippy6.09s +PythonDirectiveCLI/MCPE2E44.27s. Sourcecallassertions use
-include_occurrences(no truncation) since graph edges deduplicate same references. Logs
-/tmp/projectatlas-731-comprehension21-{clippy-final,symbols-final,boundary}.log.
-ExistingPythonselector adds13fixtures plusincrementalretarget/full/summary/identity/
-noop. NavigationSHA70eb69a7bd96f78c1b638deaf1eca243e512158434d17bc6648362597f64789d.
-Terminal1051 prior20repair+stagingcancel1PASS0.27s, inventory3PASS2.63s,
-strictstringsPASS, fmt/diffchecksPASS. No livebuild/index/timinglease.
-No global PROJECTATLAS_NO_TELEMETRY for native tests; disable onlyisolatedprobes.
+OptimizeddefaultlockedbuildPASS54.31s;129committedproductionfilesverified.
+Immutable21 ~/.cache/projectatlas-benchmarks/binding-731-comprehension-contract21-20261030/projectatlas
+SHA4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339.
+Buildhelperrelativepath correctedafterbuild, nobuildrepeat;build-session receipt.
+9970 TERMINALPASS11serialtasks; /tmp/projectatlas-731-comprehension21-proof-session.json
+andmanifest/logwithin. OptimizedPythonboundary16.89s/CPPboundary29.31s PASS.
+17uniqueactualstable050/contracts5..20 upgrades, identity/allapproved/noop/deadline/
+rollback;84initializationmeasurements42pairs14fixtures, exactroot/all63hostprobes.
+Reviewerfoundcomparisonproofgap; supplement23846 TERMINALPASS17baselines16semantic
+tablesinclallsummaries/purposes/sourcefacts/spans/graph/text/classification; normalized
+hashes+counts equal, surrogateIDs/opdates/rejectiongeneration/nodemtimeexplicitly
+excluded, fact_index retained. Reusesexactroots viarealbaselinewatch→candidatewatch→
+fullscan andfinalnoop. /tmp/projectatlas-731-comprehension21-convergence-proof.{py,json,log}.
+No activebuild/index/timinglease. Docs/benchmarks/static-binding-cost.{md,json} bind
+current21allproof. OrdinaryPythonmedian.13763→.13490s,RSS25932→26860KiB; no708SLOwaiver.
 
-Next terminalgates/fixifneeded, strictspec+IssueOps, independent21source/driver
-approval, sourcecommit/immutableoptimizedbuild. Serialcurrent21campaign reuses
-20drivers adding20baseline(17unique), Pythonupgradecases, comprehension+ordinary
-Pythoncostcontrols(14fixtures/84binarysamples/42pairs planned). Thendocs/proofreview,
-normalnativepush/currenthosted/CodeQL/freshfeedback/acceptance/normalmerge737 and
-BOTHclosedreadback before741. GoalcontinuesuntilRC1published+independentlyverified.
-Stablepublication/milestoneclosureoutsideauthority. Noissueclosed/noRC.
+Next docscommit/normalclean nativepush;
+NOglobalPROJECTATLAS_NO_TELEMETRY(native telemetryunitsrequireunset), disableonly
+isolatedprobes. SaveLATESTmemorybackupbeforepush, restoreHEADmemoryonlyifdirty,
+restoreLATESTAFTERterminal. Requiredcurrenthosted4OS/Rust/repository/verify/prstate,
+CodeQL/freshfeedback; resolvepublishedPythonthread; finalindependentarea5 and3.1/
+acceptance/finalnormalchecks, normalmerge737+BOTHclosedreadback before741.
+GoalcontinuesuntilRC1published+independentlyverified. Final715DER>21retainSEM21.
+Stablepublication/milestoneclosureoutsideauthority. Parkedownersuntouched.
 
 ## Goal and serial delivery
 

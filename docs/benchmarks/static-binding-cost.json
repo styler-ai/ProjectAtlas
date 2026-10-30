@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "date": "2026-10-30",
-  "source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-  "derivation_contract": 20,
-  "semantic_contract": 20,
+  "source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+  "derivation_contract": 21,
+  "semantic_contract": 21,
   "baseline_version": "0.5.0",
   "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
   "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
-  "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+  "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
   "host": {
     "os": "Linux 7.0.0-38-generic",
     "cpu": "AMD Ryzen 7 5700U",
@@ -25,8 +25,8 @@
     "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance",
     "fixture_digest": "SHA256 of compact sorted JSON mapping relative authored paths to SHA256",
     "parse_counters": "source-file candidates, not native parser invocation counts",
-    "binary_samples": 72,
-    "baseline_candidate_pairs": 36,
+    "binary_samples": 84,
+    "baseline_candidate_pairs": 42,
     "timed_sample_scope": "initialization; per-sample no-op and query probes excluded from this count"
   },
   "cases": {
@@ -37,8 +37,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.28379855601815507,
-          "peak_rss_kib": 26940,
+          "wall_seconds": 0.28513953200308606,
+          "peak_rss_kib": 27260,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -50,8 +50,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3472001390182413,
-          "peak_rss_kib": 32900,
+          "wall_seconds": 0.3478003659984097,
+          "peak_rss_kib": 32876,
           "work": {
             "candidates": 261,
             "parsed": 261,
@@ -70,8 +70,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.3325049899867736,
-          "peak_rss_kib": 28092,
+          "wall_seconds": 0.3296727489796467,
+          "peak_rss_kib": 27876,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -83,8 +83,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.3905715189757757,
-          "peak_rss_kib": 34164,
+          "wall_seconds": 0.3932418310432695,
+          "peak_rss_kib": 34712,
           "work": {
             "candidates": 321,
             "parsed": 321,
@@ -103,8 +103,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.1662583529832773,
-          "peak_rss_kib": 26024,
+          "wall_seconds": 0.1690813680179417,
+          "peak_rss_kib": 26152,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -116,8 +116,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.16212291101692244,
-          "peak_rss_kib": 29680,
+          "wall_seconds": 0.16036802699090913,
+          "peak_rss_kib": 29232,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -136,8 +136,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.10016407299553975,
-          "peak_rss_kib": 22892,
+          "wall_seconds": 0.10196414904203266,
+          "peak_rss_kib": 22992,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -149,8 +149,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.11846843699458987,
-          "peak_rss_kib": 24732,
+          "wall_seconds": 0.11592579900752753,
+          "peak_rss_kib": 25848,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -169,8 +169,8 @@
       "measurements": {
         "baseline": {
           "samples": 3,
-          "wall_seconds": 0.11420781695051119,
-          "peak_rss_kib": 23488,
+          "wall_seconds": 0.11639548902167007,
+          "peak_rss_kib": 23320,
           "work": {
             "candidates": 1,
             "parsed": 1,
@@ -182,8 +182,8 @@
         },
         "candidate": {
           "samples": 3,
-          "wall_seconds": 0.14091737003764138,
-          "peak_rss_kib": 26392,
+          "wall_seconds": 0.14292345801368356,
+          "peak_rss_kib": 27060,
           "work": {
             "candidates": 2,
             "parsed": 2,
@@ -210,7 +210,8 @@
     "contextual_baseline": "selected named caller anchors unavailable in both native and host cases; not merely zero call rows",
     "sample_assertions": "Every candidate sample checks resolved calls and expected occurrences; current-artifact post-measurement probes check exact Cargo-root targets, baseline anchor state and all 63host callers.",
     "invalid_identity_neighbors": "Permanent container CLI/MCP selector preserves the explicit cross-file caller and summary beside invalid NUL imports while true local collisions remain unresolved through incremental/full/no-op phases.",
-    "qualified_cpp_owners": "Actual qualified bodies select exact source namespace/type parents, unknown/base/local shadow barriers remain unresolved, and qualified definitions do not leak file bindings across CLI/MCP and incremental/full/no-op phases."
+    "qualified_cpp_owners": "Actual qualified bodies select exact source namespace/type parents, unknown/base/local shadow barriers remain unresolved, and qualified definitions do not leak file bindings across CLI/MCP and incremental/full/no-op phases.",
+    "python_comprehension_order": "Initial iterable targets retain exact enclosing ownership; rewritten loop names remain uncertain, singleton RHS compatibility and invalid syntax isolation pass exact CLI/MCP occurrence/parent/summary probes through refresh and rebuild."
   },
   "reexport_storage": {
     "protocol": "Three alternating paired rounds, same semantic14 source, fresh fixture/process, GNU time RSS maximum and median elapsed initialization; ordinary exact caller target and zero-parsed no-op verified after every sample. Long missing module remains unresolved, not falsely resolved.",
@@ -243,18 +244,18 @@
   "reopened_containers": {
     "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
     "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
-    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
     "logical_namespaces": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.18517451197840273,
-        "peak_rss_kib": 30652
+        "wall_seconds": 0.19108873000368476,
+        "peak_rss_kib": 32384
       },
       "candidate": {
-        "wall_seconds": 0.19192135700723156,
-        "peak_rss_kib": 31092
+        "wall_seconds": 0.19405753997853026,
+        "peak_rss_kib": 31152
       }
     },
     "source_hashes": {
@@ -267,18 +268,18 @@
   "instance_fields": {
     "baseline_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
     "baseline_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
-    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
     "classes": 256,
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 0.11961526999948546,
-        "peak_rss_kib": 26376
+        "wall_seconds": 0.11906129500130191,
+        "peak_rss_kib": 26176
       },
       "candidate": {
-        "wall_seconds": 0.1213079720037058,
-        "peak_rss_kib": 24888
+        "wall_seconds": 0.12028222996741533,
+        "peak_rss_kib": 25020
       }
     },
     "source_hashes": {
@@ -291,8 +292,8 @@
   "forwarding_query_modules": {
     "baseline_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
     "baseline_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
-    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
     "export_slots": 8000,
     "member_calls": 7997,
     "module_bytes": 1800002,
@@ -311,20 +312,20 @@
     "samples_per_binary": 3,
     "measurements": {
       "baseline": {
-        "wall_seconds": 3.651695931039285,
-        "max_peak_rss_kib": 131348
+        "wall_seconds": 3.790639692975674,
+        "max_peak_rss_kib": 131408
       },
       "candidate": {
-        "wall_seconds": 2.0353024619980715,
-        "max_peak_rss_kib": 129900
+        "wall_seconds": 2.0344432570273057,
+        "max_peak_rss_kib": 130428
       }
     },
     "normal_positive_each_sample": true,
     "complete_calls_each_sample": 7998,
     "noop_parsed_each_sample": 0,
     "same_contract_compatibility": {
-      "baseline_contract": 19,
-      "candidate_contract": 20,
+      "baseline_contract": 20,
+      "candidate_contract": 21,
       "repair_identity_and_all_approved_purposes_preserved": true,
       "same_contract_noop": true,
       "full_rebuild_positive": true,
@@ -333,10 +334,10 @@
     "scope": "Source-owned module storage survives query/cache/frame consumers, no public key/fact/schema change, current20 native owner contracts; cumulative module copies removed, peak parser memory not materially reduced; no release SLO waiver"
   },
   "native_member_owners": {
-    "baseline_source_commit": "f7daa7a4fb96ec083322afd2acabe992f31bbccb",
-    "baseline_binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf",
-    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+    "baseline_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
+    "baseline_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
     "samples_per_binary_per_fixture": 3,
     "query_budget": {
       "output_bytes": 32768,
@@ -354,12 +355,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.2244984680437483,
-            "peak_rss_kib": 40788
+            "wall_seconds": 0.22171374002937227,
+            "peak_rss_kib": 41772
           },
           "candidate": {
-            "wall_seconds": 0.21915815799729899,
-            "peak_rss_kib": 42108
+            "wall_seconds": 0.21452579699689522,
+            "peak_rss_kib": 42856
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -371,12 +372,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.16039848001673818,
-            "peak_rss_kib": 31120
+            "wall_seconds": 0.1624067479860969,
+            "peak_rss_kib": 31604
           },
           "candidate": {
-            "wall_seconds": 0.16189954901346937,
-            "peak_rss_kib": 31588
+            "wall_seconds": 0.16128901997581124,
+            "peak_rss_kib": 32096
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -388,12 +389,12 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.2277494299924001,
-            "peak_rss_kib": 36544
+            "wall_seconds": 0.23632307100342587,
+            "peak_rss_kib": 36652
           },
           "candidate": {
-            "wall_seconds": 0.22594579198630527,
-            "peak_rss_kib": 36492
+            "wall_seconds": 0.2303466969751753,
+            "peak_rss_kib": 37596
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true,
@@ -407,12 +408,46 @@
         },
         "measurements": {
           "baseline": {
-            "wall_seconds": 0.17101290699793026,
-            "peak_rss_kib": 30952
+            "wall_seconds": 0.17280504800146446,
+            "peak_rss_kib": 30824
           },
           "candidate": {
-            "wall_seconds": 0.17384162702364847,
-            "peak_rss_kib": 31312
+            "wall_seconds": 0.16984984400914982,
+            "peak_rss_kib": 31868
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "python-comprehension-order": {
+        "fixture_digest": "534f46708f6d1dcd7202698fde494e5f86f37f30d107b802d28709ca7374478c",
+        "source_hashes": {
+          "owners.py": "bb908b5382ad3540dde5f8f30858af2f443602fb82f14b0827e3a71be69a14e2"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.1448932159692049,
+            "peak_rss_kib": 27184
+          },
+          "candidate": {
+            "wall_seconds": 0.14332201902288944,
+            "peak_rss_kib": 28056
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "python-ordinary-calls": {
+        "fixture_digest": "be35663f68b454fa5549317684408ddfaebe65937038af4777410187c14c9a46",
+        "source_hashes": {
+          "owners.py": "e3bfd9df0cf6ec0a16e31a4a4fb107aeee810984ba1714fa3d05793f3bbc540d"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.13763122202362865,
+            "peak_rss_kib": 25932
+          },
+          "candidate": {
+            "wall_seconds": 0.13490429701050743,
+            "peak_rss_kib": 26860
           }
         },
         "candidate_exact_normal_target_and_noop_each_sample": true
@@ -420,8 +455,8 @@
     }
   },
   "upgrade_validation": {
-    "candidate_source_commit": "b9b0ab5d34e9dc48fa5caa72a6f7411541ed8b27",
-    "candidate_binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea",
+    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
     "native_baselines": [
       {
         "contract": "stable050",
@@ -460,6 +495,10 @@
         "binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf"
       },
       {
+        "contract": "contract20",
+        "binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea"
+      },
+      {
         "contract": "contract5",
         "binary_sha256": "fba3406a59f624e55f6731d722024f75b7a4f0c00671c432d59ab9e0a745d8e7"
       },
@@ -493,6 +532,59 @@
     "second_refresh_noop": true,
     "early_deadline_preserves_publication": true,
     "compatible_rollback_and_reupgrade": true,
-    "staging_cancellation": "separate projection_contract_revisions_force_full_projection_refresh unit control"
+    "staging_cancellation": "separate projection_contract_revisions_force_full_projection_refresh unit control",
+    "normalized_projection_convergence": {
+      "baselines": 17,
+      "tables": [
+        "file_content_classifications",
+        "file_texts",
+        "graph_coverage",
+        "graph_entities",
+        "graph_entity_exports",
+        "graph_identity_rejections",
+        "graph_relation_dependencies",
+        "graph_relation_occurrences",
+        "graph_relations",
+        "graph_resolution_keys",
+        "nodes",
+        "purposes",
+        "source_parse_metadata",
+        "summaries",
+        "symbol_relations",
+        "symbols"
+      ],
+      "normalization": {
+        "omitted_surrogate_ids": "nodes/summaries/symbols/symbol_relations/coverage/occurrences/rejections; summary/purpose node_id joined to stable path",
+        "omitted_operation_metadata": "created_at/updated_at/first_seen_at/last_seen_at/last_indexed_at; rejection generation; nodes mtime_ns",
+        "preserved_semantics": "all graph columns except surrogate IDs and rejection generation; complete symbol/source relations, spans, source parse metadata, summaries, all purposes, source text and classification",
+        "excluded_physical_state": "SQLite FTS shadow pages, usage events, publication/task metadata are physical or operation-specific; FTS source contents are included",
+        "authority": "read-only SQL snapshots; every mutation uses the real native CLI"
+      },
+      "each_baseline_incremental_full_hashes_equal": true,
+      "summary_projections_included": true,
+      "final_noop_checked": true
+    }
+  },
+  "propagated_name_storage": {
+    "candidate_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "candidate_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "controlled_source_identifier_bytes": 32768,
+    "ancestor_scopes": 48,
+    "before_retained_identifier_bytes_per_producer": 1572864,
+    "after_retained_identifier_bytes_per_producer": 32768,
+    "shared_producers": [
+      "Python comprehension loop barriers",
+      "C++ inline namespace barriers"
+    ],
+    "scope_layout_bytes": {
+      "baseline": 320,
+      "candidate": 336
+    },
+    "name_bindings_layout_bytes": 56,
+    "layout_environment": "Rust1.98 x86_64 Linux; other-platform layout not claimed",
+    "maximum_scope_count": 16384,
+    "maximum_added_scope_bytes_per_live_collector": 262144,
+    "retained_scope_slots_and_map_nodes": "still admitted and charged; identifier text sharing does not remove slot costs",
+    "verification": "actual before/after producer probes; permanent64scope Arc allocation identity unit and actual48nested32KiB Python/C++ navigation unit"
   }
 }
