@@ -58,6 +58,14 @@ cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low
 ```
 
+The shared Rust preflight prefers canonical Cargo-home proxies and accepts native
+package-managed bundles only after exact Rustup backing checks. On macOS,
+installation can prepare Homebrew's native libexec aliases after matching every
+selected wrapper to that exact formula. Version, override and commit checks remain
+required. Successful hosted preparation carries the native path and Homebrew
+fallback settings to later steps; read-only checks and offline self-tests do not
+publish environment changes.
+
 ## Rust dependency management
 
 The root `[workspace.dependencies]` table owns every direct dependency version used by the seven ProjectAtlas workspace crates. Member manifests inherit those entries with `workspace = true`; fixture manifests remain independent because they model repositories ProjectAtlas scans rather than packages ProjectAtlas builds.

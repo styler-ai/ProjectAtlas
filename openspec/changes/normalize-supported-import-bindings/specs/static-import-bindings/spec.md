@@ -374,6 +374,14 @@ release handoff.
 - **WHEN** the trusted accepted-base planner selects macOS ARM contracts using an image undergoing retirement
 - **THEN** current workflow provisioning selects a supported explicit ARM image without changing trusted selected contracts, retains separate Intel coverage, and keeps CI, package/install/post-publication and unsupported parser-pack matrices consistent
 
+#### Scenario: Package-managed Rustup retains exact toolchain admission
+- **WHEN** a supported runner exposes Rustup and all four selected compiler/Cargo/Clippy/rustfmt proxies together outside Cargo home
+- **THEN** the shared preflight accepts that co-located layout only after existing exact executable-backing checks, retains override/channel/version/commit validation before builds, preserves canonical proxies with an external matching manager, and refuses mixed directories, absent/separate managers and mismatched backing before invoking them
+
+#### Scenario: Homebrew wrappers prepare native aliases without weakening provenance
+- **WHEN** Darwin install preparation encounters the exact five wrapper entries belonging to the reported Homebrew Rustup formula
+- **THEN** it validates that formula's native libexec aliases before executing them, preserves fallback-settings behavior, publishes hosted path/environment changes only after complete success, and leaves command files untouched for failed verification, read-only calls and offline self-tests
+
 ### Requirement: Go implicit clauses retain independent bindings
 The system SHALL keep each Go switch and select clause in its grammar-declared
 implicit block without changing other languages' switch scoping contracts.

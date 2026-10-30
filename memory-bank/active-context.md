@@ -12,15 +12,16 @@ independent read-only GPT-6 Luna Max reviewer. Preserve all parked work.
 ## Current source and tracker
 
 Checkout `.worktrees/issue-731`, branch `fix/static-bindings-731`.
-Public HEAD: `50fcf24f9f0739c705040862a45138f13b84f67f` (contract21).
+Public HEAD: `5053ceffa814bea221af7af4979f63e24143bce0` (contract22 delivery).
 Local production source: `232186edd902a7dd7538fc80c8d934bef7bae41d` (source22; includes runner repair).
 Current reviewed production advances DER22/SEM22 for Go clause scopes and a private
 forwarding module interner. Immutable contract22 build succeeded in54.52s; binary SHA74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504.
-Local/live tasks2.6/2.7 are complete after current upgrade/cost/documentation proof:8/9.
-Independent areas1–4 APPROVED; final area5 remains open. Task3.1 and all five acceptance rows
+Confirmed Cargo root fan-out reopens local/live tasks2.6/2.7:6/9.
+Prior areas1–4 approval remains historical22; newresource fix/proof required. Task3.1 and all five acceptance rows
 are OPEN. OpenSpec owner: `normalize-supported-import-bindings`.
 
-Fresh PR feedback:21 threads, two unresolved:
+Published Go/cache feedback replied and resolved; readback21/21resolved.
+Latest addressed thread IDs:
 - Go P2: `PRRT_kwDOQyFgJ86yIDN8`, comment4427993824.
 - Cache P3 performance lead: `PRRT_kwDOQyFgJ86yILNt`, comment4428046956.
 The earlier Python comprehension thread was verified on public50fc, replied and
@@ -143,11 +144,78 @@ caught/corrected before approved retry. Both failed receipts retained as*.attemp
 Source/permanent tests unchanged; four passed E2Es safely reused with exact arg,
 name, exit and input guards. Receipts /tmp/projectatlas-731-clause-cache22-
 {proof-session,proof-manifest,upgrade-proof,stage-upgrade-proof,convergence-proof}.json.
-Next: commit current docs/proof after8/9 mirror and cheap gates, then CLEAN NORMAL
-native push (hooks enabled). Then actualfour-platform
-hosted/CodeQL/fresh feedback, published Go/cache replies/resolution, finalindependent
-area5, task3.1/five acceptance, finalnormalchecks and normal737merge. Verify BOTH
-731 and737CLOSED before741. Goal remainsactive; noissueclosed/noRCpublished.
+Native6414 TERMINALPASS normal clean push5053cef;34 suites,374CLIunits,451symbols
++1ignored,54navigation220.74s, docs/security/scan/lint PASS. Fourteen existing asset
+advisories remain exit0 with zero source/purpose findings. Remote head verified.
+Receipt /tmp/projectatlas-731-clause-cache22-native-push-session.json. No activelease.
+Current hosted source41138283363 at5053cef: plan/repositoryPASS; ARMjob124346111967
+FAILED preflight beforeinstall/build in0.08s; otherjobscontinue, do notcancel/retry.
+ActualARMadapter VERIFIED: labels[macos-15], image macos-15-arm64 20261028.0489.1.
+CodeQL41138279073 live; pr-state41138280569/41138430109PASS; metadata41138429431waits.
+All21threads replied/resolved afterpublication; PRbody soleFixes731 updated/readback.
+
+New3.1 owning gate root cause: .github/scripts/verify-rust-toolchain.py assumes
+CARGO_HOME/bin for all selected proxies. ARM selects /opt/homebrew/opt/rustup/bin.
+Read actual job/log /tmp/projectatlas-731-clause-cache22-arm-{job.json,job.log}.
+Earlier log errors are intentional selftests; actualfailure startsline465.
+Offline native-co-location test failsbefore/passesafter with exactbacking checks
+retained. Draft genericalternate selection+~90lines tests UNCOMMITTED in shared
+helper, plusaccepted design/spec scenario. Reviewer approved native-directory
+plan, NOT finalfix yet. All129 measured source/build/test inputs unchanged.
+DER22/SEM22 andcost/upgradeproof valid. Never weaken samefile/size/SHA backing,
+override/version/commit or manager-before-proxy guards.
+Homebrew wrapper fix nowIMPLEMENTED UNCOMMITTED insharedhelper, not yetpublished.
+Pureproxy_provenance extracted(noexec) retainscanonical/nativeco-location/exact
+backingchecks. homebrew_native_environment Darwin--install invalidoriginalbundle
+queriesbrew--prefixrustup, requiresall5selectedpaths samefile exactformula/bin
+wrappers, validatesnative libexec/bin backingbeforeanyRustup/proxycall, preserves
+existingfallbackenv orbrewglobal/etc/rustup/settings.toml. verify_toolchain restores
+processenvfinally; persist_ci defaultsFalse; mainreal--install+GHAtrueoptin publishes
+nativeGITHUB_PATH/fallbackGITHUB_ENV ONLYafterallpreflightPASS. Rawpreflightselftests
+cannotpersist; package tests useisolatedcommandfiles, distinctneverexecutedwrappers,
+actualhardlinkednativefiles, failure/mixed/missing/digest/prefix/override controls.
+Independent sourceapproval received; suggestedcustomfallbacktestadded/selftestPASS,
+readbackqueued. Existingcommand-fileisolationreceipt olderhelperSHA mustrefreshafter
+test-onlychange. RuntimehelperSHAatoldreceiptfed845...; latesthashnotcapturedyet.
+Gates89300PASS selftest+realLinuxreadonly+strings/spec/IssueOps8. Initialdelivery
+selectorwrongtargetmatched0 (notproof). Correctactualallfeaturesdeliveryselector
+issueops_and_workflows_use_behavior_focused_quality_gates PASS1/.27s99578.
+Officialformula andexactimage supportnative vswrappers distinction. Design/spec and
+docs/workflow updated totruthfulbootstrap; noRustproduction/fingerprintchangesyet.
+Currentall129 measuredsource/build/test bytes still232186e;22costproof valid.
+NoactualhostedcorrectedARM proofyet; willpublishafternewCargo leadfixed too.
+
+Fresh automated22nd thread OPEN PRRT_kwDOQyFgJ86yKe9j/comment4429046208 at
+runtime/graph_projection/binding_resolution/rust.rs: automaticCargo flat src/bin
+roots allegedly allmatch everysibling, per-source cause(root) retention N² (2kroots
+512MiB,4k2GiB). Lead now hasactual128target CLI proof:34176 persistedrelationdependencyrows,267perowner,51MiB/1.41s; exactsourceallrootscause retentionmechanism confirmed. NoRustfixyet.512case now529920rows,463260KiB,21.65s vs128case34176rows,51716KiB,1.41s. Need traceowningroot
+membership/causecopy/nativefixture to distinguish performancevswrongtarget facts,
+thenboundedspec/fix/regression (possiblyDER23SEM23onlyiffactschange). Keepthreadopen,
+other21resolved. Finishcurrentpreflightdesign/fixthen thislead; bothsameissue731.
+35287 TERMINALPASS optimized22 CLI512target scalingprobe; noactivelease. Receipt /tmp/projectatlas-731-flat-targets-large-before.json.128case /tmp/projectatlas-731-flat-targets-before.json.
+Potentialsharedfixunderreadonlyreview: existingcargo_target_inventory_key isalready
+emittedEVERYflatRustfile src/bin/examples/tests/benches; incrementalchangedkeys
+includeold/newsourcekeys onedit/deletion. Replaceper-flat-filecause copies with
+existingsharedinventorycause, preservingnongrouped/conventional/nested causes.
+Broaderexplicitcustomflatcase CONFIRMED too: auto*false, [[bin]]app/tN.rs;
+16targets624deps39/owner;32targets2272deps71/owner. /tmp/projectatlas-731-explicit-flat-targets-before.json.
+DoNOTshipautodir-onlygrouping and leavecustomsame-mechanismfailure. Reviewerasked
+minimalsharedroot-cohort/keyproducer design viaadmittedCargoTargetRegistry; noRust
+fixyet. PackageIndex holdsroot/name/manifestonly; publicResolutionProjectionContext
+hasrust_package(manifest,root)tuple, nocargotargets. Needrootonlysourcegroupkey or
+incrementaldirty-rootgroupescalation withcurrentcapturedmanifestfacts, withoutall-
+Rust-file/whole-crate overinvalidation. Potentialfirstmodule→candidateRootindex for
+remainingCPU. ExactdesignNOTDECIDED; wait/readreviewerrecommendation, primaryimplements.
+BootstrapcustomfallbacktestreadbackAPPROVED; actualcorrecteddelivery1PASS, strings/
+spec/IssueOps6PASS. Localbootstrapcommitnext, no pushuntilCargo fixes/proofready.
+Needverifykeyproducercoverage andavoidduplicateplacementlogic (reuseowningsymbols
+helper). RemainingrootloopCPU mustbemeasuredafterfix, notsilentlyleft. Factsseem
+unchanged; likelyDER23forprojectionrepair/SEM22unchanged, notdecidedfinalyet.
+Need finishbootstrapreadback, confirmedresourceplan/spec/taskreopen2.6/2.7, causal
+Rustfix/coverage/currentartifactupgrade/costproof/review,
+applicablecheap/nativepushgates, actualhosted4OS/CodeQL/freshfeedback, finalarea5,
+task3.1/allfiveacceptance and normal737merge. Verify BOTH731/737CLOSED before741.
+Goal ACTIVE; noissueclosed/noRCpublished. Preserve allparked owners.
 
 ## Operating discipline and parked owners
 

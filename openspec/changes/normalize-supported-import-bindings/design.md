@@ -741,11 +741,31 @@ execute an untrusted planner or let submitted code narrow proof obligations.
 Extend the existing macOS warning-gate selector to cover all active static ARM
 matrices, submitted planner, bootstrap fallback and this inherited-plan execution
 boundary. Verify the corrected real hosted ARM path; do not retry a retired pin or
-skip the platform. Product source and DER21/SEM21 remain unchanged; retain the immutable artifact
-and its129-file source/build/test binding at3e81518. The109 non-test build/source
-inputs stay byte-identical; refresh the two modified CI-test identities separately
-and reuse the verified product upgrade/cost evidence.
+skip the platform. The original runner-only repair preserved contract21 source.
+The later Go/cache repair advances to22; this toolchain-only follow-up preserves
+its immutable232186e artifact and all129 source/build/test identities, so its
+verified product upgrade/cost evidence remains valid.
 The source/publication architecture remains unchanged; this is CI provisioning.
+
+Hosted toolchain admission also preserves package-managed Rustup layouts.
+Canonical Cargo-home proxies remain preferred. Native manager/proxy bundles may
+also be co-located outside Cargo home, with the existing same-file or exact
+size/SHA-256 backing checks before any tool invocation. Homebrew's public bin
+entries are environment wrappers, while its native aliases are in libexec/bin.
+Darwin install preparation queries the package prefix with bounded no-shell calls
+and only selects its native aliases when all five PATH-selected entries match the
+reported package's exact wrapper entries by filesystem identity. Mixed/foreign
+selections cannot trigger retargeting. Native aliases must pass the same directory
+and backing checks; existing override, inventory, version and commit checks remain.
+Preserve Homebrew's fallback-settings environment for native tools and later steps.
+Only a successful real hosted install opts into GITHUB_PATH/GITHUB_ENV publication;
+read-only calls and self-tests never publish temporary fixture state. Tests isolate
+both command files and verify failure leaves them unchanged. This shared boundary
+covers CI, release, parser-pack and documentation callers without copied setup code.
+Offline causal controls cover native/package positives, missing/separate managers,
+mixed paths, equal-size impostors, malformed prefixes, overrides, inventory and
+installation failures. The actual ARM job remains required. Rust production source,
+DER22/SEM22 and all129 measured source/build/test bytes stay unchanged.
 
 ### Go clause scope and forwarding query key cost
 
