@@ -74,7 +74,8 @@ refusal, no-scan retry, scan/init,overview,watchonce,rootverify. Receipt/log
 /tmp/projectatlas-741-native-upgrade-proof.*. Initial95257 comparison incorrectly
 included newly derived suggested legacy-config purpose; proof corrected to compare
 all approved purposes, no product regression inferred. All4 finalfixturesPASS.
-Wholeissue Luna areas1–4 review active, area5 after hosted. 2.2 and3.1open.
+Wholeissue Luna areas1–4 source/spec/proof review complete with no blocking source
+finding; finalplatform proof and area5 remain after hosted. 2.2 and3.1open.
 
 Normal nativepush64217 TERMINALPASS937.02s on52ae571:34suites/1713tests,zero failures;
 check/Clippy/docs/doctests/dependency/repository/actualscan+lint allPASS. Exactreceipt
@@ -85,8 +86,17 @@ Review found macOSIntel lacks runtimeownershipproof in existingCI; source review
 complete but2.2needs explicit all4platform execution. Current owned CI-only delta adds
 16stateunits,legacyrepairunit,twoCLI/MCPselectors,roottransition onallcompile/CLIrows;
 Intelonlyregisteredholistic supplement reuses existing three-platformworktreegate.
-Placed after PHP coldcompile so15min proof budget owns only affected warmed work.
+Placed after PHP coldcompile: CLI/navigation warm; lifecycle/worktree targets still
+cold. Confirm15min focusedstep duration on actual hosted runners.
 Luna reviewed the bounded plan; no new product source/schema/DER/SEM. Full source
 native/immutable3b97+4nativeupgrades remain valid; normalhookrequiredagainonfinalCIhead.
 NextreviewCIactualdelta/cheapworkflowgates,commit,normalpush,hostedall4feedback,
 then2.2/3.1and orderedacceptance. No source mutation during active nativepush.
+
+CI-only8a0bfd8 nativepush72523 TERMINALFAIL at inventory gate:50deliveryPASS,
+2inventoryFAIL because new workflow E2E selectors not mirrored (expected72/found76).
+No product/test behavior failure. Added exactly4newcurrent selectors to inventory,
+retained all historical metadata and source identities. Focused inventory3+sourcepolicy
+must pass before normal retry. First52ae571 native937PASS/source/artifact unaffected.
+PR743 ready for review, milestone37 readback, pr-state41181296188PASS; sourceCI
+41181177594/CodeQL41181175613 stillrunning onpublic52; Codex reviewsrunning.

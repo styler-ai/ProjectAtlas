@@ -19780,6 +19780,22 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "            cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "line": 470,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation bounded_pdf_and_docx_reach_cli_and_mcp_navigation -- --exact --nocapture"
     },
