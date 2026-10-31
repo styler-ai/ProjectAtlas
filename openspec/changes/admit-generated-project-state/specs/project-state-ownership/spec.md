@@ -65,6 +65,12 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** a label-only query does not mistake filtered audit ACEs for policy absence, source-policy changes refuse replacement, and unsupported defaulted SACL state retains valid output
 - **AND** no process-wide privilege enablement or mutable-path security setter is introduced
 
+#### Scenario: Windows replacement stages do not expose lasting inherited capabilities
+- **WHEN** a principal can create entries and inherit access to new children but cannot modify or delete the existing protected output
+- **THEN** replacement staging prevents that principal from acquiring data, delete or write-DACL capabilities before destination policy is applied, including implicit owner write-DACL rights
+- **AND** retained creator data and policy operations, ordinary replacement and owned cleanup remain supported; genuinely new outputs retain normal parent inheritance
+- **AND** later policy tightening, a final identity check or handle-based rename alone is not treated as revocation of already granted handles
+
 #### Scenario: Legacy configuration admission precedes identity repair
 - **WHEN** initialization selects a missing managed legacy configuration and a current database needs native root identity repair
 - **THEN** an unsafe legacy destination is refused before database or sidecar mutation, preserving the prior incomplete binding for a supported retry

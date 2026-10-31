@@ -265,6 +265,21 @@ and dependency gates remain required; current Linux evidence is not Windows proo
 
 ### Preserve Windows system policy without blanket privilege requirements
 
+Windows replacement staging must prevent capabilities from being acquired before
+the destination policy is applied. In a shared parent, an actor may have create
+and inherited child DELETE rights without FILE_DELETE_CHILD on the parent or
+modification rights on the protected existing output. Its already-open stage
+handle remains valid after DACL tightening and even after publication. A final
+identity check or handle-based rename alone does not revoke that capability.
+Create replacement stages with a protected initial descriptor that admits no
+broader inherited data, delete or write-DACL access; suppress implicit owner
+write-DACL too. Retain the creator's original data and security handle through
+policy preparation and publication. Genuinely new outputs retain normal parent
+inheritance. Native controls must establish creator rights, restricted-actor
+acquisition denial, positive replacement and owned cleanup before acceptance.
+An SDK-only probe validates the exact creation descriptor before selecting the
+production binding; do not infer Windows runtime behavior from cross-compilation.
+
 The native Windows publisher must also preserve SACL policy: mandatory integrity,
 audit entries and other system-policy ACEs belong to the replaced object, not the
 new stage's inherited defaults. Querying only owner/group/DACL is insufficient.

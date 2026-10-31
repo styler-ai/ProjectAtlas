@@ -1004,11 +1004,79 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture
 
+  windows-security-diagnostics:
+    name: windows-security-diagnostics
+    needs: plan
+    if: needs.plan.result == 'success' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
+    runs-on: windows-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          fetch-depth: 1
+      - name: Observe native system-policy query contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content crates/projectatlas-cli/src/project_state_tests.rs -Raw
+          $match = [regex]::Match($source, '(?s)const WINDOWS_SYSTEM_POLICY_FIXTURE: &str = r#"(.*?)"#;')
+          if (-not $match.Success) { throw 'Native security fixture declaration is missing' }
+          $fixture = $match.Groups[1].Value
+          $boundary = $fixture.IndexOf('$mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE')
+          if ($boundary -lt 0) { throw 'Native security fixture entry point is missing' }
+          Invoke-Expression $fixture.Substring(0, $boundary)
+          $directory = Join-Path $env:RUNNER_TEMP ('system-policy-' + [guid]::NewGuid())
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          $results = @()
+          try {
+            foreach ($case in @('ordinary', 'audit', 'label', 'mixed')) {
+              [SystemPolicyFixture]::Enable($true)
+              $path = Join-Path $directory $case
+              [IO.File]::WriteAllText($path, 'disposable native policy fixture')
+              $policy = switch ($case) {
+                'audit' { 'S:P(AU;SAFA;FW;;;WD)' }
+                'label' { 'S:P(ML;;NW;;;HI)' }
+                'mixed' { 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)' }
+                default { '' }
+              }
+              [SystemPolicyFixture]::Policy($path, $policy, 24) | Out-Null
+              foreach ($enabled in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($enabled)
+                foreach ($mask in @(8, 16, 24, 32, 64, 65536)) {
+                  try {
+                    $value = [SystemPolicyFixture]::Policy($path, '', $mask)
+                    $results += @{ case=$case; security_privilege=$enabled; mask=$mask; value=$value }
+                  } catch {
+                    $results += @{ case=$case; security_privilege=$enabled; mask=$mask; error=$_.Exception.ToString() }
+                  }
+                  $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                }
+              }
+            }
+            foreach ($systemAccess in @($false, $true)) {
+              [SystemPolicyFixture]::Enable($systemAccess)
+              $path = Join-Path $directory ('private-creator-' + $systemAccess)
+              try {
+                $value = [SystemPolicyFixture]::CreatorControl($path, $systemAccess)
+                $results += @{ case='private-creator'; security_privilege=$systemAccess; value=$value }
+              } catch {
+                $results += @{ case='private-creator'; security_privilege=$systemAccess; error=$_.Exception.ToString() }
+              }
+              $results[-1] | ConvertTo-Json -Depth 4 -Compress
+            }
+            $results | ConvertTo-Json -Depth 4
+          } finally {
+            [SystemPolicyFixture]::Enable($false)
+            Remove-Item -LiteralPath $directory -Recurse -Force
+          }
+
   verify:
     name: verify
     # Every native CI suite supplies verify; metadata must validate real source proof.
     if: always()
-    needs: [plan, repository, rust, e2e-smoke]
+    needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]
     runs-on: ubuntu-latest
     timeout-minutes: 125
     permissions:
@@ -1054,10 +1122,15 @@ jobs:
           REPOSITORY_RESULT: ${{ needs.repository.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           PLATFORM_RESULT: ${{ needs.e2e-smoke.result }}
+          WINDOWS_SECURITY_RESULT: ${{ needs.windows-security-diagnostics.result }}
         run: |
           set -euo pipefail
           if [[ "$PLAN_RESULT" != "success" ]]; then
             echo "proof planning concluded $PLAN_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$WINDOWS_SECURITY_RESULT" != "success" && "$WINDOWS_SECURITY_RESULT" != "skipped" ]]; then
+            echo "Windows security diagnostics concluded $WINDOWS_SECURITY_RESULT" >&2
             exit 1
           fi
           export GIT_NO_REPLACE_OBJECTS=1

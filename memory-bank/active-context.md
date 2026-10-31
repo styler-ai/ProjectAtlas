@@ -1,3 +1,84 @@
+## Diagnostic candidate review and proven Mac resolutions
+
+Primary + Luna Max reviewed diagnostic SDK job and fixture, not final acceptance.
+Corrected SDDL rights to numeric0x80 (RA is an ACE type, not read-attributes rights).
+Prototype validates protected one-ACE Owner Rights DACL before payload; same-token
+DELETE/WRITE_DAC/WRITE_DATA reopens must fail native5 under a parent lacking
+FILE_DELETE_CHILD. Prototype share7 prevents sharing from masking DACL proof;
+actual publisher share4 remains a later integration proof. Parent cleanup rights
+restore in finally; unmanaged descriptors/creator handles have bounded cleanup.
+Production SACL admission logic remains unchanged except causal control diagnostics.
+Accepted specification and live741 now include creation-time capability protection;
+no product binding/dependency decision yet. Linux owning31pass/1ignored0.22s,
+CLI alltargets/allfeaturesClippy and wholeowningWindows compile-onlyClippy,
+strings/fmt/OpenSpec/IssueOps1of5/planner/YAML17Bashblocks PASS. No nativeprototype
+execution claimed. Exact e222 CodeQL all25 individually matched prior fingerprints,
+rule/flowfiles; report /tmp/projectatlas-741-e222-codeql-reconciliation.json.
+
+Two Mac findings RESOLVED individually with primary + independent native evidence:
+filenamealiases PRRT_kwDOQyFgJ86yPTKc/reply4433526580 and descriptorACLsetter
+PRRT_kwDOQyFgJ86yR85I/reply4433527823. Both resolution and replies read back.
+Exact e222 native bothMacs/all4formats/nobody/CLI/MCP passed. SIXCodexthreads remain
+OPEN, including overallACL, SELinux and Windowssetter/SACL/integrity/stagecap.
+Do not conflate resolvedMac boundaries with overall741 acceptance or finalWindows.
+Next clean normal publication of diagnostic source, then nativeSDK results drivefix.
+
+## Current Windows native findings and diagnostic candidate
+
+Published baseline e2221bb0bca64430002a749db0008b05c1b30bf6 completed normal
+push and immutable 138-input Linux CLI/MCP/registered/upgrade proof successfully.
+SOURCE run41233463389 is TERMINAL FAIL: Windows124632294148 has21pass/12fail;
+Rust/repository/Linux/bothMacs PASS, including actual four Mac filesystem formats.
+Windows root123 and corrected existing-object take-ownership controls PASS.
+Ordinary Windows replacement now refuses partial system-policy capture; the native
+control value was missing from old diagnostics. Do not guess absence or waive
+hidden auditing. New diagnostic candidate reports actual control/ACL class/ACEcount,
+queries ordinary/audit/label/mixed SDK fixtures with/without SecurityPrivilege, and
+proves proposed atomic private-creation creator rights before product implementation.
+The SDK-only Windows job is exact-head/read-only contents, isolated temporary files,
+no secrets, with per-result immediate output and fail-closed aggregate wiring.
+No production policy relaxation or dependency change yet; new tests NOT run natively.
+
+EIGHT Codex review threads OPEN. New PRRT_kwDOQyFgJ86yT5Gl/comment4433000142
+confirms inherited DELETE/write-DACL handles can survive later stage ACL tightening.
+Primary + independent review agree this is a staging-capability leak within #741,
+not a generic ancestor-race exclusion. Handle-based rename alone cannot revoke old
+handles after publication. Proposed creation descriptor D:P(A;;RA;;;OW) blocks
+inheritance and implicit owner write-DACL; retained creator rights require native
+proof before product rollout. Fresh creates retain ordinary inheritance. Linux
+anonymous preparation and Mac private directory prevent analogous acquisition at
+these boundaries; no universal hostile-ancestor guarantee is claimed.
+Technical reply4433483542 read back; thread remains OPEN pending causal native proof.
+All security and other actionable findings are in scope. Only741 active;1/5 tasks,
+all acceptance OPEN. No merge/RC. No local execution lease before diagnostic checks.
+
+## Latest published SACL candidate and live native verification
+
+PUBLIC/localHEAD e2221bb0bca64430002a749db0008b05c1b30bf6. Normalpush40421
+TERMINALPASS778.41s/34suites/1730pass/11ignored;935465gone. Receipt/log
+/tmp/projectatlas-741-sacl-native-push.*; active-sessionreceiptcompleted.
+Native7118 TERMINALPASS: immutabledefaultbinary
+ ddad35d8b81b900c1c0ccdf904cdf7fd26b2f77e54d8b6116ca87104508e93e6,
+138boundinputs INCLUDINGWindowssecuritymodule; /tmp/projectatlas-741-sacl-debug-path.txt.
+ActualCLI/MCPadmission9.65s,writer5.22s,registered9.38s,5stable050upgrade/refusal/
+retrylayouts5.88sALLPASS. Identity/ALLapprovedpurposes/config andallboundbytes
+preserved. No localexecutionlease; subsequentselecteddirtmemory-only.
+
+SOURCE41233463389 exacte222 active: plan124632255340/repository124632294279PASS;
+Windows124632294148 compile,MacARM124632294169/MacIntel124632294250/
+Linux124632294243 PHPproof, Rust124632294254 selectedproof atlastread.
+PRstate41233462597PASS; CodeQL41233461559 pending. PRbodyupdated/readback.
+SevenCodexthreadsOPEN (includingsecuritySACL andcode-reviewP1sameintegrityissue).
+Only741active; tasks1of5/allacceptanceOPEN. RequireactualNativeSACL/4formats/final
+comments/review before normalmerge+BOTHCLOSED. No RCpublished/stableLatestchange.
+
+Broader SACL ACE-class review foundNOconfirmed additionalomission: Microsoft
+MS-FSA SACL|LABEL branch copiesentireAclSize, unlikeLABEL-onlyfilter. Primary+
+independentread-onlyreviewagreednofurtherflags/Backupneeded; opaque nativecopy
+preservesclassesbycontract. /tmp/projectatlas-741-sacl-extended-ace-review.json.
+NO RA/SP/TL/FL empiricalfixture/CAP/PPL/serverclaim; currentnewNativeWindows
+fixturesstillpending. Do notaddspeculativeflags/dependency/restrictions.
+
 # Active context
 
 ## Goal and serial owner

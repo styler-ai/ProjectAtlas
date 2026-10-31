@@ -68,7 +68,9 @@ fn admitted_control(control: u16, complete: bool) -> io::Result<u16> {
     if !complete && control != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "Windows system ACL preservation requires an already available full-policy handle",
+            format!(
+                "Windows system ACL preservation requires an already available full-policy handle: native_control={control:04x}"
+            ),
         ));
     }
     Ok(control)

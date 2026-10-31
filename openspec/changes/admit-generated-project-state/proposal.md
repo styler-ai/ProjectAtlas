@@ -36,6 +36,10 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   policy on an anonymous stage before exposing a pathname. Protect macOS replacement
   stages from inherited ACL grants before opening payload data; retain normal
   direct-parent inheritance when creating genuinely new outputs.
+- Protect Windows replacement stages at creation from broader inherited access
+  and implicit owner policy-changing rights. Later DACL tightening cannot revoke
+  previously acquired handles; preserve retained creator rights and ordinary
+  new-output inheritance without weakening destination policy.
 
 ## Capabilities
 

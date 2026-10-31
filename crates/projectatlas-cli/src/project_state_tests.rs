@@ -2424,6 +2424,7 @@ public static class SystemPolicyFixture {
   [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
   [StructLayout(LayoutKind.Sequential)] struct Privilege { public uint Count; public Luid Id; public uint Attributes; }
   [StructLayout(LayoutKind.Sequential)] struct AclSize { public uint Count; public uint Used; public uint Free; }
+  [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public uint Length; public IntPtr Descriptor; public bool Inherit; }
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
@@ -2437,6 +2438,12 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor, out bool present, out IntPtr sacl, out bool defaulted);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetAclInformation(IntPtr acl, out AclSize size, uint length, uint information);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, out bool present, out IntPtr dacl, out bool defaulted);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(IntPtr handle, uint kind, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(IntPtr handle, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("kernel32.dll", EntryPoint="CreateFileW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern IntPtr CreateFile(string path, uint access, uint share, ref SecurityAttributes security, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", EntryPoint="MoveFileExW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern bool MoveFileEx(string source, string destination, uint flags);
   public static void Enable(bool enabled) {
     IntPtr token;
     if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
@@ -2484,18 +2491,135 @@ public static class SystemPolicyFixture {
       if (descriptor != IntPtr.Zero) LocalFree(descriptor);
     }
   }
+  public static string CreatorControl(string path, bool systemAccess) {
+    string directory=path+"-parent";
+    System.IO.Directory.CreateDirectory(directory);
+    try {
+      DiscretionaryPolicy(directory,"D:P(A;;0x001f01bf;;;OW)");
+      return CreatorFileControl(System.IO.Path.Combine(directory,"stage"),systemAccess);
+    } finally { DiscretionaryPolicy(directory,"D:P(A;;FA;;;OW)"); }
+  }
+  static void DiscretionaryPolicy(string path, string policy) {
+    IntPtr descriptor=IntPtr.Zero;
+    try {
+      uint length;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptor(policy,1,out descriptor,out length)) throw new Win32Exception();
+      IntPtr dacl; bool present,defaulted;
+      if (!GetSecurityDescriptorDacl(descriptor,out present,out dacl,out defaulted)) throw new Win32Exception();
+      uint status=SetNamedSecurityInfo(path,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+      if (status != 0) throw new Win32Exception((int)status);
+    } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+  }
+  static string CreatorFileControl(string path, bool systemAccess) {
+    IntPtr descriptor=IntPtr.Zero;
+    uint length;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptor("D:P(A;;0x80;;;OW)", 1, out descriptor, out length)) throw new Win32Exception();
+    IntPtr raw;
+    try {
+      SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=descriptor, Inherit=false };
+      uint access=0xc2060000u | (systemAccess ? 0x01000000u : 0u);
+      // Share all rights so second-open denial measures the DACL, not sharing.
+      raw=CreateFile(path, access, 7, ref security, 1, 0x00200080, IntPtr.Zero);
+      if (raw == new IntPtr(-1)) throw new Win32Exception();
+    } finally { LocalFree(descriptor); descriptor=IntPtr.Zero; }
+    string destination=path+"-published";
+    try { using (var handle=new Microsoft.Win32.SafeHandles.SafeFileHandle(raw, true)) {
+      using (var stream=new System.IO.FileStream(handle, System.IO.FileAccess.ReadWrite)) {
+        IntPtr owner,group,dacl,sacl;
+        uint status=GetSecurityInfo(raw,1,7,out owner,out group,out dacl,out sacl,out descriptor);
+        if (status != 0) throw new Win32Exception((int)status);
+        byte[] encoded=new byte[GetSecurityDescriptorLength(descriptor)];
+        Marshal.Copy(descriptor,encoded,0,encoded.Length);
+        var policy=new System.Security.AccessControl.RawSecurityDescriptor(encoded,0);
+        var acl=policy.DiscretionaryAcl;
+        var ace=acl != null && acl.Count == 1 ? acl[0] as System.Security.AccessControl.CommonAce : null;
+        if ((policy.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclPresent) == 0 ||
+            (policy.ControlFlags & System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) == 0 ||
+            ace == null || ace.AccessMask != 0x80 || ace.SecurityIdentifier.Value != "S-1-3-4" ||
+            ace.AceFlags != System.Security.AccessControl.AceFlags.None ||
+            ace.AceQualifier != System.Security.AccessControl.AceQualifier.AccessAllowed)
+          throw new Exception("Initial private creation DACL is not the intended protected Owner Rights policy");
+        LocalFree(descriptor); descriptor=IntPtr.Zero;
+        foreach (uint requested in new uint[] { 0x10000, 0x40000, 2 }) {
+          SecurityAttributes ordinary=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+          IntPtr second=CreateFile(path,requested,7,ref ordinary,3,0x00200080,IntPtr.Zero);
+          if (second != new IntPtr(-1)) {
+            CloseHandle(second);
+            throw new Exception("Initial private creation DACL granted forbidden second-open access: "+requested);
+          }
+          int denied=Marshal.GetLastWin32Error();
+          if (denied != 5) throw new Win32Exception(denied,"Second-open control did not establish access denial");
+        }
+        byte[] payload=System.Text.Encoding.ASCII.GetBytes("verified creator payload");
+        stream.Write(payload,0,payload.Length); stream.Flush(true); stream.Position=0;
+        byte[] read=new byte[payload.Length];
+        if (stream.Read(read,0,read.Length) != payload.Length || System.Text.Encoding.ASCII.GetString(read) != "verified creator payload") throw new Exception("Creator data rights failed");
+        DiscretionaryPolicy(System.IO.Path.GetDirectoryName(path),"D:P(A;;FA;;;OW)");
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor("D:P(A;;0x001e01ff;;;OW)",1,out descriptor,out length)) throw new Win32Exception();
+        bool present,defaulted;
+        if (!GetSecurityDescriptorDacl(descriptor,out present,out dacl,out defaulted)) throw new Win32Exception();
+        status=SetSecurityInfo(raw,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+        if (status != 0) throw new Win32Exception((int)status);
+        LocalFree(descriptor); descriptor=IntPtr.Zero;
+        if (systemAccess) {
+          if (!ConvertStringSecurityDescriptorToSecurityDescriptor("S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)",1,out descriptor,out length)) throw new Win32Exception();
+          if (!GetSecurityDescriptorSacl(descriptor,out present,out sacl,out defaulted)) throw new Win32Exception();
+          status=SetSecurityInfo(raw,1,0x40000018u,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,sacl);
+          if (status != 0) throw new Win32Exception((int)status);
+          LocalFree(descriptor); descriptor=IntPtr.Zero;
+          status=GetSecurityInfo(raw,1,24,out owner,out group,out dacl,out sacl,out descriptor);
+          if (status != 0) throw new Win32Exception((int)status);
+          LocalFree(descriptor); descriptor=IntPtr.Zero;
+        }
+        System.IO.File.WriteAllText(destination,"previous destination");
+        if (!MoveFileEx(path,destination,1)) throw new Win32Exception();
+      }
+    } } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+    if (System.IO.File.ReadAllText(destination) != "verified creator payload") throw new Exception("Creator publication failed");
+    return systemAccess ? "private creator data/DACL/SACL/publication PASS" : "private creator data/DACL/publication PASS";
+  }
 }
 '@
 $mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE
 if ($mode -eq 'query') {
   [SystemPolicyFixture]::Enable($true)
   [SystemPolicyFixture]::Policy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_SYSTEM_POLICY,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
+} elseif ($mode -eq 'creator') {
+  [SystemPolicyFixture]::Enable($false)
+  [SystemPolicyFixture]::CreatorControl($env:PROJECTATLAS_TEST_ACL_PATH,$false)
+  [SystemPolicyFixture]::Enable($true)
+  [SystemPolicyFixture]::CreatorControl(($env:PROJECTATLAS_TEST_ACL_PATH+'-system'),$true)
 } else {
   [SystemPolicyFixture]::Enable($mode -eq 'complete')
   & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_system_policy_replacement_preserves_or_refuses_without_global_privilege_changes --nocapture
   exit $LASTEXITCODE
 }
 "#;
+
+/// Prove the exact creation descriptor and retained creator rights natively.
+#[cfg(windows)]
+#[test]
+fn windows_private_creation_descriptor_preserves_creator_data_and_policy_rights() -> io::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let result = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINDOWS_SYSTEM_POLICY_FIXTURE,
+        ])
+        .env("PROJECTATLAS_TEST_SYSTEM_POLICY_MODE", "creator")
+        .env(
+            "PROJECTATLAS_TEST_ACL_PATH",
+            temp.path().join("private-creation-control"),
+        )
+        .output()?;
+    require(
+        result.status.success(),
+        &format!("private creator native control failed: {result:?}"),
+    )
+}
 
 /// Independently query or prepare SACL policy through native named SDK calls.
 #[cfg(windows)]
@@ -2573,9 +2697,10 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
     guard.ensure_directory()?;
     let output = guard.directory.join(HOST_FILES[0]);
     fs::write(&output, b"ordinary previous output")?;
+    let ordinary_policy = windows_system_policy(&output, None)?;
     require(
-        windows_system_policy(&output, None)?.starts_with("0|absent|0|"),
-        "ordinary fixture did not prove absent system policy",
+        ordinary_policy.starts_with("0|absent|0|"),
+        &format!("ordinary fixture did not prove absent system policy: {ordinary_policy}"),
     )?;
     let captured = super::ReplacementSource::capture(&output, &fs::symlink_metadata(&output)?)?;
     require(
