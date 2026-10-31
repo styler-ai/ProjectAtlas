@@ -30,6 +30,15 @@ destinations SHALL be refused without outside-owner side effects.
 - **THEN** the shared CLI/MCP writer protects only the exact managed destination, preserves outside alias targets, valid permissions and ordinary creation modes, and reports Gitignore creation truthfully without clobbering an existing entry
 - **AND** no-change config operations, existing-entry Gitignore no-ops, explicit custom/external config and map destinations, and the legacy TOON alias refusal retain their supported behavior
 
+#### Scenario: Managed paths include unresolved parent reductions
+- **WHEN** a selected database or fixed managed document is spelled through an existing or missing parent followed by `..`
+- **THEN** existing parents use their actual filesystem resolution, and an unresolved spelling that could reduce to the managed parent is refused before creating directories or writing files
+- **AND** ownership uncertainty never silently selects an external writer; selected-root aliases and physically external symlink-parent paths retain their supported behavior
+
+#### Scenario: Legacy configuration admission precedes identity repair
+- **WHEN** initialization selects a missing managed legacy configuration and a current database needs native root identity repair
+- **THEN** an unsafe legacy destination is refused before database or sidecar mutation, preserving the prior incomplete binding for a supported retry
+
 ### Requirement: Supported explicit paths remain available
 Explicit operator-selected database/config paths and canonical selected-root aliases
 SHALL retain their supported behavior and existing identity/configuration safeguards.

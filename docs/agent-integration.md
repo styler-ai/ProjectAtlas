@@ -123,6 +123,12 @@ Initialization and root transitions also admit generated destinations before cha
 identity or writing defaults. Existing config and nonsource bytes remain intact;
 generated host documents are replaced atomically with existing permissions preserved.
 Ordinary navigation does not require valid generated host documents.
+Managed paths remain managed through resolvable parent reductions and source-root
+aliases. An unresolved parent such as `.projectatlas/missing/../projectatlas.json`
+is refused before creating the intermediate directory; a failed ownership check
+cannot silently select an external writer. Existing symlink parents retain their
+physical filesystem meaning, and custom external destinations remain supported.
+Missing managed legacy configuration is admitted before database identity repair.
 
 Ignore edits and optional JSON map output apply the same ownership boundary to
 their exact managed documents. Changed default or legacy config and default JSON

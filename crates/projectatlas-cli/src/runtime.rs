@@ -9718,6 +9718,90 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn init_admits_legacy_config_before_repairing_missing_root_identity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("legacy-admission-root");
+        let database = temp.path().join("legacy-admission.db");
+        let outside = temp.path().join("missing-legacy-target.toml");
+        fs::create_dir(&root)?;
+        let original_identity = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.project_instance_id()?
+        };
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(connection);
+        let config = root.join("projectatlas.toml");
+        if !create_document_target_symlink(&outside, &config)? {
+            return Ok(());
+        }
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let result = run_init_bootstrap(
+            &root,
+            &database,
+            Some(&config),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &result.is_err(),
+            &true,
+            "dangling managed legacy config was admitted",
+        )?;
+        require_eq(
+            &(fs::read(&database)? == database_before),
+            &true,
+            "config refusal happened after database identity repair",
+        )?;
+        require_eq(
+            &["wal", "shm", "journal"]
+                .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok()),
+            &sidecars_before,
+            "config refusal changed SQLite sidecars",
+        )?;
+        require_eq(
+            &(!outside.exists() && !root.join(".projectatlas").exists()),
+            &true,
+            "config refusal created generated state",
+        )?;
+        fs::remove_file(&config)?;
+        let retry = run_init_bootstrap(
+            &root,
+            &database,
+            Some(&config),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        )?;
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &(retry.ok && config.is_file()),
+            &true,
+            "restored legacy config could not initialize",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &original_identity,
+            "supported retry changed the project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?.is_some(),
+            &true,
+            "supported retry did not repair the native root identity",
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn init_repairs_current_missing_root_identity_from_bound_metadata() -> Result<(), Box<dyn Error>>
     {

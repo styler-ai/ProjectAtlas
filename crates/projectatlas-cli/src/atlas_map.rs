@@ -783,6 +783,16 @@ pub(crate) fn init_project_with_config(
     } else {
         Some(default_config_text_for(root, &config_path)?)
     };
+    let mut config_document = if default_config.is_some() {
+        crate::project_state::ProjectStateGuard::preflight_document(root, &config_path).map_err(
+            |source| AtlasMapError::Io {
+                path: config_path.clone(),
+                source,
+            },
+        )?
+    } else {
+        None
+    };
     state
         .ensure_directory()
         .map_err(|source| AtlasMapError::Io {
@@ -811,6 +821,10 @@ pub(crate) fn init_project_with_config(
             })?;
         let written = if owned {
             state.write_new(&config_path, default_config.as_bytes())
+        } else if let Some(document) = &mut config_document {
+            document
+                .create_document(default_config.as_bytes())
+                .map(|_| ())
         } else {
             // This destination was explicitly selected by the operator.
             fs::write(&config_path, default_config)
@@ -3249,6 +3263,58 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn initialization_admits_explicit_managed_legacy_config_before_outputs()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("checkout");
+        fs::create_dir(&root)?;
+        let outside = temp.path().join("outside");
+        let selected = root.join("projectatlas.toml");
+        symlink_file(&outside, &selected)?;
+        let result = super::init_project_with_config(&root, Some(&selected));
+        if result.is_ok() || outside.exists() || root.join(".projectatlas").exists() {
+            return Err(io::Error::other(
+                "legacy config creation followed its alias or created other outputs before admission",
+            ).into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_map_parent_reduction_never_becomes_an_external_write() -> Result<(), Box<dyn Error>>
+    {
+        for existing_parent in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            let state = root.join(".projectatlas");
+            fs::create_dir_all(&state)?;
+            let missing = state.join("intermediate");
+            if existing_parent {
+                fs::create_dir(&missing)?;
+            }
+            let outside = temp.path().join("outside");
+            fs::write(&outside, b"outside map bytes")?;
+            let sidecar = state.join("projectatlas.json");
+            fs::hard_link(&outside, &sidecar)?;
+            let mut config = test_config(missing.join("../projectatlas.toon"));
+            config.root = root.canonicalize()?;
+            let result = write_json_map("{}", &config);
+            if result.is_ok() != existing_parent
+                || fs::read(&outside)? != b"outside map bytes"
+                || missing.exists() != existing_parent
+                || (existing_parent && fs::read(&sidecar)? != b"{}")
+            {
+                return Err(io::Error::other(format!(
+                    "default map parent admission failed, existing={existing_parent}: {result:?}",
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn automatic_document_mutations_preserve_alias_owners() -> Result<(), Box<dyn Error>> {

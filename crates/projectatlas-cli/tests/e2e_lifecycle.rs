@@ -5042,6 +5042,20 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             drop(connection);
             let outside = temp.path().join(format!("outside{suffix}.bin"));
             let target = sqlite_sidecar_path(&database, suffix);
+            // Keep a real committed WAL and its owning connection live. Admission
+            // must precede SQLite even when the outside sidecars are valid.
+            let pending_connection = if suffix.is_empty() {
+                None
+            } else {
+                let pending_database = outside.with_extension("db");
+                let connection = Connection::open(&pending_database)?;
+                connection.execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+                     CREATE TABLE pending(value TEXT); INSERT INTO pending VALUES ('committed');",
+                )?;
+                fs::hard_link(sqlite_sidecar_path(&pending_database, suffix), &outside)?;
+                Some(connection)
+            };
             if suffix.is_empty() {
                 fs::hard_link(&database, &outside)?;
             } else {
@@ -5050,7 +5064,6 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                         io::Error::other("fixture retained an active SQLite sidecar").into(),
                     );
                 }
-                fs::write(&outside, b"preserve outside sidecar bytes")?;
                 fs::hard_link(&outside, &target)?;
             }
             let outside_before = fs::read(&outside)?;
@@ -5127,6 +5140,7 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                 fs::remove_file(&target)?;
             }
             fs::remove_file(&outside)?;
+            drop(pending_connection);
         }
 
         // Generated host documents are irrelevant to ordinary data access.
@@ -5413,6 +5427,48 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                     fs::rename(&config, root.join(CONFIG_PATH))?;
                 }
             }
+
+            // Parent reduction must not turn this exact managed JSON sidecar
+            // into the external writer, through either CLI or per-call MCP.
+            let intermediate = root.join(ATLAS_DIR_NAME).join("map-parent");
+            let reduced_map = intermediate.join("..").join("projectatlas.toon");
+            document["project"]["map_path"] = toml::Value::String(
+                reduced_map
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("map path is not UTF-8"))?
+                    .to_owned(),
+            );
+            fs::write(&config, toml::to_string(&document)?)?;
+            let reduced_sidecar = root.join(ATLAS_DIR_NAME).join("projectatlas.json");
+            let reduced_outside = root.with_extension("reduced-map");
+            fs::write(&reduced_outside, b"outside reduced map")?;
+            fs::hard_link(&reduced_outside, &reduced_sidecar)?;
+            for existing in [false, true] {
+                if existing {
+                    fs::create_dir(&intermediate)?;
+                }
+                invoke(
+                    &executable,
+                    &root,
+                    mcp.then_some(&mut session),
+                    &["map", "--json", "--force"],
+                    "atlas_map",
+                    &json!({"project_path": root, "json": true, "force": true}),
+                    !existing,
+                )?;
+                if fs::read(&reduced_outside)? != b"outside reduced map"
+                    || intermediate.exists() != existing
+                    || (existing && fs::read(&reduced_sidecar)? == b"outside reduced map")
+                {
+                    return Err(io::Error::other(
+                        "managed parent reduction changed outside ownership",
+                    )
+                    .into());
+                }
+            }
+            fs::remove_file(&reduced_sidecar)?;
+            fs::remove_dir(&intermediate)?;
+            fs::write(&config, &original_config)?;
 
             let sidecar = root.join(".projectatlas/projectatlas.json");
             let outside = root.with_extension("map");

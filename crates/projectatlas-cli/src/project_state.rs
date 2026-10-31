@@ -3,7 +3,7 @@
 use same_file::Handle;
 use std::fs::{self, Metadata};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";
@@ -134,7 +134,7 @@ impl ProjectStateGuard {
         selected_root: &Path,
     ) -> io::Result<Option<Self>> {
         let root = fs::canonicalize(selected_root)?;
-        if !owned_named_path(database, &root.join(STATE_DIRECTORY), DATABASE_FILE) {
+        if !owned_named_path(database, &root.join(STATE_DIRECTORY), DATABASE_FILE)? {
             return Ok(None);
         }
         Self::admit(&root, Some(database), None, StateAdmission::Database).map(Some)
@@ -153,16 +153,7 @@ impl ProjectStateGuard {
                 continue;
             }
             let directory = document.directory(&root);
-            let owned = match document {
-                ProjectDocument::Config | ProjectDocument::JsonMap => {
-                    owned_named_path(path, &directory, document.filename())
-                }
-                ProjectDocument::LegacyConfig | ProjectDocument::Gitignore => {
-                    path.parent().is_some_and(|parent| {
-                        fs::canonicalize(parent).is_ok_and(|value| value == root)
-                    })
-                }
-            };
+            let owned = owned_named_path(path, &directory, document.filename())?;
             if owned {
                 let target = directory.join(document.filename());
                 return Self::admit(
@@ -200,14 +191,23 @@ impl ProjectStateGuard {
             }
             None => None,
         };
-        let automatic_database = database
-            .filter(|path| owned_named_path(path, &directory, DATABASE_FILE))
-            .map(Path::to_path_buf);
+        let automatic_database = match database {
+            Some(path) if owned_named_path(path, &directory, DATABASE_FILE)? => {
+                Some(path.to_path_buf())
+            }
+            _ => None,
+        };
         let automatic_document = match admission {
             StateAdmission::Document(_) => config.map(Path::to_path_buf),
-            StateAdmission::Database | StateAdmission::Generated => config
-                .filter(|path| owned_named_path(path, &directory, CONFIG_FILE))
-                .map(Path::to_path_buf),
+            StateAdmission::Database | StateAdmission::Generated => match config {
+                Some(path)
+                    if owned_named_path(path, &directory, CONFIG_FILE)?
+                        || owned_named_path(path, root, LEGACY_CONFIG_FILE)? =>
+                {
+                    Some(path.to_path_buf())
+                }
+                _ => None,
+            },
         };
         let guard = Self {
             root: root.to_path_buf(),
@@ -497,22 +497,91 @@ impl ProjectStateGuard {
     }
 }
 
-/// Recognize the selected default entry without restricting external DB choices.
-fn owned_named_path(path: &Path, directory: &Path, expected_name: &str) -> bool {
-    let Some(parent) = path.parent() else {
+/// Recognize a managed entry without treating unresolved ownership as external.
+fn owned_named_path(path: &Path, directory: &Path, expected_name: &str) -> io::Result<bool> {
+    if !named(path.file_name(), expected_name) {
+        return Ok(false);
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // Prove direct namespace spelling before following a possibly aliased private
+    // directory. The guard must reject that alias, not inherit its outside owner.
+    if direct_directory_spelling(parent, directory) {
+        return Ok(true);
+    }
+    match fs::canonicalize(parent) {
+        Ok(resolved) => Ok(direct_directory_spelling(&resolved, directory)
+            || resolved_logical_directory_reduction(parent, directory, &resolved)),
+        Err(source) => {
+            // mkdir_all could make a missing/.. spelling resolve to the managed
+            // parent. Refuse before that mutation, preserving the original error.
+            let potential = resolve_existing_parent_prefix(parent)?;
+            if direct_directory_spelling(&potential, directory)
+                || resolved_logical_directory_reduction(parent, directory, &potential)
+            {
+                Err(source)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Keep a reduction through the logical namespace owned even if it is aliased.
+fn resolved_logical_directory_reduction(parent: &Path, directory: &Path, resolved: &Path) -> bool {
+    parent.ancestors().skip(1).any(|ancestor| {
+        direct_directory_spelling(ancestor, directory)
+            && fs::canonicalize(ancestor).is_ok_and(|owner| owner == resolved)
+    })
+}
+
+/// Compare a fixed directory without following its final namespace component.
+fn direct_directory_spelling(path: &Path, directory: &Path) -> bool {
+    if path == directory {
+        return true;
+    }
+    let Some(name) = directory.file_name().and_then(std::ffi::OsStr::to_str) else {
         return false;
     };
-    if !named(path.file_name(), expected_name) || !named(parent.file_name(), STATE_DIRECTORY) {
+    if !named(path.file_name(), name) {
         return false;
     }
-    let Some(root) = directory.parent() else {
-        return false;
-    };
-    let prefix = parent
+    let prefix = path
         .parent()
-        .filter(|path| !path.as_os_str().is_empty())
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    parent == directory || fs::canonicalize(prefix).is_ok_and(|resolved| resolved == root)
+    fs::canonicalize(prefix).is_ok_and(|resolved| Some(resolved.as_path()) == directory.parent())
+}
+
+/// Resolve actual existing ancestors before reducing only an unresolved suffix.
+fn resolve_existing_parent_prefix(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut prefix = absolute.as_path();
+    let mut resolved = loop {
+        match fs::canonicalize(prefix) {
+            Ok(resolved) => break resolved,
+            Err(source) => match prefix.parent() {
+                Some(parent) => prefix = parent,
+                None => return Err(source),
+            },
+        }
+    };
+    let suffix = absolute.strip_prefix(prefix).map_err(io::Error::other)?;
+    for component in suffix.components() {
+        match component {
+            Component::Normal(name) => resolved.push(name),
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(refusal(path, "unresolved parent suffix is not relative"));
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// Match fixed product components using the supported platform's case behavior.

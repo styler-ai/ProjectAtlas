@@ -1,94 +1,81 @@
 # Active context
 
-## Current owner and release goal
+## Sole active issue: #741
 
-Primary works in issue-741 / fix/generated-state-741, HEAD320652f plus owned
-uncommitted document-writer fixes, tests and accepted specification expansion.
-Continue until independently verified v0.5.1-rc1; stable0.5.0 remains Latest.
-No permission pending. No RC published. Read integration memory for all owners.
-Native milestone37 has six open issues:708/731/738/739/741 plus release715.
-Native715 children and direct blockers are708/718/721/722/731/732/738/739/741;
-closed children718/721/722/732. All confirmed self-hosting defects belong in RC1.
+#731 and PR #737 BOTH CLOSED by normal merge a5b1bebcaa79c8386b68e9c247eff73aa11e5e15
+on 2026-10-31. Finish #741, review, normal merge and BOTH CLOSED before next owner.
+No #741 PR yet. Tasks 3/5 (1.1, 2.1, 2.3); all acceptance open. Release goal remains independently
+verified v0.5.1-rc1 prerelease Latest=false; stable 0.5.0 stays Latest. No stable
+promotion/milestone closure. Integration memory owns other parked release work.
 
-## Atlas and target lease
+Exact checkout issue-741 / fix/generated-state-741, HEAD 597a00e779a505f26241210d516c7b0e608bc138.
+Normal origin/main integration includes accepted #731 DER24/SEM23, no source conflicts.
+Inventory union221 tests; other owner mappings retained without parked production code.
+Owned WIP restored from retained stash7cd644e2e5b8d8561385134e8290440d0ab6b4a1;
+backup /tmp/projectatlas-741-resume-accepted731-backup preserves full source/memory/patch.
 
-Installed050 exact741 compact MCP brief still returns dependency_closure_limit10001,
-full-scan prose but typed watch continuation: known708 defect. Preserve privateDB,
-no reset/reindex for orientation. Exact reviewed owner source may be read directly.
-Shared target leased741. Source /tmp/projectatlas-rc1-test-env.sh before Cargo.
-Focused pipeline67993 TERMINALPASS, including final inventory. Shared target nowfree
-for a deliberate handoff731; preserve immutable741debugartifact before replacing it. Do not overlap sibling builds/benchmarks.
-Native debug executable currently contains saved741 document writer source.
+## Current confirmed mechanism and work
 
-## Implemented ownership boundary
+Automatic database admission and exact4-document atomic publication already implemented
+in320652f/e1e633c. New findings: failed parent canonicalization must not mean external;
+managed paths with missing/.. bypass JSON guard and truncate outside hardlinks. Legacy
+explicit config init dangling aliases created outside before guard. Actual immutable
+CLI/MCP debug b6aa4229f5bcae98f7b8941f61380b5e2cd823bc6011f8d696930e68de3a87e5:
+/tmp/projectatlas-741-document-debug-path.txt; classifier-repro.json and
+init-map-mcp-repro.json preserve causal evidence. Explicit config/DB parent variants
+already refused; MCP dangling implicit legacy is deliberately filtered (counterevidence).
 
-Committed320652f admits managed SQLite DB/WAL/SHM BEFORE reads/root discovery,
-bootstrap, transitions and hydration; generated outputs use atomic owned publication.
-Database-only admission preserves navigation despite invalid host documents. Explicit
-external config/storage and selected-root aliases retain supported semantics.
-Existing permanent automatic_state_admission_preserves_cli_mcp_navigation PASS;
-all362 previousCLIunits and Clippy PASS. Task1.1checked; allothers/acceptance open.
-Remaining wholeissue proof includes registeredhydration/liveWAL/compatibleupgrades,
-platforms/failure recovery/finalindependentreview/nativepush/hosted. No741PR yet.
+Merged source+legacy helper guard: exact legacy unit PASS, exact map reduction FAIL
+(/tmp/projectatlas-741-resume-{legacy-after,map-before}.log; terminal3024).
+Shared role10cases and Generated6cases FAIL before classifier fix (terminal6325),
+/tmp/projectatlas-741-{shared-classifier,generated-capture}-before.log. Classifier patch now implemented. Luna confirmed Generated must also capture managed
+legacy config before runtime identity repair can commit; causal existing-DB repair
+unit FAIL101 before fix then PASS, and now includes supported retry/identity proof.
 
-## Broader document-writer defects and current delta
+Implemented fallible managed classification: true owned / false proven external / Err
+unresolved potentially managed. Preserve direct namespace proof before following .state,
+physical existing symlink/.. behavior, external custom paths, Windows named() case rules,
+root aliases, no-change/read aliases. Resolve deepest existing prefix before reducing
+only unresolved suffix. All DB/Document/Generated callers propagate errors. Generated
+captures private AND legacy config; init helper retains publication recheck. No schema,
+DER/SEM bump or general path framework. Runtime test proves admission before identity repair.
 
-Luna writer audit found3 bypasses; installed050 realCLI and pluginMCP causally prove:
-ignore add follows dangling defaultconfig, init-gitignore creates outside dangling
-link target, default map --json truncates outside symlink/hardlink targets.
-Artifacts /tmp/projectatlas-741-default-writers-stable.json and
-/tmp/projectatlas-741-map-writer-stable.json. Disposablefixtures only.
-Live741 proposal/design/spec/task2.1 expanded, exactbodyreadback retained in
-/tmp/projectatlas-741-writer-scope-readback.json; strictOpenSpec PASS.
+## Verification and next steps
 
-Current uncommitted guard adds closed Document role for exact privateconfig,
-legacyrootconfig, rootGitignore and defaultJSONmap. Canonical exacttargetbinding;
-config checks only on change, custom/external routes preserved. Atomic replacement
-keeps outsidehardlinkbytes and oldpermissions; ordinary newdocument modes use pinned
-tempfile Builder permissions clipped by umask. Gitignore anyexistingentry noops;
-noclobber race returns truthfulcreatedfalse. Existing legacyTOONidentityguard retained.
-Fixed-directory revalidation/owned stage cleanup remain bounded, no universal
-hostile-ancestor race claim. No schema/derivation bump for filesystem-only boundary.
+Read-only Luna Max reviewer review_741 found no remaining source issue after alias+
+parent reduction supplement: original logical-ancestor proof distinguishes managed
+namespace from explicit physical outside path. Paired missing/existing ×DB/config/JSON
+unit FAIL101 then final16stateunitsPASS. WorkspacecheckPASS24.04s,ClippyPASS31.32s.
+No additional unguarded SQLite opens found. Real CLI/MCP extended liveWAL/admission
+PASS2.87s and writer missing/existing parent reduction PASS2.79s. Registered holistic
+--ignored PASS1test8.39s (first ignored0 discarded). Final-source reruns pending.
+Pipeline78384 terminal PASS: strings PASS after removing reviewer absolute path from memory;
+403CLIunits PASS37.48s; lifecycle39PASS/2existingignored46.29s; registered explicit
+--ignored PASS8.19s; inventory3 proof see log. No overlapping builds/index/timing.
+Final compatibleupgrade/native/hosted/
+independentacceptance remain. Design/spec/docs+inventory and715installedselectorhandoffcomplete;2.1/2.3checked.
+Do not mark implementation complete from previous narrow writer E2E alone.
+Permanent CLI/MCP selectors automatic_state_admission_preserves_cli_mcp_navigation and
+managed_document_writers_preserve_cli_mcp_capabilities previously PASS; rerun affected
+merged source. Reuse accepted #731 evidence rather than re-auditing closed history.
 
-Two owning writer tests causally FAIL beforefix then PASS afterfix. Three new state
-units cover existing/racingGitignorestatus and newumask/oldpermissions. All12 state
-units PASS; workspacealltarget/allfeatureClippy PASS; actualnativebuild PASS26.23s.
-Logs /tmp/projectatlas-741-document-{state-units,clippy,native-build}.log.
-Luna source review finds no additional defect; actualCLI/MCP and positiveexternal,
-nochange/livealias/legacyTOON controls still required before claiming completion.
-Permanent managed_document_writers_preserve_cli_mcp_capabilities now PASS2.45s actual
-nativeCLI/MCP: default+legacyconfig hardlinks/livealias/nochange/defaultdangling;
-implicitdanglinglegacy preserves discoveryfallback; defaultmap symlink/hardlink;
-Gitignore live/dangling truthfulno-op; legacyTOONaliasrefusal; explicitexternal
-hardlinkedconfig and custommapoutputs preserve selectedbehavior through bothCLI
-and startup-configuredMCP. Inventoryderived210/sourceSHA2dbe69ec693e58d4ba62b5d5a01fff696789f59b349f794c54eb3eaf23871d39.
-Current367binaryunits,64libunits,workspacecheck/Clippy/strictdocs/doctests/strings,
-inventory3 and previousstateadmissionE2EPASS. Earlier lint invocation used unsupported
---pedantic; corrected strict-strings passed after centralizing fixturepaths.
-Supportdocs reconciled exactdocumentboundary. Full native/hosted/platform acceptance
-still pending; tasks remainhonestlyunchecked. Immutable debugartifact path in
-/tmp/projectatlas-741-document-debug-path.txt with sourcebinding; no optimizedcostclaim.
+Atlas exact741 brief refresh_required80 paths, earlier closure10001 known708; preserve
+private DB, no reset/scan/installer repair for orientation. Bounded direct owner reads.
+Shared target free; source /tmp/projectatlas-rc1-test-env.sh before Cargo. No concurrent
+build/index/timing. UNSET PROJECTATLAS_NO_TELEMETRY for native suites/push; set1 for
+isolated read-only Atlas/probes. All exec login:false. Normal clean push hooks only.
+Prior complete checkpoint archived in backup above; older evidence receipts retained.
 
-## Other release owners
+Immutable final native debug SHA3b97df92f32e2b6f66814b049b29db3d9ac02ccea7e272a20463e302fccf197e,
+/tmp/projectatlas-741-final-debug-path.txt; adjacent source-binding.json131checksums.
+Stable050→corrected4layout upgrade/refusal/retry proof75899 terminalPASS: automatic,
+legacy,external,root-alias; identity+ALL approved purposes+configpreserved through
+refusal, no-scan retry, scan/init,overview,watchonce,rootverify. Receipt/log
+/tmp/projectatlas-741-native-upgrade-proof.*. Initial95257 comparison incorrectly
+included newly derived suggested legacy-config purpose; proof corrected to compare
+all approved purposes, no product regression inferred. All4 finalfixturesPASS.
+Wholeissue Luna areas1–4 review active, area5 after hosted. 2.2 and3.1open.
 
-731 current publicPR737 head48e9f59/source3531b47 DER14/SEM14, 7/9tasks/all5open.
-416symbolsPASS+1existingignore; currentCLI/MCP/native050+stages5-13upgrade/full/state/
-noop/rollback and30paired optimizedcost samples PASS. Currentcosttruth includes
-16-24%time/13-24%RSS regressions on some correctedworkfixtures; no708SLOwaiver.
-CurrentCI40880417535 Linux/Windows/macOSARM/Rust/repositoryPASS; macOSIntel failed
-beforecompile at pinnedtoolchain install. Failedjobs rerun afterterminal requested.
-New9thautomated strictness thread stillopen; sourcefix public. CurrentLuna wholeissue
-review flags plausible exportclone/keymaterialization resourceamplification; primary
-will verify/fix under731RC1, not dismiss scanner leads blindly.
-7396eb+dirtyrootwatch requires combined731/740, review/upgrade/cost;7388814prefixguard
-must compose in shared UNCACHED Doc inspector used for739 freshness.708same-seed
-actualguidanceproof and finalcombined fourplatformperformance remain. Preserve120
-samplewarm1.127FAIL and9focused1.031526partial; no silentSLOwaiver.
-715integration stillold+owned edits; finalunionowners, finalDER>allprivate/final73114,
-SEM14 unlesssemanticchanges, packages/pins/security/hosts/cleanparser4OS/install/
-publication/downloadSHAverification remain. Latest050 unchanged.
-
-Security368normalized leads previously reviewed exactlyonce, zerooverlap/remainder:
-244->738;196/197/274/292/294/295->741;361testboundary/notactionable. Noalerts changed.
-Reevaluate implicitdefault writer subroutes against newconfirmeddefects; explicit
-customoperatorroutes remain supported. Currentalerts/finalcombinedproof stillpending.
+Next: commit owned741 changes, normal clean native push with hooks/telemetry override
+unset, then draftPR and all4OS hosted/security proof. Do not edit during push; area5
+waits hosted. No other owner active. Task2.2/3.1 and acceptance remain open.

@@ -50,8 +50,8 @@ no transitive package, unsafe binding or schema change.
 ## Release Scope
 
 High-priority #741 is required for v0.5.1-rc1, directly under and blocking #715 in
-v0.5.1-00. It starts from accepted main3ef603a and has no direct implementation blocker;
-#738/#739/#731 are independent owners and must be combined before release proof.
+v0.5.1-00. It starts from accepted main, now including the merged #731 corrections, and has no
+direct implementation blocker; #738/#739/#708 must be combined before release proof.
 Ready for implementation only after independent plan review, strict OpenSpec,
 scoped IssueOps and the synchronized native milestone/parent/blocker graph.
 

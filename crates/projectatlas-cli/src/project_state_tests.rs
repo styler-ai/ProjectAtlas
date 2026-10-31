@@ -89,6 +89,195 @@ fn require(condition: bool, message: &str) -> io::Result<()> {
     }
 }
 
+#[test]
+fn managed_parent_reductions_preserve_admission_and_outside_owners() -> io::Result<()> {
+    let mut failures = Vec::new();
+    for (private, filename, database) in [
+        (true, DATABASE_FILE, true),
+        (true, super::CONFIG_FILE, false),
+        (false, super::LEGACY_CONFIG_FILE, false),
+        (true, super::JSON_MAP_FILE, false),
+        (false, super::GITIGNORE_FILE, false),
+    ] {
+        for existing in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            let directory = if private {
+                let state = root.join(STATE_DIRECTORY);
+                fs::create_dir(&state)?;
+                state
+            } else {
+                root.clone()
+            };
+            let intermediate = directory.join("intermediate");
+            if existing {
+                fs::create_dir(&intermediate)?;
+            }
+            let outside = temp.path().join("outside");
+            fs::write(&outside, b"preserve outside bytes")?;
+            let target = directory.join(filename);
+            if database {
+                fs::write(&target, b"regular database fixture")?;
+            } else {
+                fs::hard_link(&outside, &target)?;
+            }
+            let selected = intermediate.join("..").join(filename);
+            let admission = if database {
+                ProjectStateGuard::preflight_database_path(&selected, &root)
+            } else {
+                ProjectStateGuard::preflight_document(&root, &selected)
+            };
+            match admission {
+                Ok(Some(mut guard)) if existing => {
+                    if !database {
+                        if filename == super::GITIGNORE_FILE {
+                            require(
+                                !guard.create_document(b"replacement")?,
+                                "existing Gitignore was reported created",
+                            )?;
+                        } else {
+                            guard.write_document(b"managed replacement")?;
+                            require(
+                                fs::read(&target)? == b"managed replacement",
+                                "resolved managed document was not replaced",
+                            )?;
+                        }
+                    }
+                }
+                Err(_) if !existing => {}
+                _ => failures.push(format!("{filename}: existing parent={existing}")),
+            }
+            require(
+                fs::read(&outside)? == b"preserve outside bytes"
+                    && intermediate.exists() == existing,
+                "admission followed an outside owner or created its unresolved parent",
+            )?;
+        }
+    }
+    require(
+        failures.is_empty(),
+        &format!("managed parent classification lost authority: {failures:?}"),
+    )
+}
+
+#[test]
+fn generated_capture_propagates_unresolved_managed_inputs() -> io::Result<()> {
+    let mut failures = Vec::new();
+    for (private, filename, database) in [
+        (true, DATABASE_FILE, true),
+        (true, super::CONFIG_FILE, false),
+        (false, super::LEGACY_CONFIG_FILE, false),
+    ] {
+        for existing in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            let state = root.join(STATE_DIRECTORY);
+            fs::create_dir(&state)?;
+            let directory = if private { state } else { root.clone() };
+            let intermediate = directory.join("intermediate");
+            if existing {
+                fs::create_dir(&intermediate)?;
+            }
+            fs::write(directory.join(filename), b"owned regular entry")?;
+            let selected = intermediate.join("..").join(filename);
+            let (db, config) = if database {
+                (Some(selected.as_path()), None)
+            } else {
+                (None, Some(selected.as_path()))
+            };
+            match ProjectStateGuard::preflight(&root, db, config) {
+                Ok(guard) if existing => {
+                    let captured = if database {
+                        guard.automatic_database.as_deref()
+                    } else {
+                        guard.automatic_document.as_deref()
+                    };
+                    if captured != Some(selected.as_path()) {
+                        failures.push(format!("{filename}: managed input was not captured"));
+                    }
+                }
+                Err(_) if !existing => {}
+                _ => failures.push(format!("{filename}: existing parent={existing}")),
+            }
+            require(
+                intermediate.exists() == existing
+                    && fs::read(directory.join(filename))? == b"owned regular entry",
+                "generated admission changed its input before establishing ownership",
+            )?;
+        }
+    }
+    require(
+        failures.is_empty(),
+        &format!("generated input classification lost authority: {failures:?}"),
+    )
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn managed_classification_preserves_root_aliases_and_physical_external_parents() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("checkout");
+    let external = temp.path().join("external");
+    fs::create_dir(&root)?;
+    fs::create_dir_all(external.join("deep"))?;
+    let root = root.canonicalize()?;
+    let state = root.join(STATE_DIRECTORY);
+    fs::create_dir(&state)?;
+    let root_alias = temp.path().join("root-alias");
+    directory_alias(&root, &root_alias)?;
+    directory_alias(&external.join("deep"), &root.join("shortcut"))?;
+    for (private, filename, database) in [
+        (true, DATABASE_FILE, true),
+        (true, super::CONFIG_FILE, false),
+        (false, super::LEGACY_CONFIG_FILE, false),
+        (true, super::JSON_MAP_FILE, false),
+        (false, super::GITIGNORE_FILE, false),
+    ] {
+        let alias_parent = if private {
+            root_alias.join(STATE_DIRECTORY)
+        } else {
+            root_alias.clone()
+        };
+        let admit = |path: &Path| {
+            if database {
+                ProjectStateGuard::preflight_database_path(path, &root)
+            } else {
+                ProjectStateGuard::preflight_document(&root, path)
+            }
+        };
+        require(
+            admit(&alias_parent.join(filename))?.is_some(),
+            "selected root alias lost managed ownership",
+        )?;
+        require(
+            admit(&alias_parent.join("missing").join("..").join(filename)).is_err(),
+            "unresolved managed root alias became external",
+        )?;
+        let physical_parent = root.join("shortcut").join("..");
+        let physical_parent = if private {
+            physical_parent.join(STATE_DIRECTORY)
+        } else {
+            physical_parent
+        };
+        require(
+            admit(&physical_parent.join(filename))?.is_none(),
+            "physical external parent inherited lexical selected-root ownership",
+        )?;
+        require(
+            admit(&external.join("missing").join("..").join(filename))?.is_none(),
+            "ordinary missing external parent was restricted",
+        )?;
+    }
+    require(
+        !external.join("missing").exists() && !external.join(STATE_DIRECTORY).exists(),
+        "classification created external parents",
+    )
+}
+
 /// Create a directory alias through the platform's ordinary filesystem API.
 #[cfg(unix)]
 fn directory_alias(target: &Path, path: &Path) -> io::Result<()> {
@@ -99,6 +288,61 @@ fn directory_alias(target: &Path, path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn directory_alias(target: &Path, path: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(target, path)
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn logical_managed_reductions_cannot_inherit_an_aliased_state_owner() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("checkout");
+    let outside = temp.path().join("outside").join(STATE_DIRECTORY);
+    fs::create_dir(&root)?;
+    fs::create_dir_all(&outside)?;
+    let root = root.canonicalize()?;
+    directory_alias(&outside, &root.join(STATE_DIRECTORY))?;
+    for existing in [false, true] {
+        let intermediate = outside.join("intermediate");
+        if existing {
+            fs::create_dir(&intermediate)?;
+        }
+        for (filename, database) in [
+            (DATABASE_FILE, true),
+            (super::JSON_MAP_FILE, false),
+            (super::CONFIG_FILE, false),
+        ] {
+            fs::write(outside.join(filename), b"outside selected bytes")?;
+            let logical = root
+                .join(STATE_DIRECTORY)
+                .join("intermediate")
+                .join("..")
+                .join(filename);
+            let admission = if database {
+                ProjectStateGuard::preflight_database_path(&logical, &root)
+            } else {
+                ProjectStateGuard::preflight_document(&root, &logical)
+            };
+            require(
+                admission.is_err(),
+                "logical managed reduction inherited an outside state owner",
+            )?;
+            require(
+                fs::read(outside.join(filename))? == b"outside selected bytes"
+                    && intermediate.exists() == existing,
+                "logical admission changed outside state",
+            )?;
+            let physical = outside.join("intermediate").join("..").join(filename);
+            let external = if database {
+                ProjectStateGuard::preflight_database_path(&physical, &root)
+            } else {
+                ProjectStateGuard::preflight_document(&root, &physical)
+            };
+            require(
+                external?.is_none(),
+                "explicit outside spelling inherited logical ownership",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -194,7 +438,7 @@ fn external_database_is_not_inherited_through_a_state_directory_alias() -> io::R
             &external_database,
             &root.join(STATE_DIRECTORY),
             DATABASE_FILE,
-        ),
+        )?,
         "physical alias incorrectly granted automatic ownership",
     )?;
     require(

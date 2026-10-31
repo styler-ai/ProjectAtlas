@@ -111,6 +111,24 @@ Require causal owning tests and real CLI/MCP controls for dangling/live aliases,
 regular hardlinks, legacy/default layouts, custom/external config and output paths,
 unchanged mutations, existing-entry/racing Gitignore status and new-file modes.
 
+### Preserve uncertainty at managed path classification
+
+Classify the fixed document/database names with a local fallible boolean: managed,
+proven external, or an ownership error. Propagate errors through all operation roles,
+including generated-state capture, before side effects. Prove direct namespace
+spelling before following the private directory; compare existing parent reductions
+with their actual resolved location. For missing parents, resolve the deepest existing
+prefix in original component order before reducing only its unresolved suffix.
+Refuse a suffix that could become the exact managed parent before `mkdir_all` can
+make it usable. This preserves physical symlink/`..` semantics and ordinary external
+missing parents without introducing a public path framework.
+
+Generated admission captures both private and legacy managed configuration. A missing
+legacy config must be admitted before current-database native identity repair commits;
+the initializer also retains its publication-boundary document check. Causal owning
+tests cover all five selected DB/document roles, both parent states, generated capture,
+root aliases, external physical parents and the existing-DB repair ordering.
+
 ### Explicit paths remain supported
 
 An explicitly selected external database or config path is an intended operator
