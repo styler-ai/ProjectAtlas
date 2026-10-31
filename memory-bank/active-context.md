@@ -1,3 +1,16 @@
+## Diagnostic source pins corrected before publication
+
+716b5f3 normalpush79652 was controlledstopped after3hard inventoryfailures from
+missing e2e_delivery digestupdates. Receiptterminal-2/130.29s; session1247963gone
+including ownedorphanfixture1308137. No publish/no successfulfullgateclaim.
+Bothowningcurrent deliverypins now5b567030be7b54cab74f8cd63482bf0f4b00d4173a400a28beafdc398d6b604b;
+no selectors/counts/lifecycle/supportmodulebytes changed. All3inventorycontrols
+PASS2.73s and exactworkflowcontractPASS. Lunaindependentlyrecomputednormalizedhash,
+reviewedonly2pindiffs andapprovednormalpublication. Existingdiagnostic/source/wiring
+approvals remain, no productpolicychangeorWindowsruntimeclaim. NewCLEANhead/prefix
+-security-probe-pinned ownsnextnormalpush; requireterminalPASSbefore138inputproof.
+Only741active1/5tasks/allacceptanceOPEN;3threadsresolved/readback,5OPEN. NoRC.
+
 ## Diagnostic publication retry after required workflow-contract failure
 
 18462ec normalpush60016 TERMINALFAIL253.97s, process1132294gone; public remains
