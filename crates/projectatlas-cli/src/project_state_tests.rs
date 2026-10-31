@@ -2380,6 +2380,15 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
     )
 }
 
+/// Load only native fixture declarations, without its child-test entry point.
+#[cfg(windows)]
+fn windows_fixture_script(script: &str) -> io::Result<String> {
+    let (declarations, _) = WINDOWS_SYSTEM_POLICY_FIXTURE
+        .split_once("$mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE")
+        .ok_or_else(|| io::Error::other("native security fixture entry point is missing"))?;
+    Ok(format!("{declarations}\n{script}"))
+}
+
 /// Prepare a native Windows ACL independently of the Rust publication adapter.
 #[cfg(windows)]
 fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
@@ -2393,11 +2402,17 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
             $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'Delete','Deny')); \
             $guest=[System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-546'); \
             $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($guest,'Write','Deny')); \
-            $a.SetAccessRuleProtection({},$true); Set-Acl -LiteralPath $p -AclObject $a; {READ}",
+            $a.SetAccessRuleProtection({},$true); \
+            [SystemPolicyFixture]::DiscretionaryPolicy($p,$a.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)); {READ}",
             if protected { "$true" } else { "$false" },
         )
     } else {
         format!("$ErrorActionPreference='Stop'; {READ}")
+    };
+    let script = if prepare.is_some() {
+        windows_fixture_script(&script)?
+    } else {
+        script
     };
     let result = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -2425,6 +2440,10 @@ public static class SystemPolicyFixture {
   [StructLayout(LayoutKind.Sequential)] struct Privilege { public uint Count; public Luid Id; public uint Attributes; }
   [StructLayout(LayoutKind.Sequential)] struct AclSize { public uint Count; public uint Used; public uint Free; }
   [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public uint Length; public IntPtr Descriptor; public bool Inherit; }
+  [StructLayout(LayoutKind.Sequential)] struct ObjectBasicInformation {
+    public uint Attributes, GrantedAccess, HandleCount, PointerCount;
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst=10)] public uint[] Reserved;
+  }
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
@@ -2438,6 +2457,7 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor, out bool present, out IntPtr sacl, out bool defaulted);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetAclInformation(IntPtr acl, out AclSize size, uint length, uint information);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool InitializeAcl(IntPtr acl, uint length, uint revision);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, out bool present, out IntPtr dacl, out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
   [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(IntPtr handle, uint kind, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
@@ -2446,6 +2466,7 @@ public static class SystemPolicyFixture {
   [DllImport("kernel32.dll", EntryPoint="MoveFileExW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern bool MoveFileEx(string source, string destination, uint flags);
   [DllImport("kernel32.dll", EntryPoint="DeleteFileW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern bool DeleteFile(string path);
   [DllImport("advapi32.dll", EntryPoint="GetSecurityInfo")] static extern uint GetSecurityDescriptorOnly(IntPtr handle, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+  [DllImport("ntdll.dll")] static extern int NtQueryObject(IntPtr handle, uint information, out ObjectBasicInformation result, uint length, out uint returned);
   public static void Enable(bool enabled) {
     IntPtr token;
     if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
@@ -2462,7 +2483,7 @@ public static class SystemPolicyFixture {
     return Policy(path,replacement,query,false);
   }
   public static string Policy(string path, string replacement, uint query, bool retained) {
-    IntPtr descriptor=IntPtr.Zero, text=IntPtr.Zero;
+    IntPtr descriptor=IntPtr.Zero, text=IntPtr.Zero, empty=IntPtr.Zero;
     uint length, revision; ushort control;
     try {
       if (!String.IsNullOrEmpty(replacement)) {
@@ -2470,6 +2491,13 @@ public static class SystemPolicyFixture {
         bool present, defaulted; IntPtr sacl;
         if (!GetSecurityDescriptorSacl(descriptor, out present, out sacl, out defaulted)) throw new Win32Exception();
         if (!GetSecurityDescriptorControl(descriptor, out control, out revision)) throw new Win32Exception();
+        // Bare SDDL S: normalizes to a NULL pointer. Construct an actual empty
+        // SDK ACL for the independent NULL-versus-allocated-empty file control.
+        if (replacement == "S:" || replacement == "S:P") {
+          empty=Marshal.AllocHGlobal(8);
+          if (!InitializeAcl(empty,8,2)) throw new Win32Exception();
+          sacl=empty;
+        }
         uint flags=0x18u | ((control & 0x2000) != 0 ? 0x40000000u : 0x10000000u);
         uint error=SetNamedSecurityInfo(path, 1, flags, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
         if (error != 0) throw new Win32Exception((int)error);
@@ -2504,6 +2532,7 @@ public static class SystemPolicyFixture {
     } finally {
       if (text != IntPtr.Zero) LocalFree(text);
       if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty);
     }
   }
   public static string CreatorControl(string path, bool systemAccess, bool maximumAllowed) {
@@ -2527,7 +2556,11 @@ public static class SystemPolicyFixture {
       if (!ConvertStringSecurityDescriptorToSecurityDescriptor(policy,1,out descriptor,out length)) throw new Win32Exception();
       IntPtr dacl; bool present,defaulted;
       if (!GetSecurityDescriptorDacl(descriptor,out present,out dacl,out defaulted)) throw new Win32Exception();
-      uint status=SetNamedSecurityInfo(path,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+      ushort control; uint revision;
+      if (!GetSecurityDescriptorControl(descriptor,out control,out revision)) throw new Win32Exception();
+      if (revision != 1) throw new Exception("Unexpected discretionary descriptor revision");
+      uint information=4u | ((control & 0x1000) != 0 ? 0x80000000u : 0x20000000u);
+      uint status=SetNamedSecurityInfo(path,1,information,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
       if (status != 0) throw new Win32Exception((int)status);
     } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
   }
@@ -2543,7 +2576,7 @@ public static class SystemPolicyFixture {
     IntPtr raw;
     try {
       SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=descriptor, Inherit=false };
-      uint access=0xc00f0000u | (maximumAllowed ? 0x02000000u : 0u) | (systemAccess ? 0x01000000u : 0u);
+      uint access=0xc0070000u | (maximumAllowed ? 0x02000000u : 0u) | (systemAccess ? 0x01000000u : 0u);
       phase="create original data/security/delete handle";
       // Share all rights so second-open denial measures the DACL, not sharing.
       raw=CreateFile(path, access, 7, ref security, 1, 0x00200080, IntPtr.Zero);
@@ -2551,6 +2584,12 @@ public static class SystemPolicyFixture {
     } finally { LocalFree(descriptor); descriptor=IntPtr.Zero; }
     string destination=path+"-published";
     try { using (var handle=new Microsoft.Win32.SafeHandles.SafeFileHandle(raw, true)) {
+      phase="read actual creator granted access";
+      ObjectBasicInformation basic; uint returned;
+      uint size=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
+      int query=NtQueryObject(raw,0,out basic,size,out returned);
+      if (query < 0 || returned != size) throw new Exception("Creator access query failed: "+query.ToString("x"));
+      Console.WriteLine("private creator granted access="+basic.GrantedAccess.ToString("x"));
       using (var stream=new System.IO.FileStream(handle, System.IO.FileAccess.ReadWrite)) {
         IntPtr owner,group,dacl,sacl;
         phase="query initial creator descriptor";
@@ -2567,9 +2606,6 @@ public static class SystemPolicyFixture {
             ace.AceFlags != System.Security.AccessControl.AceFlags.None ||
             ace.AceQualifier != System.Security.AccessControl.AceQualifier.AccessAllowed)
           throw new Exception("Initial private creation DACL is not the intended protected Owner Rights policy");
-        phase="apply creator owner/group through retained handle";
-        status=SetSecurityInfo(raw,1,3,owner,group,IntPtr.Zero,IntPtr.Zero);
-        if (status != 0) throw new Win32Exception((int)status);
         LocalFree(descriptor); descriptor=IntPtr.Zero;
         foreach (uint requested in new uint[] { 0x10000, 0x40000, 2 }) {
           phase="deny second opener for access "+requested;
@@ -3169,13 +3205,15 @@ fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Resul
     let root = temp.path().canonicalize()?;
     let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
     guard.ensure_directory()?;
+    let script = windows_fixture_script(
+        "$p=$env:PROJECTATLAS_TEST_ACL_PATH; \
+        $a=Get-Acl -LiteralPath $p; \
+        $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; \
+        $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'TakeOwnership','ContainerInherit,ObjectInherit','None','Deny')); \
+        [SystemPolicyFixture]::DiscretionaryPolicy($p,$a.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access))",
+    )?;
     let setup = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command",
-            "$ErrorActionPreference='Stop'; $p=$env:PROJECTATLAS_TEST_ACL_PATH; \
-            $a=Get-Acl -LiteralPath $p; \
-            $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; \
-            $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'TakeOwnership','ContainerInherit,ObjectInherit','None','Deny')); \
-            Set-Acl -LiteralPath $p -AclObject $a"])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .env("PROJECTATLAS_TEST_ACL_PATH", &guard.directory)
         .output()?;
     require(
@@ -3510,11 +3548,11 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
         let output = directory.join(HOST_FILES[0]);
         fs::write(&output, b"last valid output")?;
         let original = same_file::Handle::from_path(&output)?;
+        let script = windows_fixture_script(
+            "[SystemPolicyFixture]::DiscretionaryPolicy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_ACL_SDDL)",
+        )?;
         let setup = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile", "-NonInteractive", "-Command",
-                "$ErrorActionPreference='Stop'; $p=$env:PROJECTATLAS_TEST_ACL_PATH; $a=Get-Acl -LiteralPath $p; $a.SetSecurityDescriptorSddlForm($env:PROJECTATLAS_TEST_ACL_SDDL); Set-Acl -LiteralPath $p -AclObject $a",
-            ])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .env("PROJECTATLAS_TEST_ACL_PATH", &output)
             .env("PROJECTATLAS_TEST_ACL_SDDL", sddl)
             .output()?;

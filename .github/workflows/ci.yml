@@ -1036,7 +1036,7 @@ jobs:
             foreach ($root in $directories) {
               $directory = $root.path
               New-Item -ItemType Directory -Path $directory | Out-Null
-              foreach ($case in @('ordinary', 'audit', 'label', 'mixed', 'dacl-dotnet', 'dacl-native')) {
+              foreach ($case in @('ordinary', 'audit', 'label', 'mixed', 'empty', 'protected-empty', 'null', 'dacl-dotnet', 'dacl-native')) {
                 [SystemPolicyFixture]::Enable($true)
                 $path = Join-Path $directory $case
                 [IO.File]::WriteAllText($path, 'disposable native policy fixture')
@@ -1044,6 +1044,9 @@ jobs:
                   'audit' { 'S:P(AU;SAFA;FW;;;WD)' }
                   'label' { 'S:P(ML;;NW;;;HI)' }
                   'mixed' { 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)' }
+                  'empty' { 'S:' }
+                  'protected-empty' { 'S:P' }
+                  'null' { 'S:NO_ACCESS_CONTROL' }
                   default { '' }
                 }
                 if ($case -eq 'dacl-dotnet' -or $case -eq 'dacl-native') {

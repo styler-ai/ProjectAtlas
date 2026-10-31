@@ -1,3 +1,50 @@
+## Latest native checkpoint and fixture correction
+
+PUBLIC/local60e3932762fb90d18eead692abf1d621a0245d33; normalpush17090
+PASS783.34s/34suites/1730pass/11ignored,1506318gone. Immutable73004PASS138inputs,
+DDADbinary unique60e path /tmp/projectatlas-741-system-policy-image-debug-path.txt;
+CLI/MCP11.45s,writer5.23s,registered9.29s,five050upgrades6.08s allPASS/bytespreserved.
+No locallease. SOURCE41252573921: plan124689034820/repository124689069779PASS;
+Windows124689069821 terminal29PASS5FAIL; otherjobsneedfreshreadback. prstate41252572922PASS.
+Ordinary0800admission andforcedHI/MEcopy nowPASS. Full6roleSACL andsource/stagechange
+controls NOTcompleted: firstroleemptyfixture normalizedS: to810|null|0|S:AINO_ACCESS_CONTROL.
+
+SDK124689069883SUCCESS156rows /tmp/projectatlas-741-60e-windows-security-*. Named/
+retainedagree. DACLbefore/after CONFIRMS.NETSet-Acl changesabsent0/0800 into
+2810/protectedNULLSACL; nativeDACL-onlykeepssystempolicyunchanged. CurrentDIRTYfixture
+correction routesALL3DACL-onlysites throughC#native DACLflag4 +actualP/unprotected,
+.NETGet-Acl staysindependentreadoracle; rawNULL/emptySDDLnotroundtrippedthrough.NET.
+Workflowdacl-dotnet remainsnegativecomparison. No productSACLguard weakening.
+
+ALL8creatorcases reachedGetSecurityInfo thenfailedno-opowner/groupset native5;
+essentialdata/DACL/SACLoperations notmeasured. Removedunusedownershipassignment
+andWOrequest; addedfixture-onlydocumentedNtQueryObject grantedmask diagnostic,
+requireexactpublicSDKsize56 beforetrust, underownedSafeFileHandle. MAX/nonMAX cases
+remain, NativeunitnonMAX. ThisisNOTproductprivateSDfix/changedownerproof.
+ExplicitInitializeAcl(8bytes,revision2) nowconstructs actualemptySACLforS:/S:P,
+freedHGlobal infinally; existingNativeallocated/nullassertionsretaineduntildata.
+SDKmatrixadds empty/protected-empty/null soOSnormalizationisvisible, notassumed.
+LunaMax independentlyreviewed allchanges andapproved NATIVEpublication only.
+
+NEW8dP1stagecap...yVUod confirmed/reply4433665911readbackOPEN. NEWLinuxcasefold
+...yVV8m confirmed/reply4433666457readbackOPEN: Linuxnamedfalse ignoresdirectory
+casefold; commonDocument+DB/sidecar/pathrolesaffected. Nativeownrepro pending;
+local sudo-nunavailable, Kernel7.0.0-38, useauthorizedhostedfilesystemfixture.
+Draft /tmp/projectatlas-741-linux-casefold-plan.md NOTYETacceptedimplementationplan:
+needsnativecomparisonmodelcontract, preserveUnicodecustom/execute-only paths,
+missingparentflaginheritance andsensitivehardlinks. No LinuxCFproductioncodeyet.
+StagecapandLinuxfindingremainunder741, no newissue. SevenCodexthreadsOPEN (old5+2).
+NewAdvancedSecurity398expectedread-onlyPRCI individuallyreviewed/replied/resolved/
+readback4433683341; alertNOTdismissed. All26CodeQL8d resultsindividuallyreconciled
+/tmp/projectatlas-741-8d-codeql-reconciliation.json; new3inputtriage rendered/saved
+/tmp/projectatlas-741-8d-new-review-triage.json. Latest60/newheadcommentsstillrequired.
+
+Currentchecks: actualwholeWindowsGNUowningClippy/fmt/strings/LinuxCLIalltargets
+Clippy PASS; Linuxowning31+1ignored0.21s, workflow0.32s, 3inventory2.70s,
+strictOpenSpec/IssueOps1of5 andYAML/Bash PASS. No delivery/pin/lifecycle changes. Nextclean normalpub NEWprefix
+-discretionary-fixtures, thenunique138inputproof+nativeSDK andcorrectactualpublisher.
+Only741active1/5/allacceptanceOPEN, no merge/RC. Olderentriesbelow superseded.
+
 # Active context
 
 ## Goal and serial owner
