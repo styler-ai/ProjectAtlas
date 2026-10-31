@@ -63,6 +63,12 @@ implicit blocks and repeated forwarding-cache key comparisons scaling with a sha
 module literal's length. Isolate the registered Go clause scopes and intern module
 identity within one resolver, preserving exact cross-allocation value equality,
 existing resource/cancellation limits, long-module support and ordinary callers.
-DER23/SEM22 repairs prior22 and older projections, including shared Cargo root
-causes and lazy recovery confined to relevant target directories. The source-fact
-digest remains unchanged; no provider or public schema is added.
+DER24/SEM23 repairs prior23 and older projections, including shared Cargo root
+causes and lazy recovery confined to relevant target directories. Kotlin local
+property inputs and for-container expressions retain their enclosing binding until
+the new local becomes visible; the semantic digest advances for these corrected
+source facts. One operation-wide allowance admits coexisting source/configured
+projections, identity, recovered indexes, key workspaces, decoded SQLite pages and
+candidate registries before retained growth. Preserve valid configured fanout,
+normal navigation, existing limits and typed refusal/cancellation; no provider or
+public schema is added.
