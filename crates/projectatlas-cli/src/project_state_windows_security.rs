@@ -15,6 +15,8 @@ use windows_permissions::{LocalBox, SecurityDescriptor};
 
 /// SACL presence, defaulting, inheritance request/state and protection.
 const SACL_CONTROL: u16 = 0x2a30;
+/// Only this bit establishes that system policy exists in a filtered query.
+const SACL_PRESENT: u16 = 0x0010;
 /// A defaulted SACL cannot be reproduced by the selected safe setter.
 const SACL_DEFAULTED: u16 = 0x0020;
 /// Inheritance protection for the system ACL.
@@ -59,13 +61,13 @@ fn descriptor_control(descriptor: &SecurityDescriptor) -> io::Result<u16> {
 /// Admit only complete supported policy or a proven absent partial snapshot.
 fn admitted_control(control: u16, complete: bool) -> io::Result<u16> {
     let control = control & SACL_CONTROL;
-    if control & SACL_DEFAULTED != 0 {
+    if control & SACL_PRESENT != 0 && control & SACL_DEFAULTED != 0 {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "defaulted Windows system ACL cannot be preserved",
         ));
     }
-    if !complete && control != 0 {
+    if !complete && control & SACL_PRESENT != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
@@ -111,10 +113,7 @@ impl SystemPolicy {
         // A LABEL query retains the original presence/control bits but filters
         // audit ACEs. Never infer absence from that filtered ACE list or SDDL.
         let control = admitted_control(descriptor_control(&descriptor)?, complete)?;
-        let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
-            &descriptor,
-            SecurityInformation::Sacl,
-        )?;
+        let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, information)?;
         Ok(Self {
             descriptor,
             sddl,
@@ -224,6 +223,8 @@ mod tests {
             return Err(io::Error::other("hidden SACL was admitted as absent"));
         }
         if admitted_control(0x8000, false)? != 0
+            || admitted_control(0x8800, false)? != 0x0800
+            || admitted_control(0x8800 | SACL_DEFAULTED, false)? != 0x0800 | SACL_DEFAULTED
             || admitted_control(0x8010 | SACL_PROTECTED, true)? != 0x2010
         {
             return Err(io::Error::other("supported system controls were changed"));

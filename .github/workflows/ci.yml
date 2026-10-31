@@ -1027,49 +1027,77 @@ jobs:
           $boundary = $fixture.IndexOf('$mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE')
           if ($boundary -lt 0) { throw 'Native security fixture entry point is missing' }
           Invoke-Expression $fixture.Substring(0, $boundary)
-          $directory = Join-Path $env:RUNNER_TEMP ('system-policy-' + [guid]::NewGuid())
-          New-Item -ItemType Directory -Path $directory | Out-Null
+          $directories = @(
+            @{ name='runner-temp'; path=(Join-Path $env:RUNNER_TEMP ('system-policy-' + [guid]::NewGuid())) },
+            @{ name='native-temp'; path=(Join-Path ([IO.Path]::GetTempPath()) ('system-policy-' + [guid]::NewGuid())) }
+          )
           $results = @()
           try {
-            foreach ($case in @('ordinary', 'audit', 'label', 'mixed')) {
-              [SystemPolicyFixture]::Enable($true)
-              $path = Join-Path $directory $case
-              [IO.File]::WriteAllText($path, 'disposable native policy fixture')
-              $policy = switch ($case) {
-                'audit' { 'S:P(AU;SAFA;FW;;;WD)' }
-                'label' { 'S:P(ML;;NW;;;HI)' }
-                'mixed' { 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)' }
-                default { '' }
+            foreach ($root in $directories) {
+              $directory = $root.path
+              New-Item -ItemType Directory -Path $directory | Out-Null
+              foreach ($case in @('ordinary', 'audit', 'label', 'mixed', 'dacl-dotnet', 'dacl-native')) {
+                [SystemPolicyFixture]::Enable($true)
+                $path = Join-Path $directory $case
+                [IO.File]::WriteAllText($path, 'disposable native policy fixture')
+                $policy = switch ($case) {
+                  'audit' { 'S:P(AU;SAFA;FW;;;WD)' }
+                  'label' { 'S:P(ML;;NW;;;HI)' }
+                  'mixed' { 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)' }
+                  default { '' }
+                }
+                if ($case -eq 'dacl-dotnet' -or $case -eq 'dacl-native') {
+                  $value = [SystemPolicyFixture]::Policy($path, '', 24)
+                  @{ case=$case; root=$root.name; operation='before-dacl'; value=$value } | ConvertTo-Json -Compress
+                  if ($case -eq 'dacl-dotnet') {
+                    $acl = Get-Acl -LiteralPath $path
+                    $acl.SetAccessRuleProtection($true, $false)
+                    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'FullControl', 'Allow'))
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'Delete', 'Deny'))
+                    $guest = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-546')
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($guest, 'Write', 'Deny'))
+                    Set-Acl -LiteralPath $path -AclObject $acl
+                  } else {
+                    [SystemPolicyFixture]::DiscretionaryPolicy($path, 'D:P(A;;FA;;;OW)')
+                  }
+                }
+                [SystemPolicyFixture]::Policy($path, $policy, 24) | Out-Null
+                foreach ($enabled in @($false, $true)) {
+                  [SystemPolicyFixture]::Enable($enabled)
+                  foreach ($retained in @($false, $true)) {
+                    foreach ($mask in @(8, 16, 24)) {
+                      try {
+                        $value = [SystemPolicyFixture]::Policy($path, '', $mask, $retained)
+                        $results += @{ case=$case; root=$root.name; retained=$retained; security_privilege=$enabled; mask=$mask; value=$value }
+                      } catch {
+                        $results += @{ case=$case; root=$root.name; retained=$retained; security_privilege=$enabled; mask=$mask; error=$_.Exception.ToString() }
+                      }
+                      $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                    }
+                  }
+                }
               }
-              [SystemPolicyFixture]::Policy($path, $policy, 24) | Out-Null
-              foreach ($enabled in @($false, $true)) {
-                [SystemPolicyFixture]::Enable($enabled)
-                foreach ($mask in @(8, 16, 24, 32, 64, 65536)) {
+              foreach ($systemAccess in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($systemAccess)
+                foreach ($maximumAllowed in @($false, $true)) {
+                  $path = Join-Path $directory ('private-creator-' + $systemAccess + '-' + $maximumAllowed)
                   try {
-                    $value = [SystemPolicyFixture]::Policy($path, '', $mask)
-                    $results += @{ case=$case; security_privilege=$enabled; mask=$mask; value=$value }
+                    $value = [SystemPolicyFixture]::CreatorControl($path, $systemAccess, $maximumAllowed)
+                    $results += @{ case='private-creator'; root=$root.name; maximum_allowed=$maximumAllowed; security_privilege=$systemAccess; value=$value }
                   } catch {
-                    $results += @{ case=$case; security_privilege=$enabled; mask=$mask; error=$_.Exception.ToString() }
+                    $results += @{ case='private-creator'; root=$root.name; maximum_allowed=$maximumAllowed; security_privilege=$systemAccess; error=$_.Exception.ToString() }
                   }
                   $results[-1] | ConvertTo-Json -Depth 4 -Compress
                 }
               }
             }
-            foreach ($systemAccess in @($false, $true)) {
-              [SystemPolicyFixture]::Enable($systemAccess)
-              $path = Join-Path $directory ('private-creator-' + $systemAccess)
-              try {
-                $value = [SystemPolicyFixture]::CreatorControl($path, $systemAccess)
-                $results += @{ case='private-creator'; security_privilege=$systemAccess; value=$value }
-              } catch {
-                $results += @{ case='private-creator'; security_privilege=$systemAccess; error=$_.Exception.ToString() }
-              }
-              $results[-1] | ConvertTo-Json -Depth 4 -Compress
-            }
             $results | ConvertTo-Json -Depth 4
           } finally {
             [SystemPolicyFixture]::Enable($false)
-            Remove-Item -LiteralPath $directory -Recurse -Force
+            foreach ($root in $directories) {
+              if (Test-Path -LiteralPath $root.path) { Remove-Item -LiteralPath $root.path -Recurse -Force }
+            }
           }
 
   verify:

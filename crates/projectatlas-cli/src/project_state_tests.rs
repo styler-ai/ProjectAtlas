@@ -2444,6 +2444,8 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(IntPtr handle, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
   [DllImport("kernel32.dll", EntryPoint="CreateFileW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern IntPtr CreateFile(string path, uint access, uint share, ref SecurityAttributes security, uint disposition, uint flags, IntPtr template);
   [DllImport("kernel32.dll", EntryPoint="MoveFileExW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern bool MoveFileEx(string source, string destination, uint flags);
+  [DllImport("kernel32.dll", EntryPoint="DeleteFileW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern bool DeleteFile(string path);
+  [DllImport("advapi32.dll", EntryPoint="GetSecurityInfo")] static extern uint GetSecurityDescriptorOnly(IntPtr handle, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
   public static void Enable(bool enabled) {
     IntPtr token;
     if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
@@ -2457,6 +2459,9 @@ public static class SystemPolicyFixture {
     } finally { CloseHandle(token); }
   }
   public static string Policy(string path, string replacement, uint query) {
+    return Policy(path,replacement,query,false);
+  }
+  public static string Policy(string path, string replacement, uint query, bool retained) {
     IntPtr descriptor=IntPtr.Zero, text=IntPtr.Zero;
     uint length, revision; ushort control;
     try {
@@ -2471,7 +2476,17 @@ public static class SystemPolicyFixture {
         LocalFree(descriptor); descriptor=IntPtr.Zero;
       }
       IntPtr owner, group, dacl, system;
-      uint result=GetNamedSecurityInfo(path, 1, query, out owner, out group, out dacl, out system, out descriptor);
+      uint result;
+      if (retained) {
+        SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+        uint access=0x20080u | ((query & 8) != 0 ? 0x01000000u : 0u);
+        IntPtr handle=CreateFile(path,access,7,ref security,3,0x00200080,IntPtr.Zero);
+        if (handle == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Open retained policy handle");
+        try { result=GetSecurityDescriptorOnly(handle,1,query,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,out descriptor); }
+        finally { CloseHandle(handle); }
+      } else {
+        result=GetNamedSecurityInfo(path, 1, query, out owner, out group, out dacl, out system, out descriptor);
+      }
       if (result != 0) throw new Win32Exception((int)result);
       if (!GetSecurityDescriptorControl(descriptor, out control, out revision)) throw new Win32Exception();
       if (revision != 1) throw new Exception("Unexpected descriptor revision");
@@ -2484,22 +2499,28 @@ public static class SystemPolicyFixture {
         if (!GetAclInformation(acl, out size, (uint)Marshal.SizeOf(typeof(AclSize)), 2)) throw new Win32Exception();
         count=size.Count;
       }
-      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, 8, out text, out length)) throw new Win32Exception();
+      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, query, out text, out length)) throw new Win32Exception();
       return (control & 0x2a30).ToString("x") + "|" + kind + "|" + count + "|" + Marshal.PtrToStringUni(text);
     } finally {
       if (text != IntPtr.Zero) LocalFree(text);
       if (descriptor != IntPtr.Zero) LocalFree(descriptor);
     }
   }
-  public static string CreatorControl(string path, bool systemAccess) {
+  public static string CreatorControl(string path, bool systemAccess, bool maximumAllowed) {
     string directory=path+"-parent";
     System.IO.Directory.CreateDirectory(directory);
     try {
       DiscretionaryPolicy(directory,"D:P(A;;0x001f01bf;;;OW)");
-      return CreatorFileControl(System.IO.Path.Combine(directory,"stage"),systemAccess);
-    } finally { DiscretionaryPolicy(directory,"D:P(A;;FA;;;OW)"); }
+      return CreatorFileControl(System.IO.Path.Combine(directory,"stage"),systemAccess,maximumAllowed);
+    } finally {
+      DiscretionaryPolicy(directory,"D:P(A;;FA;;;OW)");
+      foreach (string file in System.IO.Directory.GetFiles(directory)) {
+        if (!DeleteFile(file)) throw new Win32Exception(Marshal.GetLastWin32Error(),"Delete disposable native creator fixture");
+      }
+      System.IO.Directory.Delete(directory);
+    }
   }
-  static void DiscretionaryPolicy(string path, string policy) {
+  public static void DiscretionaryPolicy(string path, string policy) {
     IntPtr descriptor=IntPtr.Zero;
     try {
       uint length;
@@ -2510,14 +2531,20 @@ public static class SystemPolicyFixture {
       if (status != 0) throw new Win32Exception((int)status);
     } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
   }
-  static string CreatorFileControl(string path, bool systemAccess) {
+  static string CreatorFileControl(string path, bool systemAccess, bool maximumAllowed) {
+    string phase="convert creation descriptor";
+    try { return CreatorFileControlCore(path,systemAccess,maximumAllowed,ref phase); }
+    catch (Exception error) { throw new Exception("Private creator phase: "+phase,error); }
+  }
+  static string CreatorFileControlCore(string path, bool systemAccess, bool maximumAllowed, ref string phase) {
     IntPtr descriptor=IntPtr.Zero;
     uint length;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptor("D:P(A;;0x80;;;OW)", 1, out descriptor, out length)) throw new Win32Exception();
     IntPtr raw;
     try {
       SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=descriptor, Inherit=false };
-      uint access=0xc2060000u | (systemAccess ? 0x01000000u : 0u);
+      uint access=0xc00f0000u | (maximumAllowed ? 0x02000000u : 0u) | (systemAccess ? 0x01000000u : 0u);
+      phase="create original data/security/delete handle";
       // Share all rights so second-open denial measures the DACL, not sharing.
       raw=CreateFile(path, access, 7, ref security, 1, 0x00200080, IntPtr.Zero);
       if (raw == new IntPtr(-1)) throw new Win32Exception();
@@ -2526,6 +2553,7 @@ public static class SystemPolicyFixture {
     try { using (var handle=new Microsoft.Win32.SafeHandles.SafeFileHandle(raw, true)) {
       using (var stream=new System.IO.FileStream(handle, System.IO.FileAccess.ReadWrite)) {
         IntPtr owner,group,dacl,sacl;
+        phase="query initial creator descriptor";
         uint status=GetSecurityInfo(raw,1,7,out owner,out group,out dacl,out sacl,out descriptor);
         if (status != 0) throw new Win32Exception((int)status);
         byte[] encoded=new byte[GetSecurityDescriptorLength(descriptor)];
@@ -2539,8 +2567,12 @@ public static class SystemPolicyFixture {
             ace.AceFlags != System.Security.AccessControl.AceFlags.None ||
             ace.AceQualifier != System.Security.AccessControl.AceQualifier.AccessAllowed)
           throw new Exception("Initial private creation DACL is not the intended protected Owner Rights policy");
+        phase="apply creator owner/group through retained handle";
+        status=SetSecurityInfo(raw,1,3,owner,group,IntPtr.Zero,IntPtr.Zero);
+        if (status != 0) throw new Win32Exception((int)status);
         LocalFree(descriptor); descriptor=IntPtr.Zero;
         foreach (uint requested in new uint[] { 0x10000, 0x40000, 2 }) {
+          phase="deny second opener for access "+requested;
           SecurityAttributes ordinary=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
           IntPtr second=CreateFile(path,requested,7,ref ordinary,3,0x00200080,IntPtr.Zero);
           if (second != new IntPtr(-1)) {
@@ -2550,18 +2582,22 @@ public static class SystemPolicyFixture {
           int denied=Marshal.GetLastWin32Error();
           if (denied != 5) throw new Win32Exception(denied,"Second-open control did not establish access denial");
         }
+        phase="creator payload write/flush/read";
         byte[] payload=System.Text.Encoding.ASCII.GetBytes("verified creator payload");
         stream.Write(payload,0,payload.Length); stream.Flush(true); stream.Position=0;
         byte[] read=new byte[payload.Length];
         if (stream.Read(read,0,read.Length) != payload.Length || System.Text.Encoding.ASCII.GetString(read) != "verified creator payload") throw new Exception("Creator data rights failed");
+        phase="restore parent delete-child for publication control";
         DiscretionaryPolicy(System.IO.Path.GetDirectoryName(path),"D:P(A;;FA;;;OW)");
         if (!ConvertStringSecurityDescriptorToSecurityDescriptor("D:P(A;;0x001e01ff;;;OW)",1,out descriptor,out length)) throw new Win32Exception();
         bool present,defaulted;
         if (!GetSecurityDescriptorDacl(descriptor,out present,out dacl,out defaulted)) throw new Win32Exception();
+        phase="apply creator DACL through retained handle";
         status=SetSecurityInfo(raw,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
         if (status != 0) throw new Win32Exception((int)status);
         LocalFree(descriptor); descriptor=IntPtr.Zero;
         if (systemAccess) {
+          phase="apply/query creator SACL through retained handle";
           if (!ConvertStringSecurityDescriptorToSecurityDescriptor("S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)",1,out descriptor,out length)) throw new Win32Exception();
           if (!GetSecurityDescriptorSacl(descriptor,out present,out sacl,out defaulted)) throw new Win32Exception();
           status=SetSecurityInfo(raw,1,0x40000018u,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,sacl);
@@ -2571,6 +2607,7 @@ public static class SystemPolicyFixture {
           if (status != 0) throw new Win32Exception((int)status);
           LocalFree(descriptor); descriptor=IntPtr.Zero;
         }
+        phase="publish through MoveFileEx";
         System.IO.File.WriteAllText(destination,"previous destination");
         if (!MoveFileEx(path,destination,1)) throw new Win32Exception();
       }
@@ -2586,9 +2623,9 @@ if ($mode -eq 'query') {
   [SystemPolicyFixture]::Policy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_SYSTEM_POLICY,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
 } elseif ($mode -eq 'creator') {
   [SystemPolicyFixture]::Enable($false)
-  [SystemPolicyFixture]::CreatorControl($env:PROJECTATLAS_TEST_ACL_PATH,$false)
+  [SystemPolicyFixture]::CreatorControl($env:PROJECTATLAS_TEST_ACL_PATH,$false,$false)
   [SystemPolicyFixture]::Enable($true)
-  [SystemPolicyFixture]::CreatorControl(($env:PROJECTATLAS_TEST_ACL_PATH+'-system'),$true)
+  [SystemPolicyFixture]::CreatorControl(($env:PROJECTATLAS_TEST_ACL_PATH+'-system'),$true,$false)
 } else {
   [SystemPolicyFixture]::Enable($mode -eq 'complete')
   & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_system_policy_replacement_preserves_or_refuses_without_global_privilege_changes --nocapture
@@ -2698,8 +2735,12 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
     let output = guard.directory.join(HOST_FILES[0]);
     fs::write(&output, b"ordinary previous output")?;
     let ordinary_policy = windows_system_policy(&output, None)?;
+    let ordinary_fields: Vec<_> = ordinary_policy.splitn(4, '|').collect();
     require(
-        ordinary_policy.starts_with("0|absent|0|"),
+        ordinary_fields.len() == 4
+            && u16::from_str_radix(ordinary_fields[0], 16).map_err(io::Error::other)? & 0x10 == 0
+            && ordinary_fields[1] == "absent"
+            && ordinary_fields[2] == "0",
         &format!("ordinary fixture did not prove absent system policy: {ordinary_policy}"),
     )?;
     let captured = super::ReplacementSource::capture(&output, &fs::symlink_metadata(&output)?)?;
@@ -2732,6 +2773,47 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             "former DACL-only publisher did not reproduce SACL policy loss",
         )?;
         fs::remove_file(control)?;
+
+        let expected = windows_system_policy(&output, Some("S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)"))?;
+        let outside = root.join("outside-integrity-policy-owner");
+        fs::hard_link(&output, &outside)?;
+        guard.publish_with_stage_check(
+            &output,
+            b"restored high-integrity replacement",
+            FilePublication::Replace,
+            |stage| {
+                let lower = windows_system_policy(
+                    stage.path(),
+                    Some("S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;ME)"),
+                )?;
+                require(
+                    expected.contains("(ML;;NW;;;HI)")
+                        && lower.contains("(ML;;NW;;;ME)")
+                        && expected != lower
+                        && expected.split('|').next() == lower.split('|').next(),
+                    "integrity-only copy control did not establish distinct labels with equal flags",
+                )?;
+                // Read the original creator handle before policy copy; the
+                // label setter above is only independent fixture preparation.
+                let observed = super::windows_security::SystemPolicy::capture(stage.as_file(), true)?;
+                let source = super::ReplacementSource::capture(
+                    &output,
+                    &fs::symlink_metadata(&output)?,
+                )?;
+                require(
+                    observed != source.security.system,
+                    "held-handle comparison omitted the only integrity-policy difference",
+                )
+            },
+            || Ok(()),
+        )?;
+        require(
+            windows_system_policy(&output, None)? == expected
+                && windows_system_policy(&outside, None)? == expected
+                && fs::read(&output)? == b"restored high-integrity replacement"
+                && fs::read(&outside)? == b"ordinary replacement",
+            "integrity-only stage difference escaped copy/readback or changed the outside owner",
+        )?;
     }
 
     let roles = HOST_FILES.iter().map(|name| (true, true, *name)).chain([
@@ -2818,7 +2900,7 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             } else {
                 guard.write_document(b"preserved system-policy replacement")
             };
-            if complete || flags == 0 {
+            if complete || flags & 0x10 == 0 {
                 replaced?;
                 require(
                     fs::read(&output)? == b"preserved system-policy replacement",
@@ -2847,7 +2929,8 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
 #[cfg(windows)]
 fn windows_system_policy_failure_controls(complete: bool) -> io::Result<()> {
     const ORIGINAL: &str = "S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)";
-    const CHANGED: &str = "S:P(AU;SAFA;FR;;;WD)(ML;;NW;;;HI)";
+    const CHANGED_AUDIT: &str = "S:P(AU;SAFA;FR;;;WD)(ML;;NW;;;HI)";
+    const CHANGED_LABEL: &str = "S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;ME)";
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
     let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
@@ -2905,22 +2988,25 @@ fn windows_system_policy_failure_controls(complete: bool) -> io::Result<()> {
     windows_system_policy(&output, Some(ORIGINAL))?;
     let entries = fs::read_dir(&guard.directory)?.count();
     let mut changed = None;
-    let failed = guard.publish(
-        &output,
-        b"unpublished bytes",
-        FilePublication::Replace,
-        || {
-            changed = Some(windows_system_policy(&output, Some(CHANGED))?);
-            Ok(())
-        },
-    );
-    require(
-        failed.is_err()
-            && fs::read(&output)? == b"last valid output"
-            && Some(windows_system_policy(&output, None)?) == changed
-            && fs::read_dir(&guard.directory)?.count() == entries,
-        "source SACL change was overwritten or leaked staging",
-    )?;
+    for policy in [CHANGED_AUDIT, CHANGED_LABEL] {
+        windows_system_policy(&output, Some(ORIGINAL))?;
+        let failed = guard.publish(
+            &output,
+            b"unpublished bytes",
+            FilePublication::Replace,
+            || {
+                changed = Some(windows_system_policy(&output, Some(policy))?);
+                Ok(())
+            },
+        );
+        require(
+            failed.is_err()
+                && fs::read(&output)? == b"last valid output"
+                && Some(windows_system_policy(&output, None)?) == changed
+                && fs::read_dir(&guard.directory)?.count() == entries,
+            "source SACL change was overwritten or leaked staging",
+        )?;
+    }
     let captured = super::ReplacementSource::capture(&output, &fs::symlink_metadata(&output)?)?;
     let victim = root.join("foreign-system-policy-owner");
     fs::write(&victim, b"foreign complete bytes")?;

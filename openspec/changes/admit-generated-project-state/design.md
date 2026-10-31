@@ -292,6 +292,10 @@ ordered ACEs and native SACL control state. Without it, use a LABEL-only query's
 native control word to prove the original SACL is absent. MS-FSA 2.1.5.14 preserves
 the original SACL-present/control bits while filtering audit ACEs from that query:
 an empty filtered ACE list is not proof that a present SACL contains no auditing.
+Absence means the SACL-present bit is clear, not that every related control bit
+is zero: native ordinary files can retain auto-inheritance state without a SACL.
+Retain those bits in the source/stage comparison; ignore defaulting only when
+the SACL is absent, as the SDK specifies.
 Require the no-privilege stage to prove absent policy too; otherwise refuse before
 payload I/O. Keep create-only workflows and ordinary unlabeled replacement usable.
 If full policy cannot be queried/copied, retain valid output rather than publishing
@@ -304,6 +308,11 @@ accessor, and verify ordered entries and control state before payload writes.
 Retain strict SACL AI comparison until native evidence proves a safe normalization;
 the earlier DACL normalization does not establish SACL behavior. Recheck source
 system policy alongside owner/group/DACL immediately before replacement.
+Serialize the same selected policy components that were queried. In particular,
+SACL-only serialization omits mandatory-label ACEs even when the descriptor holds
+them; complete comparison requires SACL plus LABEL. Native controls must distinguish
+identical audit/control policy with high versus medium integrity labels, repair a
+lower-labeled stage, and reject independent source or stage label changes.
 
 The independent reviewer approved a second tiny platform-local unsafe exception:
 GetSecurityDescriptorControl in a private Windows security module, borrowing the
