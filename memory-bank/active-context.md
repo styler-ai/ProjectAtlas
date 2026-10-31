@@ -1,5 +1,105 @@
 # Active context
 
+## ACL normalization and creation-mode candidate
+
+Only #741 / PR #743 remains active. Public HEAD is cdb0857; current dirty candidate
+adds the owning fixes below. No native push is active yet. Tasks 1/5 and all
+acceptance remain open. Do not claim Windows/macOS acceptance before hosted rerun.
+
+Windows native cdb ordinary replacement differs only in AI, with exact owner/group,
+presence/NULL/P/AR/ordered ACEs. Candidate accepts only AI normalization for admitted
+regular-file readback; directories are outside this comparison. Pure controls reject
+P/AR/NULL/empty/ACE/order/identity changes; private diagnostics remain. All three
+special native fixtures are present: D:NO_ACCESS_CONTROL, D:P, D:. Microsoft .NET
+reference source proves its NULL descriptor serializer omits D: (crafted allow-all
+representation), so independent RawSecurityDescriptor binary class checks replace
+the invalid text-presence assertion. Check class before/after; failed publication
+requires exact old SDDL; successful publication permits only AI with owner/group,
+ordered policy and NULL/empty/protection class intact. Native verification pending.
+
+New Codex P2 4431642098 causal init-mode unit failed before fix. Managed config now
+uses its Document creator. Broader accepted-main trace proves config, nonsource and
+all host JSON writers previously used fs::write. Shared new-output publisher now
+uses 0666 filtered by umask whenever metadata is absent; existing output mode/ACL
+preservation is unchanged. Units cover all host registry entries and nonsource,
+default/private/legacy init and repeat init; existing custom/external positives stay.
+CLI/configured MCP exercise new config/nonsource/host JSON and default map-sidecar
+creation modes before original hardlink/refusal controls. Final lifecycle digest
+is ee25e9df237172f3c2c924669ac524fe3ffab7ec84038606ec91e57f5ceb761a in both pins.
+
+Mac Intel cdb also passed 21 units, legacy repair, real CLI/MCP admission/writer/root
+and registered-worktree proof, then failed the same nested APFSX hdiutil create.
+Candidate maps diskutil's APFSX token to hdiutil's Case-sensitive APFS name (upstream
+zsh completion lists that exact name); logs native create help and retains all four
+APFS/APFSX/HFS+/HFSX outer modes with opposite-case nested mounts. No HFS proof yet.
+
+Local proof: init causal before /tmp/projectatlas-741-init-modes-before.log; expanded
+init4 and owning23 PASS; writer E2E PASS4.83s and umask027 PASS4.82s; 3 inventory,
+workspace Clippy, strictstrings, strict OpenSpec and scoped IssueOps PASS. Final
+23 owning units PASS0.08s; writer with missing map sidecar PASS4.96s and final
+umask027 PASS5.02s; 3 inventory PASS2.66s, workspace Clippy PASS6.17s, strictstrings,
+workflow Bash syntax, strict OpenSpec and scoped IssueOps PASS. Logs use
+/tmp/projectatlas-741-acl-normalization-final-*. Independent Luna retracted a false
+missing-D: claim after exact-byte recheck, approved the expanded mode/AI mechanism
+and found no issue in the final map-sidecar/native-class test deltas. No final
+acceptance claimed.
+
+Next: commit the validated candidate and run normal CLEAN native
+push with new /tmp/projectatlas-741-acl-normalization-native-push receipt/log. Preserve
+all earlier receipts. No force/amend of public cdb; no parked owner or DB changes.
+
+## Current GitHub security review and native blockers
+
+Only #741 / PR #743 is active; public/local source remains cdb0857. No local
+build/push/index lease is active. Tasks remain 1/5; all acceptance rows are open.
+
+Advanced Security comments and REST alerts were re-read on cdb0857. Current Actions
+analysis 2068197287 has two results: #377 and new #379 share the unchanged event-bound
+checkout producer and cache-scope counterevidence. GitHub marks prior #378 fixed;
+that scanner identity change is not a manual dismissal or claimed application fix.
+Latest available Rust analysis is still 2068152217 on 3a6409c: five alerts #372–376,
+all 20 flows traverse cfg(test) fixtures. Current affected guard source is unchanged
+apart from unrelated Windows diagnostic code. No new actionable Advanced Security
+finding, suppression, or alert mutation. Eight-item static report rendered and saved
+at /tmp/projectatlas-741-security-comment-triage-cdb.json. Keep the Rust revision gap
+explicit until a current-head analysis appears.
+
+NEW separate Codex P2 thread PRRT_kwDOQyFgJ86yQn8p: fresh default
+config creation in atlas_map::init_project_with_config uses the Generated guard,
+bypassing Document creation mode 0666/umask and retaining tempfile 0600. Source
+confirms the routing mismatch. Fix under this same owner; thread remains open.
+Prior Mac alias and ACL threads also remain open; no acceptance approval.
+
+Current Windows job 124532093706 is terminal FAILURE: 16 passed / 3 failed owning
+units. Ordinary host/config replacements match owner, group, presence, NULL state,
+protection, AR and exact ordered ACEs; ONLY auto_inherited_matches=false. This is
+native field evidence, not a guessed normalization waiver. Special-DACL fixture
+also fails with 'native file descriptor has no DACL'; inspect its exact fixture
+boundary before changing production or claiming absent-file-DACL behavior.
+Log: /tmp/projectatlas-741-cdb-windows-job.log. Windows Unicode remains masked.
+
+Current macOS ARM job 124532093674 is terminal FAILURE after all 21 owning units,
+legacy repair and actual CLI/MCP admission/writer/root-validation tests passed.
+Controlled-volume setup creates outer APFS, then nested APFSX hdiutil create fails
+'Invalid argument' before any controlled-volume tests. Investigate supported image
+format arguments; retain APFS/APFSX/HFS+/HFSX coverage. HFS behavior remains unobserved.
+Log: /tmp/projectatlas-741-cdb-macos-arm64-job.log. Mac Intel/Linux/Rust source jobs
+were still active at last bounded read; poll exact handles, do not restart them.
+
+## Diagnostic candidate published; awaiting native field evidence
+
+Public/localHEADcdb085722c0ff4e925a4b9b55cc8e3663f79fdb9 verified throughPRmetadata.
+Normalpush60652 TERMINALPASS772.88s:34suites/1719passing/10conditionalignored,
+allRust/docs/dependency/repository/actualscan+lint;3743823gone. Receipt/log
+/tmp/projectatlas-741-native-acl-diagnostics.*. No active locallease.
+Current sourceCI41199414431 andCodeQL41199412032 active; prstate41199413031SUCCESS.
+Candidate fixesMacfixture only andaddsWinfield diagnostics; WindowsstrictACL
+predicate remains unchanged and ordinaryreplacement is NOT yet fixed. Await exact
+owner/group/presence/NULL/P/AR/AI/opaqueACE match booleans from currentWindowsjob.
+Do notguessinheritancewaiver. Preserve3a nativeevidence below; oldWindows16/18failure
+wasgenericandnotexactfieldproof. NativeHFS/WindowsUnicode stillpending/masked.
+Live/local1/5/allacceptanceOPEN; only741/743 active, no merge/release/Latestchange.
+
 ## Published ACL candidate: native results and diagnostic follow-up
 
 Public/localHEAD3a6409c20da52af43167edb4005c3ae1aab7a035. Normal native retry8236

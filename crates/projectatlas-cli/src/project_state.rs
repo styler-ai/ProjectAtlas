@@ -420,7 +420,7 @@ impl ProjectStateGuard {
         #[cfg(not(unix))]
         let builder = tempfile::Builder::new();
         #[cfg(unix)]
-        if metadata.is_none() && matches!(self.admission, StateAdmission::Document(_)) {
+        if metadata.is_none() {
             use std::os::unix::fs::PermissionsExt;
             builder.permissions(fs::Permissions::from_mode(0o666));
         }
@@ -670,7 +670,7 @@ fn preserve_windows_access(path: &Path, staged: &tempfile::NamedTempFile) -> io:
         ConvertSecurityDescriptorToStringSecurityDescriptor(&applied, SecurityInformation::Dacl)?;
     let owner_matches = applied.owner() == access.owner();
     let group_matches = applied.group() == access.group();
-    if !owner_matches || !group_matches || applied_sddl != sddl {
+    if !owner_matches || !group_matches || !windows_file_dacl_matches(&sddl, &applied_sddl)? {
         let difference = windows_dacl_difference(&sddl, &applied_sddl)?;
         return Err(refusal(
             path,
@@ -682,34 +682,57 @@ fn preserve_windows_access(path: &Path, staged: &tempfile::NamedTempFile) -> io:
     Ok(())
 }
 
+/// Borrow the native DACL header and opaque ordered ACE suffix; never parse ACEs.
+#[cfg(any(windows, test))]
+fn windows_dacl_parts(value: &std::ffi::OsStr) -> io::Result<(Option<&str>, &str)> {
+    const DACL_PREFIX: &str = "D:";
+    let text = value.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "native DACL header is not text")
+    })?;
+    if text.is_empty() {
+        return Ok((None, ""));
+    }
+    let dacl = text.strip_prefix(DACL_PREFIX).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "native DACL header is invalid")
+    })?;
+    let (flags, entries) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
+    Ok((Some(flags), entries))
+}
+
+/// Native automatic-inheritance state may normalize when applying a file DACL.
+#[cfg(any(windows, test))]
+const WINDOWS_DACL_AUTO_INHERITED_FLAG: &str = "AI";
+
+/// Preserve regular-file policy while allowing only native AI-flag normalization.
+///
+/// Both objects are admitted regular files, with no child ACLs to propagate. Keep
+/// every ordered ACE (including inherited markers), protection, AR, NULL/empty
+/// distinction and any unknown header text exact. Ownership is checked separately.
+#[cfg(any(windows, test))]
+fn windows_file_dacl_matches(
+    expected: &std::ffi::OsStr,
+    observed: &std::ffi::OsStr,
+) -> io::Result<bool> {
+    let (expected_flags, expected_entries) = windows_dacl_parts(expected)?;
+    let (observed_flags, observed_entries) = windows_dacl_parts(observed)?;
+    let file_flags = |flags: Option<&str>| {
+        flags.map(|flags| flags.replace(WINDOWS_DACL_AUTO_INHERITED_FLAG, ""))
+    };
+    Ok(expected_entries == observed_entries
+        && file_flags(expected_flags) == file_flags(observed_flags))
+}
+
 /// Describe native DACL differences without exposing ACEs or principal identities.
 #[cfg(any(windows, test))]
 fn windows_dacl_difference(
     expected: &std::ffi::OsStr,
     observed: &std::ffi::OsStr,
 ) -> io::Result<String> {
-    /// Borrow the native header and opaque ordered ACE suffix; do not parse ACEs.
-    fn parts(value: &std::ffi::OsStr) -> io::Result<(Option<&str>, &str)> {
-        const DACL_PREFIX: &str = "D:";
-        let text = value.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "native DACL header is not text")
-        })?;
-        if text.is_empty() {
-            return Ok((None, ""));
-        }
-        let dacl = text.strip_prefix(DACL_PREFIX).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "native DACL header is invalid")
-        })?;
-        let (flags, entries) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
-        Ok((Some(flags), entries))
-    }
-
     const NULL_FLAG: &str = "NO_ACCESS_CONTROL";
     const PROTECTED_FLAG: &str = "P";
     const INHERIT_REQUEST_FLAG: &str = "AR";
-    const AUTO_INHERITED_FLAG: &str = "AI";
-    let (expected_flags, expected_entries) = parts(expected)?;
-    let (observed_flags, observed_entries) = parts(observed)?;
+    let (expected_flags, expected_entries) = windows_dacl_parts(expected)?;
+    let (observed_flags, observed_entries) = windows_dacl_parts(observed)?;
     let flag_matches = |flag| {
         expected_flags.is_some_and(|flags| flags.contains(flag))
             == observed_flags.is_some_and(|flags| flags.contains(flag))
@@ -720,7 +743,7 @@ fn windows_dacl_difference(
         flag_matches(NULL_FLAG),
         flag_matches(PROTECTED_FLAG),
         flag_matches(INHERIT_REQUEST_FLAG),
-        flag_matches(AUTO_INHERITED_FLAG),
+        flag_matches(WINDOWS_DACL_AUTO_INHERITED_FLAG),
         expected_entries == observed_entries,
     ))
 }

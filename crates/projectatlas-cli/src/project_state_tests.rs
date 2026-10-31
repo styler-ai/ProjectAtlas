@@ -80,6 +80,33 @@ fn document_creation_uses_ordinary_umask_and_replacement_preserves_permissions()
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn generated_creation_preserves_ordinary_modes_for_all_host_and_default_roles() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let control = root.join("ordinary-control");
+    fs::write(&control, b"ordinary creation control")?;
+    let mode = fs::metadata(&control)?.permissions().mode() & 0o777;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    for name in HOST_FILES {
+        let path = root.join(STATE_DIRECTORY).join(name);
+        guard.write_generated(&path, b"generated host")?;
+        require(
+            fs::metadata(path)?.permissions().mode() & 0o777 == mode,
+            "generated host changed ordinary creation mode",
+        )?;
+    }
+    let path = root.join(STATE_DIRECTORY).join(super::NONSOURCE_FILE);
+    guard.write_new(&path, b"generated defaults")?;
+    require(
+        fs::metadata(path)?.permissions().mode() & 0o777 == mode,
+        "generated defaults changed ordinary creation mode",
+    )
+}
+
 /// Return a typed test failure rather than panic in a fallible filesystem test.
 fn require(condition: bool, message: &str) -> io::Result<()> {
     if condition {
@@ -1325,6 +1352,24 @@ fn replacement_preserves_native_dacl_inheritance_and_outside_owner() -> io::Resu
 #[cfg(windows)]
 #[test]
 fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::Result<()> {
+    let classify = |path: &Path| -> io::Result<String> {
+        // .NET omits D: for NULL descriptors. Its binary form retains the
+        // NULL-versus-allocated-empty distinction independently of SDDL text.
+        let class = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; $a=Get-Acl -LiteralPath $env:PROJECTATLAS_TEST_ACL_PATH; $r=[System.Security.AccessControl.RawSecurityDescriptor]::new($a.GetSecurityDescriptorBinaryForm(),0); if ($null -eq $r.DiscretionaryAcl) { 'NULL' } elseif ($r.DiscretionaryAcl.Count -eq 0) { if (($r.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0) { 'EMPTY_PROTECTED' } else { 'EMPTY_INHERITED' } } else { 'NONEMPTY' }",
+            ])
+            .env("PROJECTATLAS_TEST_ACL_PATH", path)
+            .output()?;
+        require(
+            class.status.success(),
+            &format!("native DACL class query failed: {class:?}"),
+        )?;
+        String::from_utf8(class.stdout)
+            .map(|value| value.trim().to_owned())
+            .map_err(io::Error::other)
+    };
     for sddl in ["D:NO_ACCESS_CONTROL", "D:P", "D:"] {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
@@ -1352,21 +1397,35 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
             &format!("native special DACL setup failed: {setup:?}"),
         )?;
         let acl = windows_acl(&output, None)?;
-        let dacl = acl
-            .split_once("D:")
-            .map(|(_, dacl)| dacl)
-            .ok_or_else(|| io::Error::other("native file descriptor has no DACL"))?;
+        let class = classify(&output)?;
         require(
-            if sddl == "D:NO_ACCESS_CONTROL" {
-                dacl.contains("NO_ACCESS_CONTROL")
-            } else {
-                !dacl.contains('(') && dacl.contains('P') == (sddl == "D:P")
-            },
+            class
+                == match sddl {
+                    "D:NO_ACCESS_CONTROL" => "NULL",
+                    "D:P" => "EMPTY_PROTECTED",
+                    _ => "EMPTY_INHERITED",
+                },
             "native special DACL fixture did not retain its requested access class",
         )?;
         let result = guard.write_generated(&output, b"owned replacement");
+        let applied = windows_acl(&output, None)?;
+        let access_matches = if result.is_err() {
+            applied == acl
+        } else {
+            match (acl.split_once("D:"), applied.split_once("D:")) {
+                (Some((owner, dacl)), Some((applied_owner, applied_dacl))) => {
+                    owner == applied_owner
+                        && super::windows_file_dacl_matches(
+                            std::ffi::OsStr::new(&format!("D:{dacl}")),
+                            std::ffi::OsStr::new(&format!("D:{applied_dacl}")),
+                        )?
+                }
+                (None, None) => applied == acl,
+                _ => false,
+            }
+        };
         require(
-            windows_acl(&output, None)? == acl && fs::read_dir(&directory)?.count() == 1,
+            access_matches && classify(&output)? == class && fs::read_dir(&directory)?.count() == 1,
             "special DACL publication changed access or leaked staging",
         )?;
         if let Err(source) = &result {
@@ -1396,6 +1455,42 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
         }
     }
     Ok(())
+}
+
+#[test]
+fn file_dacl_readback_allows_only_auto_inherited_flag_normalization() -> io::Result<()> {
+    use std::ffi::OsStr;
+    let original = "D:(A;ID;FA;;;SY)(D;;GW;;;WD)";
+    require(
+        super::windows_file_dacl_matches(
+            OsStr::new(original),
+            OsStr::new("D:AI(A;ID;FA;;;SY)(D;;GW;;;WD)"),
+        )?,
+        "native AI normalization rejected unchanged regular-file policy",
+    )?;
+    for changed in [
+        "D:P(A;ID;FA;;;SY)(D;;GW;;;WD)",
+        "D:AR(A;ID;FA;;;SY)(D;;GW;;;WD)",
+        "D:(A;;FA;;;SY)(D;;GW;;;WD)",
+        "D:(A;ID;FA;;;WD)(D;;GW;;;WD)",
+        "D:(D;;GW;;;WD)(A;ID;FA;;;SY)",
+        "D:Z(A;ID;FA;;;SY)(D;;GW;;;WD)",
+    ] {
+        require(
+            !super::windows_file_dacl_matches(OsStr::new(original), OsStr::new(changed))?,
+            "DACL readback concealed an access-policy change",
+        )?;
+    }
+    for (expected, observed) in [("D:", "D:NO_ACCESS_CONTROL"), ("", "D:AI")] {
+        require(
+            !super::windows_file_dacl_matches(OsStr::new(expected), OsStr::new(observed))?,
+            "DACL readback conflated NULL, empty or absent ACLs",
+        )?;
+    }
+    require(
+        super::windows_file_dacl_matches(OsStr::new("D:AR"), OsStr::new("D:ARAI"))?,
+        "AI normalization changed an otherwise preserved inheritance request",
+    )
 }
 
 #[test]

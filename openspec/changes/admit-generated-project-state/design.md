@@ -106,6 +106,14 @@ ordinary creation permissions under the process umask, using the pinned tempfile
 builder rather than changing process-wide umask or widening permissions afterward.
 Keep the legacy TOON alias refusal before any JSON mutation.
 
+Initialization routes managed config defaults through their document guard, even
+inside the private directory. All newly created generated documents also use
+ordinary 0666 filtered by umask; this includes nonsource defaults and host JSON
+files, whose accepted writers previously used fs::write. Reinitialization preserves
+existing bytes and modes, and replacement retains existing native access policy.
+Native CLI and configured MCP must prove new-file modes beside explicit custom
+and legacy configuration controls.
+
 Gitignore creation treats any existing directory entry as its existing no-op,
 including a dangling link. No-clobber publication handles a racing entry without
 following it or claiming creation. Use the same bounded directory identities and
@@ -186,6 +194,17 @@ An absent DACL belongs to an unattached descriptor, not the real-file snapshot:
 the Windows SDK's `SE_DACL_PRESENT` contract guarantees that bit once associated
 with a securable object. Keep synthetic diagnostic handling distinct from native
 NULL/empty file ACL controls; do not require an impossible absent-file fixture.
+
+Native Windows evidence shows SetSecurityInfo can normalize only the AI control
+flag on ordinary regular-file replacement while preserving owner/group, exact
+ordered ACEs and their inherited markers, P, AR and NULL/empty policy. Permit only
+that AI normalization for admitted regular-file destinations, which have no child
+ACLs to propagate; all other header text and ordered ACEs remain exact. Do not
+generalize this comparison to directories or describe inheritance state as mere
+bookkeeping. Keep private diagnostics for any remaining difference and native
+ordinary/protected/inherited/NULL/empty controls. The .NET fixture formatter omits
+D: for NULL descriptors; inspect its binary RawSecurityDescriptor access class
+instead of using omitted SDDL text as proof of an absent native file DACL.
 
 The safe native wrappers require direct macOS-only exacl and Windows-only
 windows-permissions dependencies. The latter retains bitflags 1; the dependency ban

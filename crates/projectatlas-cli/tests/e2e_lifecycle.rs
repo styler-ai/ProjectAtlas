@@ -5404,11 +5404,47 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
         for mcp in [false, true] {
             let root = temp.path().join(if mcp { "mcp" } else { "cli" });
             fs::create_dir(&root)?;
-            let initialized = command(&executable, &root)
-                .args(["init", "--no-scan"])
-                .output()?;
-            if !initialized.status.success() {
-                return Err(io::Error::other(String::from_utf8_lossy(&initialized.stderr)).into());
+            invoke(
+                &executable,
+                &root,
+                mcp.then_some(&mut session),
+                &["init", "--no-scan"],
+                "atlas_init",
+                &json!({"project_path": root, "no_scan": true}),
+                false,
+            )?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let control = root.join("ordinary-control");
+                fs::write(&control, b"ordinary creation control")?;
+                let mode = fs::metadata(&control)?.permissions().mode() & 0o777;
+                for relative in [
+                    CONFIG_PATH,
+                    ".projectatlas/projectatlas-nonsource-files.toon",
+                ] {
+                    if fs::metadata(root.join(relative))?.permissions().mode() & 0o777 != mode {
+                        return Err(io::Error::other(format!(
+                            "init changed ordinary creation mode: mcp={mcp}, path={relative}"
+                        ))
+                        .into());
+                    }
+                }
+                for entry in fs::read_dir(root.join(ATLAS_DIR_NAME))? {
+                    let path = entry?.path();
+                    if path
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+                        && fs::metadata(&path)?.permissions().mode() & 0o777 != mode
+                    {
+                        return Err(io::Error::other(format!(
+                            "init changed generated JSON creation mode: mcp={mcp}, path={}",
+                            path.display()
+                        ))
+                        .into());
+                    }
+                }
+                fs::remove_file(control)?;
             }
             let config = root.join(CONFIG_PATH);
             let mut document: toml::Value = toml::from_str(&fs::read_to_string(&config)?)?;
@@ -5574,6 +5610,23 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
             let sidecar = root.join(".projectatlas/projectatlas.json");
             let outside = root.with_extension("map");
             fs::write(&outside, b"outside map bytes")?;
+            invoke(
+                &executable,
+                &root,
+                mcp.then_some(&mut session),
+                &["map", "--json", "--force"],
+                "atlas_map",
+                &json!({"project_path": root, "json": true, "force": true}),
+                false,
+            )?;
+            #[cfg(unix)]
+            if fs::metadata(&sidecar)?.permissions().mode() & 0o777
+                != fs::metadata(&outside)?.permissions().mode() & 0o777
+            {
+                return Err(io::Error::other("default map changed ordinary creation mode").into());
+            }
+            let _: Value = serde_json::from_slice(&fs::read(&sidecar)?)?;
+            fs::remove_file(&sidecar)?;
             fs::hard_link(&outside, &sidecar)?;
             invoke(
                 &executable,

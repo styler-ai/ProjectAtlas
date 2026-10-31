@@ -813,16 +813,8 @@ pub(crate) fn init_project_with_config(
             path: project_dir.clone(),
             source,
         })?;
-        let owned = state
-            .owns_entry(&config_path)
-            .map_err(|source| AtlasMapError::Io {
-                path: config_path.clone(),
-                source,
-            })?;
-        // Directory containment alone does not make a custom filename managed.
-        let written = if owned && config_document.is_some() {
-            state.write_new(&config_path, default_config.as_bytes())
-        } else if let Some(document) = &mut config_document {
+        // The document role owns both fixed-name admission and creation mode.
+        let written = if let Some(document) = &mut config_document {
             document
                 .create_document(default_config.as_bytes())
                 .map(|_| ())
@@ -3264,6 +3256,50 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    #[test]
+    fn initialization_defaults_preserve_ordinary_creation_and_existing_modes()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        for relative in [
+            None,
+            Some(".projectatlas/config.toml"),
+            Some("projectatlas.toml"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let selected = relative.map(|relative| root.join(relative));
+            let control = root.join("ordinary-control");
+            fs::write(&control, b"ordinary creation control")?;
+            let mode = fs::metadata(&control)?.permissions().mode() & 0o777;
+            super::init_project_with_config(&root, selected.as_deref())?;
+            let config = selected.unwrap_or_else(|| root.join(".projectatlas/config.toml"));
+            let nonsource = root.join(".projectatlas/projectatlas-nonsource-files.toon");
+            for path in [&config, &nonsource] {
+                if fs::metadata(path)?.permissions().mode() & 0o777 != mode {
+                    return Err(io::Error::other(format!(
+                        "initialization changed ordinary creation mode for {}",
+                        path.display()
+                    ))
+                    .into());
+                }
+                fs::set_permissions(path, fs::Permissions::from_mode(0o640))?;
+            }
+            let contents = [fs::read(&config)?, fs::read(&nonsource)?];
+            super::init_project_with_config(&root, Some(&config))?;
+            for (path, bytes) in [&config, &nonsource].into_iter().zip(contents) {
+                if fs::metadata(path)?.permissions().mode() & 0o777 != 0o640
+                    || fs::read(path)? != bytes
+                {
+                    return Err(
+                        io::Error::other("reinitialization changed existing defaults").into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn initialization_preserves_custom_config_aliases_independently_of_parent()

@@ -512,9 +512,18 @@ jobs:
           }
           trap cleanup EXIT
           mkdir "$volume"
+          hdiutil create -help
+          create_case_image() {
+            local filesystem="$1"
+            # APFSX is diskutil's personality; hdiutil uses this full name.
+            if [ "$filesystem" = APFSX ]; then
+              filesystem="Case-sensitive APFS"
+            fi
+            hdiutil create -size 128m -fs "$filesystem" -volname "$2" -ov "$3"
+          }
           for filesystem in APFS APFSX HFS+ HFSX; do
             image="$fixture/$filesystem.dmg"
-            hdiutil create -size 128m -fs "$filesystem" -volname ProjectAtlasCase -ov "$image"
+            create_case_image "$filesystem" ProjectAtlasCase "$image"
             hdiutil attach -nobrowse -mountpoint "$volume" "$image"
             mounted=true
             mkdir -p "$volume/tmp" "$nested"
@@ -523,7 +532,7 @@ jobs:
               nested_filesystem=APFS
             fi
             nested_image="$fixture/nested-$filesystem.dmg"
-            hdiutil create -size 128m -fs "$nested_filesystem" -volname ProjectAtlasNested -ov "$nested_image"
+            create_case_image "$nested_filesystem" ProjectAtlasNested "$nested_image"
             hdiutil attach -nobrowse -mountpoint "$nested" "$nested_image"
             nested_mounted=true
             export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
