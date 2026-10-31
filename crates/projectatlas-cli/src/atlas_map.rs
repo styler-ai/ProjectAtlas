@@ -819,7 +819,8 @@ pub(crate) fn init_project_with_config(
                 path: config_path.clone(),
                 source,
             })?;
-        let written = if owned {
+        // Directory containment alone does not make a custom filename managed.
+        let written = if owned && config_document.is_some() {
             state.write_new(&config_path, default_config.as_bytes())
         } else if let Some(document) = &mut config_document {
             document
@@ -3263,6 +3264,81 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn initialization_preserves_custom_config_aliases_independently_of_parent()
+    -> Result<(), Box<dyn Error>> {
+        let mut failures = Vec::new();
+        for relative in [
+            "custom.toml",
+            ".projectatlas/custom.toml",
+            ".projectatlas/operator/config.toml",
+            "operator/config.toml",
+        ] {
+            for alias in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("checkout");
+                let selected = root.join(relative);
+                let parent = selected
+                    .parent()
+                    .ok_or_else(|| io::Error::other("custom config has no parent"))?;
+                fs::create_dir_all(parent)?;
+                let outside = temp.path().join("selected-target.toml");
+                let target = if alias {
+                    symlink_file(&outside, &selected)?;
+                    &outside
+                } else {
+                    &selected
+                };
+                let control = target.with_file_name("ordinary-control");
+                fs::write(&control, b"ordinary creation control")?;
+                if let Err(error) = super::init_project_with_config(&root, Some(&selected)) {
+                    failures.push(format!("{relative}, alias={alias}: {error}"));
+                    continue;
+                }
+                let original = fs::read(target)?;
+                if original.is_empty()
+                    || fs::symlink_metadata(&selected)?.file_type().is_symlink() != alias
+                {
+                    return Err(io::Error::other(
+                        "custom config did not retain its selected entry",
+                    )
+                    .into());
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if fs::metadata(target)?.permissions().mode() & 0o777
+                        != fs::metadata(&control)?.permissions().mode() & 0o777
+                    {
+                        return Err(io::Error::other(
+                            "custom config lost ordinary creation permissions",
+                        )
+                        .into());
+                    }
+                }
+                let permissions = fs::metadata(target)?.permissions();
+                super::init_project_with_config(&root, Some(&selected))?;
+                if fs::read(target)? != original
+                    || fs::metadata(target)?.permissions() != permissions
+                {
+                    return Err(io::Error::other(
+                        "reinitialization changed an existing custom config",
+                    )
+                    .into());
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "custom config routing depended on its parent: {failures:?}"
+            ))
+            .into())
+        }
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn initialization_admits_explicit_managed_legacy_config_before_outputs()

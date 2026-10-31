@@ -121,7 +121,9 @@ source root. Before SQLite access, ProjectAtlas checks that root's conventional
 database and WAL/SHM entries are direct regular files with a single hard link.
 Initialization and root transitions also admit generated destinations before changing
 identity or writing defaults. Existing config and nonsource bytes remain intact;
-generated host documents are replaced atomically with existing permissions preserved.
+live nonsource aliases remain read-only inputs, while dangling aliases and aliases
+encountered at creation are refused. Generated host documents are replaced atomically
+with existing permissions preserved.
 Ordinary navigation does not require valid generated host documents.
 Managed paths remain managed through resolvable parent reductions and source-root
 aliases. An unresolved parent such as `.projectatlas/missing/../projectatlas.json`
@@ -137,8 +139,10 @@ targets and existing permissions. Unchanged config operations still read valid
 aliases. Gitignore initialization leaves every existing entry untouched, including
 dangling links, and reports a racing entry as existing rather than created.
 New documents use ordinary permissions under the process umask. Explicit custom
-config and map destinations retain their operator-selected behavior; JSON output
-still refuses to overwrite its legacy TOON import through an alias.
+config and map destinations retain their operator-selected behavior, including
+custom filenames directly inside `.projectatlas`; the parent directory alone does
+not make them managed. JSON output still refuses to overwrite its legacy TOON
+import through an alias.
 
 Canonical source-root aliases and explicit external database/configuration paths remain
 supported. A conventional-looking database filename outside the independently selected

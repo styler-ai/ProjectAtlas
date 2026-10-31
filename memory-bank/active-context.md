@@ -1,102 +1,123 @@
 # Active context
 
-## Sole active issue: #741
+## Sole active issue: #741 / PR #743
 
-#731 and PR #737 BOTH CLOSED by normal merge a5b1bebcaa79c8386b68e9c247eff73aa11e5e15
-on 2026-10-31. Finish #741, review, normal merge and BOTH CLOSED before next owner.
-Draft PR743 open; public52ae571. Tasks 3/5 (1.1, 2.1, 2.3); all acceptance open. Release goal remains independently
-verified v0.5.1-rc1 prerelease Latest=false; stable 0.5.0 stays Latest. No stable
-promotion/milestone closure. Integration memory owns other parked release work.
+Finish741 through normal merge and BOTH CLOSED before any other owner. #731/#737
+BOTH CLOSED by a5b1bebcaa79c8386b68e9c247eff73aa11e5e15 on2026-10-31. Goal continues
+to independently verified v0.5.1-rc1 prerelease Latest=false; stable050 stays Latest.
+No stable promotion or milestone closure. No RC published. Other owners remain parked.
 
-Exact checkout issue-741 / fix/generated-state-741, HEAD 597a00e779a505f26241210d516c7b0e608bc138.
-Normal origin/main integration includes accepted #731 DER24/SEM23, no source conflicts.
-Inventory union221 tests; other owner mappings retained without parked production code.
-Owned WIP restored from retained stash7cd644e2e5b8d8561385134e8290440d0ab6b4a1;
-backup /tmp/projectatlas-741-resume-accepted731-backup preserves full source/memory/patch.
+Exact checkout issue-741 / fix/generated-state-741. HEAD e957ccacc86e5cbb22c7775065482c04ebf053b7
+plus current owned custom-config fix/tests/docs. 8a0bfd8 CI and e957 inventory commits
+are local; remote743 head52ae571. PR743 is ready for review, milestone37 verified;
+soleFixes741. Task local/live3/5 (1.1,2.1,2.3);2.2/3.1 and all5acceptance OPEN.
+2.1 was reopened for confirmed Codex custom-config finding and rechecked after proof.
 
-## Current confirmed mechanism and work
+## Implementation and current immutable artifact
 
-Automatic database admission and exact4-document atomic publication already implemented
-in320652f/e1e633c. New findings: failed parent canonicalization must not mean external;
-managed paths with missing/.. bypass JSON guard and truncate outside hardlinks. Legacy
-explicit config init dangling aliases created outside before guard. Actual immutable
-CLI/MCP debug b6aa4229f5bcae98f7b8941f61380b5e2cd823bc6011f8d696930e68de3a87e5:
-/tmp/projectatlas-741-document-debug-path.txt; classifier-repro.json and
-init-map-mcp-repro.json preserve causal evidence. Explicit config/DB parent variants
-already refused; MCP dangling implicit legacy is deliberately filtered (counterevidence).
+Managed DB/WAL/SHM admitted before any SQLite open; Generated before bootstrap,
+native identity repair, registered hydration/root transitions; closed4document roles
+privateconfig/legacyrootconfig/Gitignore/defaultJSONmap atomic/no-clobber publication.
+Fallible classification preserves actual existing parent resolution and root aliases;
+unresolved potentially-managed reductions refuse beforemkdir; logical original
+ancestor proof prevents alias-state reductions inheriting outside ownership. No schema,
+DER/SEM change: acceptedmain731 DER24/SEM23. Retainedhandles/rechecks/ownedcleanup
+remain bounded; no universal ancestor-race guarantee or arbitrary external-path ban.
 
-Merged source+legacy helper guard: exact legacy unit PASS, exact map reduction FAIL
-(/tmp/projectatlas-741-resume-{legacy-after,map-before}.log; terminal3024).
-Shared role10cases and Generated6cases FAIL before classifier fix (terminal6325),
-/tmp/projectatlas-741-{shared-classifier,generated-capture}-before.log. Classifier patch now implemented. Luna confirmed Generated must also capture managed
-legacy config before runtime identity repair can commit; causal existing-DB repair
-unit FAIL101 before fix then PASS, and now includes supported retry/identity proof.
+Current custom fix: parent containment alone must not classify all direct children
+of.state asmanaged. init now uses Generated.write_new only for owned AND exact
+preflightDocumentSome. CustomNone uses explicit raw writer; generic parent ownership
+stays inside publication revalidation. Fixed default/legacy protections unchanged.
+This owner is shared by CLI/bootstrap/roottransition/registeredMCP; no adapter patch.
+Custom names inside private directory retain aliases, ordinary permissions and reinit.
+Live nonsource aliases are existing read-only inputs; no outside write occurs. Dangling
+or publication-time aliases refuse. Preserve this capability, no scanner-driven ban.
 
-Implemented fallible managed classification: true owned / false proven external / Err
-unresolved potentially managed. Preserve direct namespace proof before following .state,
-physical existing symlink/.. behavior, external custom paths, Windows named() case rules,
-root aliases, no-change/read aliases. Resolve deepest existing prefix before reducing
-only unresolved suffix. All DB/Document/Generated callers propagate errors. Generated
-captures private AND legacy config; init helper retains publication recheck. No schema,
-DER/SEM bump or general path framework. Runtime test proves admission before identity repair.
+Immutable native82e655d7dd1cf45fd95d5c51bf29d2f311f7df8f94043970ea44bf3fbaf96aa7:
+/tmp/projectatlas-741-final-debug-path.txt points to read-only artifact; adjacent
+source-binding.json binds131inputs. Earlier3b97 remains immutable, pointer saved in
+/tmp/projectatlas-741-before-custom-debug-path.txt; initialb6aa baseline also preserved.
+Do not overwrite old binaries or their source receipts.
 
-## Verification and next steps
+## Verified causal and positive proof
 
-Read-only Luna Max reviewer review_741 found no remaining source issue after alias+
-parent reduction supplement: original logical-ancestor proof distinguishes managed
-namespace from explicit physical outside path. Paired missing/existing ×DB/config/JSON
-unit FAIL101 then final16stateunitsPASS. WorkspacecheckPASS24.04s,ClippyPASS31.32s.
-No additional unguarded SQLite opens found. Real CLI/MCP extended liveWAL/admission
-PASS2.87s and writer missing/existing parent reduction PASS2.79s. Registered holistic
---ignored PASS1test8.39s (first ignored0 discarded). Final-source reruns pending.
-Pipeline78384 terminal PASS: strings PASS after removing reviewer absolute path from memory;
-403CLIunits PASS37.48s; lifecycle39PASS/2existingignored46.29s; registered explicit
---ignored PASS8.19s; inventory3 proof see log. No overlapping builds/index/timing.
-Final compatibleupgrade/native/hosted/
-independentacceptance remain. Design/spec/docs+inventory and715installedselectorhandoffcomplete;2.1/2.3checked.
-Do not mark implementation complete from previous narrow writer E2E alone.
-Permanent CLI/MCP selectors automatic_state_admission_preserves_cli_mcp_navigation and
-managed_document_writers_preserve_cli_mcp_capabilities previously PASS; rerun affected
-merged source. Reuse accepted #731 evidence rather than re-auditing closed history.
+Parent/sharedrole10cases+Generated6cases FAIL beforefix; legacyidentityrepairunit
+FAIL beforefix (DBmutated) thenPASS includingpositive retry. State-alias+reduction
+pairedunit FAILbefore/PASSafter. Original immutable3b97 customCLI refuses dangling
+privatecustom while installed050 succeeds: /tmp/projectatlas-741-private-custom-
+config-before.json. Owning4parentunit FAIL101; expanded8cases4parents×plain/alias,
+ordinary creation mode and repeated-init bytes/perms PASS in current404unit suite.
+Actualnormalmode stable0500664 vsold3b970600(control0664) confirms sharedmodeimpact;
+/tmp/projectatlas-741-private-custom-mode-before.json. Extended permanentwriterE2E
+against3b97 FAIL1012.54s, current82 native PASS3.46s: CLI explicit custom-init plus
+CLI/configuredMCP custom config/map outputs both outside and inside private state.
 
-Atlas exact741 brief refresh_required80 paths, earlier closure10001 known708; preserve
-private DB, no reset/scan/installer repair for orientation. Bounded direct owner reads.
-Shared target free; source /tmp/projectatlas-rc1-test-env.sh before Cargo. No concurrent
-build/index/timing. UNSET PROJECTATLAS_NO_TELEMETRY for native suites/push; set1 for
-isolated read-only Atlas/probes. All exec login:false. Normal clean push hooks only.
-Prior complete checkpoint archived in backup above; older evidence receipts retained.
+Current404CLIunits PASS37.49s; workspacecheckPASS3.45s; ClippyPASS6.71s; sourcepolicy
+PASS aftercentralizing repeated custom.toml fixturefilename. NativebuildPASS29.83s.
+Current82 artifact CLI/MCPadmission PASS2.82s, writersPASS3.46s, registeredholistic
+explicitincludeignoredPASS8.23s. Pipeline29072 TERMINALPASS; no active local lease.
+Native stable050→82 five layouts(auto,legacy,external,rootalias,privatecustom) allPASS:
+refusal beforeupgrade, no-scan retry, init,overview,watchonce,rootverify preserve
+identity+ALL approvedpurposes+config. /tmp/projectatlas-741-native-upgrade-proof.json/log.
+Initial95257 compared new derivedsuggestedlegacy row bymistake; corrected proof
+comparesALLapprovedpurposes, not new source-derivedsuggestions. No productbug there.
+Inventory221tests/current5sourcehashes plus76workflowselectors reconciled; final3
+inventorychecksPASS2.63s. SourcepolicyPASS and affectedlifecycleClippyPASS8.85s.
+Added explicitread-onlynonsourcealias CLI/MCPinit+map control PASS3.38s: alias/outside
+bytes/ownedDBsnapshot preserved. Artifact82 productcodeunchanged;129/131boundinputs
+identical, onlylifecyclefixture+itschecksum changed. Exactreusebinding
+/tmp/projectatlas-741-final-proof-source-reuse.json; originalbindingpreserved.
 
-Immutable final native debug SHA3b97df92f32e2b6f66814b049b29db3d9ac02ccea7e272a20463e302fccf197e,
-/tmp/projectatlas-741-final-debug-path.txt; adjacent source-binding.json131checksums.
-Stable050→corrected4layout upgrade/refusal/retry proof75899 terminalPASS: automatic,
-legacy,external,root-alias; identity+ALL approved purposes+configpreserved through
-refusal, no-scan retry, scan/init,overview,watchonce,rootverify. Receipt/log
-/tmp/projectatlas-741-native-upgrade-proof.*. Initial95257 comparison incorrectly
-included newly derived suggested legacy-config purpose; proof corrected to compare
-all approved purposes, no product regression inferred. All4 finalfixturesPASS.
-Wholeissue Luna areas1–4 source/spec/proof review complete with no blocking source
-finding; finalplatform proof and area5 remain after hosted. 2.2 and3.1open.
+## Review, normal gates and current feedback
 
-Normal nativepush64217 TERMINALPASS937.02s on52ae571:34suites/1713tests,zero failures;
-check/Clippy/docs/doctests/dependency/repository/actualscan+lint allPASS. Exactreceipt
-/tmp/projectatlas-741-native-push.json/log. Public draftPR743 opened/readback52ae571.
-Only741/743 active. Task2.2/3.1/allacceptance remainopen. NoRCpublished.
+LunaMax source/spec/proof review found no other unguardedSQLiteopen. Current custom
+conditional/8cases/CLI-MCPcoverage independently clean; architectureN/Aexistingowners.
+Areas1–4 sourcejudgment complete conditional on actualall4OSproof; finalarea5 later.
+PR743 Codex P2 threadPRRT_kwDOQyFgJ86yO_7U is fixed locally but remainsOPEN until
+corrected publishedhead + reply/readback/resolution. Code/securityreviews on52complete.
 
-Review found macOSIntel lacks runtimeownershipproof in existingCI; source reviewed
-complete but2.2needs explicit all4platform execution. Current owned CI-only delta adds
-16stateunits,legacyrepairunit,twoCLI/MCPselectors,roottransition onallcompile/CLIrows;
-Intelonlyregisteredholistic supplement reuses existing three-platformworktreegate.
-Placed after PHP coldcompile: CLI/navigation warm; lifecycle/worktree targets still
-cold. Confirm15min focusedstep duration on actual hosted runners.
-Luna reviewed the bounded plan; no new product source/schema/DER/SEM. Full source
-native/immutable3b97+4nativeupgrades remain valid; normalhookrequiredagainonfinalCIhead.
-NextreviewCIactualdelta/cheapworkflowgates,commit,normalpush,hostedall4feedback,
-then2.2/3.1and orderedacceptance. No source mutation during active nativepush.
+Normal nativepush64217 on52 TERMINALPASS937.02s,34suites/1713tests+allRust/docs/
+dependency/repository/actualscan+lint; /tmp/projectatlas-741-native-push.json/log.
+72523 onCI8a TERMINALFAIL229s solely2inventoryselectors tests(expected72/found76),
+50otherdeliveryPASS; exact4selector metadata added, no weakening/historicalrewrite.
+96159 on e957 INTERRUPTED confirmed sourcecorrection SIGINT onlyownPGID2883038,
+terminal130/allownedgroupprocessesgone, NOT passing proof. Receipt
+/tmp/projectatlas-741-final-native-push.json/log. Do not reuse interruption as pass.
 
-CI-only8a0bfd8 nativepush72523 TERMINALFAIL at inventory gate:50deliveryPASS,
-2inventoryFAIL because new workflow E2E selectors not mirrored (expected72/found76).
-No product/test behavior failure. Added exactly4newcurrent selectors to inventory,
-retained all historical metadata and source identities. Focused inventory3+sourcepolicy
-must pass before normal retry. First52ae571 native937PASS/source/artifact unaffected.
-PR743 ready for review, milestone37 readback, pr-state41181296188PASS; sourceCI
-41181177594/CodeQL41181175613 stillrunning onpublic52; Codex reviewsrunning.
+Firstsource hostedCI41181177594 on52 stillrunning; prstate41181296188PASS after
+assigning743milestone37. CodeQL41181175613 all7analysisPASS; summaryFAILURE for5new
+Rust path-injection alerts372–376, independently reviewednotactionable. ExactRESTJSON /tmp/projectatlas-741-alert-N.json;
+RustSARIFanalysis2067657079 /tmp/projectatlas-741-first-rust.sarif.json; extractedflows
+...first-rust-flows.json and ...flow-summary.json. ALL20reportedflows pass cfgtest
+project_state_tests.rs, with symlink_metadata/canonicalize sources and guard-path
+sinks. IndependentLuna static reviewcomplete peralert: source/testguards+closedderived
+root paths give no reportedproductionCWE22escape. All20flows pass cfgtestfixture
+Self/closure propagation. 372leaflstat,373retainedrootmeta,374postcreatecheck,
+375admitteddirectdircreate,376fixedNSexistence. LiveNSinputpreserved/proven.
+Fiveper-alerttechnicalreplies+conversationresolutions exactreadbackcompleted;
+alertrecordsremainOPEN/undismissed. Do notrestrictexplicitrootsjusttosatisfyscanner.
+Otherknown368leads remainhistorical/existingowners; no rescan.
+
+## Remaining steps
+
+Cheapinventory/sourcepolicy/OpenSpec/scopedIssueOps passed atcurrent3/5; refresh
+OpenSpec/IssueOps forfinalcandidate. Commit current customfix, normalclean nativepush,
+then exact correctedhostedall4OS
+ownershipstep/feedback/security readiness. UpdatePRdescription finalimplementation.
+Reconcilethread after publishedfix, independentlyreviewall5CodeQL leads thenresolve
+onlydispositionedthreads. Complete2.2/3.1 and orderedacceptance onlyafterproofgates.
+Normal743merge, verify741AND743CLOSED before nextowner. No bypass/admin/forcedpush.
+
+CI17line delta adds stateunits/legacyrepair/twoCLI-MCPselectors/roottransition on
+allcompile+CLIrows; Intelonlyregisteredholistic supplement reuses existing3platform
+worktreegate. AfterPHP step warmsCLI/navigation, lifecycle/worktree stillcold; confirm
+15min budget onactualhostedrunners. YAML/planner/independentCIreviewPASS. #715integration
+memory owns3permanentinstalledselectors +finalcombined708/738/739/all4OShandoff.
+
+Atlas exact741 knownrefresh_required80/earlierclosure10001 (708owner), preserveprivate
+DB and no orientation reset/scan/installerrepair. Normalhook requiredscan52completed.
+Use exactroots/login:false. Source /tmp/projectatlas-rc1-test-env.sh beforeCargo;
+no concurrent builds/index/timing. UNSET telemetryoverride for native suites/push;
+read-onlyisolatedAtlas/probes use1. Eachcommit subjectexactone(#741). All oldWIP/
+stash/backups retained; previousfullcheckpoint /tmp/projectatlas-741-before-custom-
+current-memory.md. Integrationmemory ownsotherparkedreleasework.

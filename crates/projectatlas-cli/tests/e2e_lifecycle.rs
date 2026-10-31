@@ -190,6 +190,7 @@ const SKILL_FILE_NAME: &str = "SKILL.md";
 const BTRFS_TEST_ROOT_ENV: &str = "PROJECTATLAS_BTRFS_TEST_ROOT";
 
 const SUBDIR_CONFIG_DIR: &str = "config";
+const CUSTOM_CONFIG_FILE_NAME: &str = "custom.toml";
 
 #[cfg(any(
     windows,
@@ -5178,6 +5179,47 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             );
         }
 
+        #[cfg(any(unix, windows))]
+        {
+            // Existing nonsource metadata is an agent-maintained read-only input.
+            // A live alias is preserved; dangling/create-time aliases stay guarded.
+            let nonsource = state.join("projectatlas-nonsource-files.toon");
+            let original = fs::read(&nonsource)?;
+            let outside = temp.path().join("read-only-nonsource.toon");
+            fs::write(&outside, &original)?;
+            fs::remove_file(&nonsource)?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&outside, &nonsource)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(&outside, &nonsource)?;
+            for arguments in [vec!["init", "--no-scan"], vec!["map"]] {
+                let output = command(&executable, &root).args(&arguments).output()?;
+                if !output.status.success() {
+                    return Err(io::Error::other(format!(
+                        "read-only nonsource alias disabled {arguments:?}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                    .into());
+                }
+            }
+            session.call_tool(
+                "atlas_init",
+                &json!({"project_path": root, "no_scan": true}),
+            )?;
+            session.call_tool("atlas_map", &json!({"project_path": root}))?;
+            if fs::read(&outside)? != original
+                || !fs::symlink_metadata(&nonsource)?.file_type().is_symlink()
+                || mcp_database_snapshot(&database)? != before
+            {
+                return Err(io::Error::other(
+                    "read-only nonsource alias was mutated or changed owned state",
+                )
+                .into());
+            }
+            fs::remove_file(&nonsource)?;
+            fs::write(&nonsource, original)?;
+        }
+
         // An explicit external database keeps its operator-selected link semantics.
         let external_state = temp.path().join("operator-storage").join(ATLAS_DIR_NAME);
         fs::create_dir_all(&external_state)?;
@@ -5583,87 +5625,133 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
             }
             fs::write(&config, &original_config)?;
 
-            let operator_config = root.with_extension("operator.toml");
-            let selected_config = root.with_extension("selected.toml");
-            let operator_map = root.with_extension("operator-map.toon");
-            let operator_sidecar = operator_map.with_extension("json");
-            let operator_target = root.with_extension("operator-output");
-            document["project"]["map_path"] = toml::Value::String(
-                operator_map
+            for private in [false, true] {
+                let operator_config = root.with_extension(if private {
+                    "private-operator.toml"
+                } else {
+                    "operator.toml"
+                });
+                let selected_config = if private {
+                    root.join(ATLAS_DIR_NAME).join(CUSTOM_CONFIG_FILE_NAME)
+                } else {
+                    root.with_extension("selected.toml")
+                };
+                let operator_map = if private {
+                    root.join(ATLAS_DIR_NAME).join("custom-map.toon")
+                } else {
+                    root.with_extension("operator-map.toon")
+                };
+                let operator_sidecar = operator_map.with_extension("json");
+                let operator_target = root.with_extension(if private {
+                    "private-operator-output"
+                } else {
+                    "operator-output"
+                });
+                document["project"]["map_path"] = toml::Value::String(
+                    operator_map
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("fixture map path is not UTF-8"))?
+                        .to_owned(),
+                );
+                let operator_before = toml::to_string(&document)?;
+                // Custom names directly inside private state remain explicit
+                // operator paths, including first creation through a dangling alias.
+                #[cfg(any(unix, windows))]
+                if private {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(&operator_config, &selected_config)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_file(&operator_config, &selected_config)?;
+                    let initialized = command(&executable, &root)
+                        .arg("--config")
+                        .arg(&selected_config)
+                        .args(["init", "--no-scan"])
+                        .output()?;
+                    if !initialized.status.success()
+                        || !operator_config.is_file()
+                        || !fs::symlink_metadata(&selected_config)?
+                            .file_type()
+                            .is_symlink()
+                    {
+                        return Err(io::Error::other(format!(
+                            "explicit private custom config creation was restricted: {}",
+                            String::from_utf8_lossy(&initialized.stderr)
+                        ))
+                        .into());
+                    }
+                }
+                fs::write(&operator_config, &operator_before)?;
+                if !selected_config.exists() {
+                    fs::hard_link(&operator_config, &selected_config)?;
+                }
+                fs::write(&operator_target, b"explicit output bytes")?;
+                fs::hard_link(&operator_target, &operator_sidecar)?;
+                let config_argument = selected_config
                     .to_str()
-                    .ok_or_else(|| io::Error::other("fixture map path is not UTF-8"))?
-                    .to_owned(),
-            );
-            let operator_before = toml::to_string(&document)?;
-            fs::write(&operator_config, &operator_before)?;
-            fs::hard_link(&operator_config, &selected_config)?;
-            fs::write(&operator_target, b"explicit output bytes")?;
-            fs::hard_link(&operator_target, &operator_sidecar)?;
-            let config_argument = selected_config
-                .to_str()
-                .ok_or_else(|| io::Error::other("fixture config path is not UTF-8"))?;
-            let mut configured_session = if mcp {
-                let (session, _) = McpContractSession::spawn_configured(
-                    &executable,
-                    &root,
-                    &root.join(DATABASE_PATH),
-                    Some(&selected_config),
-                    &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-                )?;
-                Some(session)
-            } else {
-                None
-            };
-            let configured_result = (|| -> Result<(), Box<dyn Error>> {
-                invoke(
-                    &executable,
-                    &root,
-                    configured_session.as_mut(),
-                    &[
-                        "--config",
-                        config_argument,
-                        "ignore",
-                        "add",
-                        "--kind",
-                        "path-prefix",
-                        "generated",
-                    ],
-                    "atlas_ignore_add",
-                    &json!({"kind": "path-prefix", "value": "generated"}),
-                    false,
-                )?;
-                if fs::read_to_string(&operator_config)? == operator_before {
-                    return Err(io::Error::other(
-                        "explicit config lost its supported link semantics",
-                    )
-                    .into());
+                    .ok_or_else(|| io::Error::other("fixture config path is not UTF-8"))?;
+                let mut configured_session = if mcp {
+                    let (session, _) = McpContractSession::spawn_configured(
+                        &executable,
+                        &root,
+                        &root.join(DATABASE_PATH),
+                        Some(&selected_config),
+                        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+                    )?;
+                    Some(session)
+                } else {
+                    None
+                };
+                let configured_result = (|| -> Result<(), Box<dyn Error>> {
+                    invoke(
+                        &executable,
+                        &root,
+                        configured_session.as_mut(),
+                        &[
+                            "--config",
+                            config_argument,
+                            "ignore",
+                            "add",
+                            "--kind",
+                            "path-prefix",
+                            "generated",
+                        ],
+                        "atlas_ignore_add",
+                        &json!({"kind": "path-prefix", "value": "generated"}),
+                        false,
+                    )?;
+                    if fs::read_to_string(&operator_config)? == operator_before {
+                        return Err(io::Error::other(
+                            "explicit config lost its supported link semantics",
+                        )
+                        .into());
+                    }
+                    invoke(
+                        &executable,
+                        &root,
+                        configured_session.as_mut(),
+                        &["--config", config_argument, "map", "--json", "--force"],
+                        "atlas_map",
+                        &json!({"json": true, "force": true}),
+                        false,
+                    )?;
+                    let published: Value = serde_json::from_slice(&fs::read(&operator_target)?)?;
+                    if !published.is_object()
+                        || !same_file::is_same_file(&operator_target, &operator_sidecar)?
+                    {
+                        return Err(io::Error::other(
+                            "explicit custom map lost its supported destination",
+                        )
+                        .into());
+                    }
+                    Ok(())
+                })();
+                if let Some(configured_session) = configured_session {
+                    complete_mcp_test_after_shutdown(configured_result, || {
+                        configured_session.shutdown()
+                    })?;
+                } else {
+                    configured_result?;
                 }
-                invoke(
-                    &executable,
-                    &root,
-                    configured_session.as_mut(),
-                    &["--config", config_argument, "map", "--json", "--force"],
-                    "atlas_map",
-                    &json!({"json": true, "force": true}),
-                    false,
-                )?;
-                let published: Value = serde_json::from_slice(&fs::read(&operator_target)?)?;
-                if !published.is_object()
-                    || !same_file::is_same_file(&operator_target, &operator_sidecar)?
-                {
-                    return Err(io::Error::other(
-                        "explicit custom map lost its supported destination",
-                    )
-                    .into());
-                }
-                Ok(())
-            })();
-            if let Some(configured_session) = configured_session {
-                complete_mcp_test_after_shutdown(configured_result, || {
-                    configured_session.shutdown()
-                })?;
-            } else {
-                configured_result?;
             }
         }
         Ok(())
@@ -5740,7 +5828,7 @@ fn init_explicit_config_creates_selected_config_and_reports_it() -> Result<(), B
     let temp = tempfile::tempdir()?;
     let repo = temp.path().join(TEST_REPO_DIR);
     fs::create_dir(&repo)?;
-    let custom_config_path = repo.join("custom.toml");
+    let custom_config_path = repo.join(CUSTOM_CONFIG_FILE_NAME);
 
     let output = Command::cargo_bin("projectatlas")?
         .current_dir(&repo)

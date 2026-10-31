@@ -93,6 +93,10 @@ root `projectatlas.toml`, root `.gitignore` or private `projectatlas.json`. This
 checks only its owning directory and target; unrelated DB/host outputs do not gate
 these mutations. The same managed namespace stays protected when spelled explicitly.
 Custom/external operator config and map destinations keep their supported route.
+A parent directory check revalidates publication containment; it does not classify
+all direct children of `.projectatlas` as managed. Initialization chooses its writer
+from exact document admission, preserving custom-name aliases and ordinary creation
+permissions even when their selected parent is the private directory.
 
 Acquire config write admission only for an actual change, so no-change operations
 and ordinary reads preserve valid config aliases. Reject changed managed config or

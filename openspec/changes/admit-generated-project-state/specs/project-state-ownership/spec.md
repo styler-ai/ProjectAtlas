@@ -48,6 +48,11 @@ Automatic output admission SHALL NOT become a blanket ban on external paths.
 - **WHEN** a caller intentionally selects a supported external database or config path with a valid project root
 - **THEN** CLI/MCP initialization and subsequent navigation/refresh operate normally and generated project files retain their admitted owner
 
+#### Scenario: Custom names inside the private directory
+- **WHEN** initialization explicitly selects a custom config filename directly inside `.projectatlas`, including a dangling alias to an operator-selected missing target
+- **THEN** fixed managed names use their guarded writer while custom names use the explicit path route, preserving custom creation and repeated-init behavior
+- **AND** CLI and configured MCP custom config/map writes preserve operator-selected behavior regardless of their parent directory
+
 #### Scenario: Valid existing projects and root aliases
 - **WHEN** an existing valid project, linked worktree or supported canonical root alias is initialized again
 - **THEN** its identity, authored configuration, all approved purposes and valid publication remain intact while normal generated host configuration remains available
