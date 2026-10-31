@@ -4,7 +4,7 @@
 
 #731 and PR #737 BOTH CLOSED by normal merge a5b1bebcaa79c8386b68e9c247eff73aa11e5e15
 on 2026-10-31. Finish #741, review, normal merge and BOTH CLOSED before next owner.
-No #741 PR yet. Tasks 3/5 (1.1, 2.1, 2.3); all acceptance open. Release goal remains independently
+Draft PR743 open; public52ae571. Tasks 3/5 (1.1, 2.1, 2.3); all acceptance open. Release goal remains independently
 verified v0.5.1-rc1 prerelease Latest=false; stable 0.5.0 stays Latest. No stable
 promotion/milestone closure. Integration memory owns other parked release work.
 
@@ -76,6 +76,17 @@ included newly derived suggested legacy-config purpose; proof corrected to compa
 all approved purposes, no product regression inferred. All4 finalfixturesPASS.
 Wholeissue Luna areas1–4 review active, area5 after hosted. 2.2 and3.1open.
 
-Next: commit owned741 changes, normal clean native push with hooks/telemetry override
-unset, then draftPR and all4OS hosted/security proof. Do not edit during push; area5
-waits hosted. No other owner active. Task2.2/3.1 and acceptance remain open.
+Normal nativepush64217 TERMINALPASS937.02s on52ae571:34suites/1713tests,zero failures;
+check/Clippy/docs/doctests/dependency/repository/actualscan+lint allPASS. Exactreceipt
+/tmp/projectatlas-741-native-push.json/log. Public draftPR743 opened/readback52ae571.
+Only741/743 active. Task2.2/3.1/allacceptance remainopen. NoRCpublished.
+
+Review found macOSIntel lacks runtimeownershipproof in existingCI; source reviewed
+complete but2.2needs explicit all4platform execution. Current owned CI-only delta adds
+16stateunits,legacyrepairunit,twoCLI/MCPselectors,roottransition onallcompile/CLIrows;
+Intelonlyregisteredholistic supplement reuses existing three-platformworktreegate.
+Placed after PHP coldcompile so15min proof budget owns only affected warmed work.
+Luna reviewed the bounded plan; no new product source/schema/DER/SEM. Full source
+native/immutable3b97+4nativeupgrades remain valid; normalhookrequiredagainonfinalCIhead.
+NextreviewCIactualdelta/cheapworkflowgates,commit,normalpush,hostedall4feedback,
+then2.2/3.1and orderedacceptance. No source mutation during active nativepush.

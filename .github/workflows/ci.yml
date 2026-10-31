@@ -471,6 +471,23 @@ jobs:
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
 
+      - name: Managed project-state ownership platform regressions
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
+        timeout-minutes: 15
+        shell: bash
+        env:
+          PROJECTATLAS_CI_PLATFORM: ${{ matrix.label }}
+        run: |
+          cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::init_admits_legacy_config_before_repairing_missing_root_identity -- --exact
+          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
+          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+          cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact
+          # The existing worktree-contract step covers the other three platforms.
+          if [ "$PROJECTATLAS_CI_PLATFORM" = "macos-x64" ]; then
+            cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored
+          fi
+
       - name: Install cargo-deny for PDF source validation
         if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
