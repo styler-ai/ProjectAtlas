@@ -152,7 +152,7 @@ jobs:
                   },
                   {
                       "label": "macos-arm64",
-                      "os": "macos-14",
+                      "os": "macos-15",
                       "contracts": ["compile", "mac-quality", "mcp", "parser", "plugin", "process", "tui", "worktree"],
                   },
               ]
@@ -384,7 +384,7 @@ jobs:
     name: e2e-smoke ${{ matrix.label }}
     needs: plan
     if: needs.plan.outputs.platform == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.label == 'macos-arm64' && 'macos-15' || matrix.os }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}

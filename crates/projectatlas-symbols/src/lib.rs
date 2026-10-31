@@ -1,11 +1,32 @@
 //! Purpose: Extract tree-sitter-backed `ProjectAtlas` symbol graphs.
 
 mod configured_modules;
+/// Canonical source declaration scopes shared by parser proof and graph publication.
+pub mod declaration_identity;
 mod documents;
+mod import_source;
 mod languages;
+mod lexical_bindings;
 mod markdown;
 mod resolution_keys;
+mod rust_binding_source;
+mod rust_use_source;
 mod semantic;
+mod source_positions;
+mod source_semantics;
+
+pub use rust_binding_source::{
+    SourceCargoAutomaticTarget, SourceCargoTarget, SourceCargoTargetKind, SourceCargoTargets,
+    SourceRustAnchor, SourceRustAssociated, SourceRustBinding, SourceRustCall,
+    SourceRustCallImports, SourceRustCallOrigin, SourceRustDeclaration, SourceRustFacts,
+    SourceRustModule, SourceRustPath, SourceRustUse, SourceRustUseRole, SourceRustVisibility,
+    cargo_automatic_target_directory, cargo_root_cohort_key, cargo_target_inventory_key,
+};
+pub use source_semantics::{
+    SourceByteSpan, SourceCallBinding, SourceCallFact, SourceExportBinding, SourceExportFact,
+    SourceExportNamespace, SourceExtraction, SourceImportFact, SourceSemanticFacts,
+    SourceSemanticRemapError,
+};
 
 pub use configured_modules::{
     ConfiguredModuleError, ConfiguredModuleResolution, EcmaScriptConfigKind,
@@ -32,7 +53,7 @@ pub use markdown::{
     extract_markdown_facts, extract_markdown_facts_controlled,
 };
 pub use resolution_keys::{
-    ImportReference, ImportSyntax, MAX_RESOLUTION_KEYS_PER_FACT,
+    ExportResolutionKeys, ImportReference, ImportSyntax, MAX_RESOLUTION_KEYS_PER_FACT,
     MAX_RESOLUTION_PROJECTION_FAILURES, RelationResolutionKeys, ResolutionKeyProjection,
     ResolutionProjectionContext, ResolutionProjectionError, ResolutionProjectionFact,
     ResolutionProjectionFactFailure, ResolutionProjectionFailure,
@@ -41,10 +62,12 @@ pub use resolution_keys::{
     resolve_relative_import_path, semantic_resolution_contract_digest, source_stems_for_path,
 };
 
+use source_semantics::SourceSymbolRemap;
+
 use projectatlas_core::graph::{GraphIdentityText, QUALIFIED_SYMBOL_SCOPE_PREFIX};
 use projectatlas_core::language::{
-    EmbeddedHostKind, EmbeddedLanguageCapability, SymbolParserOwner, TreeSitterGrammar,
-    builtin_tree_sitter_language_ids, language_capability, tree_sitter_grammar,
+    EmbeddedHostKind, EmbeddedLanguageCapability, SemanticProviderOwner, SymbolParserOwner,
+    TreeSitterGrammar, builtin_tree_sitter_language_ids, language_capability, tree_sitter_grammar,
 };
 use projectatlas_core::symbols::{
     CodeSymbol, MODULE_RELATION_SOURCE, ParserKind, RelationKind, SymbolGraph, SymbolKind,
@@ -53,7 +76,7 @@ use projectatlas_core::symbols::{
 use projectatlas_core::{IndexWorkControl, IndexWorkFailure, IndexWorkStage};
 use regex::Regex;
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::ops::ControlFlow;
 use std::path::Path;
@@ -64,6 +87,8 @@ use tree_sitter::{Language, Node, ParseOptions, Parser, Tree};
 const MAX_SYMBOLS_PER_FILE: usize = 4_000;
 /// Maximum relations kept from one file to bound call-heavy sources.
 const MAX_RELATIONS_PER_FILE: usize = 8_000;
+/// Bound native traversal stacks before lexical and language-specific refinement.
+const MAX_TREE_SITTER_AST_DEPTH: usize = 256;
 /// Maximum text length stored for symbol names, signatures, and relation context.
 const MAX_SNIPPET_CHARS: usize = 240;
 /// Maximum text length stored for extracted documentation.
@@ -115,6 +140,41 @@ pub fn extract_symbol_graph_with_source_controlled(
     })
 }
 
+/// Extract graph facts with source-bound import and call occurrence evidence.
+///
+/// Binding proof is independent from display names and graph provenance. Missing
+/// or unresolved source evidence never authorizes an exact target. Consumers
+/// filtering facts must remap evidence before using its ordinal associations.
+///
+/// # Errors
+///
+/// Returns a typed cancellation or deadline failure without partial evidence.
+pub fn extract_symbol_graph_with_semantics_controlled(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    control: &IndexWorkControl,
+) -> Result<SourceExtraction, IndexWorkFailure> {
+    let mut semantics = SourceSemanticFacts::default();
+    let (source_parser, graph) = extract_symbol_graph_with_semantics_checked(
+        path,
+        language,
+        content,
+        &mut || control.check(IndexWorkStage::SymbolParsing),
+        Some(&mut semantics),
+    )?;
+    semantics.bind_source(&graph, content);
+    semantics.bind_source_spans(content, &mut || {
+        control.check(IndexWorkStage::SymbolParsing)
+    })?;
+    control.check(IndexWorkStage::SymbolParsing)?;
+    Ok(SourceExtraction {
+        source_parser,
+        graph,
+        semantics,
+    })
+}
+
 /// Preserve graph-only extraction for callers that do not consume source provenance.
 fn extract_symbol_graph_checked<E>(
     path: &str,
@@ -132,6 +192,17 @@ fn extract_symbol_graph_with_source_checked<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<(ParserKind, SymbolGraph), E> {
+    extract_symbol_graph_with_semantics_checked(path, language, content, check, None)
+}
+
+/// Share the existing parse while optionally retaining typed occurrence evidence.
+fn extract_symbol_graph_with_semantics_checked<E>(
+    path: &str,
+    language: Option<&str>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+    semantics: Option<&mut SourceSemanticFacts>,
+) -> Result<(ParserKind, SymbolGraph), E> {
     check()?;
     let parse_content = content_without_leading_purpose_header(content);
     if let Some(capability) = semantic::embedded_source::host_capability(path, language) {
@@ -141,12 +212,13 @@ fn extract_symbol_graph_with_source_checked<E>(
             parse_content.as_ref(),
             capability,
             check,
+            semantics,
         )
         .map(|graph| (graph.parser, graph));
     }
     match symbol_parser_owner(path, language) {
         SymbolParserOwner::CargoManifest => {
-            return extract_cargo_manifest_graph_checked(path, language, content, check)
+            return extract_cargo_manifest_graph_checked(path, language, content, check, semantics)
                 .map(|graph| (graph.parser, graph));
         }
         SymbolParserOwner::Vue => {
@@ -180,9 +252,14 @@ fn extract_symbol_graph_with_source_checked<E>(
         }
         SymbolParserOwner::TreeSitter(_) | SymbolParserOwner::Fallback => {}
     }
-    if let Some(mut parsed) =
-        extract_tree_sitter_graph(path, language, parse_content.as_ref(), check)?
-    {
+    if let Some(mut parsed) = extract_tree_sitter_graph(
+        path,
+        language,
+        parse_content.as_ref(),
+        check,
+        semantics,
+        None,
+    )? {
         normalize_source_selector_columns(&mut parsed.graph, content, check)?;
         if parsed.incomplete || parsed.graph.parser == ParserKind::Fallback {
             mark_graph_fallback(&mut parsed.graph);
@@ -221,6 +298,7 @@ fn extract_embedded_host_graph_checked<E>(
     content: &str,
     capability: EmbeddedLanguageCapability,
     check: &mut impl FnMut() -> Result<(), E>,
+    mut semantics: Option<&mut SourceSemanticFacts>,
 ) -> Result<SymbolGraph, E> {
     let mut graph = match capability.host_kind {
         EmbeddedHostKind::HtmlLike => empty_graph(path, language, ParserKind::Structural),
@@ -231,24 +309,67 @@ fn extract_embedded_host_graph_checked<E>(
             extract_fallback_graph_checked(path, language, content, check)?
         }
     };
-    let (projections, _incomplete) = semantic::embedded_source::project(content).into_parts();
+    let (projections, incomplete) =
+        semantic::embedded_source::project_for_host(content, capability.host_kind).into_parts();
     // Embedded hosts retain their structural/fallback graph parser. Runtime
     // coverage therefore remains partial even when admitted tree-sitter facts
     // are merged, including when reconciliation stopped after a safe prefix.
     for projection in projections {
         check()?;
+        let mut source_semantics = SourceSemanticFacts::default();
         if let Some(parsed) = extract_tree_sitter_graph(
             path,
             Some(projection.language().as_str()),
             projection.source(),
             check,
+            Some(&mut source_semantics),
+            Some(projection.regions()),
         )? {
+            if semantics.is_some() {
+                source_semantics.bind_source(&parsed.graph, projection.source());
+            }
+            let mut ordinals = semantics.as_ref().map(|_| GraphMergeOrdinals {
+                symbols: vec![SourceSymbolRemap::Omitted; parsed.graph.symbols.len()],
+                relations: vec![None; parsed.graph.relations.len()],
+            });
+            let compatibility_imports =
+                paired_host_import_rows(&graph, &parsed.graph, &source_semantics, content, check)?;
             merge_missing_graph_entries_checked(
                 &mut graph,
                 parsed.graph,
+                &compatibility_imports,
                 capability.host_kind,
                 check,
+                ordinals.as_mut(),
             )?;
+            if let Some(destination) = semantics.as_deref_mut()
+                && let Some(ordinals) = ordinals
+                && destination
+                    .append_mapped(
+                        source_semantics,
+                        &graph,
+                        &ordinals.symbols,
+                        &ordinals.relations,
+                    )
+                    .is_err()
+            {
+                // A correspondence failure cannot authorize partial binding guesses.
+                *destination = SourceSemanticFacts::default();
+                mark_graph_fallback(&mut graph);
+            }
+        }
+    }
+    if incomplete.is_some()
+        && let Some(facts) = semantics
+    {
+        // Unknown/duplicate host roles or omitted regions cannot prove the
+        // complete lexical environment. Keep raw evidence and static imports.
+        facts.bindings_incomplete = true;
+        facts.exports_incomplete = true;
+        facts.exports.clear();
+        for call in &mut facts.calls {
+            check()?;
+            call.binding = SourceCallBinding::Unresolved;
         }
     }
     check()?;
@@ -467,26 +588,119 @@ fn merge_preferred_graph_entries_checked<E>(
     Ok(())
 }
 
-/// Merge embedded facts without replacing compatibility facts owned by the host parser.
+/// Surviving parser ordinals through an append-only host merge.
+struct GraphMergeOrdinals {
+    /// Native declaration indices mapped to unique retained host declarations.
+    symbols: Vec<SourceSymbolRemap>,
+    /// Native relation occurrences mapped independently into host rows.
+    relations: Vec<Option<usize>>,
+}
+
+/// Pair whole-line rescue imports only with the actual first AST import on that line.
+fn paired_host_import_rows<E>(
+    graph: &SymbolGraph,
+    native: &SymbolGraph,
+    facts: &SourceSemanticFacts,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<BTreeMap<usize, usize>, E> {
+    let mut rescued = BTreeMap::<usize, Vec<usize>>::new();
+    for (index, relation) in graph.relations.iter().enumerate() {
+        check_parser_iteration(index, check)?;
+        if relation.kind == RelationKind::Imports
+            && relation.parser != ParserKind::TreeSitter
+            && relation.source_name == MODULE_RELATION_SOURCE
+        {
+            rescued.entry(relation.line).or_default().push(index);
+        }
+    }
+    if rescued.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut imports = BTreeMap::new();
+    for fact in facts.imports() {
+        check()?;
+        if native
+            .relations
+            .get(fact.relation)
+            .is_some_and(|relation| relation.kind == RelationKind::Imports)
+        {
+            imports.insert(fact.span.start, fact.relation);
+        }
+    }
+    let mut paired = BTreeMap::new();
+    let mut offset = 0;
+    for (line, source) in content.split_inclusive('\n').enumerate() {
+        check_parser_iteration(line, check)?;
+        let start = offset + source.len() - source.trim_start().len();
+        offset += source.len();
+        let Some(candidates) = rescued.get(&(line + 1)) else {
+            continue;
+        };
+        let Some(native_index) = imports.get(&start).copied() else {
+            continue;
+        };
+        let expected = bounded_relation_text(source);
+        if let Some(index) = candidates
+            .iter()
+            .copied()
+            .find(|index| graph.relations[*index].target_name == expected)
+        {
+            paired.insert(native_index, index);
+        }
+    }
+    Ok(paired)
+}
+
+/// Reproduce bounded rescue display text without materializing an arbitrarily long line.
+fn bounded_relation_text(source: &str) -> String {
+    let mut text = String::new();
+    let mut chars = 0;
+    'words: for word in source.split_whitespace() {
+        if !text.is_empty() {
+            text.push(' ');
+            chars += 1;
+        }
+        if chars > MAX_SNIPPET_CHARS {
+            break;
+        }
+        for character in word.chars() {
+            text.push(character);
+            chars += 1;
+            if chars > MAX_SNIPPET_CHARS {
+                break 'words;
+            }
+        }
+    }
+    truncate_chars_at_boundary(&text, MAX_SNIPPET_CHARS)
+}
+
+/// Merge native facts while preserving host declarations and distinct call occurrences.
 fn merge_missing_graph_entries_checked<E>(
     graph: &mut SymbolGraph,
     embedded: SymbolGraph,
+    compatibility_imports: &BTreeMap<usize, usize>,
     host_kind: EmbeddedHostKind,
     check: &mut impl FnMut() -> Result<(), E>,
+    mut ordinals: Option<&mut GraphMergeOrdinals>,
 ) -> Result<(), E> {
-    let mut symbol_identities = graph
-        .symbols
-        .iter()
-        .map(|symbol| {
-            (
-                symbol.name.clone(),
-                symbol.kind as u8,
-                symbol.line_start,
-                symbol.line_end,
-                symbol.parent.clone(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
+    let symbol_identity = |symbol: &CodeSymbol| {
+        (
+            symbol.name.clone(),
+            symbol.kind as u8,
+            symbol.line_start,
+            symbol.line_end,
+            symbol.parent.clone(),
+        )
+    };
+    let mut symbol_indices = BTreeMap::<_, Vec<usize>>::new();
+    for (index, symbol) in graph.symbols.iter().enumerate() {
+        check_parser_iteration(index, check)?;
+        symbol_indices
+            .entry(symbol_identity(symbol))
+            .or_default()
+            .push(index);
+    }
     for (iteration, symbol) in embedded.symbols.into_iter().enumerate() {
         check_parser_iteration(iteration, check)?;
         if graph.symbols.len() >= MAX_SYMBOLS_PER_FILE {
@@ -498,42 +712,116 @@ fn merge_missing_graph_entries_checked<E>(
         {
             continue;
         }
-        let identity = (
-            symbol.name.clone(),
-            symbol.kind as u8,
-            symbol.line_start,
-            symbol.line_end,
-            symbol.parent.clone(),
-        );
-        if symbol_identities.insert(identity) {
+        let identity = symbol_identity(&symbol);
+        let indices = symbol_indices.entry(identity).or_insert_with(|| {
+            let index = graph.symbols.len();
             graph.symbols.push(symbol);
+            vec![index]
+        });
+        if let Some(mapping) = ordinals.as_deref_mut()
+            && indices.len() == 1
+        {
+            mapping.symbols[iteration] = SourceSymbolRemap::Retained(indices[0]);
         }
     }
-    let mut relation_identities = graph
-        .relations
-        .iter()
-        .map(|relation| {
-            (
-                relation.source_name.clone(),
-                relation.target_name.clone(),
-                relation.kind as u8,
-                relation.line,
-            )
-        })
-        .collect::<BTreeSet<_>>();
+    // Several native declarations coalescing to one display row cannot narrow an overload.
+    if let Some(mapping) = ordinals.as_deref_mut() {
+        let mut counts = BTreeMap::new();
+        for symbol in &mapping.symbols {
+            if let Some(index) = symbol.retained() {
+                *counts.entry(index).or_insert(0_usize) += 1;
+            }
+        }
+        for symbol in &mut mapping.symbols {
+            if let Some(index) = symbol.retained()
+                && counts.get(&index).is_some_and(|count| *count > 1)
+            {
+                *symbol = SourceSymbolRemap::Ambiguous(index);
+            }
+        }
+    }
+    let relation_identity = |relation: &SymbolRelation| {
+        (
+            relation.source_name.clone(),
+            relation.target_name.clone(),
+            relation.kind as u8,
+            relation.line,
+        )
+    };
+    let mut relation_indices = BTreeMap::<_, Vec<usize>>::new();
+    for (index, relation) in graph.relations.iter().enumerate() {
+        check_parser_iteration(index, check)?;
+        if matches!(relation.kind, RelationKind::Calls | RelationKind::Imports)
+            && relation.parser == ParserKind::TreeSitter
+        {
+            continue;
+        }
+        relation_indices
+            .entry(relation_identity(relation))
+            .or_default()
+            .push(index);
+    }
+    let mut claimed_compatibility_rows = BTreeSet::new();
     for (iteration, relation) in embedded.relations.into_iter().enumerate() {
         check_parser_iteration(iteration, check)?;
         if graph.relations.len() >= MAX_RELATIONS_PER_FILE {
             break;
         }
-        let identity = (
-            relation.source_name.clone(),
-            relation.target_name.clone(),
-            relation.kind as u8,
-            relation.line,
-        );
-        if relation_identities.insert(identity) {
+        let indices = relation_indices
+            .entry(relation_identity(&relation))
+            .or_default();
+        let occurrence = matches!(relation.kind, RelationKind::Calls | RelationKind::Imports);
+        let parser = relation.parser;
+        let existing = if occurrence {
+            let mut existing = None;
+            while let Some(index) = indices.pop() {
+                if !claimed_compatibility_rows.contains(&index) {
+                    existing = Some(index);
+                    break;
+                }
+            }
+            existing
+        } else {
+            indices.first().copied()
+        };
+        let owned_import = if existing.is_none() {
+            compatibility_imports
+                .get(&iteration)
+                .copied()
+                .filter(|index| !claimed_compatibility_rows.contains(index))
+        } else {
+            None
+        };
+        let index = if let Some(index) = owned_import {
+            // The native AST owns this line's first import. Replace the rescue
+            // row's whole-line payload with that captured occurrence.
+            graph.relations[index]
+                .target_name
+                .clone_from(&relation.target_name);
+            graph.relations[index].context.clone_from(&relation.context);
+            index
+        } else if let Some(index) = existing {
+            index
+        } else {
+            let index = graph.relations.len();
             graph.relations.push(relation);
+            if !occurrence {
+                indices.push(index);
+            }
+            index
+        };
+        if occurrence {
+            // This exact occurrence now has native AST proof, even when its row
+            // was first rescued by the host. Keep graph-level host coverage
+            // partial, but do not mix rescue and native trust for one proved edge.
+            graph.relations[index].parser = parser;
+        }
+        // A compatibility row can represent one captured occurrence, not every same-line call.
+        let first_owner = claimed_compatibility_rows.insert(index);
+        if let Some(mapping) = ordinals.as_deref_mut()
+            && (occurrence || first_owner)
+        {
+            mapping.relations[iteration] = Some(index);
         }
     }
     Ok(())
@@ -610,6 +898,7 @@ fn extract_cargo_manifest_graph_checked<E>(
     language: Option<&str>,
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
+    semantics: Option<&mut SourceSemanticFacts>,
 ) -> Result<SymbolGraph, E> {
     check()?;
     let mut graph = empty_graph(path, language, ParserKind::Manifest);
@@ -622,7 +911,7 @@ fn extract_cargo_manifest_graph_checked<E>(
         check()?;
         return Ok(graph);
     }
-    extract_cargo_toml_entries_checked(&mut graph, content, check)?;
+    extract_cargo_toml_entries_checked(&mut graph, content, check, semantics)?;
     check()?;
     Ok(graph)
 }
@@ -703,6 +992,7 @@ fn extract_cargo_toml_entries_checked<E>(
     graph: &mut SymbolGraph,
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
+    semantics: Option<&mut SourceSemanticFacts>,
 ) -> Result<(), E> {
     let Ok(manifest) = toml::from_str::<TomlValue>(content) else {
         return Ok(());
@@ -711,6 +1001,9 @@ fn extract_cargo_toml_entries_checked<E>(
     let Some(root) = manifest.as_table() else {
         return Ok(());
     };
+    if let Some(facts) = semantics {
+        facts.cargo = Some(rust_binding_source::cargo_targets(root, check)?);
+    }
     let line_index = CargoTomlLineIndex::new_checked(content, check)?;
     if root.contains_key("workspace") {
         let line = line_index.section_line("workspace").unwrap_or(1);
@@ -925,6 +1218,8 @@ fn extract_tree_sitter_graph<E>(
     language: Option<&str>,
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
+    mut semantics: Option<&mut SourceSemanticFacts>,
+    regions: Option<&[semantic::embedded_source::EmbeddedScriptRegion]>,
 ) -> Result<Option<TreeSitterParse>, E> {
     let Some(language_name) = language else {
         return Ok(None);
@@ -932,23 +1227,34 @@ fn extract_tree_sitter_graph<E>(
     let Some(grammar) = tree_sitter_grammar(language_name) else {
         return Ok(None);
     };
-    let (tree, has_php_opening_tag) = if grammar == TreeSitterGrammar::Php {
+    let (trees, has_php_opening_tag) = if grammar == TreeSitterGrammar::Php {
         let Some(parsed) = parse_php_tree(content, check)? else {
             return Ok(None);
         };
-        (parsed.tree, Some(parsed.has_opening_tag))
+        (vec![parsed.tree], Some(parsed.has_opening_tag))
     } else {
         let Some(parser_language) = tree_sitter_language(language_name) else {
             return Ok(None);
         };
-        let Some(tree) = parse_tree_sitter_language(&parser_language, content, check)? else {
+        let trees = if let Some(regions) = regions {
+            parse_embedded_script_trees(&parser_language, path, content, regions, check)?
+        } else {
+            let ecmascript = matches!(
+                grammar,
+                TreeSitterGrammar::JavaScript
+                    | TreeSitterGrammar::TypeScript
+                    | TreeSitterGrammar::Tsx
+            );
+            parse_source_program(&parser_language, content, ecmascript.then_some(path), check)?
+                .map(|tree| vec![tree])
+        };
+        let Some(trees) = trees else {
             return Ok(None);
         };
-        (tree, None)
+        (trees, None)
     };
     check()?;
     let mut graph = empty_graph(path, language, ParserKind::TreeSitter);
-    let root = tree.root_node();
     if has_php_opening_tag == Some(false) {
         return Ok(Some(TreeSitterParse {
             graph,
@@ -956,24 +1262,77 @@ fn extract_tree_sitter_graph<E>(
             incomplete: false,
         }));
     }
-    let had_errors = root.has_error() && has_php_opening_tag != Some(false);
+    let had_errors = trees.iter().any(|tree| tree.root_node().has_error());
     let mut incomplete = has_php_opening_tag == Some(true) && had_errors;
-    let mut php_namespace_context = if has_php_opening_tag == Some(true) {
-        Some(PhpNamespaceContext::from_program(root, content, check)?)
-    } else {
-        None
-    };
-    let traversal = visit_node(
-        root,
-        content,
-        &mut graph,
-        check,
-        php_namespace_context.as_mut(),
-        &mut incomplete,
-    )?;
+    let mut traversal = ControlFlow::Continue(());
+    for (tree_index, tree) in trees.iter().enumerate() {
+        check()?;
+        let root = tree.root_node();
+        let import_start = semantics.as_ref().map(|facts| facts.imports.len());
+        let mut php_namespace_context = if has_php_opening_tag == Some(true) {
+            Some(PhpNamespaceContext::from_program(root, content, check)?)
+        } else {
+            None
+        };
+        traversal = visit_node(
+            root,
+            0,
+            content,
+            &mut graph,
+            check,
+            php_namespace_context.as_mut(),
+            &mut incomplete,
+            semantics.as_deref_mut(),
+        )?;
+        if matches!(language_name, "javascript" | "typescript" | "tsx")
+            && let (Some(start), Some(facts)) = (import_start, semantics.as_deref_mut())
+            && !semantic::ecmascript_context::source_context(
+                root,
+                path,
+                regions
+                    .and_then(|regions| regions.get(tree_index))
+                    .map(|region| region.role),
+                content,
+                check,
+            )?
+            .is_module()
+        {
+            for import in &mut facts.imports[start..] {
+                check()?;
+                import.module = None;
+                import.references.clear();
+            }
+        }
+        if traversal.is_break() {
+            break;
+        }
+    }
     check()?;
     if traversal.is_continue() {
         languages::augment_language_graph(&mut graph, content, check)?;
+        if let Some(facts) = semantics {
+            if facts.bindings_incomplete {
+                facts.exports_incomplete = true;
+                if semantic::provider_for_graph(&graph) == Some(SemanticProviderOwner::Rust) {
+                    facts.rust = Some(SourceRustFacts::default());
+                }
+                for call in &mut facts.calls {
+                    call.binding = SourceCallBinding::Unresolved;
+                }
+            } else {
+                let roots = trees
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tree)| lexical_bindings::SourceSyntaxRoot {
+                        node: tree.root_node(),
+                        role: regions
+                            .and_then(|regions| regions.get(index))
+                            .map(|region| region.role),
+                    })
+                    .collect::<Vec<_>>();
+                lexical_bindings::bind_calls(&roots, content, &graph, facts, check)?;
+            }
+        }
     }
     check()?;
     Ok(Some(TreeSitterParse {
@@ -1177,11 +1536,203 @@ fn parse_tree_sitter_language<E>(
     content: &str,
     check: &mut impl FnMut() -> Result<(), E>,
 ) -> Result<Option<Tree>, E> {
+    parse_source_program(parser_language, content, None, check)
+}
+
+/// Parse one program, repairing contextual ECMAScript tokens only when necessary.
+fn parse_source_program<E>(
+    parser_language: &Language,
+    content: &str,
+    ecmascript_path: Option<&str>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
     check()?;
     let mut parser = Parser::new();
     if parser.set_language(parser_language).is_err() {
         return Ok(None);
     }
+    let Some(tree) = parse_tree_with_parser(&mut parser, content, check)? else {
+        return Ok(None);
+    };
+    if let Some(path) = ecmascript_path {
+        return repair_contextual_tree(
+            &mut parser,
+            tree,
+            path,
+            None,
+            content,
+            SourceByteSpan {
+                start: 0,
+                end: content.len(),
+            },
+            &mut None,
+            check,
+        );
+    }
+    Ok(Some(tree))
+}
+
+/// Prove contextual repairs through the same parser and actual candidate scopes.
+///
+/// At most two reparses share one private buffer: the second only restores tokens
+/// proved to be reserved operators in the first candidate. No per-call reparsing.
+fn repair_contextual_tree<E>(
+    parser: &mut Parser,
+    original: Tree,
+    path: &str,
+    role: Option<semantic::embedded_source::EmbeddedScriptRole>,
+    content: &str,
+    span: SourceByteSpan,
+    projected: &mut Option<String>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
+    use semantic::ecmascript_context::{
+        ContextualProjectionValidation, project_contextual_identifiers, source_context,
+        validate_contextual_projection,
+    };
+    let context = source_context(original.root_node(), path, role, content, check)?;
+    if !project_contextual_identifiers(
+        original.root_node(),
+        context,
+        content,
+        span,
+        projected,
+        check,
+    )? {
+        return Ok(Some(original));
+    }
+    let Some(projected) = projected else {
+        return Ok(Some(original));
+    };
+    for _ in 0..2 {
+        let Some(candidate) = parse_tree_with_parser(parser, projected, check)? else {
+            return Ok(None);
+        };
+        if candidate.root_node().has_error() {
+            return Ok(Some(original));
+        }
+        match validate_contextual_projection(
+            candidate.root_node(),
+            path,
+            role,
+            span,
+            content,
+            projected,
+            check,
+        )? {
+            ContextualProjectionValidation::Valid => return Ok(Some(candidate)),
+            ContextualProjectionValidation::Restored => {}
+            ContextualProjectionValidation::Rejected => return Ok(Some(original)),
+        }
+    }
+    Ok(Some(original))
+}
+
+/// Parse each admitted program once with one reused grammar parser and budget.
+///
+/// Trees retain original offsets; the input buffer is borrowed, never copied per
+/// region. Separate ranges prevent cross-program recovery and ASI ambiguity.
+fn parse_embedded_script_trees<E>(
+    parser_language: &Language,
+    path: &str,
+    content: &str,
+    regions: &[semantic::embedded_source::EmbeddedScriptRegion],
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Vec<Tree>>, E> {
+    check()?;
+    let mut parser = Parser::new();
+    if parser.set_language(parser_language).is_err()
+        || regions.len() > semantic::embedded_source::MAX_EMBEDDED_SCRIPT_REGIONS
+    {
+        return Ok(None);
+    }
+    let mut trees = Vec::with_capacity(regions.len());
+    let mut projected = None;
+    let mut offset = 0;
+    let mut point = tree_sitter::Point { row: 0, column: 0 };
+    for region in regions {
+        check()?;
+        if region.span.start < offset
+            || region.span.start > region.span.end
+            || region.span.end > content.len()
+            || !content.is_char_boundary(region.span.start)
+            || !content.is_char_boundary(region.span.end)
+        {
+            return Ok(None);
+        }
+        advance_source_point(
+            content.as_bytes(),
+            &mut offset,
+            &mut point,
+            region.span.start,
+            check,
+        )?;
+        let start_point = point;
+        advance_source_point(
+            content.as_bytes(),
+            &mut offset,
+            &mut point,
+            region.span.end,
+            check,
+        )?;
+        let range = tree_sitter::Range {
+            start_byte: region.span.start,
+            end_byte: region.span.end,
+            start_point,
+            end_point: point,
+        };
+        if parser.set_included_ranges(&[range]).is_err() {
+            return Ok(None);
+        }
+        let Some(tree) = parse_tree_with_parser(&mut parser, content, check)? else {
+            return Ok(None);
+        };
+        let Some(tree) = repair_contextual_tree(
+            &mut parser,
+            tree,
+            path,
+            Some(region.role),
+            content,
+            region.span,
+            &mut projected,
+            check,
+        )?
+        else {
+            return Ok(None);
+        };
+        trees.push(tree);
+    }
+    Ok(Some(trees))
+}
+
+/// Map sorted region endpoints in one bounded pass without prefix rescans.
+fn advance_source_point<E>(
+    bytes: &[u8],
+    offset: &mut usize,
+    point: &mut tree_sitter::Point,
+    end: usize,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    while *offset < end {
+        check_parser_iteration(*offset, check)?;
+        if bytes[*offset] == b'\n' {
+            point.row += 1;
+            point.column = 0;
+        } else {
+            point.column += 1;
+        }
+        *offset += 1;
+    }
+    Ok(())
+}
+
+/// Reuse native progress cancellation without resetting the operation budget.
+fn parse_tree_with_parser<E>(
+    parser: &mut Parser,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<Tree>, E> {
+    check()?;
     let mut parse_failure = None;
     let mut progress = |_: &tree_sitter::ParseState| match check() {
         Ok(()) => ControlFlow::Continue(()),
@@ -1424,13 +1975,22 @@ fn is_php_compiler_halt(node: Node<'_>, content: &str) -> bool {
 /// Recursively inspect one tree-sitter node.
 fn visit_node<E>(
     node: Node<'_>,
+    depth: usize,
     content: &str,
     graph: &mut SymbolGraph,
     check: &mut impl FnMut() -> Result<(), E>,
     mut php_namespace_context: Option<&mut PhpNamespaceContext>,
     incomplete: &mut bool,
+    mut semantics: Option<&mut SourceSemanticFacts>,
 ) -> Result<ControlFlow<()>, E> {
     check()?;
+    if depth >= MAX_TREE_SITTER_AST_DEPTH {
+        *incomplete = true;
+        if let Some(facts) = semantics.as_deref_mut() {
+            facts.bindings_incomplete = true;
+        }
+        return Ok(ControlFlow::Continue(()));
+    }
     if is_php_language(graph.language.as_deref()) && is_php_compiler_halt(node, content) {
         return Ok(ControlFlow::Break(()));
     }
@@ -1457,10 +2017,12 @@ fn visit_node<E>(
                 || is_import_node(node.kind())
                 || is_call_node(node.kind()));
     }
-    if let Some(kind) = declaration_kind(node.kind())
+    let kind = source_declaration_kind(node.kind(), graph.language.as_deref());
+    if let Some(kind) = kind
         && should_emit_declaration_symbol(node, content)
     {
-        let admitted = graph.symbols.len() < MAX_SYMBOLS_PER_FILE
+        let at_symbol_limit = graph.symbols.len() >= MAX_SYMBOLS_PER_FILE;
+        let admitted = !at_symbol_limit
             && push_tree_symbol(
                 graph,
                 node,
@@ -1475,29 +2037,82 @@ fn visit_node<E>(
                 },
                 php_namespace_context.as_deref_mut(),
             );
+        if at_symbol_limit {
+            graph.parser = ParserKind::Fallback;
+            *incomplete = true;
+            if let Some(facts) = semantics.as_deref_mut() {
+                facts.bindings_incomplete = true;
+            }
+        }
         if !admitted && is_php_language(graph.language.as_deref()) {
             *incomplete = true;
             return Ok(ControlFlow::Continue(()));
         }
     }
+    let import_like = owns_import_occurrence(node, graph);
+    if graph.relations.len() >= MAX_RELATIONS_PER_FILE && import_like {
+        graph.parser = ParserKind::Fallback;
+        *incomplete = true;
+        if let Some(facts) = semantics.as_deref_mut() {
+            facts.bindings_incomplete = true;
+        }
+    }
     if graph.relations.len() < MAX_RELATIONS_PER_FILE {
         if is_php_trait_use_declaration(node) {
             push_php_trait_use_relations(graph, node, content);
-        } else if is_import_node(node.kind()) {
-            push_import_relation(graph, node, content);
+        } else if import_like {
+            let relation_start = graph.relations.len();
+            let rust_sources = push_import_relation(graph, node, content, check)?;
+            *incomplete |= rust_sources
+                .as_ref()
+                .is_some_and(|sources| !sources.complete);
+            if let Some(facts) = semantics.as_deref_mut() {
+                capture_import_occurrences(
+                    facts,
+                    graph,
+                    node,
+                    content,
+                    relation_start,
+                    rust_sources,
+                    check,
+                )?;
+            }
         } else if is_call_node(node.kind()) {
+            let relation_start = graph.relations.len();
             push_call_relation(graph, node, content, php_namespace_context.as_deref_mut());
+            if let Some(facts) = semantics.as_deref_mut() {
+                for relation in relation_start..graph.relations.len() {
+                    if graph.relations[relation].kind == RelationKind::Calls {
+                        facts.calls.push(SourceCallFact {
+                            relation,
+                            source_span: None,
+                            owner: None,
+                            span: SourceByteSpan {
+                                start: node.start_byte(),
+                                end: node.end_byte(),
+                            },
+                            binding: if is_php_language(graph.language.as_deref()) {
+                                SourceCallBinding::PhpNamespace
+                            } else {
+                                SourceCallBinding::Unresolved
+                            },
+                        });
+                    }
+                }
+            }
         }
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if visit_node(
             child,
+            depth + 1,
             content,
             graph,
             check,
             php_namespace_context.as_deref_mut(),
             incomplete,
+            semantics.as_deref_mut(),
         )?
         .is_break()
         {
@@ -1507,8 +2122,76 @@ fn visit_node<E>(
     Ok(ControlFlow::Continue(()))
 }
 
+/// Associate canonical references only with imports admitted by their source grammar.
+fn capture_import_occurrences<E>(
+    facts: &mut SourceSemanticFacts,
+    graph: &SymbolGraph,
+    node: Node<'_>,
+    content: &str,
+    relation_start: usize,
+    rust_sources: Option<rust_use_source::RustUseSources>,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let owner = semantic::provider_for_graph(graph);
+    let mut rust_sources = rust_sources
+        .map_or_else(Vec::new, |sources| {
+            facts.bindings_incomplete |= !sources.complete;
+            sources.facts
+        })
+        .into_iter();
+    // Rust grouped-use extraction already validates independent leaf facts; an
+    // unsupported sibling must not erase its separately admitted valid leaves.
+    let source_valid = !node.has_error() || owner == Some(SemanticProviderOwner::Rust);
+    for (relation, fact) in graph.relations.iter().enumerate().skip(relation_start) {
+        if fact.kind != RelationKind::Imports {
+            continue;
+        }
+        check()?;
+        let proof = if owner == Some(SemanticProviderOwner::EcmaScript) {
+            semantic::ecmascript_source_bindings(node, content, check)?
+        } else {
+            let references = if source_valid {
+                owner.map_or_else(Vec::new, |owner| {
+                    semantic::parse_imports(owner, &fact.target_name)
+                })
+            } else {
+                Vec::new()
+            };
+            semantic::SourceImportProof {
+                module: references
+                    .first()
+                    .map(|reference| reference.module().to_string()),
+                references,
+            }
+        };
+        facts.imports.push(SourceImportFact {
+            relation,
+            source_span: None,
+            span: SourceByteSpan {
+                start: node.start_byte(),
+                end: node.end_byte(),
+            },
+            module: proof.module,
+            references: proof.references,
+            rust: rust_sources
+                .next()
+                .and_then(|fact| fact.binding)
+                .map(std::sync::Arc::new),
+            rust_toolchain: None,
+        });
+    }
+    Ok(())
+}
+
 /// Refine a declaration kind using surrounding syntax context.
 fn effective_declaration_kind(node: Node<'_>, kind: SymbolKind) -> SymbolKind {
+    if node.kind() == "record_declaration"
+        && node
+            .children(&mut node.walk())
+            .any(|child| child.kind() == "struct")
+    {
+        return SymbolKind::Struct;
+    }
     if kind == SymbolKind::Function && declaration_is_method_context(node) {
         return SymbolKind::Method;
     }
@@ -1540,6 +2223,7 @@ fn declaration_is_method_context(node: Node<'_>) -> bool {
         || has_ancestor_kind(node.parent(), "class_body")
         || has_ancestor_kind(node.parent(), "class_specifier")
         || has_ancestor_kind(node.parent(), "struct_specifier")
+        || has_ancestor_kind(node.parent(), "union_specifier")
         || has_ancestor_kind(node.parent(), "interface_declaration")
         || has_ancestor_kind(node.parent(), "trait_declaration"))
 }
@@ -1582,7 +2266,8 @@ fn should_emit_declaration_symbol(node: Node<'_>, content: &str) -> bool {
 fn is_type_member_declarator(node: Node<'_>) -> bool {
     has_ancestor_kind(node.parent(), "field_declaration")
         && (has_ancestor_kind(node.parent(), "class_specifier")
-            || has_ancestor_kind(node.parent(), "struct_specifier"))
+            || has_ancestor_kind(node.parent(), "struct_specifier")
+            || has_ancestor_kind(node.parent(), "union_specifier"))
         && !has_ancestor_kind(node.parent(), "function_definition")
 }
 
@@ -1606,15 +2291,35 @@ fn declaration_has_direct_callable_initializer(node: Node<'_>) -> bool {
         return false;
     }
     first_declaration_initializer(node).is_some_and(|initializer| {
-        matches!(
-            initializer.kind(),
-            "arrow_function"
-                | "function"
-                | "function_expression"
-                | "generator_function"
-                | "lambda_expression"
-        )
+        initializer
+            .parent()
+            .filter(|declarator| !declarator_has_recovery_error(*declarator))
+            .and_then(|declarator| declarator.child_by_field_name("name"))
+            .is_some_and(|name| matches!(name.kind(), "identifier" | "simple_identifier"))
+            && matches!(
+                initializer.kind(),
+                "arrow_function"
+                    | "function"
+                    | "function_expression"
+                    | "generator_function"
+                    | "lambda_expression"
+            )
     })
+}
+
+/// Keep an initializer recovery error with its declarator, not a valid sibling.
+fn declarator_has_recovery_error(node: Node<'_>) -> bool {
+    if node.has_error() || node.is_missing() {
+        return true;
+    }
+    let mut sibling = node.next_sibling();
+    while let Some(current) = sibling {
+        if current.kind() != "comment" {
+            return current.is_error() || current.is_missing();
+        }
+        sibling = current.next_sibling();
+    }
+    false
 }
 
 /// Return the first direct declaration initializer.
@@ -1643,6 +2348,7 @@ fn is_local_value_declaration(node: Node<'_>) -> bool {
             "function",
             "function_expression",
             "function_declaration",
+            "generator_function_declaration",
             "generator_function",
             "method_definition",
             "method_declaration",
@@ -2035,13 +2741,32 @@ fn php_semicolon_namespace_parent(
 }
 
 /// Map tree-sitter node kinds to `ProjectAtlas` symbol kinds.
+/// Share actual native declaration admission with source-evidence consumers.
+fn source_declaration_kind(kind: &str, language: Option<&str>) -> Option<SymbolKind> {
+    declaration_kind(kind).or_else(|| {
+        (kind == "variable_declaration"
+            && matches!(
+                language.and_then(tree_sitter_grammar),
+                Some(
+                    TreeSitterGrammar::JavaScript
+                        | TreeSitterGrammar::TypeScript
+                        | TreeSitterGrammar::Tsx
+                )
+            ))
+        .then_some(SymbolKind::Value)
+    })
+}
+
+/// Map grammar-owned declaration nodes to their raw graph kind.
 fn declaration_kind(kind: &str) -> Option<SymbolKind> {
     match kind {
         "function_item"
         | "function_declaration"
+        | "generator_function_declaration"
         | "function_definition"
         | "function_declarator"
-        | "func_literal" => Some(SymbolKind::Function),
+        | "func_literal"
+        | "local_function_statement" => Some(SymbolKind::Function),
         "method_definition"
         | "method_declarator"
         | "method_declaration"
@@ -2051,9 +2776,12 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         "class_declaration"
         | "class_definition"
         | "class_specifier"
+        | "record_declaration"
         | "class_interface"
         | "class_implementation" => Some(SymbolKind::Class),
-        "struct_item" | "struct_specifier" | "struct_declaration" => Some(SymbolKind::Struct),
+        "struct_item" | "struct_specifier" | "union_specifier" | "struct_declaration" => {
+            Some(SymbolKind::Struct)
+        }
         "enum_item" | "enum_declaration" | "enum_specifier" => Some(SymbolKind::Enum),
         "trait_item" | "trait_declaration" => Some(SymbolKind::Trait),
         "interface_declaration" | "interface_type" => Some(SymbolKind::Interface),
@@ -2087,6 +2815,14 @@ fn declaration_kind(kind: &str) -> Option<SymbolKind> {
         | "namespace_use_declaration" => Some(SymbolKind::Import),
         _ => None,
     }
+}
+
+/// Select the exact syntax nodes allowed to produce import occurrence evidence.
+fn owns_import_occurrence(node: Node<'_>, graph: &SymbolGraph) -> bool {
+    is_import_node(node.kind())
+        || (node.kind() == "export_statement"
+            && semantic::provider_for_graph(graph) == Some(SemanticProviderOwner::EcmaScript)
+            && node.child_by_field_name("source").is_some())
 }
 
 /// Return whether a node is an import-like relation.
@@ -2555,9 +3291,14 @@ fn has_direct_child_kind(node: Node<'_>, kind: &str) -> bool {
 }
 
 /// Push an import relation from an import node.
-fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) {
+fn push_import_relation<E>(
+    graph: &mut SymbolGraph,
+    node: Node<'_>,
+    content: &str,
+    check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<Option<rust_use_source::RustUseSources>, E> {
     if is_php_language(graph.language.as_deref()) && is_inside_php_anonymous_class(node) {
-        return;
+        return Ok(None);
     }
     if node.kind() == "namespace_use_declaration" {
         for import_text in php_namespace_use_targets(node, content).0 {
@@ -2576,7 +3317,65 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
                 );
             }
         }
-        return;
+        return Ok(None);
+    }
+    if semantic::provider_for_graph(graph).is_some_and(semantic::supports_source_dependencies) {
+        if semantic::provider_for_graph(graph) == Some(SemanticProviderOwner::Rust)
+            && let Some(sources) = rust_use_source::use_sources(
+                node,
+                content,
+                MAX_RELATIONS_PER_FILE.saturating_sub(graph.relations.len()),
+                check,
+            )?
+        {
+            let context = node
+                .utf8_text(content.as_bytes())
+                .unwrap_or_default()
+                .chars()
+                .take(MAX_SNIPPET_CHARS)
+                .collect::<String>();
+            if !sources.complete {
+                graph.parser = ParserKind::Fallback;
+            }
+            for fact in &sources.facts {
+                push_relation_preserving_target(
+                    graph,
+                    MODULE_RELATION_SOURCE,
+                    &fact.statement,
+                    RelationKind::Imports,
+                    fact.line,
+                    &context,
+                );
+            }
+            return Ok(Some(sources));
+        }
+        let import_text = if semantic::provider_for_graph(graph)
+            == Some(SemanticProviderOwner::EcmaScript)
+            && node.has_error()
+        {
+            import_source::canonical_import_recovery_source(node, content, check)?
+        } else {
+            import_source::canonical_import_source(node, content, check)?
+        };
+        let Some(import_text) = import_text else {
+            graph.parser = ParserKind::Fallback;
+            return Ok(None);
+        };
+        let context = node
+            .utf8_text(content.as_bytes())
+            .unwrap_or_default()
+            .chars()
+            .take(MAX_SNIPPET_CHARS)
+            .collect::<String>();
+        push_relation_preserving_target(
+            graph,
+            MODULE_RELATION_SOURCE,
+            &import_text,
+            RelationKind::Imports,
+            node.start_position().row + 1,
+            &context,
+        );
+        return Ok(None);
     }
     let import_text = if is_php_include_node(node.kind()) {
         php_static_include_target(node, content)
@@ -2586,10 +3385,10 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
         ))
     };
     let Some(import_text) = import_text else {
-        return;
+        return Ok(None);
     };
     if import_text.is_empty() || import_text.chars().count() > MAX_SNIPPET_CHARS {
-        return;
+        return Ok(None);
     }
     if is_php_include_node(node.kind()) {
         // Keep bounded source syntax so partial graphs distinguish includes from aliases.
@@ -2617,6 +3416,7 @@ fn push_import_relation(graph: &mut SymbolGraph, node: Node<'_>, content: &str) 
             &import_text,
         );
     }
+    Ok(None)
 }
 
 /// Push a call relation from a call node.
@@ -2644,6 +3444,21 @@ fn push_call_relation(
             return;
         };
         target
+    } else if node.kind() == "method_invocation"
+        && graph.language.as_deref().and_then(tree_sitter_grammar) == Some(TreeSitterGrammar::Java)
+    {
+        let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|name| node_text(name, content))
+        else {
+            return;
+        };
+        node.child_by_field_name("object")
+            .and_then(|object| node_text(object, content))
+            .map_or_else(
+                || compact_text(&name),
+                |object| compact_text(&format!("{object}.{name}")),
+            )
     } else {
         compact_text(node_text(target_node, content).as_deref().unwrap_or(""))
     };
@@ -2666,7 +3481,7 @@ fn push_call_relation(
         node.start_position().row + 1,
         &context,
     );
-    if graph.language.as_deref() == Some("rust")
+    if graph.language.as_deref().and_then(tree_sitter_grammar) == Some(TreeSitterGrammar::Rust)
         && rust_target_invokes_function_item(target_node, content)
         && let Some(arguments) = node.child_by_field_name("arguments")
         && let Some(callback) = first_named_child(arguments)
@@ -2873,6 +3688,19 @@ fn php_declaration_name(node: Node<'_>, content: &str) -> Option<String> {
 
 /// Extract a declaration name by removing a language keyword prefix.
 fn prefixed_declaration_name(node: Node<'_>, content: &str, prefixes: &[&str]) -> Option<String> {
+    if let Some(name) = node.child_by_field_name("name") {
+        return (!name.is_missing() && !name.has_error())
+            .then(|| named_text(name, content))
+            .flatten()
+            .map(|name| name.trim_matches('"').to_string())
+            .filter(|name| !name.is_empty());
+    }
+    if matches!(
+        node.kind(),
+        "namespace_declaration" | "file_scoped_namespace_declaration" | "module_declaration"
+    ) {
+        return None;
+    }
     let text = compact_text(&node_text(node, content)?);
     for prefix in prefixes {
         let Some(rest) = text.strip_prefix(prefix) else {
@@ -2939,6 +3767,15 @@ fn clean_type_name(value: &str) -> String {
 fn first_variable_declarator_name(node: Node<'_>, content: &str) -> Option<String> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
+        if child.kind() == "variable_declarator"
+            && child
+                .child_by_field_name("name")
+                .is_some_and(|name| matches!(name.kind(), "object_pattern" | "array_pattern"))
+        {
+            // A destructuring property's key is not the declared binding name,
+            // and a callable initializer does not make that property callable.
+            return None;
+        }
         if matches!(child.kind(), "variable_declarator" | "identifier")
             && let Some(name) = declarator_name(child, content)
         {
@@ -2958,6 +3795,17 @@ fn first_variable_declarator_name(node: Node<'_>, content: &str) -> Option<Strin
 
 /// Extract the declared name from a declarator subtree.
 fn declarator_name(node: Node<'_>, content: &str) -> Option<String> {
+    if node.kind() == "qualified_identifier" {
+        // A nested C++ qualifier is an owner path, not the declared leaf name.
+        let mut name = node;
+        for _ in 0..MAX_TREE_SITTER_AST_DEPTH {
+            if name.kind() != "qualified_identifier" {
+                return declarator_name(name, content);
+            }
+            name = name.child_by_field_name("name")?;
+        }
+        return None;
+    }
     if let Some(name_node) = node.child_by_field_name("name")
         && let Some(name) = named_text(name_node, content)
     {
@@ -3005,7 +3853,19 @@ fn declaration_signature(node: Node<'_>, content: &str) -> String {
     if matches!(node.kind(), "property_element" | "const_element") {
         return php_element_signature(node, content);
     }
-    let header_end = declaration_body_start(node).unwrap_or_else(|| node.end_byte());
+    let header_end = declaration_body_start(node)
+        .or_else(|| {
+            // A bodyless method header has the same source signature as its
+            // implementation. The terminating semicolon is not a signature token.
+            if node.kind() == "method_declaration" {
+                node.children(&mut node.walk())
+                    .find(|child| child.kind() == ";")
+                    .map(|semicolon| semicolon.start_byte())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| node.end_byte());
     let mut signature = String::new();
     append_declaration_tokens(node, content, header_end, &mut signature);
     if signature.is_empty() {
@@ -3055,7 +3915,8 @@ fn declaration_body_start(node: Node<'_>) -> Option<usize> {
     {
         return Some(body.start_byte());
     }
-    if declaration_kind(node.kind()) == Some(SymbolKind::Value)
+    if (declaration_kind(node.kind()) == Some(SymbolKind::Value)
+        || node.kind() == "variable_declaration")
         && let Some(initializer) = first_declaration_initializer(node)
     {
         return Some(initializer.start_byte());
@@ -3811,7 +4672,13 @@ mod tests {
         }
 
         assert_parser_cancels_at!("Cargo manifest", 3, |check| {
-            extract_cargo_manifest_graph_checked(fixtures[1].0, fixtures[1].1, fixtures[1].2, check)
+            extract_cargo_manifest_graph_checked(
+                fixtures[1].0,
+                fixtures[1].1,
+                fixtures[1].2,
+                check,
+                None,
+            )
         });
         assert_parser_cancels_at!("fallback", 3, |check| {
             extract_fallback_graph_checked(fixtures[5].0, fixtures[5].1, fixtures[5].2, check)
@@ -4269,6 +5136,95 @@ export const createWriter = () => createReader();
     }
 
     #[test]
+    fn host_import_reconciliation_owns_the_first_statement_not_the_whole_line() {
+        for (path, language) in [
+            ("view.vue", "vue"),
+            ("view.svelte", "svelte"),
+            ("view.html", "html"),
+        ] {
+            for first in [
+                "import {run as first} from './a.js';".to_string(),
+                format!(
+                    "import /*{}*/ {{run as first}} from './a.js';",
+                    "comment ".repeat(80)
+                ),
+                "import {\nrun as first\n} from './a.js';".to_string(),
+            ] {
+                let role = match language {
+                    "html" => "type=module",
+                    "svelte" => "module",
+                    _ => "",
+                };
+                let content = format!(
+                    "<script {role}>\n{first} export {{first as again}}; import {{run as second}} from './b.js';\nfunction caller() {{first(); second();}}\n</script>\n<script lang=\"coffee\">\nimport missing from './unprojected.js';\n</script>"
+                );
+                let result = super::extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &projectatlas_core::IndexWorkControl::new(
+                        projectatlas_core::IndexCancellation::new(),
+                        None,
+                    ),
+                );
+                assert!(result.is_ok(), "{result:?}");
+                let Ok(extracted) = result else {
+                    return;
+                };
+                let graph = extracted.graph();
+                let imports = graph
+                    .relations
+                    .iter()
+                    .filter(|relation| relation.kind == RelationKind::Imports)
+                    .collect::<Vec<_>>();
+                let expected_unsupported = usize::from(language != "html");
+                assert_eq!(
+                    imports.len(),
+                    2 + expected_unsupported,
+                    "{language}: {first}: {imports:?}"
+                );
+                assert_eq!(
+                    extracted.semantics().imports().len(),
+                    2,
+                    "unsupported region gained native proof"
+                );
+                for import in extracted.semantics().imports() {
+                    assert_eq!(
+                        graph.relations[import.relation].parser,
+                        ParserKind::TreeSitter,
+                        "AST-owned import retained rescue trust"
+                    );
+                }
+                assert_eq!(extracted.semantics().calls().len(), 2);
+                for call in extracted.semantics().calls() {
+                    assert_eq!(
+                        graph.relations[call.relation].parser,
+                        ParserKind::TreeSitter,
+                        "AST-owned call retained rescue trust"
+                    );
+                }
+                if expected_unsupported != 0 {
+                    assert!(imports.iter().any(|relation| {
+                        relation.target_name.contains("unprojected.js")
+                            && relation.parser != ParserKind::TreeSitter
+                    }));
+                }
+                assert!(
+                    imports
+                        .iter()
+                        .all(|relation| !relation.target_name.contains("export {first")),
+                    "whole-line rescue retained sibling statements"
+                );
+                let graph_only = extract_symbol_graph(path, Some(language), &content);
+                assert_eq!(
+                    graph_only.relations, graph.relations,
+                    "graph-only and typed host paths diverged"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn typescript_nested_locals_do_not_inherit_exported_parent() {
         let source = r#"
 export function useAtlas() {
@@ -4554,7 +5510,7 @@ const retryCount = ref(0);
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Imports
                 && relation.target_name.contains("computed")
-                && relation.parser == ParserKind::Structural
+                && relation.parser == ParserKind::TreeSitter
         }));
         assert!(
             graph
@@ -4863,6 +5819,70 @@ func helper() {
         assert!(graph.relations.iter().any(|relation| {
             relation.kind == RelationKind::Imports && relation.target_name.contains("\"fmt\"")
         }));
+    }
+
+    #[test]
+    fn braced_container_names_exclude_bodies_and_retain_declaration_parents() {
+        for (language, source, namespace, child) in [
+            (
+                "csharp",
+                "namespace N { class C { static void Run() {} } }",
+                "N",
+                Some("C"),
+            ),
+            (
+                "csharp",
+                "namespace A.B {\n class C {}\n}",
+                "A.B",
+                Some("C"),
+            ),
+            ("csharp", "namespace @N { class C {} }", "@N", Some("C")),
+            ("csharp", "namespace N;\nclass C {}", "N", None),
+            (
+                "java",
+                "module atlas.core { exports atlas.api; }",
+                "atlas.core",
+                None,
+            ),
+            ("java", "package atlas.core; class C {}", "atlas.core", None),
+            ("go", "package atlas\nfunc run() {}", "atlas", None),
+            (
+                "kotlin",
+                "package atlas.core\nclass C {}",
+                "atlas.core",
+                None,
+            ),
+            ("cpp", "namespace N { class C {}; }", "N", Some("C")),
+        ] {
+            let graph = extract_symbol_graph("containers.source", Some(language), source);
+            assert!(
+                graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Module && symbol.name == namespace),
+                "{language}: {graph:?}"
+            );
+            if let Some(child) = child {
+                assert!(
+                    graph.symbols.iter().any(|symbol| symbol.name == child
+                        && symbol.parent.as_deref() == Some(namespace)),
+                    "{language}: {graph:?}"
+                );
+            }
+        }
+        for (language, source) in [
+            ("csharp", "namespace { class C {} }"),
+            ("java", "module { exports atlas.api; }"),
+        ] {
+            let graph = extract_symbol_graph("malformed.source", Some(language), source);
+            assert!(
+                !graph
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == SymbolKind::Module),
+                "{language}: {graph:?}"
+            );
+        }
     }
 
     #[test]

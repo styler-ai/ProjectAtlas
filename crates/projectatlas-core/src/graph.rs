@@ -1470,6 +1470,15 @@ impl CanonicalResolutionKey {
         &self.canonical_identity
     }
 
+    /// Return the allocated collision-witness bytes owned by this key.
+    ///
+    /// This includes spare string capacity and excludes the inline key value,
+    /// whose storage belongs to its owning vector or map.
+    #[must_use]
+    pub const fn retained_heap_bytes(&self) -> u64 {
+        self.canonical_identity.capacity() as u64
+    }
+
     /// Remove project qualification while retaining the exact canonical
     /// resolver material needed to rebind a derived graph snapshot.
     ///

@@ -58,6 +58,14 @@ cargo run --locked -p projectatlas-cli -- --format json scan .
 cargo run --locked -p projectatlas-cli -- lint --report-untracked --purpose-level low
 ```
 
+The shared Rust preflight prefers canonical Cargo-home proxies and accepts native
+package-managed bundles only after exact Rustup backing checks. On macOS,
+installation can prepare Homebrew's native libexec aliases after matching every
+selected wrapper to that exact formula. Version, override and commit checks remain
+required. Successful hosted preparation carries the native path and Homebrew
+fallback settings to later steps; read-only checks and offline self-tests do not
+publish environment changes.
+
 ## Rust dependency management
 
 The root `[workspace.dependencies]` table owns every direct dependency version used by the seven ProjectAtlas workspace crates. Member manifests inherit those entries with `workspace = true`; fixture manifests remain independent because they model repositories ProjectAtlas scans rather than packages ProjectAtlas builds.
@@ -215,6 +223,14 @@ RELEASE_VERSION=v0.5.0
 - If a publish run fails after creating a tag or leaves a GitHub release with missing or stale assets, rerun the release workflow for the same exact version. Repair is accepted only when the existing non-draft release classification and tag head match the derived stable/RC policy; replaceable assets may then be repaired without moving the tag or changing classification, while validated immutable seed assets are never clobbered. If interruption left exactly one seed-pair member, recovery also requires the complete staged pair and exact byte equality, then uploads only the missing companion. The workflow rechecks release metadata, exact head, and requires the previously captured Latest release to remain unchanged during repair.
 
 ## CI behavior
+
+- The accepted-base planner owns logical platform and contract selection; the
+  current workflow owns supported runner provisioning. CI provisions the
+  `macos-arm64` row on the explicit `macos-15` ARM image even when an older
+  accepted planner retains a retiring image pin. Intel stays on
+  `macos-15-intel`. The submitted planner, bootstrap matrix, release package,
+  installed/post-publication and unsupported parser-pack matrices retain those
+  same separate architectures. Image maintenance does not narrow proof coverage.
 
 - `01-CI` plans from the exact base-to-head diff, runs selected repository,
   affected Rust package or test-target, and platform contracts concurrently, and

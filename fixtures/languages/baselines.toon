@@ -24,7 +24,7 @@ summaries[28]{path,language,parser_kind,status,min_symbols,summary}:
   json/package.json,json,structural,ok,0,package manifest for demo with scripts test and 1 dependencies.
   yaml/workflow.yml,yaml,structural,ok,0,"yaml workflow CI triggered by pull_request, push with jobs test."
   css/tokens.css,css,structural,ok,0,"css stylesheet with selectors .card, .panel, :root, custom properties --brand, 1 media queries, and 0 supports queries."
-  html/index.html,html,structural,ok,0,"html document with title Home, meta description Welcome page, headings Hello, structured data."
+  html/index.html,html,structural-symbol-graph,ok,0,"html document with title Home, meta description Welcome page, headings Hello, structured data."
   groovy/build.gradle,groovy,fallback-symbol-graph,fallback,4,"groovy source defining functions bootRunSmoke, cleanE2E, copyGroovyReports, publishE2E."
   rust/empty.rs,rust,tree-sitter-symbol-graph,ok,0,rust source file with no declarations found.
   toon/projectatlas-nonsource-files.toon,toon,structural,ok,0,TOON document with sections nonsource_files.
