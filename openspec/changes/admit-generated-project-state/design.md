@@ -208,7 +208,8 @@ entries retain their subjects; test the mode/ACL-mask ordering. Linux reuses loc
 xattr to copy kernel-owned POSIX/NFSv4 ACL values without decoding them; remove a
 stage's inherited ACL when absent on the source. A source query that proves the
 namespace unsupported does not authorize ignoring a successfully captured ACL.
-macOS uses exacl's ordered extended-ACL representation. Verify native roundtrips.
+macOS retains opaque native extended ACLs through descriptors; exacl provides only
+an independent path-based test oracle. Verify native roundtrips.
 
 Windows uses safe handle-based windows-permissions APIs with READ_CONTROL on the
 source and appropriate WRITE_DAC/WRITE_OWNER rights on the stage. Acquire stage
@@ -256,11 +257,55 @@ safe windows-permissions dependency, which retains bitflags 1; the dependency ba
 exception is exact and justified by safe handle/OsStr compatibility. Alternatives
 using in-place writes violate hardlink/atomicity guarantees; a common ReplaceFile
 wrapper accepts only str paths and has different partial-publication failures.
-Apart from the isolated macOS descriptor ACL exception below, no project unsafe
-code, shell runtime dependency, global ACL change, or blanket ban
+Apart from the isolated macOS descriptor ACL and Windows control-getter exceptions
+below, no project unsafe code, shell runtime dependency, global ACL change, or blanket ban
 on regeneration is introduced. Native failures keep the old valid output; do not
 fall back to a publication that drops access controls. All platform-specific proof
 and dependency gates remain required; current Linux evidence is not Windows proof.
+
+### Preserve Windows system policy without blanket privilege requirements
+
+The native Windows publisher must also preserve SACL policy: mandatory integrity,
+audit entries and other system-policy ACEs belong to the replaced object, not the
+new stage's inherited defaults. Querying only owner/group/DACL is insufficient.
+Try a no-follow retained source handle with ACCESS_SYSTEM_SECURITY; fall back to
+the existing READ_CONTROL handle only for native access/privilege denial. Never
+enable privileges process-wide or require them for ordinary no-SACL regeneration.
+
+With full access, capture SACL plus LABEL through that handle, preserving opaque
+ordered ACEs and native SACL control state. Without it, use a LABEL-only query's
+native control word to prove the original SACL is absent. MS-FSA 2.1.5.14 preserves
+the original SACL-present/control bits while filtering audit ACEs from that query:
+an empty filtered ACE list is not proof that a present SACL contains no auditing.
+Require the no-privilege stage to prove absent policy too; otherwise refuse before
+payload I/O. Keep create-only workflows and ordinary unlabeled replacement usable.
+If full policy cannot be queried/copied, retain valid output rather than publishing
+weaker policy. Explicitly labeled/audited replacement can therefore require already
+available SACL rights; this limitation must be documented and proved natively.
+
+Acquire any full SACL rights on the original stage creation handle. Apply through
+that retained handle only, guard present-null SACLs from the wrapper's panicking
+accessor, and verify ordered entries and control state before payload writes.
+Retain strict SACL AI comparison until native evidence proves a safe normalization;
+the earlier DACL normalization does not establish SACL behavior. Recheck source
+system policy alongside owner/group/DACL immediately before replacement.
+
+The independent reviewer approved a second tiny platform-local unsafe exception:
+GetSecurityDescriptorControl in a private Windows security module, borrowing the
+opaque descriptor returned by windows-permissions. Check BOOL and descriptor
+revision; introduce no parser, descriptor-layout cast, dependency or privilege
+toggle. The canonical safe wrapper has no control getter, and SDDL omits
+SE_SACL_DEFAULTED. Inspect that bit and refuse a defaulted SACL because the current
+SetSecurityInfo adapter cannot reproduce it. Workspace unsafe denial remains
+unchanged elsewhere. Native tests must prove ordinary source/stage absence,
+filtered audit presence, label-only and mixed audit/label policy, available and
+unavailable privilege, inherited stage mismatch, outside hardlinks, source-policy
+changes and retained-handle substitution. Do not claim ReFS or defaulted-file
+fixture coverage without actual proof.
+
+Primary references: Microsoft's SECURITY_INFORMATION, SECURITY_DESCRIPTOR_CONTROL,
+GetSecurityDescriptorControl and MS-FSA 2.1.5.14 documentation. This is an access
+policy correction, not a general promise to clone every Windows file attribute.
 
 ### Prepare native policy before exposing replacement payloads
 
@@ -400,8 +445,9 @@ only if implementation changes a derived-data contract.
 
 Reuse existing same-file handles and tempfile publication. A direct Windows-only
 winapi-util dependency reuses the already locked canonical utility solely for stable
-hard-link counts; the sole native binding exception is the macOS ACL owner above;
-do not add unrelated unsafe bindings or unstable std APIs. Ordinary
+hard-link counts; native binding exceptions are the macOS ACL owner and the tiny
+Windows descriptor-control getter above; do not add unrelated unsafe bindings or
+unstable std APIs. Ordinary
 DB admission stays constant in the fixed product file family and does not index,
 parse or walk source trees. Preserve valid generated-file permissions and document
 bounded retention when changed ownership makes automatic staging cleanup unsafe.

@@ -17,6 +17,10 @@ mod macos_access;
 #[path = "project_state_macos_acl.rs"]
 mod macos_acl;
 
+#[cfg(windows)]
+#[path = "project_state_windows_security.rs"]
+mod windows_security;
+
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";
 /// Automatic SQLite filename whose aliases must be checked before opening SQLite.
@@ -497,7 +501,13 @@ impl ProjectStateGuard {
             let mut temporary = builder.tempfile_in(staging_directory)?;
             #[cfg(windows)]
             let mut temporary = builder.make_in(staging_directory, |path| {
-                create_windows_staging_file(path, metadata.is_some())
+                create_windows_staging_file(
+                    path,
+                    metadata.is_some(),
+                    access
+                        .as_ref()
+                        .is_some_and(|access| access.security.system.needs_system_access()),
+                )
             })?;
             #[cfg(target_os = "linux")]
             let content_prepared = if let Some(access) = &access {
@@ -569,6 +579,10 @@ impl ProjectStateGuard {
                     .map_err(|source| {
                         publication_failure("recheck staged file before publication", source)
                     })?;
+                #[cfg(windows)]
+                if let Some(access) = &access {
+                    access.security.system.verify(temporary.as_file())?;
+                }
                 #[cfg(target_os = "linux")]
                 if let Some(access) = &access
                     && !access.matches(temporary.as_file())?
@@ -762,6 +776,10 @@ impl ProjectStateGuard {
             // not depend on a filesystem's optional POSIX-delete support.
             let mut permissions = temporary.as_file().metadata()?.permissions();
             if permissions.readonly() {
+                #[expect(
+                    clippy::permissions_set_readonly_false,
+                    reason = "Windows clears only the readonly attribute on the verified held stage"
+                )]
                 permissions.set_readonly(false);
                 temporary.as_file().set_permissions(permissions)?;
                 self.verify_staging_file(temporary, directory_identity)?;
@@ -792,9 +810,9 @@ struct ReplacementSource {
     /// Opaque macOS extended ACL, preserving ordered entries and native flags.
     #[cfg(target_os = "macos")]
     acl: macos_acl::AccessAcl,
-    /// Windows owner, group and complete DACL, excluding privileged SACL access.
+    /// Windows discretionary policy and complete or proven-absent system policy.
     #[cfg(windows)]
-    security: std::ffi::OsString,
+    security: WindowsAccessSnapshot,
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -816,22 +834,39 @@ impl ReplacementSource {
             )
         };
         #[cfg(windows)]
-        let file = {
+        let (file, complete_system_access) = {
             use std::os::windows::fs::OpenOptionsExt;
             use windows_permissions::constants::AccessRights;
             const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
             const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-            fs::OpenOptions::new()
-                .access_mode(AccessRights::ReadControl.bits() | FILE_READ_ATTRIBUTES)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(path)?
+            let open = |system| {
+                fs::OpenOptions::new()
+                    .access_mode(
+                        AccessRights::ReadControl.bits()
+                            | FILE_READ_ATTRIBUTES
+                            | if system {
+                                AccessRights::AccessSystemSecurity.bits()
+                            } else {
+                                0
+                            },
+                    )
+                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(path)
+            };
+            match open(true) {
+                Ok(file) => (file, true),
+                Err(source) if matches!(source.raw_os_error(), Some(5 | 1314)) => {
+                    (open(false)?, false)
+                }
+                Err(source) => return Err(source),
+            }
         };
         require_regular(path, &file.metadata()?)?;
         let identity = Handle::from_file(file.try_clone()?)?;
         #[cfg(target_os = "macos")]
         let acl = macos_access::get_acl(&file)?;
         #[cfg(windows)]
-        let security = windows_access_snapshot(&file)?;
+        let security = windows_access_snapshot(&file, complete_system_access)?;
         let source = Self {
             file,
             identity,
@@ -875,7 +910,8 @@ impl ReplacementSource {
             require_regular(path, &current.metadata()?)?;
             Handle::from_file(current)? == self.identity
                 && self.file.metadata()?.permissions() == self.metadata.permissions()
-                && windows_access_snapshot(&self.file)? == self.security
+                && windows_access_snapshot(&self.file, self.security.system.needs_system_access())?
+                    == self.security
         };
         if !matches {
             return Err(refusal(path, "destination object or access policy changed"));
@@ -899,7 +935,10 @@ impl ReplacementSource {
             macos_access::set_acl(staged.as_file(), &self.acl)?;
         }
         #[cfg(windows)]
-        preserve_windows_access(path, &self.file, staged)?;
+        {
+            self.security.system.apply(staged.as_file())?;
+            preserve_windows_access(path, &self.file, staged)?;
+        }
         // Ownership changes can clear mode bits. Restore mode after ownership/ACL.
         staged
             .as_file()
@@ -943,7 +982,11 @@ fn preserve_replacement_access(
 
 /// Create an exclusive data handle with policy rights bound to the original stage.
 #[cfg(windows)]
-fn create_windows_staging_file(path: &Path, replacing: bool) -> io::Result<fs::File> {
+fn create_windows_staging_file(
+    path: &Path,
+    replacing: bool,
+    system_access: bool,
+) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_permissions::constants::AccessRights;
     let mut rights = (AccessRights::GenericRead | AccessRights::GenericWrite).bits();
@@ -953,6 +996,9 @@ fn create_windows_staging_file(path: &Path, replacing: bool) -> io::Result<fs::F
         // regular file, so SetSecurityInfo has no child propagation to suppress.
         const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
         rights |= (AccessRights::ReadControl | AccessRights::WriteDac).bits() | MAXIMUM_ALLOWED;
+    }
+    if system_access {
+        rights |= AccessRights::AccessSystemSecurity.bits();
     }
     // Deny competing data handles before native policy is copied; allow rename.
     fs::OpenOptions::new()
@@ -964,9 +1010,22 @@ fn create_windows_staging_file(path: &Path, replacing: bool) -> io::Result<fs::F
         .open(path)
 }
 
-/// Capture owner/group/DACL through the retained file without requesting SACL privilege.
+/// Discretionary access and a complete or proven-absent system-policy snapshot.
 #[cfg(windows)]
-fn windows_access_snapshot(file: &fs::File) -> io::Result<std::ffi::OsString> {
+#[derive(PartialEq, Eq)]
+struct WindowsAccessSnapshot {
+    /// Native owner/group/DACL comparison image.
+    discretionary: std::ffi::OsString,
+    /// Opaque system policy and native controls.
+    system: windows_security::SystemPolicy,
+}
+
+/// Capture native policy without changing the caller's enabled privileges.
+#[cfg(windows)]
+fn windows_access_snapshot(
+    file: &fs::File,
+    complete_system_access: bool,
+) -> io::Result<WindowsAccessSnapshot> {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::{
         ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo,
@@ -974,7 +1033,10 @@ fn windows_access_snapshot(file: &fs::File) -> io::Result<std::ffi::OsString> {
     let information =
         SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
     let access = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, information)?;
-    ConvertSecurityDescriptorToStringSecurityDescriptor(&access, information)
+    Ok(WindowsAccessSnapshot {
+        discretionary: ConvertSecurityDescriptorToStringSecurityDescriptor(&access, information)?,
+        system: windows_security::SystemPolicy::capture(file, complete_system_access)?,
+    })
 }
 
 /// Copy the destination DACL and inheritance policy using native file handles.
@@ -1198,17 +1260,28 @@ fn direct_directory_spelling(path: &Path, directory: &Path) -> io::Result<bool> 
     let Some(name) = directory.file_name().and_then(std::ffi::OsStr::to_str) else {
         return Ok(false);
     };
+    // Verbatim Windows paths with literal parent reductions can fail lookup
+    // with ERROR_INVALID_NAME. Let the owning existing-prefix fallback resolve
+    // them; this is not evidence of external ownership or permission denial.
+    let unresolved = |source: &io::Error| {
+        source.kind() == io::ErrorKind::NotFound
+            || (cfg!(windows) && source.raw_os_error() == Some(123))
+    };
     // A selected root can have arbitrary Unicode, unlike the product names.
     // Prove existing direct directory aliases by object identity, not by a
     // modern Unicode fold. Never use this proof for managed file leaves.
-    if (!name.is_ascii()
+    let unicode = !name.is_ascii()
         || path
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| !name.is_ascii()))
-        && same_direct_directory(path, directory)?
-    {
-        return Ok(true);
+            .is_some_and(|name| !name.is_ascii());
+    if unicode {
+        match same_direct_directory(path, directory) {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(source) if unresolved(&source) => {}
+            Err(source) => return Err(source),
+        }
     }
     if !fixed_name_candidate(path, name)? {
         return Ok(false);
@@ -1218,7 +1291,7 @@ fn direct_directory_spelling(path: &Path, directory: &Path) -> io::Result<bool> 
         (Ok(resolved), Some(parent)) => {
             resolved == parent || same_direct_directory(&resolved, parent)?
         }
-        (Err(source), _) if source.kind() == io::ErrorKind::NotFound => false,
+        (Err(source), _) if unresolved(&source) => false,
         (Err(source), _) => return Err(source),
         (_, None) => false,
     };

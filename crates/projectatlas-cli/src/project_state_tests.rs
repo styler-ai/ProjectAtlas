@@ -1,5 +1,7 @@
 //! Causal ownership, publication and compatibility controls for generated state.
 
+#[cfg(windows)]
+use super::{CONFIG_FILE, JSON_MAP_FILE, LEGACY_CONFIG_FILE};
 use super::{DATABASE_FILE, FilePublication, HOST_FILES, ProjectStateGuard, STATE_DIRECTORY};
 use std::fs;
 use std::io;
@@ -916,79 +918,83 @@ fn generated_capture_propagates_unresolved_managed_inputs() -> io::Result<()> {
 #[cfg(any(unix, windows))]
 #[test]
 fn managed_classification_preserves_root_aliases_and_physical_external_parents() -> io::Result<()> {
-    let temp = tempfile::tempdir()?;
-    let root = temp.path().join("checkout");
-    let external = temp.path().join("external");
-    fs::create_dir(&root)?;
-    fs::create_dir_all(external.join("deep"))?;
-    let root = root.canonicalize()?;
-    let state = root.join(STATE_DIRECTORY);
-    fs::create_dir(&state)?;
-    let root_alias = root.with_file_name("root-alias");
-    directory_alias(&root, &root_alias)?;
-    directory_alias(&external.join("deep"), &root.join("shortcut"))?;
-    for (private, filename, database) in [
-        (true, DATABASE_FILE, true),
-        (true, super::CONFIG_FILE, false),
-        (false, super::LEGACY_CONFIG_FILE, false),
-        (true, super::JSON_MAP_FILE, false),
-        (false, super::GITIGNORE_FILE, false),
-    ] {
-        let alias_parent = if private {
-            root_alias.join(STATE_DIRECTORY)
-        } else {
-            root_alias.clone()
-        };
-        let admit = |path: &Path| {
-            if database {
-                ProjectStateGuard::preflight_database_path(path, &root)
+    for root_name in ["checkout", "checkout-É"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(root_name);
+        let external = temp.path().join("external");
+        fs::create_dir(&root)?;
+        fs::create_dir_all(external.join("deep"))?;
+        let root = root.canonicalize()?;
+        let state = root.join(STATE_DIRECTORY);
+        fs::create_dir(&state)?;
+        let root_alias = root.with_file_name("root-alias");
+        directory_alias(&root, &root_alias)?;
+        directory_alias(&external.join("deep"), &root.join("shortcut"))?;
+        for (private, filename, database) in [
+            (true, DATABASE_FILE, true),
+            (true, super::CONFIG_FILE, false),
+            (false, super::LEGACY_CONFIG_FILE, false),
+            (true, super::JSON_MAP_FILE, false),
+            (false, super::GITIGNORE_FILE, false),
+        ] {
+            let alias_parent = if private {
+                root_alias.join(STATE_DIRECTORY)
             } else {
-                ProjectStateGuard::preflight_document(&root, path)
+                root_alias.clone()
+            };
+            let admit = |path: &Path| {
+                if database {
+                    ProjectStateGuard::preflight_database_path(path, &root)
+                } else {
+                    ProjectStateGuard::preflight_document(&root, path)
+                }
+            };
+            require(
+                admit(&alias_parent.join(filename))?.is_some(),
+                "selected root alias lost managed ownership",
+            )?;
+            let unresolved = unreduced_path(&alias_parent, &["missing", "..", filename])?;
+            let parent_resolves =
+                fs::canonicalize(super::containing_directory(&unresolved)).is_ok();
+            let admission = admit(&unresolved);
+            require(
+                if parent_resolves {
+                    admission?.is_some()
+                } else {
+                    admission.is_err()
+                },
+                "root alias lost managed ownership under native parent resolution",
+            )?;
+            let mut components = vec!["shortcut", ".."];
+            if private {
+                components.push(STATE_DIRECTORY);
             }
-        };
-        require(
-            admit(&alias_parent.join(filename))?.is_some(),
-            "selected root alias lost managed ownership",
-        )?;
-        let unresolved = unreduced_path(&alias_parent, &["missing", "..", filename])?;
-        let parent_resolves = fs::canonicalize(super::containing_directory(&unresolved)).is_ok();
-        let admission = admit(&unresolved);
-        require(
-            if parent_resolves {
-                admission?.is_some()
+            components.push(filename);
+            let physical = unreduced_path(&root, &components)?;
+            let managed_parent = if private {
+                state.as_path()
             } else {
-                admission.is_err()
-            },
-            "root alias lost managed ownership under native parent resolution",
-        )?;
-        let mut components = vec!["shortcut", ".."];
-        if private {
-            components.push(STATE_DIRECTORY);
+                root.as_path()
+            };
+            let resolves_managed = fs::canonicalize(super::containing_directory(&physical))
+                .is_ok_and(|resolved| resolved == managed_parent);
+            require(
+                admit(&physical)?.is_some() == resolves_managed,
+                "native physical parent resolution lost its actual owner",
+            )?;
+            let outside_missing =
+                unreduced_path(&external.canonicalize()?, &["missing", "..", filename])?;
+            require(
+                admit(&outside_missing)?.is_none(),
+                "ordinary missing external parent was restricted",
+            )?;
         }
-        components.push(filename);
-        let physical = unreduced_path(&root, &components)?;
-        let managed_parent = if private {
-            state.as_path()
-        } else {
-            root.as_path()
-        };
-        let resolves_managed = fs::canonicalize(super::containing_directory(&physical))
-            .is_ok_and(|resolved| resolved == managed_parent);
         require(
-            admit(&physical)?.is_some() == resolves_managed,
-            "native physical parent resolution lost its actual owner",
-        )?;
-        let outside_missing =
-            unreduced_path(&external.canonicalize()?, &["missing", "..", filename])?;
-        require(
-            admit(&outside_missing)?.is_none(),
-            "ordinary missing external parent was restricted",
+            !external.join("missing").exists() && !external.join(STATE_DIRECTORY).exists(),
+            "classification created external parents",
         )?;
     }
-    require(
-        !external.join("missing").exists() && !external.join(STATE_DIRECTORY).exists(),
-        "classification created external parents",
-    )
+    Ok(())
 }
 
 /// Create a directory alias through the platform's ordinary filesystem API.
@@ -2406,6 +2412,439 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
         .map_err(io::Error::other)
 }
 
+/// Native fixture setup/oracle and privilege changes confined to child processes.
+#[cfg(windows)]
+const WINDOWS_SYSTEM_POLICY_FIXTURE: &str = r#"
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class SystemPolicyFixture {
+  [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
+  [StructLayout(LayoutKind.Sequential)] struct Privilege { public uint Count; public Luid Id; public uint Attributes; }
+  [StructLayout(LayoutKind.Sequential)] struct AclSize { public uint Count; public uint Used; public uint Free; }
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool LookupPrivilegeValue(string system, string name, out Luid id);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref Privilege state, uint length, IntPtr previous, IntPtr returned);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode)] static extern uint GetNamedSecurityInfo(string path, uint kind, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode)] static extern uint SetNamedSecurityInfo(string path, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string text, uint revision, out IntPtr descriptor, out uint length);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(IntPtr descriptor, uint revision, uint information, out IntPtr text, out uint length);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor, out bool present, out IntPtr sacl, out bool defaulted);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetAclInformation(IntPtr acl, out AclSize size, uint length, uint information);
+  public static void Enable(bool enabled) {
+    IntPtr token;
+    if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
+    try {
+      Luid id;
+      if (!LookupPrivilegeValue(null, "SeSecurityPrivilege", out id)) throw new Win32Exception();
+      Privilege state=new Privilege { Count=1, Id=id, Attributes=enabled ? 2u : 0u };
+      if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+      int error=Marshal.GetLastWin32Error();
+      if (error != 0) throw new Win32Exception(error);
+    } finally { CloseHandle(token); }
+  }
+  public static string Policy(string path, string replacement, uint query) {
+    IntPtr descriptor=IntPtr.Zero, text=IntPtr.Zero;
+    uint length, revision; ushort control;
+    try {
+      if (!String.IsNullOrEmpty(replacement)) {
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(replacement, 1, out descriptor, out length)) throw new Win32Exception();
+        bool present, defaulted; IntPtr sacl;
+        if (!GetSecurityDescriptorSacl(descriptor, out present, out sacl, out defaulted)) throw new Win32Exception();
+        if (!GetSecurityDescriptorControl(descriptor, out control, out revision)) throw new Win32Exception();
+        uint flags=0x18u | ((control & 0x2000) != 0 ? 0x40000000u : 0x10000000u);
+        uint error=SetNamedSecurityInfo(path, 1, flags, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
+        if (error != 0) throw new Win32Exception((int)error);
+        LocalFree(descriptor); descriptor=IntPtr.Zero;
+      }
+      IntPtr owner, group, dacl, system;
+      uint result=GetNamedSecurityInfo(path, 1, query, out owner, out group, out dacl, out system, out descriptor);
+      if (result != 0) throw new Win32Exception((int)result);
+      if (!GetSecurityDescriptorControl(descriptor, out control, out revision)) throw new Win32Exception();
+      if (revision != 1) throw new Exception("Unexpected descriptor revision");
+      bool exists, wasDefaulted; IntPtr acl;
+      if (!GetSecurityDescriptorSacl(descriptor, out exists, out acl, out wasDefaulted)) throw new Win32Exception();
+      string kind=!exists ? "absent" : acl == IntPtr.Zero ? "null" : "allocated";
+      uint count=0;
+      if (acl != IntPtr.Zero) {
+        AclSize size;
+        if (!GetAclInformation(acl, out size, (uint)Marshal.SizeOf(typeof(AclSize)), 2)) throw new Win32Exception();
+        count=size.Count;
+      }
+      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, 8, out text, out length)) throw new Win32Exception();
+      return (control & 0x2a30).ToString("x") + "|" + kind + "|" + count + "|" + Marshal.PtrToStringUni(text);
+    } finally {
+      if (text != IntPtr.Zero) LocalFree(text);
+      if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+    }
+  }
+}
+'@
+$mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE
+if ($mode -eq 'query') {
+  [SystemPolicyFixture]::Enable($true)
+  [SystemPolicyFixture]::Policy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_SYSTEM_POLICY,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
+} else {
+  [SystemPolicyFixture]::Enable($mode -eq 'complete')
+  & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_system_policy_replacement_preserves_or_refuses_without_global_privilege_changes --nocapture
+  exit $LASTEXITCODE
+}
+"#;
+
+/// Independently query or prepare SACL policy through native named SDK calls.
+#[cfg(windows)]
+fn windows_system_policy(path: &Path, policy: Option<&str>) -> io::Result<String> {
+    windows_system_policy_query(path, policy, 0x18)
+}
+
+/// Compare full versus filtered native queries without sharing the product adapter.
+#[cfg(windows)]
+fn windows_system_policy_query(
+    path: &Path,
+    policy: Option<&str>,
+    information: u32,
+) -> io::Result<String> {
+    let result = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINDOWS_SYSTEM_POLICY_FIXTURE,
+        ])
+        .env("PROJECTATLAS_TEST_SYSTEM_POLICY_MODE", "query")
+        .env(
+            "PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY",
+            information.to_string(),
+        )
+        .env("PROJECTATLAS_TEST_ACL_PATH", path)
+        .env("PROJECTATLAS_TEST_SYSTEM_POLICY", policy.unwrap_or(""))
+        .output()?;
+    require(
+        result.status.success(),
+        &format!("native SACL fixture failed: {result:?}"),
+    )?;
+    String::from_utf8(result.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(io::Error::other)
+}
+
+/// Ordinary replacement needs no SACL privilege; nonempty policy is never dropped.
+#[cfg(windows)]
+#[test]
+fn windows_system_policy_replacement_preserves_or_refuses_without_global_privilege_changes()
+-> io::Result<()> {
+    use std::io::Write;
+    const MODE: &str = "PROJECTATLAS_TEST_SYSTEM_POLICY_MODE";
+    let mode = std::env::var(MODE).ok();
+    if !matches!(mode.as_deref(), Some("complete" | "unprivileged")) {
+        for mode in ["complete", "unprivileged"] {
+            let child = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_SYSTEM_POLICY_FIXTURE,
+                ])
+                .env(MODE, mode)
+                .env(
+                    "PROJECTATLAS_TEST_SYSTEM_POLICY_EXE",
+                    std::env::current_exe()?,
+                )
+                .output()?;
+            require(
+                child.status.success(),
+                &format!("native SACL {mode} child failed: {child:?}"),
+            )?;
+        }
+        return Ok(());
+    }
+    let complete = mode.as_deref() == Some("complete");
+    // The unprivileged child has SeSecurityPrivilege explicitly disabled, so
+    // this positive cannot be satisfied accidentally by the runner's privileges.
+    let ordinary = tempfile::tempdir()?;
+    let root = ordinary.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    fs::write(&output, b"ordinary previous output")?;
+    require(
+        windows_system_policy(&output, None)?.starts_with("0|absent|0|"),
+        "ordinary fixture did not prove absent system policy",
+    )?;
+    let captured = super::ReplacementSource::capture(&output, &fs::symlink_metadata(&output)?)?;
+    require(
+        captured.security.system.needs_system_access() == complete,
+        "native child did not establish the requested SACL privilege state",
+    )?;
+    drop(captured);
+    guard.write_generated(&output, b"ordinary replacement")?;
+    require(
+        fs::read(&output)? == b"ordinary replacement",
+        "ordinary regeneration required SACL privilege",
+    )?;
+    if complete {
+        let control = guard.directory.join("former-system-policy-publication");
+        fs::write(&control, b"original control")?;
+        let previous = windows_system_policy(&control, Some("S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)"))?;
+        let mut stage = tempfile::Builder::new().make_in(&guard.directory, |path| {
+            super::create_windows_staging_file(path, true, false)
+        })?;
+        {
+            let source = fs::File::open(&control)?;
+            // The former adapter preserved DACLs but omitted system policy.
+            super::preserve_windows_access(&control, &source, &stage)?;
+        }
+        stage.write_all(b"former replacement")?;
+        stage.persist(&control).map_err(|failure| failure.error)?;
+        require(
+            windows_system_policy(&control, None)? != previous,
+            "former DACL-only publisher did not reproduce SACL policy loss",
+        )?;
+        fs::remove_file(control)?;
+    }
+
+    let roles = HOST_FILES.iter().map(|name| (true, true, *name)).chain([
+        (false, true, CONFIG_FILE),
+        (false, false, LEGACY_CONFIG_FILE),
+        (false, true, JSON_MAP_FILE),
+    ]);
+    for (host, private, filename) in roles {
+        let extra: &[&str] = if host && filename == HOST_FILES[0] {
+            &["S:", "S:P", "S:NO_ACCESS_CONTROL", "S:(AU;SAFA;FW;;;WD)"]
+        } else {
+            &[]
+        };
+        for policy in [
+            "S:P(ML;;NW;;;HI)",
+            "S:P(AU;SAFA;FW;;;WD)",
+            "S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)",
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = if private {
+                root.join(STATE_DIRECTORY)
+            } else {
+                root.clone()
+            };
+            fs::create_dir_all(&directory)?;
+            let output = directory.join(filename);
+            fs::write(&output, b"previous complete output")?;
+            let before = windows_system_policy(&output, Some(policy))?;
+            let native: Vec<_> = before.splitn(4, '|').collect();
+            require(
+                native.len() == 4,
+                "native system policy oracle is incomplete",
+            )?;
+            let control = u16::from_str_radix(native[0], 16).map_err(io::Error::other)?;
+            if matches!(policy, "S:" | "S:P") {
+                require(
+                    control & 0x10 != 0
+                        && (control & 0x2000 != 0) == (policy == "S:P")
+                        && native[1] == "allocated"
+                        && native[2] == "0",
+                    &format!("empty SACL fixture normalized to another native class: {before}"),
+                )?;
+            } else if policy == "S:NO_ACCESS_CONTROL" {
+                require(
+                    control & 0x10 != 0 && native[1] == "null" && native[2] == "0",
+                    &format!("NULL SACL fixture normalized to another native class: {before}"),
+                )?;
+            }
+            require(
+                (!policy.contains("(AU;") || before.contains("(AU;"))
+                    && (!policy.contains("(ML;") || before.contains("(ML;")),
+                "native SACL fixture did not retain its intended ACE classes",
+            )?;
+            let filtered = windows_system_policy_query(&output, None, 0x10)?;
+            let flags = filtered
+                .split('|')
+                .next()
+                .ok_or_else(|| io::Error::other("missing native SACL flags"))?;
+            let flags = u16::from_str_radix(flags, 16).map_err(io::Error::other)?;
+            if policy.contains('(') {
+                require(flags & 0x10 != 0, "label query lost original SACL presence")?;
+            }
+            if policy == "S:P(AU;SAFA;FW;;;WD)" {
+                require(
+                    !filtered.contains("(AU;"),
+                    "label query unexpectedly exposed audit ACEs",
+                )?;
+            }
+            let outside = root.join("outside-system-policy-owner");
+            fs::hard_link(&output, &outside)?;
+            let mut guard = if host {
+                ProjectStateGuard::preflight(&root, None, None)?
+            } else {
+                ProjectStateGuard::preflight_document(&root, &output)?
+                    .ok_or_else(|| io::Error::other("system-policy document was not admitted"))?
+            };
+            let entries = fs::read_dir(&directory)?.count();
+            let replaced = if host {
+                guard.write_generated(&output, b"preserved system-policy replacement")
+            } else {
+                guard.write_document(b"preserved system-policy replacement")
+            };
+            if complete || flags == 0 {
+                replaced?;
+                require(
+                    fs::read(&output)? == b"preserved system-policy replacement",
+                    "full-policy regeneration failed",
+                )?;
+            } else {
+                require(
+                    replaced.is_err() && fs::read(&output)? == b"previous complete output",
+                    "unprivileged replacement dropped an unknown SACL",
+                )?;
+            }
+            require(
+                windows_system_policy(&output, None)? == before
+                    && windows_system_policy(&outside, None)? == before
+                    && fs::read(&outside)? == b"previous complete output"
+                    && fs::read_dir(&directory)?.count() == entries,
+                "replacement changed system policy, outside bytes or staging entries",
+            )?;
+        }
+    }
+    windows_system_policy_failure_controls(complete)?;
+    Ok(())
+}
+
+/// Exercise hidden inherited stage policy, source changes and held-object setters.
+#[cfg(windows)]
+fn windows_system_policy_failure_controls(complete: bool) -> io::Result<()> {
+    const ORIGINAL: &str = "S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)";
+    const CHANGED: &str = "S:P(AU;SAFA;FR;;;WD)(ML;;NW;;;HI)";
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    let outside = root.join("outside-stage-policy-owner");
+    // Move an unlabeled file into an audited parent without changing its own
+    // policy. Only the newly created stage must inherit that audit SACL.
+    fs::write(&outside, b"previous complete output")?;
+    let absent = windows_system_policy(&outside, None)?;
+    windows_system_policy(&guard.directory, Some("S:P(AU;OICIIOSAFA;FW;;;WD)"))?;
+    fs::rename(&outside, &output)?;
+    require(
+        windows_system_policy(&output, None)? == absent,
+        "native move fixture did not retain absent source policy",
+    )?;
+    let probe = guard.directory.join("inherited-system-policy-control");
+    fs::write(&probe, b"empty-policy probe")?;
+    require(
+        windows_system_policy(&probe, None)? != absent,
+        "native stage parent did not supply inherited system policy",
+    )?;
+    fs::remove_file(probe)?;
+    let entries = fs::read_dir(&guard.directory)?.count();
+    let result = guard.write_generated(&output, b"replacement");
+    if !complete {
+        require(
+            result.is_err(),
+            "unprivileged stage inherited hidden audit policy",
+        )?;
+    }
+    let bytes: &[u8] = if result.is_ok() {
+        b"replacement"
+    } else {
+        b"previous complete output"
+    };
+    require(
+        fs::read(&output)? == bytes
+            && windows_system_policy(&output, None)? == absent
+            && fs::read_dir(&guard.directory)?.count() == entries,
+        "inherited stage policy changed valid output or leaked staging",
+    )?;
+    if !complete {
+        return Ok(());
+    }
+
+    // A separate ordinary parent keeps source-change and substitution controls
+    // independent of the deliberately incompatible stage-inheritance fixture.
+    let isolated = tempfile::tempdir()?;
+    let root = isolated.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    fs::write(&output, b"last valid output")?;
+    windows_system_policy(&output, Some(ORIGINAL))?;
+    let entries = fs::read_dir(&guard.directory)?.count();
+    let mut changed = None;
+    let failed = guard.publish(
+        &output,
+        b"unpublished bytes",
+        FilePublication::Replace,
+        || {
+            changed = Some(windows_system_policy(&output, Some(CHANGED))?);
+            Ok(())
+        },
+    );
+    require(
+        failed.is_err()
+            && fs::read(&output)? == b"last valid output"
+            && Some(windows_system_policy(&output, None)?) == changed
+            && fs::read_dir(&guard.directory)?.count() == entries,
+        "source SACL change was overwritten or leaked staging",
+    )?;
+    let captured = super::ReplacementSource::capture(&output, &fs::symlink_metadata(&output)?)?;
+    let victim = root.join("foreign-system-policy-owner");
+    fs::write(&victim, b"foreign complete bytes")?;
+    let victim_policy = windows_system_policy(&victim, Some(ORIGINAL))?;
+    let staged = tempfile::Builder::new().make_in(&guard.directory, |path| {
+        super::create_windows_staging_file(path, true, true)
+    })?;
+    let retained = guard.directory.join("retained-system-policy-stage");
+    fs::rename(staged.path(), &retained)?;
+    fs::hard_link(&victim, staged.path())?;
+    captured.security.system.apply(staged.as_file())?;
+    require(
+        Some(windows_system_policy(&retained, None)?) == changed
+            && windows_system_policy(&victim, None)? == victim_policy
+            && fs::read(&victim)? == b"foreign complete bytes",
+        "system ACL setter followed a substituted staging name",
+    )?;
+    fs::remove_file(staged.path())?;
+    fs::rename(retained, staged.path())?;
+    drop(staged);
+    drop(captured);
+
+    let stage_path = std::cell::RefCell::new(None);
+    let failed = guard.publish_with_stage_check(
+        &output,
+        b"unpublished bytes",
+        FilePublication::Replace,
+        |stage| {
+            *stage_path.borrow_mut() = Some(stage.path().to_path_buf());
+            Ok(())
+        },
+        || {
+            let path = stage_path.borrow();
+            let path = path
+                .as_ref()
+                .ok_or_else(|| io::Error::other("stage was not observed"))?;
+            windows_system_policy(path, Some(ORIGINAL))?;
+            Ok(())
+        },
+    );
+    require(
+        failed.is_err()
+            && fs::read(&output)? == b"last valid output"
+            && Some(windows_system_policy(&output, None)?) == changed
+            && fs::read_dir(&guard.directory)?.count() == entries,
+        "changed staging SACL was published or leaked staging",
+    )
+}
+
 /// The retained snapshot must survive checks and be released at the rename boundary.
 #[cfg(windows)]
 #[test]
@@ -2420,17 +2859,18 @@ fn source_snapshot_handles_are_released_before_windows_replacement() -> io::Resu
             if linked {
                 fs::hard_link(&output, root.join("outside-owner"))?;
             }
-            let query = if snapshot != "absent" {
+            let query = if snapshot == "absent" {
+                None
+            } else {
                 Some(super::ReplacementSource::capture(
                     &output,
                     &fs::symlink_metadata(&output)?,
                 )?)
-            } else {
-                None
             };
             let mut query = query;
-            let mut stage = tempfile::Builder::new()
-                .make_in(&root, |path| super::create_windows_staging_file(path, true))?;
+            let mut stage = tempfile::Builder::new().make_in(&root, |path| {
+                super::create_windows_staging_file(path, true, false)
+            })?;
             stage.write_all(b"complete replacement")?;
             if let Some(query) = &query {
                 query.verify_destination(&output)?;
@@ -2483,8 +2923,9 @@ fn windows_acl_updates_do_not_reopen_a_substituted_stage_name() -> io::Result<()
         "ACL substitution fixture has equal policies",
     )?;
     let snapshot = super::ReplacementSource::capture(&source, &fs::symlink_metadata(&source)?)?;
-    let mut stage = tempfile::Builder::new()
-        .make_in(&root, |path| super::create_windows_staging_file(path, true))?;
+    let mut stage = tempfile::Builder::new().make_in(&root, |path| {
+        super::create_windows_staging_file(path, true, false)
+    })?;
     let stage_name = stage.path().to_path_buf();
     let retained = root.join("retained-stage");
     fs::rename(&stage_name, &retained)?;
@@ -2507,7 +2948,7 @@ fn windows_acl_updates_do_not_reopen_a_substituted_stage_name() -> io::Result<()
     Ok(())
 }
 
-/// Copying an equal owner does not require otherwise denied WRITE_OWNER access.
+/// Copying an equal owner does not require otherwise denied `WRITE_OWNER` access.
 #[cfg(windows)]
 #[test]
 fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Result<()> {
@@ -2634,6 +3075,10 @@ fn failed_readonly_replacement_cleans_only_its_owned_stage() -> io::Result<()> {
     }
     // Restore only this fixture's original inode after checking preservation.
     let mut permissions = fs::metadata(&output)?.permissions();
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "This Windows fixture restores only its readonly attribute"
+    )]
     permissions.set_readonly(false);
     fs::set_permissions(&output, permissions)
 }
@@ -2702,6 +3147,10 @@ fn replacement_refuses_changed_windows_destination_identity_and_policy() -> io::
                     permissions.readonly(),
                     "changed readonly policy was overwritten",
                 )?;
+                #[expect(
+                    clippy::permissions_set_readonly_false,
+                    reason = "This Windows fixture changes only its readonly attribute"
+                )]
                 permissions.set_readonly(false);
                 fs::set_permissions(&output, permissions)?;
             }

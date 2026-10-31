@@ -26,7 +26,7 @@ pub(super) fn clear_acl(file: &fs::File) -> io::Result<()> {
 pub(super) struct ReplacementDirectory<'a> {
     /// Admission authority for the root and original publication directory.
     guard: &'a ProjectStateGuard,
-    /// Private same-volume directory; automatic TempDir cleanup is disabled.
+    /// Private same-volume directory; automatic `TempDir` cleanup is disabled.
     path: PathBuf,
     /// Retained identity prevents removing a substituted directory.
     identity: Handle,

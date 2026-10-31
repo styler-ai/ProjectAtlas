@@ -150,10 +150,16 @@ import through an alias.
 
 Replacement retains existing ownership and native file access controls: Linux
 POSIX/NFSv4 ACLs and SELinux/Smack file labels, macOS ordered ACLs, and Windows
-owner/group/DACL policy. A policy that cannot be preserved causes a causal refusal
-before valid output is replaced. Linux prepares changed policy and complete bytes
-on an unnamed inode; macOS isolates every existing-file replacement before native
-pathname ACL operations, using no-follow leaf ACL access.
+owner/group/DACL and system ACL policy. A policy that cannot be preserved causes a
+causal refusal before valid output is replaced. Linux prepares changed policy and
+complete bytes on an unnamed inode. macOS isolates every existing-file replacement
+and binds ACL operations to retained descriptors; Windows policy updates use the
+original staging handle.
+Ordinary Windows outputs with no system ACL remain replaceable without additional
+privilege. Replacing explicitly labeled or audited files requires full policy
+access already available to the caller; otherwise it leaves valid output intact.
+ProjectAtlas does not enable privileges globally. Defaulted system ACLs whose
+control state cannot be reproduced are refused as unsupported.
 New outputs retain ordinary parent inheritance. The destination and staging file
 identities are rechecked before publication; uncertain staging ownership withholds
 cleanup. A private-directory cleanup error after publication explicitly reports

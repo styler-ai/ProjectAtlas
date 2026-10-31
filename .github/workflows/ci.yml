@@ -478,7 +478,7 @@ jobs:
         env:
           PROJECTATLAS_CI_PLATFORM: ${{ matrix.label }}
         run: |
-          cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
           if [ "$RUNNER_OS" = Linux ]; then
             # Build as the runner; elevate only the disposable native-label test.
             target_receipt="$RUNNER_TEMP/project-state-unit-target.jsonl"
@@ -508,7 +508,10 @@ jobs:
 
       - name: Managed state across macOS volume case and Unicode modes
         if: runner.os == 'macOS' && contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
-        timeout-minutes: 5
+        # Four real filesystems include exhaustive native alias and ACL controls.
+        # The Intel runner completed HFSX admission at five minutes; allow the
+        # final writer and owned image cleanup to finish within a bounded budget.
+        timeout-minutes: 10
         shell: bash
         run: |
           set -euo pipefail
@@ -570,7 +573,7 @@ jobs:
             if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
               export PROJECTATLAS_TEST_CASE_SENSITIVE=true
             fi
-            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact

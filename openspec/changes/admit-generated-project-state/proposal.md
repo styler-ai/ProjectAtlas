@@ -69,6 +69,12 @@ require dependency gates and native behavior proof before acceptance. Anonymous
 Linux staging and non-following source snapshots reuse the already locked rustix
 safe filesystem APIs; macOS also uses its effective-user-ID accessor.
 
+Windows SACL preservation requires a second narrowly reviewed native getter:
+GetSecurityDescriptorControl, missing from the canonical safe wrapper. Preserve
+system policy through retained handles when full rights are already available;
+otherwise prove source and stage have no SACL or refuse replacement before bytes.
+No global privilege enablement or blanket elevation requirement is introduced.
+
 ## Release Scope
 
 High-priority #741 is required for v0.5.1-rc1, directly under and blocking #715 in
