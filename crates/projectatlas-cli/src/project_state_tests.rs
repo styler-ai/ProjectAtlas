@@ -1597,6 +1597,63 @@ fn replacement_preserves_ordered_extended_acl_and_outside_owner() -> io::Result<
 
 #[cfg(target_os = "macos")]
 #[test]
+fn descriptor_acl_empty_readback_and_unsupported_objects_preserve_handles() -> io::Result<()> {
+    use std::io::{Read, Write};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    let file = tempfile::NamedTempFile::new()?;
+    super::macos_access::clear_acl(file.as_file())?;
+    let captured = super::macos_access::get_acl(file.as_file())?;
+    let allocated_empty = super::macos_acl::AccessAcl::empty()?;
+    require(
+        !allocated_empty.is_absent() && allocated_empty.is_empty()?,
+        "native empty ACL allocation was classified as an absent snapshot",
+    )?;
+    if captured.is_absent() {
+        require(
+            captured != allocated_empty,
+            "absent and allocated-empty snapshots compare equally",
+        )?;
+    }
+    require(
+        captured.is_empty()? && exacl::getfacl(file.path(), None)?.is_empty(),
+        "native empty ACL readback differs from the independent path query",
+    )?;
+    let target = tempfile::NamedTempFile::new()?;
+    super::macos_access::set_acl(target.as_file(), &captured)?;
+    require(
+        super::macos_access::get_acl(target.as_file())? == captured
+            && exacl::getfacl(target.path(), None)?.is_empty(),
+        "native absent or empty ACL changed during descriptor preservation",
+    )?;
+    super::macos_access::set_acl(target.as_file(), &allocated_empty)?;
+    require(
+        super::macos_access::get_acl(target.as_file())?.is_empty()?
+            && exacl::getfacl(target.path(), None)?.is_empty(),
+        "allocated-empty descriptor ACL did not preserve empty native policy",
+    )?;
+
+    let (socket, mut receiver) = UnixStream::pair()?;
+    let mut unsupported = fs::File::from(OwnedFd::from(socket));
+    let refused = super::macos_access::get_acl(&unsupported);
+    require(
+        refused
+            .as_ref()
+            .is_err_and(|source| source.kind() == io::ErrorKind::InvalidInput),
+        "unsupported descriptor was silently treated as an absent ACL",
+    )?;
+    unsupported.write_all(b"live")?;
+    let mut received = [0; 4];
+    receiver.read_exact(&mut received)?;
+    require(
+        received == *b"live",
+        "ACL refusal consumed its borrowed descriptor",
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn descriptor_acl_operations_preserve_foreign_objects_after_name_substitution() -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     for directory in [false, true] {
@@ -1630,8 +1687,11 @@ fn descriptor_acl_operations_preserve_foreign_objects_after_name_substitution() 
             )?;
             let held = fs::File::open(&named)?;
             let identity = held.metadata()?;
+            let captured_acl = super::macos_access::get_acl(&held)?;
+            let readback = tempfile::NamedTempFile::new_in(&root)?;
+            super::macos_access::set_acl(readback.as_file(), &captured_acl)?;
             require(
-                super::macos_access::get_acl(&held)? == source_acl,
+                !captured_acl.is_empty()? && exacl::getfacl(readback.path(), None)? == source_acl,
                 "descriptor ACL read differs before substitution",
             )?;
             fs::rename(&named, &retained)?;
@@ -1656,12 +1716,12 @@ fn descriptor_acl_operations_preserve_foreign_objects_after_name_substitution() 
             )?;
             exacl::setfacl(&[foreign], &foreign_acl, None)?;
             require(
-                super::macos_access::get_acl(&held)? == source_acl,
+                super::macos_access::get_acl(&held)? == captured_acl,
                 "descriptor ACL read followed the replaced name",
             )?;
-            super::macos_access::set_acl(&held, &[])?;
+            super::macos_access::clear_acl(&held)?;
             require(
-                super::macos_access::get_acl(&held)?.is_empty()
+                super::macos_access::get_acl(&held)?.is_empty()?
                     && exacl::getfacl(&retained, None)?.is_empty()
                     && exacl::getfacl(foreign, None)? == foreign_acl
                     && (held.metadata()?.dev(), held.metadata()?.ino())
@@ -2048,7 +2108,7 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
     )?;
     exacl::setfacl(&[&victim], &victim_acl, None)?;
     // The held inode remains the target after its name becomes an alias.
-    super::macos_access::set_acl(exposed.as_file(), &[])?;
+    super::macos_access::clear_acl(exposed.as_file())?;
     require(
         exacl::getfacl(&victim, None)? == victim_acl,
         "descriptor ACL setter changed the outside owner",
@@ -2263,7 +2323,7 @@ fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Resul
     use windows_permissions::constants::AccessRights;
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
-    let guard = ProjectStateGuard::preflight(&root, None, None)?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
     guard.ensure_directory()?;
     let setup = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command",
@@ -2279,6 +2339,7 @@ fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Resul
         "take-ownership denial fixture failed",
     )?;
     let excessive = fs::OpenOptions::new()
+        .write(true)
         .access_mode(
             (AccessRights::GenericRead
                 | AccessRights::GenericWrite

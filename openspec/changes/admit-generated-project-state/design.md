@@ -231,12 +231,14 @@ Keep every snapshot handle through pre-copy and final destination-policy checks,
 then release the complete Windows snapshot immediately before persist. Do not
 drop it before verification or weaken the existing bounded final-check contract.
 
-The safe native wrappers require direct macOS-only exacl and Windows-only
-windows-permissions dependencies. The latter retains bitflags 1; the dependency ban
+Independent native macOS path controls use exacl only as a target-specific test
+dependency. Production uses the isolated descriptor owner below. Windows uses the
+safe windows-permissions dependency, which retains bitflags 1; the dependency ban
 exception is exact and justified by safe handle/OsStr compatibility. Alternatives
 using in-place writes violate hardlink/atomicity guarantees; a common ReplaceFile
 wrapper accepts only str paths and has different partial-publication failures.
-No project unsafe code, shell runtime dependency, global ACL change, or blanket ban
+Apart from the isolated macOS descriptor ACL exception below, no project unsafe
+code, shell runtime dependency, global ACL change, or blanket ban
 on regeneration is introduced. Native failures keep the old valid output; do not
 fall back to a publication that drops access controls. All platform-specific proof
 and dependency gates remain required; current Linux evidence is not Windows proof.
@@ -271,11 +273,12 @@ replacement without an inheritable ACL, so equal ownership and absent inheritanc
 do not make a pathname ACL setter safe. Every existing-target stage therefore uses
 a private same-volume staging directory, whose ACL is cleared and0700 mode verified
 before payload file creation. Native ACL reads/writes take a borrowed retained File
-and use Darwin's /dev/fd namespace through the existing safe exacl wrapper, including
-workspace hardening, source capture/rechecks and stage copying/readback. The
-descriptor stays owned and live throughout each call; no mutable project pathname
-is supplied to an ACL getter/setter. Current XNU resolves descriptor SETATTR to the
-held vnode; older Darwin fdesc_setattr forwards to that vnode. The directory mode
+and call Darwin's actual descriptor ACL API, including workspace hardening, source
+capture/rechecks and stage copying/readback. Native tests on bf8df82 disprove the
+/dev/fd path proxy: it returns empty ACLs for an inode with an extended ACL, and
+the ordinary preservation test detects ACL loss. Remove that route completely.
+The descriptor stays owned and live throughout each native call; no mutable project
+pathname is supplied to an ACL getter/setter. The directory mode
 setter also uses a NOFOLLOW, directory-only descriptor bound to its retained identity. Keep that directory
 owned by the writer even when the destination has a different owner. Keep genuinely new
 outputs in their original parent to preserve supported inherited grants. Retain
@@ -283,8 +286,34 @@ private-directory identity, verify both stage parent and held file, and remove o
 the verified empty directory without recursive TempDir cleanup. A failed cleanup
 after successful persist is explicitly a committed-publication follow-up error.
 Native nobody-held-FD controls prove the original window and the protected actual
-publisher; positive new-file controls retain normal inheritance. No project unsafe
-code, process-global security-context changes or shell runtime dependency.
+publisher; positive new-file controls retain normal inheritance. No process-global
+security-context changes or shell runtime dependency.
+
+#### Controlled macOS native ACL exception
+
+The independent reviewer explicitly approved one small private macOS-only FFI
+module after the failed proxy proof. Workspace unsafe_code remains deny elsewhere.
+The locked exacl crate exposes no safe descriptor API and libc exposes no Darwin
+ACL symbols. Vendoring the complete ACL crate to expose those private routines is
+a larger maintenance surface. Bind only six Apple SDK primitives: acl_get_fd,
+acl_set_fd, acl_init, acl_free, acl_size and acl_copy_ext. Apple's current Libc
+acl_file.c forwards get/set to ACL_TYPE_EXTENDED; use that implementation evidence
+and native proof rather than the inconsistent archived generic man page.
+
+Keep returned ACLs opaque and owned by a null-checked RAII allocation freed exactly
+once. Borrow File throughout each get/set; transfer no raw descriptor ownership.
+Distinguish absent ACL from allocated empty ACL. Only native no-ACL ENOENT on a
+still-valid held file becomes absence; unsupported, access and allocation failures
+propagate. Apply the captured native object directly. Compare only OS-produced
+acl_copy_ext encodings: check signed acl_size, a generous 1 MiB bound, aligned
+zero-initialized storage and exact returned size. No ACL/ACE parser, layout cast,
+text translation or imported binary decoder is introduced. Apple acl_translate.c
+zeroes the external encoding and includes ordered entries, identities and flags.
+Clear directory ACLs with an owned acl_init(0) object, then require descriptor
+readback to be empty before payload creation. Prove actual getter/setter behavior,
+absence/empty/error handling, source/stage/directory identity, write-only capture,
+all four substitutions and normal ACL inheritance on both architectures and all
+four controlled volume formats before accepting this exception.
 
 Native ACL authorization probes request O_WRONLY without O_APPEND/O_TRUNC for a
 granted write right. Darwin treats append as a separate right; a sibling direct
@@ -296,7 +325,7 @@ arbitrary concurrent ancestor substitution.
 
 The former no-follow path option still had a real-object substitution gap, and
 Darwin's acl_set_link_np can lstat and then call the following setter. Descriptor
-routing replaces that unsafe assumption. A four-case native causal fixture replaces
+routines replace that unsafe assumption. A four-case native causal fixture replaces
 an admitted file/directory name with either a symlink or a different real object;
 the path setter mutates the foreign ACL, while descriptor reads/writes must preserve
 foreign policy and bytes and target only the retained original inode. This route
@@ -352,7 +381,8 @@ only if implementation changes a derived-data contract.
 
 Reuse existing same-file handles and tempfile publication. A direct Windows-only
 winapi-util dependency reuses the already locked canonical utility solely for stable
-hard-link counts; do not add unsafe platform bindings or unstable std APIs. Ordinary
+hard-link counts; the sole native binding exception is the macOS ACL owner above;
+do not add unrelated unsafe bindings or unstable std APIs. Ordinary
 DB admission stays constant in the fixed product file family and does not index,
 parse or walk source trees. Preserve valid generated-file permissions and document
 bounded retention when changed ownership makes automatic staging cleanup unsafe.

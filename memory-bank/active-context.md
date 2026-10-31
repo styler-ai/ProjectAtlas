@@ -2,6 +2,77 @@
 
 ## Current primary security review and held-policy candidate
 
+NEWEST IMPLEMENTATION (dirty after bf): NativeMac proxy disproved on BOTHarches.
+bfMacARM124596342176/Intel124596342187 ordinary26pass/2fail/1ignored: getterempty
+BEFOREsubstitution andactualorderedACLloss. Logs /tmp/projectatlas-741-bf-macos-*-job.log.
+Windows124596342090 compileE0596 missingmutableguard innewfixture; fixed. PRIMARY
+alsofoundRust1.98 get_cmode_disposition ignorescustomaccessmask forcreationflags:
+bothcreate_new+access_mode sites now.write(true), while3open-existingqueriesunchanged.
+Existingnativecreation+compatunitsmustpass; no newwaiver. Rust/repositorybfSUCCESS;
+Linux124596342179 stillliveatlastread. Old frozenbfproof doesNOTcovercurrentdirt.
+
+Primaryimplemented project_state_macos_acl.rs using6AppleSDKsymbols get_fd/set_fd/
+init/free/size/copy_ext. OpaqueRAIIACLowner, no parser/texttranslation/nativepointer
+exposure, borrowedFilelifetime, exactonefree. NULL+ENOENT onstillvalidheldfile is
+Absent; actualemptyallocationkeptdistinct. Unsupported/access/allocationfailures
+propagate. Binarycomparisons useOSexternalencoding, 1MiBcheckedsize, alignedzeroed
+wordstorage/exactwrittenlength; BOTHbuffersfalliblyreservedbeforeuse. NativeSDK
+evidence /tmp/projectatlas-741-apple-{acl-header,acl-file,acl-translate}.txt:
+AppleLibc71bbe350ab79eef58113991d817ccc6165061a64. get/setforwardEXTENDED; serializer
+zeroesallbytes/includesflags+orderedACEidentities. Nopathproxyfallback remains.
+
+IndependentLunaMax explicitlyapproved the ONEprivateMacmodule unsafeexception;
+OpenSpecproposal/designamendedbeforeimplementation, workspaceunsafe_codeDENY
+unchanged elsewhere. Subsequentsource reviewfoundnoABI/ownershipblocker; its
+falliblebuffer+explicitAbsent/AllocatedEmptyfollowups bothfixedbeforepublication.
+Mac4caseunit nowindependentlyroundtripscapturedFDACL viaexacl BEFOREsubstitution
+so theprevious empty-getterbugcannotpass. Newempty/readback+unsupportedSocket
+testpreservesFDI/O. Exacl onlyMacdev-dependency now; no runtimeexacl/newlockedge.
+
+FinalLinux all-target/allfeaturecheck18.87s,27owning+1ignored0.12s,Clippy6.04s,
+strictstrings/fmt/OpenSpec/IssueOps1of5 PASS. Logs native-acl-final-*.
+Compile-onlyUnixharness includesACTUALnativeACLmodule withEXACTworkspaceClippylints:
+/tmp/projectatlas-741-native-acl-typecheck.log PASS0.07s (caught/fixed2docbackticks).
+This runs NO nativecalls and isNOTMacABI/runtimeproof. Nativehostedproofmandatory.
+
+Installed050 purpose_set hitknownpolicy_drift/fullchanged0. Frozenbfcurrent-contract
+purpose_set hitboundeddependency_closure_limit10001 afterCargoManifestchange;
+followedrequiredFULLscan (session33370 TERMINAL0),724parsed/25960symbols/174273rels,
+noDBreset. Newmodulepurposeexplicitlyapprovedandreadback viaactualCLI summary:
+/tmp/projectatlas-741-native-acl-purpose-{scan.log,set.log,readback.json}. Authored
+responsibilityapproved/sourceagent/agent_reviewed=true. Fullrefreshwasrequiredfor
+manifestclosure, notanorientationrestart. Currentcandidatepublicationpending; use
+NEWnormalpushprefix /tmp/projectatlas-741-native-acl-native-push. No locallease.
+Macsecurityreply4432559863 documentsnativeproxyfailureandactualAPIreplacement,
+readbackverified/threadOPEN; PRbodyupdated/readback to failednative+pendingfix.
+FiveCodexthreadsOPEN,17AdvancedSecurityresolved, tasks1of5/allacceptanceOPEN.
+
+LATEST PUBLIC/LOCAL HEAD bf8df82dfef5a29db7ba09fe7eba9a008f190b25. Normalpush8075
+TERMINAL PASS772.57s,34suites/1726pass/11ignored; PID344922gone. Receipt/log
+/tmp/projectatlas-741-held-policy-native-push.*; active-session receipt completed.
+Native36805 TERMINALPASS: immutable default binary0fddcbfb66f05b825baceb365f06984d1012eb338dc4b3010119c4b0cf24b7e5
+marker /tmp/projectatlas-741-held-policy-debug-path.txt,136boundinputs. ActualCLI/MCP
+admission17.76s,writer5.53s,registered10.89s,5stable050upgrades5.98s ALLPASS; preserve
+identity/ALLapprovedpurposes/config and boundbinary/inputbytes unchanged. No live
+push/proof lease. Subsequent selected dirt is memory-only, excluded from136inputs.
+
+Fresh SOURCE41221325411: plan124596309339/repository124596342066SUCCESS;
+Rust124596342068,Windows124596342090,MacARM124596342176,Linux124596342179,
+MacIntel124596342187 RUNNING at lastread. Poll exactjobs; no native outcome assumed.
+prstate41221323018 and CodeQL41221321798 require final readback. PR body updated/
+readback to actualbf proof+pendingnative, stillRefs741. Tasks1of5/allacceptanceOPEN.
+FiveCodexthreads remainOPEN untilnativeproof;17AdvancedSecurity resolved/readback.
+
+Broader Windows persist trace /tmp/projectatlas-741-windows-persist-review.json:
+lockedtempfile sets DOS attributes bypath inside finalcheck-to-MoveFileEx interval;
+this is distinct from the fixed descriptorACL setter and remains within accepted
+bounded pathname publication/cleanup guarantee. No supported security-boundary
+bypass or readonly-destination outputloss established. PRIMARY+independentLuna
+reviewed; no newdependency/unsafe/pathframework or silent universalrace claim.
+Native394Intel ordinary27+privileged1PASS; controlledAPFSfailed 'narrowed ACL still
+permits new handles', whereas ARM baselinefailedbeforegrant. Explicitbothmount
+ownership/traversableouterfixture corrections inbf still need actualnativeproof.
+
 Public394d91a normal push80965 TERMINAL PASS812.30s,34suites/1726pass/11ignored;
 receipt /tmp/projectatlas-741-review-feedback-native-push.json. No live push lease.
 Its SOURCE41218365025 is TERMINAL: Rust/Linux/repository/planSUCCESS; Windows and

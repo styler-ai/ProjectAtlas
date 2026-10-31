@@ -13,6 +13,10 @@ mod linux_access;
 #[path = "project_state_macos.rs"]
 mod macos_access;
 
+#[cfg(target_os = "macos")]
+#[path = "project_state_macos_acl.rs"]
+mod macos_acl;
+
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";
 /// Automatic SQLite filename whose aliases must be checked before opening SQLite.
@@ -785,9 +789,9 @@ struct ReplacementSource {
     identity: Handle,
     /// Original permissions and, on Unix, ownership and inode identity.
     metadata: Metadata,
-    /// macOS access ACL entries in their original order.
+    /// Opaque macOS extended ACL, preserving ordered entries and native flags.
     #[cfg(target_os = "macos")]
-    acl: Vec<exacl::AclEntry>,
+    acl: macos_acl::AccessAcl,
     /// Windows owner, group and complete DACL, excluding privileged SACL access.
     #[cfg(windows)]
     security: std::ffi::OsString,
@@ -952,6 +956,8 @@ fn create_windows_staging_file(path: &Path, replacing: bool) -> io::Result<fs::F
     }
     // Deny competing data handles before native policy is copied; allow rename.
     fs::OpenOptions::new()
+        // Rust validates creation flags independently of the custom access mask.
+        .write(true)
         .access_mode(rights)
         .create_new(true)
         .share_mode(0x0000_0004)

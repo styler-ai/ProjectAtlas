@@ -4,23 +4,22 @@ use super::{ProjectStateGuard, RetainedStaging, refusal, require_directory};
 use same_file::Handle;
 use std::fs;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Read ACLs from the retained object through Darwin's descriptor namespace.
-pub(super) fn get_acl(file: &fs::File) -> io::Result<Vec<exacl::AclEntry>> {
-    exacl::getfacl(descriptor_path(file), None)
+/// Capture the retained object's native extended ACL.
+pub(super) fn get_acl(file: &fs::File) -> io::Result<super::macos_acl::AccessAcl> {
+    super::macos_acl::AccessAcl::read(file)
 }
 
 /// Mutate only the retained object, never its replaceable project pathname.
-pub(super) fn set_acl(file: &fs::File, entries: &[exacl::AclEntry]) -> io::Result<()> {
-    exacl::setfacl(&[descriptor_path(file)], entries, None)
+pub(super) fn set_acl(file: &fs::File, acl: &super::macos_acl::AccessAcl) -> io::Result<()> {
+    acl.apply(file)
 }
 
-/// Keep construction and use scoped to a live borrowed descriptor.
-fn descriptor_path(file: &fs::File) -> PathBuf {
-    PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
+/// Remove ACL entries and flags through the retained descriptor.
+pub(super) fn clear_acl(file: &fs::File) -> io::Result<()> {
+    super::macos_acl::AccessAcl::empty()?.apply(file)
 }
 
 /// A non-recursively cleaned workspace, hardened before any payload file exists.
@@ -89,12 +88,12 @@ impl<'a> ReplacementDirectory<'a> {
                     "private staging directory creator changed",
                 ));
             }
-            set_acl(&file, &[])?;
+            clear_acl(&file)?;
             // Keep the workspace owned by this writer. Destination ownership
             // belongs on the payload, never on its private traversal boundary.
             file.set_permissions(fs::Permissions::from_mode(0o700))?;
             directory.verify()?;
-            if !get_acl(&file)?.is_empty()
+            if !get_acl(&file)?.is_empty()?
                 || file.metadata()?.permissions().mode() & 0o777 != 0o700
                 || fs::read_dir(&directory.path)?.next().is_some()
             {
