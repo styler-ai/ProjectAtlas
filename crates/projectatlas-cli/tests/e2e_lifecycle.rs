@@ -4990,6 +4990,33 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
         command
     }
 
+    fn case_database_aliases(root: &Path) -> io::Result<Vec<PathBuf>> {
+        const DATABASE_NAME: &str = "projectatlas.db";
+        let state = root.join(ATLAS_DIR_NAME);
+        let candidates = vec![
+            state.join(DATABASE_NAME.to_ascii_uppercase()),
+            root.join(ATLAS_DIR_NAME.to_ascii_uppercase())
+                .join(DATABASE_NAME),
+        ];
+        #[cfg(target_os = "macos")]
+        let candidates = {
+            let mut candidates = candidates;
+            candidates.push(state.join(DATABASE_NAME.replace('s', "ſ")));
+            candidates.push(
+                root.join(ATLAS_DIR_NAME.replace('s', "ſ"))
+                    .join(DATABASE_NAME.replace('s', "ſ")),
+            );
+            candidates
+        };
+        let mut aliases = Vec::new();
+        for candidate in candidates {
+            if candidate.try_exists()? {
+                aliases.push(candidate);
+            }
+        }
+        Ok(aliases)
+    }
+
     let temp = tempfile::tempdir()?;
     let executable = mcp_contract_executable();
     let root = temp.path().join("selected-project");
@@ -5068,6 +5095,7 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                 fs::hard_link(&outside, &target)?;
             }
             let outside_before = fs::read(&outside)?;
+            let case_databases = case_database_aliases(&root)?;
             for arguments in [
                 vec!["overview"],
                 vec!["settings"],
@@ -5077,16 +5105,18 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                 vec!["mcp-config"],
                 vec!["init", "--no-scan"],
             ] {
-                for explicit in [false, true] {
+                let mut bindings = vec![None, Some(&database)];
+                bindings.extend(case_databases.iter().map(Some));
+                for binding in bindings {
                     let mut operation = command(&executable, &root);
-                    if explicit {
-                        operation.arg("--db").arg(&database);
+                    if let Some(database) = binding {
+                        operation.arg("--db").arg(database);
                     }
                     let refused = operation.args(&arguments).output()?;
                     let error = String::from_utf8_lossy(&refused.stderr);
                     if refused.status.success() || !error.contains("multiple hard links") {
                         return Err(io::Error::other(format!(
-                            "managed {suffix:?} was not admitted before {arguments:?}, explicit={explicit}: {error}"
+                            "managed {suffix:?} was not admitted before {arguments:?}, binding={binding:?}: {error}"
                         ))
                         .into());
                     }
@@ -5117,23 +5147,27 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                 }
             }
             fs::write(&config, config_before)?;
-            let mut target_session = McpContractSession::spawn(&executable, &root, &database)?;
-            let target_result = (|| -> Result<(), Box<dyn Error>> {
-                let response = target_session.request(
-                    "tools/call",
-                    &json!({"name": "atlas_overview", "arguments": {}}),
-                )?;
-                if response.get("result").is_none()
-                    || !response.to_string().contains("multiple hard links")
-                {
-                    return Err(io::Error::other(format!(
-                        "MCP startup binding bypassed managed {suffix:?} admission: {response}"
-                    ))
-                    .into());
-                }
-                Ok(())
-            })();
-            complete_mcp_test_after_shutdown(target_result, || target_session.shutdown())?;
+            let mut bindings = vec![&database];
+            bindings.extend(&case_databases);
+            for binding in bindings {
+                let mut target_session = McpContractSession::spawn(&executable, &root, binding)?;
+                let target_result = (|| -> Result<(), Box<dyn Error>> {
+                    let response = target_session.request(
+                        "tools/call",
+                        &json!({"name": "atlas_overview", "arguments": {}}),
+                    )?;
+                    if response.get("result").is_none()
+                        || !response.to_string().contains("multiple hard links")
+                    {
+                        return Err(io::Error::other(format!(
+                            "MCP startup binding bypassed managed {suffix:?} admission: {response}"
+                        ))
+                        .into());
+                    }
+                    Ok(())
+                })();
+                complete_mcp_test_after_shutdown(target_result, || target_session.shutdown())?;
+            }
             if fs::read(&outside)? != outside_before {
                 return Err(io::Error::other("refusal modified outside bytes").into());
             }
@@ -5202,11 +5236,18 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
                     .into());
                 }
             }
-            session.call_tool(
+            let selected_root_display = normalize_native_path_display(root.canonicalize()?);
+            let initialized: Value = toon_format::decode_default(&session.call_tool(
                 "atlas_init",
                 &json!({"project_path": root, "no_scan": true}),
+            )?)?;
+            require_json_bool(&initialized, &["init", "ok"], true)?;
+            require_json_string(&initialized, &["init", "root"], &selected_root_display)?;
+            let mapped: Value = toon_format::decode_default(
+                &session.call_tool("atlas_map", &json!({"project_path": root}))?,
             )?;
-            session.call_tool("atlas_map", &json!({"project_path": root}))?;
+            require_json_bool(&mapped, &["map", "written"], false)?;
+            require_json_string(&mapped, &["map", "root"], &selected_root_display)?;
             if fs::read(&outside)? != original
                 || !fs::symlink_metadata(&nonsource)?.file_type().is_symlink()
                 || mcp_database_snapshot(&database)? != before
@@ -5472,8 +5513,15 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
 
             // Parent reduction must not turn this exact managed JSON sidecar
             // into the external writer, through either CLI or per-call MCP.
-            let intermediate = root.join(ATLAS_DIR_NAME).join("map-parent");
-            let reduced_map = intermediate.join("..").join("projectatlas.toon");
+            let intermediate = root.join(ATLAS_DIR_NAME).canonicalize()?.join("map-parent");
+            // PathBuf::join normalizes .. on a Windows verbatim prefix. Preserve
+            // the exact serialized spelling presented to the config/CLI/MCP path.
+            let mut spelling = intermediate.as_os_str().to_os_string();
+            for component in ["..", "projectatlas.toon"] {
+                spelling.push(std::path::MAIN_SEPARATOR_STR);
+                spelling.push(component);
+            }
+            let reduced_map = PathBuf::from(spelling);
             document["project"]["map_path"] = toml::Value::String(
                 reduced_map
                     .to_str()
@@ -5489,6 +5537,14 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                 if existing {
                     fs::create_dir(&intermediate)?;
                 }
+                // Win32 may resolve missing/.. before traversing components;
+                // POSIX leaves the same spelling unresolved. Admit the actual owner.
+                let parent_resolves = fs::canonicalize(
+                    reduced_map
+                        .parent()
+                        .ok_or_else(|| io::Error::other("map reduction fixture has no parent"))?,
+                )
+                .is_ok();
                 invoke(
                     &executable,
                     &root,
@@ -5496,11 +5552,14 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                     &["map", "--json", "--force"],
                     "atlas_map",
                     &json!({"project_path": root, "json": true, "force": true}),
-                    !existing,
+                    !parent_resolves,
                 )?;
+                let sidecar_changed = fs::read(&reduced_sidecar)? != b"outside reduced map";
                 if fs::read(&reduced_outside)? != b"outside reduced map"
                     || intermediate.exists() != existing
-                    || (existing && fs::read(&reduced_sidecar)? == b"outside reduced map")
+                    || sidecar_changed != parent_resolves
+                    || (!parent_resolves
+                        && !same_file::is_same_file(&reduced_outside, &reduced_sidecar)?)
                 {
                     return Err(io::Error::other(
                         "managed parent reduction changed outside ownership",
@@ -5623,6 +5682,90 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                 ))
                 .into());
             }
+            fs::write(&config, &original_config)?;
+
+            // A volume alias is managed; a separate case-sensitive name keeps
+            // its intentional custom writer, even when both names share an inode.
+            let upper_config = config.with_file_name("config.toml".to_ascii_uppercase());
+            let case_alias = upper_config.try_exists()?;
+            let case_owner = root.with_extension("case-config-owner");
+            let upper_map = root
+                .join(ATLAS_DIR_NAME)
+                .join("projectatlas.toon".to_ascii_uppercase());
+            let case_output = root.with_extension("case-map-owner");
+            document["project"]["map_path"] = toml::Value::String(
+                upper_map
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("case map path is not UTF-8"))?
+                    .to_owned(),
+            );
+            let case_config_before = toml::to_string(&document)?;
+            fs::write(&case_owner, &case_config_before)?;
+            if case_alias {
+                fs::remove_file(&config)?;
+            }
+            fs::hard_link(&case_owner, &upper_config)?;
+            fs::write(&case_output, b"case map bytes")?;
+            fs::hard_link(&case_output, upper_map.with_extension("json"))?;
+            let (mut case_session, _) = McpContractSession::spawn_configured(
+                &executable,
+                &root,
+                &root.join(DATABASE_PATH),
+                Some(&upper_config),
+                &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            )?;
+            let case_result = (|| -> Result<(), Box<dyn Error>> {
+                let config_argument = upper_config
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("case config path is not UTF-8"))?;
+                invoke(
+                    &executable,
+                    &root,
+                    mcp.then_some(&mut case_session),
+                    &[
+                        "--config",
+                        config_argument,
+                        "ignore",
+                        "add",
+                        "--kind",
+                        "path-prefix",
+                        "generated",
+                    ],
+                    "atlas_ignore_add",
+                    &json!({"kind": "path-prefix", "value": "generated"}),
+                    false,
+                )?;
+                if (fs::read_to_string(&case_owner)? == case_config_before) != case_alias {
+                    return Err(io::Error::other(
+                        "case config ownership ignored actual filesystem behavior",
+                    )
+                    .into());
+                }
+                invoke(
+                    &executable,
+                    &root,
+                    mcp.then_some(&mut case_session),
+                    &["--config", config_argument, "map", "--json", "--force"],
+                    "atlas_map",
+                    &json!({"json": true, "force": true}),
+                    false,
+                )?;
+                if (fs::read(&case_output)? == b"case map bytes") != case_alias {
+                    return Err(io::Error::other(
+                        "case map ownership ignored actual filesystem behavior",
+                    )
+                    .into());
+                }
+                let published: Value =
+                    serde_json::from_slice(&fs::read(upper_map.with_extension("json"))?)?;
+                if !published.is_object() {
+                    return Err(io::Error::other("case map did not publish JSON").into());
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(case_result, || case_session.shutdown())?;
+            fs::remove_file(&upper_config)?;
+            fs::remove_file(upper_map.with_extension("json"))?;
             fs::write(&config, &original_config)?;
 
             for private in [false, true] {

@@ -149,7 +149,7 @@ impl ProjectStateGuard {
             ProjectDocument::JsonMap,
             ProjectDocument::Gitignore,
         ] {
-            if !named(path.file_name(), document.filename()) {
+            if !fixed_name_candidate(path, document.filename())? {
                 continue;
             }
             let directory = document.directory(&root);
@@ -499,27 +499,32 @@ impl ProjectStateGuard {
 
 /// Recognize a managed entry without treating unresolved ownership as external.
 fn owned_named_path(path: &Path, directory: &Path, expected_name: &str) -> io::Result<bool> {
-    if !named(path.file_name(), expected_name) {
+    if !fixed_name_candidate(path, expected_name)? {
         return Ok(false);
     }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let parent = containing_directory(path);
     // Prove direct namespace spelling before following a possibly aliased private
-    // directory. The guard must reject that alias, not inherit its outside owner.
-    if direct_directory_spelling(parent, directory) {
-        return Ok(true);
+    // directory. Volume lookup below supplies case behavior, never ownership.
+    if direct_directory_spelling(parent, directory)? {
+        return named(path, expected_name);
     }
     match fs::canonicalize(parent) {
-        Ok(resolved) => Ok(direct_directory_spelling(&resolved, directory)
-            || resolved_logical_directory_reduction(parent, directory, &resolved)),
+        Ok(resolved) => {
+            if direct_directory_spelling(&resolved, directory)?
+                || resolved_logical_directory_reduction(parent, directory, &resolved)?
+            {
+                named(path, expected_name)
+            } else {
+                Ok(false)
+            }
+        }
         Err(source) => {
             // mkdir_all could make a missing/.. spelling resolve to the managed
             // parent. Refuse before that mutation, preserving the original error.
             let potential = resolve_existing_parent_prefix(parent)?;
-            if direct_directory_spelling(&potential, directory)
-                || resolved_logical_directory_reduction(parent, directory, &potential)
+            if (direct_directory_spelling(&potential, directory)?
+                || resolved_logical_directory_reduction(parent, directory, &potential)?)
+                && named(path, expected_name)?
             {
                 Err(source)
             } else {
@@ -530,29 +535,46 @@ fn owned_named_path(path: &Path, directory: &Path, expected_name: &str) -> io::R
 }
 
 /// Keep a reduction through the logical namespace owned even if it is aliased.
-fn resolved_logical_directory_reduction(parent: &Path, directory: &Path, resolved: &Path) -> bool {
-    parent.ancestors().skip(1).any(|ancestor| {
-        direct_directory_spelling(ancestor, directory)
+fn resolved_logical_directory_reduction(
+    parent: &Path,
+    directory: &Path,
+    resolved: &Path,
+) -> io::Result<bool> {
+    for ancestor in parent.ancestors().skip(1) {
+        if direct_directory_spelling(ancestor, directory)?
             && fs::canonicalize(ancestor).is_ok_and(|owner| owner == resolved)
-    })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Compare a fixed directory without following its final namespace component.
-fn direct_directory_spelling(path: &Path, directory: &Path) -> bool {
+fn direct_directory_spelling(path: &Path, directory: &Path) -> io::Result<bool> {
     if path == directory {
-        return true;
+        return Ok(true);
     }
     let Some(name) = directory.file_name().and_then(std::ffi::OsStr::to_str) else {
-        return false;
+        return Ok(false);
     };
-    if !named(path.file_name(), name) {
-        return false;
+    if !fixed_name_candidate(path, name)? {
+        return Ok(false);
     }
-    let prefix = path
-        .parent()
+    let prefix = containing_directory(path);
+    if fs::canonicalize(prefix).is_ok_and(|resolved| Some(resolved.as_path()) == directory.parent())
+    {
+        named(path, name)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Select a path's lookup directory without treating an empty parent as root.
+fn containing_directory(path: &Path) -> &Path {
+    path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::canonicalize(prefix).is_ok_and(|resolved| Some(resolved.as_path()) == directory.parent())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// Resolve actual existing ancestors before reducing only an unresolved suffix.
@@ -584,18 +606,75 @@ fn resolve_existing_parent_prefix(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Match fixed product components using the supported platform's case behavior.
-fn named(name: Option<&std::ffi::OsStr>, expected: &str) -> bool {
-    let Some(name) = name.and_then(std::ffi::OsStr::to_str) else {
-        return false;
+/// Select a possible fixed name without probing an unrelated filesystem.
+fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
+    let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return Ok(false);
     };
+    if name.eq_ignore_ascii_case(expected) {
+        return Ok(true);
+    }
+    // Fixed product names are ASCII, but APFS simple Unicode folding also
+    // admits long-s aliases. Reuse regex's non-expanding Unicode fold tables;
+    // full uppercasing would incorrectly admit ligatures and sharp-s names.
+    if !name.is_ascii() && expected.is_ascii() {
+        let pattern = format!(r"\A{}\z", regex::escape(expected));
+        return regex::RegexBuilder::new(&pattern)
+            .case_insensitive(true)
+            .build()
+            .map(|pattern| pattern.is_match(name))
+            .map_err(io::Error::other);
+    }
+    Ok(false)
+}
+
+/// Match fixed components using the supported platform's case behavior.
+// Keep one fallible caller contract: only macOS needs a native volume query.
+#[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
+fn named(path: &Path, expected: &str) -> io::Result<bool> {
+    let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return Ok(false);
+    };
+    if name == expected {
+        return Ok(true);
+    }
     #[cfg(windows)]
     {
-        name.eq_ignore_ascii_case(expected)
+        Ok(name.eq_ignore_ascii_case(expected))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        name == expected
+        if !fixed_name_candidate(path, expected)? {
+            return Ok(false);
+        }
+        // Match the ownership proof: resolve the existing original prefix, then
+        // reduce the unresolved suffix before choosing its destination volume.
+        // A mount crossed by missing/../.. need not own the resulting parent.
+        let parent = resolve_existing_parent_prefix(containing_directory(path))?;
+        let mut prefix = parent.as_path();
+        let probe = loop {
+            match fs::canonicalize(prefix) {
+                Ok(resolved) => break resolved,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    prefix = match prefix.parent() {
+                        Some(parent) => parent,
+                        None => return Err(source),
+                    };
+                }
+                Err(source) => return Err(source),
+            }
+        };
+        match whichdisk::resolve(&probe)?.case_sensitive() {
+            Some(case_sensitive) => Ok(!case_sensitive),
+            None => Err(refusal(
+                path,
+                "managed case-alias volume behavior is unknown",
+            )),
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        Ok(false)
     }
 }
 

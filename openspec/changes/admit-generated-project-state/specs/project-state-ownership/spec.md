@@ -35,6 +35,11 @@ destinations SHALL be refused without outside-owner side effects.
 - **THEN** existing parents use their actual filesystem resolution, and an unresolved spelling that could reduce to the managed parent is refused before creating directories or writing files
 - **AND** ownership uncertainty never silently selects an external writer; selected-root aliases and physically external symlink-parent paths retain their supported behavior
 
+#### Scenario: Managed case aliases follow macOS volume behavior
+- **WHEN** a selected fixed filename or private-directory component is a case alias on macOS, including Unicode simple-fold spellings
+- **THEN** classification uses the actual containing volume's case behavior, protects case aliases before database/document writes even when the main file is absent, and propagates unresolved ownership rather than choosing an external writer
+- **AND** case-distinct custom names on case-sensitive volumes remain available, including separate hardlink entries and unrelated external paths
+
 #### Scenario: Legacy configuration admission precedes identity repair
 - **WHEN** initialization selects a missing managed legacy configuration and a current database needs native root identity repair
 - **THEN** an unsafe legacy destination is refused before database or sidecar mutation, preserving the prior incomplete binding for a supported retry

@@ -89,6 +89,298 @@ fn require(condition: bool, message: &str) -> io::Result<()> {
     }
 }
 
+/// Keep reductions literal even when Windows `PathBuf::push` would normalize a verbatim prefix.
+fn unreduced_path(parent: &Path, components: &[&str]) -> io::Result<std::path::PathBuf> {
+    let mut spelling = parent.as_os_str().to_os_string();
+    for component in components {
+        spelling.push(std::path::MAIN_SEPARATOR_STR);
+        spelling.push(component);
+    }
+    let path = std::path::PathBuf::from(spelling);
+    require(
+        path.components()
+            .any(|component| component == std::path::Component::ParentDir),
+        "reduction fixture lost its literal parent component",
+    )?;
+    Ok(path)
+}
+
+/// Observe the fixture filesystem rather than assuming an OS-wide case policy.
+fn fixture_names_are_case_sensitive(root: &Path) -> io::Result<bool> {
+    const PROBE_NAME: &str = "Case-Probe";
+    let probe = root.join(PROBE_NAME);
+    fs::write(&probe, b"case behavior")?;
+    let sensitive = !root.join(PROBE_NAME.to_ascii_lowercase()).try_exists()?;
+    fs::remove_file(probe)?;
+    #[cfg(target_os = "macos")]
+    if let Ok(expected) = std::env::var("PROJECTATLAS_TEST_CASE_SENSITIVE") {
+        require(
+            expected == sensitive.to_string(),
+            "fixture volume does not have the requested case behavior",
+        )?;
+    }
+    Ok(sensitive)
+}
+
+/// Include Unicode APFS case aliases without changing other platform policies.
+fn managed_name_case_variants(name: &str) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        let mut variants = vec![name.to_ascii_uppercase()];
+        let long_s = name.replace('s', "ſ");
+        if long_s != name {
+            variants.push(long_s);
+        }
+        variants
+    }
+    #[cfg(not(unix))]
+    {
+        vec![name.to_ascii_uppercase()]
+    }
+}
+
+#[test]
+fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() -> io::Result<()> {
+    for (private, filename, database) in [
+        (true, DATABASE_FILE, true),
+        (true, super::CONFIG_FILE, false),
+        (false, super::LEGACY_CONFIG_FILE, false),
+        (true, super::JSON_MAP_FILE, false),
+        (false, super::GITIGNORE_FILE, false),
+    ] {
+        for variant in managed_name_case_variants(filename) {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            let directory = if private {
+                let state = root.join(STATE_DIRECTORY);
+                fs::create_dir(&state)?;
+                state
+            } else {
+                root.clone()
+            };
+            let target = directory.join(filename);
+            let selected = directory.join(variant);
+            let admit = || {
+                if database {
+                    ProjectStateGuard::preflight_database_path(&selected, &root)
+                } else {
+                    ProjectStateGuard::preflight_document(&root, &selected)
+                }
+            };
+            require(
+                admit()?.is_some() != sensitive,
+                "missing case variant lost its actual volume ownership",
+            )?;
+            let outside = root.join("outside-owner");
+            fs::write(&outside, b"outside bytes")?;
+            fs::hard_link(&outside, &target)?;
+            if sensitive {
+                // Distinct directory entries can share an inode on a sensitive FS.
+                fs::hard_link(&target, &selected)?;
+                require(
+                    admit()?.is_none(),
+                    "distinct custom hardlink became managed",
+                )?;
+            } else if database {
+                require(
+                    admit().is_err(),
+                    "case-aliased DB hardlink bypassed admission",
+                )?;
+            } else {
+                let mut guard =
+                    admit()?.ok_or_else(|| io::Error::other("document alias was external"))?;
+                guard.write_document(b"owned replacement")?;
+                require(
+                    fs::read(&selected)? == b"owned replacement",
+                    "alias publication failed",
+                )?;
+            }
+            require(
+                fs::read(&outside)? == b"outside bytes",
+                "outside owner was changed",
+            )?;
+        }
+    }
+    // Prove the filesystem distinction before using these as custom controls.
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let directory = root.join(STATE_DIRECTORY);
+    fs::create_dir(&directory)?;
+    for (fixed, custom) in [
+        (super::CONFIG_FILE, "conﬁg.toml"),
+        (DATABASE_FILE, "projectatlaß.db"),
+        (super::CONFIG_FILE, "prefix-config.toml"),
+    ] {
+        let fixed = directory.join(fixed);
+        fs::write(&fixed, b"fixed-name control")?;
+        let selected = directory.join(custom);
+        require(
+            !selected.try_exists()?,
+            "Unicode custom control aliases the fixed filesystem name",
+        )?;
+        require(
+            ProjectStateGuard::preflight_document(&root, &selected)?.is_none()
+                && ProjectStateGuard::preflight_database_path(&selected, &root)?.is_none(),
+            "distinct Unicode or prefixed custom name became managed",
+        )?;
+        fs::remove_file(&fixed)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::Result<()> {
+    for suffix in super::WAL_SIDECAR_SUFFIXES {
+        for variant in managed_name_case_variants(DATABASE_FILE) {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            let directory = root.join(STATE_DIRECTORY);
+            fs::create_dir(&directory)?;
+            let outside = root.join("outside-owner");
+            fs::write(&outside, b"outside bytes")?;
+            fs::hard_link(&outside, directory.join(format!("{DATABASE_FILE}{suffix}")))?;
+            let selected = directory.join(variant);
+            let admission = ProjectStateGuard::preflight_database_path(&selected, &root);
+            require(
+                if sensitive {
+                    admission?.is_none()
+                } else {
+                    admission.is_err()
+                },
+                "case variant bypassed main/sidecar ownership or blocked a distinct custom name",
+            )?;
+            require(
+                fs::read(&outside)? == b"outside bytes",
+                "outside sidecar owner changed",
+            )?;
+        }
+    }
+    for document in [
+        super::ProjectDocument::Config,
+        super::ProjectDocument::LegacyConfig,
+        super::ProjectDocument::JsonMap,
+        super::ProjectDocument::Gitignore,
+    ] {
+        for variant in managed_name_case_variants(document.filename()) {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            let directory = document.directory(&root);
+            fs::create_dir_all(&directory)?;
+            let outside = root.join("outside-owner");
+            let target = directory.join(document.filename());
+            let selected = directory.join(variant);
+            std::os::unix::fs::symlink(&outside, &target)?;
+            let admission = ProjectStateGuard::preflight_document(&root, &selected);
+            if sensitive {
+                require(
+                    admission?.is_none(),
+                    "distinct custom name became a managed dangling alias",
+                )?;
+            } else if matches!(document, super::ProjectDocument::Gitignore) {
+                let mut guard =
+                    admission?.ok_or_else(|| io::Error::other("Gitignore alias was external"))?;
+                require(
+                    !guard.create_document(b"requested")?,
+                    "existing Gitignore alias was overwritten",
+                )?;
+            } else {
+                require(
+                    admission.is_err(),
+                    "case-aliased dangling document bypassed admission",
+                )?;
+            }
+            require(
+                !outside.exists(),
+                "outside dangling document target was created",
+            )?;
+        }
+    }
+    for dangling in [false, true] {
+        for variant in managed_name_case_variants(STATE_DIRECTORY) {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            let outside = temp.path().join("outside-state");
+            if !dangling {
+                fs::create_dir(&outside)?;
+            }
+            let upper_state = root.join(variant);
+            std::os::unix::fs::symlink(&outside, &upper_state)?;
+            let selected = upper_state.join(DATABASE_FILE);
+            let admission = ProjectStateGuard::preflight_database_path(&selected, &root);
+            require(
+                if sensitive {
+                    admission?.is_none()
+                } else {
+                    admission.is_err()
+                },
+                "case-aliased state directory was followed or distinct custom directory refused",
+            )?;
+            require(
+                !outside.join(DATABASE_FILE).exists(),
+                "outside DB was created",
+            )?;
+            require(
+                outside.exists() != dangling,
+                "outside directory inventory changed",
+            )?;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(mount) = std::env::var_os("PROJECTATLAS_TEST_CASE_MOUNT") {
+        let mount = std::path::PathBuf::from(mount).canonicalize()?;
+        let root = mount
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| io::Error::other("nested volume has no project root"))?;
+        let sensitive = fixture_names_are_case_sensitive(root)?;
+        require(
+            whichdisk::resolve(&mount)?.case_sensitive() == Some(!sensitive),
+            "nested volume must have opposite case behavior",
+        )?;
+        for (private, filename, database) in [
+            (true, DATABASE_FILE, true),
+            (true, super::CONFIG_FILE, false),
+            (false, super::LEGACY_CONFIG_FILE, false),
+            (true, super::JSON_MAP_FILE, false),
+            (false, super::GITIGNORE_FILE, false),
+        ] {
+            for variant in managed_name_case_variants(filename) {
+                let mut parent = mount.join("missing").join("..").join("..");
+                if !private {
+                    parent.push("..");
+                }
+                let selected = parent.join(variant);
+                let admission = if database {
+                    ProjectStateGuard::preflight_database_path(&selected, root)
+                } else {
+                    ProjectStateGuard::preflight_document(root, &selected)
+                };
+                require(
+                    if sensitive {
+                        admission?.is_none()
+                    } else {
+                        admission.is_err()
+                    },
+                    "unresolved reduction used the prefix volume instead of the destination volume",
+                )?;
+                require(
+                    !mount.join("missing").exists(),
+                    "case classification created a missing parent",
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[test]
 fn managed_parent_reductions_preserve_admission_and_outside_owners() -> io::Result<()> {
     let mut failures = Vec::new();
@@ -123,14 +415,15 @@ fn managed_parent_reductions_preserve_admission_and_outside_owners() -> io::Resu
             } else {
                 fs::hard_link(&outside, &target)?;
             }
-            let selected = intermediate.join("..").join(filename);
+            let selected = unreduced_path(&intermediate, &["..", filename])?;
+            let parent_resolves = fs::canonicalize(super::containing_directory(&selected)).is_ok();
             let admission = if database {
                 ProjectStateGuard::preflight_database_path(&selected, &root)
             } else {
                 ProjectStateGuard::preflight_document(&root, &selected)
             };
             match admission {
-                Ok(Some(mut guard)) if existing => {
+                Ok(Some(mut guard)) if parent_resolves => {
                     if !database {
                         if filename == super::GITIGNORE_FILE {
                             require(
@@ -146,7 +439,7 @@ fn managed_parent_reductions_preserve_admission_and_outside_owners() -> io::Resu
                         }
                     }
                 }
-                Err(_) if !existing => {}
+                Err(_) if !parent_resolves => {}
                 _ => failures.push(format!("{filename}: existing parent={existing}")),
             }
             require(
@@ -183,14 +476,15 @@ fn generated_capture_propagates_unresolved_managed_inputs() -> io::Result<()> {
                 fs::create_dir(&intermediate)?;
             }
             fs::write(directory.join(filename), b"owned regular entry")?;
-            let selected = intermediate.join("..").join(filename);
+            let selected = unreduced_path(&intermediate, &["..", filename])?;
+            let parent_resolves = fs::canonicalize(super::containing_directory(&selected)).is_ok();
             let (db, config) = if database {
                 (Some(selected.as_path()), None)
             } else {
                 (None, Some(selected.as_path()))
             };
             match ProjectStateGuard::preflight(&root, db, config) {
-                Ok(guard) if existing => {
+                Ok(guard) if parent_resolves => {
                     let captured = if database {
                         guard.automatic_database.as_deref()
                     } else {
@@ -200,7 +494,7 @@ fn generated_capture_propagates_unresolved_managed_inputs() -> io::Result<()> {
                         failures.push(format!("{filename}: managed input was not captured"));
                     }
                 }
-                Err(_) if !existing => {}
+                Err(_) if !parent_resolves => {}
                 _ => failures.push(format!("{filename}: existing parent={existing}")),
             }
             require(
@@ -227,7 +521,7 @@ fn managed_classification_preserves_root_aliases_and_physical_external_parents()
     let root = root.canonicalize()?;
     let state = root.join(STATE_DIRECTORY);
     fs::create_dir(&state)?;
-    let root_alias = temp.path().join("root-alias");
+    let root_alias = root.with_file_name("root-alias");
     directory_alias(&root, &root_alias)?;
     directory_alias(&external.join("deep"), &root.join("shortcut"))?;
     for (private, filename, database) in [
@@ -253,22 +547,38 @@ fn managed_classification_preserves_root_aliases_and_physical_external_parents()
             admit(&alias_parent.join(filename))?.is_some(),
             "selected root alias lost managed ownership",
         )?;
+        let unresolved = unreduced_path(&alias_parent, &["missing", "..", filename])?;
+        let parent_resolves = fs::canonicalize(super::containing_directory(&unresolved)).is_ok();
+        let admission = admit(&unresolved);
         require(
-            admit(&alias_parent.join("missing").join("..").join(filename)).is_err(),
-            "unresolved managed root alias became external",
+            if parent_resolves {
+                admission?.is_some()
+            } else {
+                admission.is_err()
+            },
+            "root alias lost managed ownership under native parent resolution",
         )?;
-        let physical_parent = root.join("shortcut").join("..");
-        let physical_parent = if private {
-            physical_parent.join(STATE_DIRECTORY)
+        let mut components = vec!["shortcut", ".."];
+        if private {
+            components.push(STATE_DIRECTORY);
+        }
+        components.push(filename);
+        let physical = unreduced_path(&root, &components)?;
+        let managed_parent = if private {
+            state.as_path()
         } else {
-            physical_parent
+            root.as_path()
         };
+        let resolves_managed = fs::canonicalize(super::containing_directory(&physical))
+            .is_ok_and(|resolved| resolved == managed_parent);
         require(
-            admit(&physical_parent.join(filename))?.is_none(),
-            "physical external parent inherited lexical selected-root ownership",
+            admit(&physical)?.is_some() == resolves_managed,
+            "native physical parent resolution lost its actual owner",
         )?;
+        let outside_missing =
+            unreduced_path(&external.canonicalize()?, &["missing", "..", filename])?;
         require(
-            admit(&external.join("missing").join("..").join(filename))?.is_none(),
+            admit(&outside_missing)?.is_none(),
             "ordinary missing external parent was restricted",
         )?;
     }
@@ -311,11 +621,8 @@ fn logical_managed_reductions_cannot_inherit_an_aliased_state_owner() -> io::Res
             (super::CONFIG_FILE, false),
         ] {
             fs::write(outside.join(filename), b"outside selected bytes")?;
-            let logical = root
-                .join(STATE_DIRECTORY)
-                .join("intermediate")
-                .join("..")
-                .join(filename);
+            let logical =
+                unreduced_path(&root, &[STATE_DIRECTORY, "intermediate", "..", filename])?;
             let admission = if database {
                 ProjectStateGuard::preflight_database_path(&logical, &root)
             } else {
@@ -330,7 +637,8 @@ fn logical_managed_reductions_cannot_inherit_an_aliased_state_owner() -> io::Res
                     && intermediate.exists() == existing,
                 "logical admission changed outside state",
             )?;
-            let physical = outside.join("intermediate").join("..").join(filename);
+            let physical =
+                unreduced_path(&outside.canonicalize()?, &["intermediate", "..", filename])?;
             let external = if database {
                 ProjectStateGuard::preflight_database_path(&physical, &root)
             } else {
@@ -588,19 +896,38 @@ fn directory_replacement_never_unlinks_a_foreign_staging_name() -> io::Result<()
     let parked = root.join("parked-state");
     let output = state.join(HOST_FILES[0]);
     let mut stage_name = None;
+    let mut callback_started = false;
+    let mut renamed = false;
+    let mut aliased = false;
     let result = guard.publish(&output, b"candidate", FilePublication::Replace, || {
+        callback_started = true;
         let name = fs::read_dir(&state)?
             .next()
             .ok_or_else(|| io::Error::other("missing owned stage"))??
             .file_name();
+        stage_name = Some(name.clone());
         fs::write(outside.join(&name), b"foreign sentinel")?;
         fs::rename(&state, &parked)?;
+        renamed = true;
         directory_alias(&outside, &state)?;
-        stage_name = Some(name);
+        aliased = true;
         Ok(())
     });
     require(result.is_err(), "replaced owner was admitted")?;
-    let name = stage_name.ok_or_else(|| io::Error::other("replacement callback did not run"))?;
+    require(
+        callback_started,
+        &format!("publication failed before callback: {result:?}"),
+    )?;
+    let name = stage_name
+        .ok_or_else(|| io::Error::other(format!("staging enumeration failed: {result:?}")))?;
+    require(
+        renamed,
+        &format!("native directory rename failed: {result:?}"),
+    )?;
+    require(
+        aliased,
+        &format!("replacement alias creation failed: {result:?}"),
+    )?;
     require(
         fs::read(outside.join(&name))? == b"foreign sentinel",
         "cleanup unlinked foreign state",

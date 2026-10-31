@@ -58,6 +58,7 @@ cli-core = [
     "dep:scraper",
     "dep:same-file",
     "dep:winapi-util",
+    "dep:whichdisk",
     "dep:tempfile",
     "dep:tiktoken",
     "dep:tokio",
@@ -126,6 +127,9 @@ tree-sitter = { workspace = true, optional = true }
 tree-sitter-language-pack = { workspace = true, optional = true }
 yaml-rust2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whichdisk = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = { workspace = true, optional = true }

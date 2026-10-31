@@ -22,6 +22,9 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
 - Protect the same implicit destinations in config ignore edits, root `.gitignore`
   creation and the default JSON map sidecar. Preserve custom/external config and map
   outputs, existing-entry Gitignore no-ops and read-only config aliases.
+- Recognize macOS filename and directory case aliases, including Unicode folding,
+  from the actual destination volume; preserve distinct custom names on sensitive
+  volumes and resolve missing-parent reductions across mount boundaries before writes.
 - Trace analogous producer/write/admission paths and prove positive compatibility,
   causal failures and real installed CLI/MCP behavior on supported platforms.
 
@@ -44,7 +47,8 @@ wrappers and early metadata reads, CLI init and generated MCP-config writers, sh
 atlas_map default/nonsource creation, MCP registered-worktree initialization and
 hydration activation, existing filesystem/project-binding helpers, native init tests,
 installed selector inventory and #715 release acceptance. Reuse existing same-file/tempfile helpers and the already locked canonical
-winapi-util as a direct Windows-only dependency for stable hard-link counts; add
+winapi-util as a direct Windows-only dependency for stable hard-link counts and
+whichdisk as a direct macOS-only dependency for existing volume capabilities; add
 no transitive package, unsafe binding or schema change.
 
 ## Release Scope

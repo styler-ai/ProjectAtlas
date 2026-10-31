@@ -488,6 +488,60 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored
           fi
 
+      - name: Managed state on both macOS volume case modes
+        if: runner.os == 'macOS' && contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          original_tmpdir="${TMPDIR:-$RUNNER_TEMP}"
+          fixture="$(mktemp -d "$RUNNER_TEMP/projectatlas-case-modes.XXXXXX")"
+          volume="$fixture/volume"
+          mounted=false
+          nested_mounted=false
+          nested="$volume/.projectatlas/bridge"
+          cleanup() {
+            export TMPDIR="$original_tmpdir"
+            if [ "$nested_mounted" = true ]; then
+              hdiutil detach "$nested" || return
+            fi
+            if [ "$mounted" = true ]; then
+              hdiutil detach "$volume" || return
+            fi
+            rm -rf "$fixture"
+          }
+          trap cleanup EXIT
+          mkdir "$volume"
+          for filesystem in APFS APFSX; do
+            image="$fixture/$filesystem.dmg"
+            hdiutil create -size 128m -fs "$filesystem" -volname ProjectAtlasCase -ov "$image"
+            hdiutil attach -nobrowse -mountpoint "$volume" "$image"
+            mounted=true
+            mkdir -p "$volume/tmp" "$nested"
+            nested_filesystem=APFSX
+            if [ "$filesystem" = APFSX ]; then
+              nested_filesystem=APFS
+            fi
+            nested_image="$fixture/nested-$filesystem.dmg"
+            hdiutil create -size 128m -fs "$nested_filesystem" -volname ProjectAtlasNested -ov "$nested_image"
+            hdiutil attach -nobrowse -mountpoint "$nested" "$nested_image"
+            nested_mounted=true
+            export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
+            export TMPDIR="$volume/tmp"
+            export PROJECTATLAS_TEST_CASE_SENSITIVE=false
+            if [ "$filesystem" = APFSX ]; then
+              export PROJECTATLAS_TEST_CASE_SENSITIVE=true
+            fi
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+            export TMPDIR="$original_tmpdir"
+            hdiutil detach "$nested"
+            nested_mounted=false
+            hdiutil detach "$volume"
+            mounted=false
+          done
+
       - name: Install cargo-deny for PDF source validation
         if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2

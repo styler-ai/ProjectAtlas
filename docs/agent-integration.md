@@ -131,6 +131,10 @@ is refused before creating the intermediate directory; a failed ownership check
 cannot silently select an external writer. Existing symlink parents retain their
 physical filesystem meaning, and custom external destinations remain supported.
 Missing managed legacy configuration is admitted before database identity repair.
+On macOS, managed case aliases follow the containing volume's case behavior,
+including Unicode case aliases. Distinct custom filenames on case-sensitive volumes
+remain supported. Unavailable case evidence for a possible managed alias causes a
+refusal before mutation; parent reductions use the destination volume's rules.
 
 Ignore edits and optional JSON map output apply the same ownership boundary to
 their exact managed documents. Changed default or legacy config and default JSON

@@ -133,6 +133,32 @@ the initializer also retains its publication-boundary document check. Causal own
 tests cover all five selected DB/document roles, both parent states, generated capture,
 root aliases, external physical parents and the existing-DB repair ordering.
 
+### Recognize case aliases using the containing macOS volume
+
+Exact fixed ASCII component spellings retain the no-query fast path. A filesystem-independent
+Unicode simple-fold prefilter selects candidate roles without probing unrelated external paths.
+Establish the logical parent owner before testing a file's case variant. For the
+private directory component, establish its containing selected root before querying
+case behavior, without following that final directory component as ownership proof.
+On macOS use the already workspace-locked whichdisk safe volume capability API;
+Some(false) admits the alias, Some(true) preserves a distinct custom name, and
+unknown/failed capability evidence propagates before mutation. Resolve existing
+original parent prefixes, reduce only the unresolved suffix, then query the prospective
+parent's volume (or its nearest existing ancestor), including across mount boundaries.
+Never infer case behavior from
+following the selected file itself or from equality of hardlink object identities.
+The capability lookup may follow the parent solely to learn its volume behavior;
+existing guard/reduction evidence, not that lookup, establishes logical ownership.
+
+This adds a direct macOS CLI use of an existing dependency, no new crate, platform
+unsafe code, directory scan, write probe, cache or path framework. Ordinary fixed-name
+admission remains constant in the closed output family. Owning/platform tests cover
+all five DB/document roles, absent leaves, aliased state directories and case-sensitive
+custom/hardlink positives. Actual macOS hosted proof is required; Linux directory
+casefold and Windows per-directory case sensitivity are adjacent unverified behaviors,
+not covered by this macOS-volume fix. No analogous supported-route reproduction was
+established in the bounded review; preserve existing non-macOS classification policy.
+
 ### Explicit paths remain supported
 
 An explicitly selected external database or config path is an intended operator

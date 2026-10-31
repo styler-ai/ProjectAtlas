@@ -4,7 +4,7 @@
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
       "crates/projectatlas-cli/tests/e2e_delivery.rs": "8b6cfc1b705f558effc8aac49aa66785de8db6b73b3edb66839a5c183d09751c",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "c84f5acc356cbb19a5002d19eab4bb290ce356474ec5a16f0852c4a27b012fcd",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "db567c1e1ea6f449b1fa0534b676e90cb46fe90f62fb33e96891e536fc7f874e",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "3f583175a078d607cbc7d7db0ac6d26361e7507e518e79e6113ae8a97e27ad08",
       "crates/projectatlas-cli/tests/e2e_navigation.rs": "82821d6136374241a25358d9fbdc45267662b36cfeea13bf9239131da9ef5f87",
       "crates/projectatlas-cli/tests/e2e_worktrees.rs": "ebb8c769da7d018645761bfcc4de3cda47fda0721de7c16ef1c46df413201c9a"
@@ -19793,6 +19793,14 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "text": "            cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",
