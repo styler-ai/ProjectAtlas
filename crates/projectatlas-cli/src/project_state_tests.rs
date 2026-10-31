@@ -207,6 +207,36 @@ fn require(condition: bool, message: &str) -> io::Result<()> {
     }
 }
 
+/// Read native codes through contextual errors without dropping the I/O cause.
+fn native_io_error_code(error: &io::Error) -> Option<i32> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = current {
+        if let Some(code) = cause
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::raw_os_error)
+        {
+            return Some(code);
+        }
+        current = cause.source();
+    }
+    None
+}
+
+#[test]
+fn publication_context_preserves_native_failure_kind_and_code() -> io::Result<()> {
+    let original = io::Error::from_raw_os_error(5);
+    let kind = original.kind();
+    let contextual = super::publication_failure("controlled native operation", original);
+    require(
+        contextual.kind() == kind
+            && native_io_error_code(&contextual) == Some(5)
+            && contextual
+                .to_string()
+                .contains("controlled native operation"),
+        "publication context lost its operation or native I/O cause",
+    )
+}
+
 /// Keep reductions literal even when Windows `PathBuf::push` would normalize a verbatim prefix.
 fn unreduced_path(parent: &Path, components: &[&str]) -> io::Result<std::path::PathBuf> {
     let mut spelling = parent.as_os_str().to_os_string();
@@ -993,7 +1023,16 @@ fn generated_replacement_preserves_an_external_hard_link() -> io::Result<()> {
     let output = state.join(HOST_FILES[0]);
     fs::hard_link(&outside, &output)?;
     let guard = ProjectStateGuard::preflight(&root, None, None)?;
-    guard.write_generated(&output, b"replacement")?;
+    let replacement = guard.write_generated(&output, b"replacement");
+    #[cfg(windows)]
+    if let Err(source) = &replacement {
+        let controls = windows_query_handle_replacement_controls();
+        return Err(io::Error::new(
+            source.kind(),
+            format!("generated replacement: {source}; native query-handle controls={controls:?}"),
+        ));
+    }
+    replacement?;
     require(
         fs::read(&output)? == b"replacement",
         "generated replacement missing",
@@ -1075,23 +1114,33 @@ fn staging_entry_replacement_never_publishes_or_unlinks_the_foreign_file() -> io
         let output = state.join(HOST_FILES[0]);
         fs::write(&output, b"last valid output")?;
         let retained_stage = root.join("retained-owned-stage");
+        let stage = std::cell::OnceCell::new();
         let mut foreign = None;
-        let result = guard.publish(&output, b"candidate", FilePublication::Replace, || {
-            let path = fs::read_dir(&state)?
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<io::Result<Vec<_>>>()?
-                .into_iter()
-                .find(|path| path != &output)
-                .ok_or_else(|| io::Error::other("missing owned stage"))?;
-            fs::rename(&path, &retained_stage)?;
-            fs::write(&path, b"foreign sentinel")?;
-            foreign = Some(path);
-            if fail_before_publication {
-                Err(io::Error::other("controlled pre-publication failure"))
-            } else {
-                Ok(())
-            }
-        });
+        let result = guard.publish_with_stage_check(
+            &output,
+            b"candidate",
+            FilePublication::Replace,
+            |temporary| {
+                stage
+                    .set(temporary.path().to_path_buf())
+                    .map_err(|duplicate| {
+                        io::Error::other(format!("stage observed twice: {duplicate:?}"))
+                    })
+            },
+            || {
+                let path = stage
+                    .get()
+                    .ok_or_else(|| io::Error::other("missing owned stage"))?;
+                fs::rename(path, &retained_stage)?;
+                fs::write(path, b"foreign sentinel")?;
+                foreign = Some(path.clone());
+                if fail_before_publication {
+                    Err(io::Error::other("controlled pre-publication failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
         let foreign = foreign.ok_or_else(|| io::Error::other("stage replacement did not run"))?;
         if result.is_ok()
             || fs::read(&output)? != b"last valid output"
@@ -1580,10 +1629,9 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
                 "-n",
                 "-u",
                 "nobody",
-                "/bin/sh",
+                "/usr/bin/python3",
                 "-c",
-                "if [ \"$2\" = write ]; then exec 3>>\"$1\"; else exec 3<\"$1\"; fi",
-                "projectatlas-access",
+                "import os,sys; fd=os.open(sys.argv[1], os.O_WRONLY if sys.argv[2]=='write' else os.O_RDONLY); os.close(fd)",
             ])
             .arg(path)
             .arg(if write { "write" } else { "read" })
@@ -1644,6 +1692,11 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
     chmod_acl(
         &guard.directory,
         "user:nobody allow read,write,file_inherit,only_inherit",
+    )?;
+    let parent_acl = exacl::getfacl(&guard.directory, None)?;
+    require(
+        !parent_acl.is_empty(),
+        "native inheritance fixture has no parent ACL",
     )?;
 
     let baseline = tempfile::Builder::new()
@@ -1708,12 +1761,73 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
             && !nobody_open(&output, true)?.status.success(),
         "protected replacement lost bytes or restrictive ACL",
     )?;
-    let created = guard.directory.join(HOST_FILES[1]);
-    guard.write_new(&created, b"fresh output")?;
     require(
-        nobody_open(&created, true)?.status.success()
-            && !exacl::getfacl(&created, None)?.is_empty(),
-        "new output lost legitimate direct-parent ACL inheritance",
+        exacl::getfacl(&guard.directory, None)? == parent_acl,
+        "replacement changed its parent inheritance ACL",
+    )?;
+    let direct = guard.directory.join("ordinary-inheritance-control");
+    fs::write(&direct, b"ordinary file")?;
+    let direct_acl = exacl::getfacl(&direct, None)?;
+    let direct_write = nobody_open(&direct, true)?.status.success();
+    let append = Command::new("sudo")
+        .args([
+            "-n",
+            "-u",
+            "nobody",
+            "/usr/bin/python3",
+            "-c",
+            "import os,sys; fd=os.open(sys.argv[1], os.O_WRONLY|os.O_APPEND); os.close(fd)",
+        ])
+        .arg(&direct)
+        .output()?;
+    require(
+        !direct_acl.is_empty() && direct_write && !append.status.success(),
+        &format!(
+            "native fixture must distinguish granted write from ungranted append: parent_acl_count={}, direct_acl_count={}, write_allowed={direct_write}, append_allowed={}",
+            parent_acl.len(),
+            direct_acl.len(),
+            append.status.success()
+        ),
+    )?;
+    fs::remove_file(direct)?;
+    let created = guard.directory.join(HOST_FILES[1]);
+    let mut creation = None;
+    guard.publish_with_stage_check(
+        &created,
+        b"fresh output",
+        FilePublication::Create,
+        |stage| {
+            creation = Some((
+                stage.as_file().metadata()?.ino(),
+                exacl::getfacl(stage.path(), None)?,
+                nobody_open(stage.path(), true)?.status.success(),
+            ));
+            Ok(())
+        },
+        || Ok(()),
+    )?;
+    let (staged_inode, staged_acl, staged_write) =
+        creation.ok_or_else(|| io::Error::other("new-file stage was not observed"))?;
+    require(
+        !staged_acl.is_empty() && staged_write,
+        &format!(
+            "new-file stage lost inherited policy: stage_acl_count={}, write_allowed={staged_write}",
+            staged_acl.len()
+        ),
+    )?;
+    let final_acl = exacl::getfacl(&created, None)?;
+    let final_write = nobody_open(&created, true)?.status.success();
+    let same_inode = fs::metadata(&created)?.ino() == staged_inode;
+    require(
+        final_acl == staged_acl
+            && final_write
+            && same_inode
+            && fs::read(&created)? == b"fresh output",
+        &format!(
+            "new output lost legitimate direct-parent ACL inheritance: stage_acl_count={}, final_acl_count={}, write_allowed={final_write}, same_inode={same_inode}",
+            staged_acl.len(),
+            final_acl.len()
+        ),
     )?;
 
     for substitute_directory in [false, true] {
@@ -1783,6 +1897,88 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
         fs::remove_file(private.join("foreign-sentinel"))?;
         fs::remove_dir(private)?;
     }
+
+    // No inherited ACL and equal ownership do not protect a named stage from
+    // directory-entry replacement by another user of a shared state directory.
+    let shared_temp = tempfile::tempdir_in(&base)?;
+    let shared_root = shared_temp.path().canonicalize()?;
+    fs::set_permissions(&shared_root, fs::Permissions::from_mode(0o755))?;
+    let mut shared = ProjectStateGuard::preflight(&shared_root, None, None)?;
+    shared.ensure_directory()?;
+    exacl::setfacl(&[&shared_root, &shared.directory], &[], None)?;
+    fs::set_permissions(&shared.directory, fs::Permissions::from_mode(0o777))?;
+    let selected = shared.directory.join(HOST_FILES[0]);
+    fs::write(&selected, b"same-owner output")?;
+    fs::set_permissions(&selected, fs::Permissions::from_mode(0o640))?;
+    let victim = shared_root.join("outside-acl-owner");
+    fs::write(&victim, b"outside ACL and bytes")?;
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o666))?;
+    chmod_acl(&victim, "user:nobody deny write")?;
+    let victim_acl = exacl::getfacl(&victim, None)?;
+    let substitute = |path: &Path| {
+        Command::new("sudo")
+            .args([
+                "-n",
+                "-u",
+                "nobody",
+                "/usr/bin/python3",
+                "-c",
+                "import os,sys; os.unlink(sys.argv[1]); os.symlink(sys.argv[2],sys.argv[1])",
+            ])
+            .arg(path)
+            .arg(&victim)
+            .output()
+    };
+    let mut exposed = tempfile::NamedTempFile::new_in(&shared.directory)?;
+    exposed.disable_cleanup(true);
+    let changed = substitute(exposed.path())?;
+    require(
+        changed.status.success(),
+        "shared-directory substitution control failed",
+    )?;
+    exacl::setfacl(&[exposed.path()], &[], None)?;
+    require(
+        exacl::getfacl(&victim, None)?.is_empty() && nobody_open(&victim, true)?.status.success(),
+        "following ACL setter did not reproduce the outside-owner mutation",
+    )?;
+    exacl::setfacl(
+        &[&victim],
+        &victim_acl,
+        Some(super::macos_access::NOFOLLOW_ACL),
+    )?;
+    // Even a supplied alias must not redirect the safe setter to its target.
+    let _safe_alias_result = exacl::setfacl(
+        &[exposed.path()],
+        &[],
+        Some(super::macos_access::NOFOLLOW_ACL),
+    );
+    require(
+        exacl::getfacl(&victim, None)? == victim_acl,
+        "non-following ACL setter changed the outside owner",
+    )?;
+    fs::remove_file(exposed.path())?;
+    drop(exposed);
+    shared.publish_with_stage_check(
+        &selected,
+        b"protected same-owner replacement",
+        FilePublication::Replace,
+        |stage| {
+            check_private(stage, writer)?;
+            let changed = substitute(stage.path())?;
+            require(
+                !changed.status.success()
+                    && String::from_utf8_lossy(&changed.stderr).contains("Permission denied"),
+                "another user replaced a protected stage entry",
+            )
+        },
+        || Ok(()),
+    )?;
+    require(
+        fs::read(&selected)? == b"protected same-owner replacement"
+            && fs::read(&victim)? == b"outside ACL and bytes"
+            && exacl::getfacl(&victim, None)? == victim_acl,
+        "shared-directory replacement changed its outside ACL owner",
+    )?;
 
     let owner_temp = tempfile::tempdir_in(&base)?;
     let owner_root = owner_temp.path().canonicalize()?;
@@ -1859,6 +2055,121 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
     String::from_utf8(result.stdout)
         .map(|value| value.trim().to_owned())
         .map_err(io::Error::other)
+}
+
+/// Diagnose native rename independently of policy copying, with exact source-handle rights.
+#[cfg(windows)]
+fn windows_query_handle_replacement_controls() -> io::Result<String> {
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut controls = Vec::new();
+    for linked in [false, true] {
+        for retained in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let output = root.join("destination");
+            fs::write(&output, b"previous complete output")?;
+            if linked {
+                fs::hard_link(&output, root.join("outside-owner"))?;
+            }
+            let query = if retained {
+                Some(super::ReplacementSource::capture(
+                    &output,
+                    &fs::symlink_metadata(&output)?,
+                )?)
+            } else {
+                None
+            };
+            let mut stage = tempfile::Builder::new().make_in(&root, |path| {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .share_mode(0x0000_0004)
+                    .open(path)
+            })?;
+            stage.write_all(b"complete replacement")?;
+            let result = stage.persist(&output);
+            controls.push(format!(
+                "linked={linked},retained={retained},native_code={:?},succeeded={}",
+                result
+                    .as_ref()
+                    .err()
+                    .and_then(|failure| failure.error.raw_os_error()),
+                result.is_ok()
+            ));
+            drop(query);
+        }
+    }
+    Ok(controls.join("; "))
+}
+
+#[cfg(windows)]
+#[test]
+fn failed_readonly_replacement_cleans_only_its_owned_stage() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    let outside = root.join("outside-owner");
+    fs::write(&output, b"last valid output")?;
+    fs::hard_link(&output, &outside)?;
+    let mut permissions = fs::metadata(&output)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&output, permissions)?;
+    let held = std::cell::RefCell::new(None::<fs::File>);
+    let reached = std::cell::Cell::new(false);
+    let result = guard.publish_with_stage_check(
+        &output,
+        b"",
+        FilePublication::Replace,
+        |stage| {
+            *held.borrow_mut() = Some(stage.as_file().try_clone()?);
+            Ok(())
+        },
+        || {
+            let borrowed = held.borrow();
+            let stage = borrowed
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing retained stage"))?;
+            require(
+                stage.metadata()?.permissions().readonly(),
+                "native readonly policy was not applied before the failure",
+            )?;
+            reached.set(true);
+            Err(io::Error::other("controlled readonly publication failure"))
+        },
+    );
+    require(
+        reached.get() && result.is_err(),
+        "readonly fixture did not reach its controlled failure",
+    )?;
+    let stage = held
+        .into_inner()
+        .ok_or_else(|| io::Error::other("missing failed stage"))?;
+    // IGNORE_READONLY_ATTRIBUTE deletion on NTFS can remove the old stage's
+    // name without clearing its readonly flag. Assert the portable cleanup
+    // invariant through the retained object, without claiming an NTFS leak.
+    require(
+        !stage.metadata()?.permissions().readonly(),
+        "failed stage cleanup still depends on POSIX-delete readonly support",
+    )?;
+    drop(stage);
+    require(
+        fs::read_dir(&guard.directory)?.count() == 1,
+        "failed readonly publication leaked a named stage",
+    )?;
+    for path in [&output, &outside] {
+        require(
+            fs::read(path)? == b"last valid output" && fs::metadata(path)?.permissions().readonly(),
+            "readonly cleanup changed the destination or outside owner",
+        )?;
+    }
+    // Restore only this fixture's original inode after checking preservation.
+    let mut permissions = fs::metadata(&output)?.permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(&output, permissions)
 }
 
 #[cfg(windows)]
@@ -2119,7 +2430,7 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
         )?;
         if let Err(source) = &result {
             require(
-                matches!(source.raw_os_error(), Some(5 | 1336))
+                matches!(native_io_error_code(source), Some(5 | 1336))
                     || source.kind() == io::ErrorKind::InvalidInput,
                 &format!("special DACL failed without a preservation/access cause: {source}"),
             )?;

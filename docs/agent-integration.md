@@ -152,7 +152,8 @@ Replacement retains existing ownership and native file access controls: Linux
 POSIX/NFSv4 ACLs and SELinux/Smack file labels, macOS ordered ACLs, and Windows
 owner/group/DACL policy. A policy that cannot be preserved causes a causal refusal
 before valid output is replaced. Linux prepares changed policy and complete bytes
-on an unnamed inode; macOS isolates payload creation from broader inherited ACLs.
+on an unnamed inode; macOS isolates every existing-file replacement before native
+pathname ACL operations, using no-follow leaf ACL access.
 New outputs retain ordinary parent inheritance. The destination and staging file
 identities are rechecked before publication; uncertain staging ownership withholds
 cleanup. A private-directory cleanup error after publication explicitly reports

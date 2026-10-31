@@ -46,15 +46,31 @@ enum FilePublication {
     Replace,
 }
 
-/// Preserve both the operation and ownership failure when cleanup is unsafe.
+/// Preserve the operation and failed cleanup precondition without an unsafe unlink.
 #[derive(Debug, thiserror::Error)]
-#[error("{operation}; generated-file cleanup was withheld because {ownership}")]
+#[error("{operation}; generated-file cleanup was withheld because {cleanup}")]
 struct RetainedStaging {
     /// Original write or publication failure.
     #[source]
     operation: io::Error,
-    /// Why the old temporary pathname can no longer be safely unlinked.
-    ownership: io::Error,
+    /// Ownership or native metadata prevented safe cleanup of the old temporary name.
+    cleanup: io::Error,
+}
+
+/// Keep a failed publication step and its native I/O cause together.
+#[derive(Debug, thiserror::Error)]
+#[error("{action}: {source}")]
+struct PublicationFailure {
+    /// Human-readable operation whose native cause remains available below.
+    action: &'static str,
+    /// Preserve the original native error and its code in the causal chain.
+    #[source]
+    source: io::Error,
+}
+
+/// Add causal operation context without changing the I/O failure category.
+fn publication_failure(action: &'static str, source: io::Error) -> io::Error {
+    io::Error::new(source.kind(), PublicationFailure { action, source })
 }
 
 /// Keep database admission independent of optional generated host documents.
@@ -444,9 +460,10 @@ impl ProjectStateGuard {
         let access = metadata
             .as_ref()
             .map(|metadata| ReplacementSource::capture(path, metadata))
-            .transpose()?;
+            .transpose()
+            .map_err(|source| publication_failure("capture destination access policy", source))?;
         #[cfg(target_os = "macos")]
-        let private = macos_access::ReplacementDirectory::create(self, metadata.as_ref())?;
+        let private = macos_access::ReplacementDirectory::create(self, metadata.is_some())?;
         #[cfg(target_os = "macos")]
         let staging_directory = private
             .as_ref()
@@ -529,8 +546,12 @@ impl ProjectStateGuard {
                 self.verify_staging_file(&temporary, &staging_identity)?;
                 #[cfg(any(target_os = "macos", windows))]
                 if let Some(access) = &access {
-                    access.verify_destination(path)?;
-                    access.apply(path, &temporary)?;
+                    access.verify_destination(path).map_err(|source| {
+                        publication_failure("recheck destination before policy copy", source)
+                    })?;
+                    access.apply(path, &temporary).map_err(|source| {
+                        publication_failure("prepare staged native access policy", source)
+                    })?;
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 if let Some(metadata) = &metadata {
@@ -538,12 +559,22 @@ impl ProjectStateGuard {
                 }
                 self.verify_staging_file(&temporary, &staging_identity)?;
                 if !content_prepared {
-                    temporary.write_all(bytes)?;
-                    temporary.as_file().sync_all()?;
+                    temporary
+                        .write_all(bytes)
+                        .map_err(|source| publication_failure("write staged payload", source))?;
+                    temporary
+                        .as_file()
+                        .sync_all()
+                        .map_err(|source| publication_failure("sync staged payload", source))?;
                 }
                 before_publication()?;
-                self.verify()?;
-                self.verify_staging_file(&temporary, &staging_identity)?;
+                self.verify().map_err(|source| {
+                    publication_failure("recheck project state before publication", source)
+                })?;
+                self.verify_staging_file(&temporary, &staging_identity)
+                    .map_err(|source| {
+                        publication_failure("recheck staged file before publication", source)
+                    })?;
                 #[cfg(target_os = "linux")]
                 if let Some(access) = &access
                     && !access.matches(temporary.as_file())?
@@ -556,7 +587,9 @@ impl ProjectStateGuard {
                 if matches!(publication, FilePublication::Replace) {
                     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                     if let Some(access) = &access {
-                        access.verify_destination(path)?;
+                        access.verify_destination(path).map_err(|source| {
+                            publication_failure("recheck destination before replacement", source)
+                        })?;
                     }
                     if metadata.is_none() && optional_metadata(path)?.is_some() {
                         return Err(refusal(
@@ -619,7 +652,11 @@ impl ProjectStateGuard {
                             Ok(_) => {}
                         }
                     }
-                    Err(self.staging_failure(&mut failure.file, failure.error, &staging_identity))
+                    Err(self.staging_failure(
+                        &mut failure.file,
+                        publication_failure("persist generated output", failure.error),
+                        &staging_identity,
+                    ))
                 }
             }
         })();
@@ -658,7 +695,7 @@ impl ProjectStateGuard {
                     operation.kind(),
                     RetainedStaging {
                         operation,
-                        ownership,
+                        cleanup: ownership,
                     },
                 )),
             };
@@ -717,19 +754,27 @@ impl ProjectStateGuard {
         operation: io::Error,
         directory_identity: &Handle,
     ) -> io::Error {
-        match self.verify_staging_file(temporary, directory_identity) {
+        let cleanup = self.verify_staging_file(temporary, directory_identity);
+        #[cfg(windows)]
+        let cleanup = cleanup.and_then(|()| {
+            // Classic Windows deletion cannot remove a readonly file.
+            // Normalize only our held, unpublished inode so cleanup does
+            // not depend on a filesystem's optional POSIX-delete support.
+            let mut permissions = temporary.as_file().metadata()?.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                temporary.as_file().set_permissions(permissions)?;
+                self.verify_staging_file(temporary, directory_identity)?;
+            }
+            Ok(())
+        });
+        match cleanup {
             Ok(()) => operation,
-            Err(ownership) => {
+            Err(cleanup) => {
                 // keep() itself performs path I/O on Windows. Only disable cleanup:
                 // the original private staging file survives under its old owner.
                 temporary.disable_cleanup(true);
-                io::Error::new(
-                    operation.kind(),
-                    RetainedStaging {
-                        operation,
-                        ownership,
-                    },
-                )
+                io::Error::new(operation.kind(), RetainedStaging { operation, cleanup })
             }
         }
     }
@@ -784,7 +829,7 @@ impl ReplacementSource {
         require_regular(path, &file.metadata()?)?;
         let identity = Handle::from_file(file.try_clone()?)?;
         #[cfg(target_os = "macos")]
-        let acl = exacl::getfacl(path, None)?;
+        let acl = exacl::getfacl(path, Some(macos_access::NOFOLLOW_ACL))?;
         #[cfg(windows)]
         let security = windows_access_snapshot(&file)?;
         let source = Self {
@@ -815,7 +860,7 @@ impl ReplacementSource {
                 && held.uid() == self.metadata.uid()
                 && held.gid() == self.metadata.gid()
                 && held.mode() == self.metadata.mode()
-                && exacl::getfacl(path, None)? == self.acl
+                && exacl::getfacl(path, Some(macos_access::NOFOLLOW_ACL))? == self.acl
                 && Handle::from_file(self.file.try_clone()?)? == self.identity
         };
         #[cfg(windows)]
@@ -851,7 +896,11 @@ impl ReplacementSource {
                     Some(self.metadata.gid()),
                 )?;
             }
-            exacl::setfacl(&[staged.path()], &self.acl, None)?;
+            exacl::setfacl(
+                &[staged.path()],
+                &self.acl,
+                Some(macos_access::NOFOLLOW_ACL),
+            )?;
         }
         #[cfg(windows)]
         preserve_windows_access(path, &self.file, staged)?;
@@ -860,7 +909,7 @@ impl ReplacementSource {
             .as_file()
             .set_permissions(self.metadata.permissions())?;
         #[cfg(target_os = "macos")]
-        if exacl::getfacl(staged.path(), None)? != self.acl {
+        if exacl::getfacl(staged.path(), Some(macos_access::NOFOLLOW_ACL))? != self.acl {
             return Err(refusal(
                 path,
                 "staged access ACL differs from the destination",

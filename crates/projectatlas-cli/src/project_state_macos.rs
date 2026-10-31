@@ -2,10 +2,13 @@
 
 use super::{ProjectStateGuard, RetainedStaging, refusal, require_directory};
 use same_file::Handle;
-use std::fs::{self, Metadata};
+use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+/// Operate on an entry itself; never redirect ACL mutation through a leaf symlink.
+pub(super) const NOFOLLOW_ACL: exacl::AclOption = exacl::AclOption::SYMLINK_ACL;
 
 /// A non-recursively cleaned workspace, hardened before any payload file exists.
 pub(super) struct ReplacementDirectory<'a> {
@@ -18,23 +21,18 @@ pub(super) struct ReplacementDirectory<'a> {
 }
 
 impl<'a> ReplacementDirectory<'a> {
-    /// Isolate replacements only where creation inheritance or ownership could broaden access.
+    /// Isolate every replacement before path-based native ACL operations.
     pub(super) fn create(
         guard: &'a ProjectStateGuard,
-        metadata: Option<&Metadata>,
+        replacing: bool,
     ) -> io::Result<Option<Self>> {
-        let Some(metadata) = metadata else {
-            return Ok(None);
-        };
-        let inherited = exacl::getfacl(&guard.directory, None)?
-            .iter()
-            .any(|entry| entry.flags.contains(exacl::Flag::FILE_INHERIT));
-        if !inherited && metadata.uid() == rustix::process::geteuid().as_raw() {
+        if !replacing {
             return Ok(None);
         }
         guard.verify_directories()?;
         let path = tempfile::Builder::new()
             .prefix(".publication-")
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(&guard.directory)?
             .keep();
         // Do not let TempDir recursively clean a path before ownership is proved.
@@ -43,7 +41,7 @@ impl<'a> ReplacementDirectory<'a> {
                 operation.kind(),
                 RetainedStaging {
                     operation,
-                    ownership: io::Error::other(
+                    cleanup: io::Error::other(
                         "private staging directory identity unavailable; retained",
                     ),
                 },
@@ -56,7 +54,21 @@ impl<'a> ReplacementDirectory<'a> {
         };
         let hardened = (|| {
             directory.verify()?;
-            let file = fs::File::open(&directory.path)?;
+            let file = fs::File::from(rustix::fs::openat(
+                rustix::fs::CWD,
+                &directory.path,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )?);
+            if Handle::from_file(file.try_clone()?)? != directory.identity {
+                return Err(refusal(
+                    &directory.path,
+                    "private staging directory object changed",
+                ));
+            }
             let current = file.metadata()?;
             if current.uid() != rustix::process::geteuid().as_raw() {
                 return Err(refusal(
@@ -64,12 +76,12 @@ impl<'a> ReplacementDirectory<'a> {
                     "private staging directory creator changed",
                 ));
             }
-            exacl::setfacl(&[&directory.path], &[], None)?;
+            exacl::setfacl(&[&directory.path], &[], Some(NOFOLLOW_ACL))?;
             // Keep the workspace owned by this writer. Destination ownership
             // belongs on the payload, never on its private traversal boundary.
             file.set_permissions(fs::Permissions::from_mode(0o700))?;
             directory.verify()?;
-            if !exacl::getfacl(&directory.path, None)?.is_empty()
+            if !exacl::getfacl(&directory.path, Some(NOFOLLOW_ACL))?.is_empty()
                 || file.metadata()?.permissions().mode() & 0o777 != 0o700
                 || fs::read_dir(&directory.path)?.next().is_some()
             {
@@ -113,7 +125,7 @@ impl<'a> ReplacementDirectory<'a> {
                 operation.kind(),
                 RetainedStaging {
                     operation,
-                    ownership,
+                    cleanup: ownership,
                 },
             )),
             (Ok(_), Err(ownership)) => Err(io::Error::new(
@@ -122,7 +134,7 @@ impl<'a> ReplacementDirectory<'a> {
                     operation: io::Error::other(
                         "publication committed; private staging cleanup failed",
                     ),
-                    ownership,
+                    cleanup: ownership,
                 },
             )),
         }

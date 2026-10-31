@@ -251,9 +251,13 @@ change could revoke them on the retained handle. Revalidate the admitted target'
 inode and captured access policy before replacement; an absent Replace target
 must remain absent. Create-only no-clobber races retain their existing result.
 
-macOS inherited ACL allows can override0600. Existing-target stages with inheritable
-parent ACLs therefore use a private same-volume staging directory, whose ACL is
-cleared and0700 mode verified before payload file creation. Keep that directory
+macOS inherited ACL allows can override0600. A directory can also permit entry
+replacement without an inheritable ACL, so equal ownership and absent inheritance
+do not make a pathname ACL setter safe. Every existing-target stage therefore uses
+a private same-volume staging directory, whose ACL is cleared and0700 mode verified
+before payload file creation. Native ACL reads/writes use the library's no-follow
+entry option, including workspace ACL clearing; the directory mode setter uses a
+NOFOLLOW, directory-only descriptor bound to its retained identity. Keep that directory
 owned by the writer even when the destination has a different owner. Keep genuinely new
 outputs in their original parent to preserve supported inherited grants. Retain
 private-directory identity, verify both stage parent and held file, and remove only
@@ -262,6 +266,26 @@ after successful persist is explicitly a committed-publication follow-up error.
 Native nobody-held-FD controls prove the original window and the protected actual
 publisher; positive new-file controls retain normal inheritance. No project unsafe
 code, process-global security-context changes or shell runtime dependency.
+
+Native ACL authorization probes request O_WRONLY without O_APPEND/O_TRUNC for a
+granted write right. Darwin treats append as a separate right; a sibling direct
+creation control proves write access and append denial before comparing actual
+stage/final ACLs and inode continuity. A shared-directory/no-inheritance/same-owner
+case demonstrates the unsafe following setter and the protected replacement, with
+outside ACL and byte preservation. These do not promise an atomic defense against
+arbitrary concurrent ancestor substitution.
+
+The private directory's ACL clearing remains a pathname operation. Final-component
+no-follow prevents symlink redirection, while retained-identity checks detect later
+replacement; neither makes the ACL mutation identity-atomic if a different real
+directory is substituted during that operation. Preserve this explicit proof gap
+in review and assess its supported trust boundary before final acceptance rather
+than treating the symlink regression as complete concurrent-directory coverage.
+
+Windows failure cleanup clears a copied readonly attribute only through the verified
+owned staging handle and rechecks its identity before automatic removal. This keeps
+cleanup independent of optional POSIX-delete support, while preserving the original
+destination and outside hardlinks. Failed normalization retains the stage explicitly.
 
 ### Explicit paths remain supported
 

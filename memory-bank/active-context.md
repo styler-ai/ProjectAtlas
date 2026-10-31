@@ -1,10 +1,75 @@
 # Active context
 
+## Latest review-feedback candidate (supersedes prior pending/native notes)
+
+Public/local Git HEAD before this follow-up is b7d4b25ca7b845cf2a65309e41d1b6cb8ffffc18.
+Its normalpush99963 TERMINALPASS866.96s,34reported suites/1725pass/11ignored;
+4149010gone. Receipt/log /tmp/projectatlas-741-stage-policy-native-push.*.
+Selected current Git HEAD/status and the NEW review-feedback push receipt own the
+next candidate. Do NOT run the b7-hardcoded freeze helper as final-source proof.
+
+b7SOURCE41213259104 TERMINAL individual Rust124572523727/Linux124572523761/repo/
+planSUCCESS. BothMac andWindowsFAIL atowningblock. DetailedLinuxlog
+/tmp/projectatlas-741-b7-linux-job.log proves ignoredrootlabeltest explicitly ran
+1PASS0.02s, all6rolelabels+uid/gid65534/outside/failure/capdrop controls. This proves
+real kernel xattr STORAGE, not enforcedMACpolicy. No4Macformatproof yet.
+
+MacARM124572523695 passed26owning, thenignorednativefreshfile combinedassertion
+failed. Intel124572523698sameblockfailure (terminal lognotyetdownloaded). Initial
+probe usedO_APPEND despitegrantingwritewithoutappend. Correctedcurrentprobe uses
+PythonO_WRONLY/noTRUNC/noAPPEND; directcreationwrite/appenddistinction+realstage/
+finalACL+inodecontrols retainpositiveinheritanceassertions. Native rerunrequired.
+
+Windows124572523724 failed3ordinaryreplacementswithOS5: externalhardlink,
+case/customcompatibility andnativeDACL preservation. 20otherowningPASS, including
+newdestinationracecases andstagequery/share32 exclusion. Log
+/tmp/projectatlas-741-b7-windows-job.log. DO NOT guess handle-lifetime cause/drop
+sourcehandles or relaxACLs. Currentcandidate adds PublicationFailure phase+typedIO
+cause for capture/apply/rechecks/write/sync/persist; native-code-chain unit passes.
+The failinghardlinkpositive appends4nativequery-controls (retained/not × single/
+hardlinked) onERRORONLY. Ordinarysuccesschecks remain unchanged. Native code5/1336
+checks traverse the preserved cause chain. ActualWindowsrootcause remainsOPEN.
+
+FreshCodexSecurityP2 PRRT_kwDOQyFgJ86yR85I/comment4432194749 confirmed by PRIMARY
+inspection of publisher andexacl: optionalprivateMacstaging leavespathACLsetter in
+sharedmutableparent. Newsource isolates ALL existingMac replacements; freshcreates
+stillinheritdirectparent. AllMacACL operations useSYMLINK_ACL/no-follow leaf.
+Directorymode usesNOFOLLOW|DIRECTORY FD boundtoretainedidentity beforemutation;
+initialprivateDirpermissions0700. Newignorednative777shared/noinherit/sameUID
+fixture demonstrates unsafefollowingACLtargetmutation, nofollowaliaspreservation,
+actualprivateblockedleafswap andlegitimatewrite/outsideACL+bytes. Existingstageleaf
+regression observesactualstagepath (privateorflat), nottop-levelenumeration.
+Technicalreply4432275802 confirmed/readback; threadSTAYSOPEN untilpublishednativeproof.
+FourCodexthreadsnowOPEN (Macname,ACL,SELinux,newMacsetter). No bulkresolution.
+
+NewWindowsreadonlycleanup guard clearsONLYownedheldstage readonlyafteridentity
+proof, rechecksownership, retainscausallyonfailure. Nativeactualpublisheremptybytes
+control capturesstageFD, observesreadonlycopy, fails, checksheldreadonlycleared,
+dropsclone BEFOREdirectorycount, preserves source/outsideReadonly+bytes. This is a
+portablecleanupinvariant, NOT proofoldcode leakedonNTFS/FAT. SourceACLcapture onFAT
+and pre1607support are NOT established. RetainedStaging.secondaryfield generalized
+tocleanup, so metadatafailure isnotfalselyreported as ownershipchange.
+
+IndependentLunaMax reviewedcurrentdelta andAPPROVED next NATIVE DIAGNOSTIC
+publication only, NOT acceptance. Residual explicitproofgap: privateDirectory ACL
+clearing remainspathname-based despitefinalleafnofollow; different realdirectory
+substitution betweencheck/setter canmutatemetadata beforedetection. Reviewitsactual
+supportedtrustboundary beforeacceptance; do notclaimidentity-atomicACLmutation or
+silentlydeclareallconcurrentdirectorycasescovered. SourceNoUniversalAncestorRace
+non-goal doesnotconstitutenativeproof. No safeFDACL API/dependency added.
+
+Currentlocal27owningPASS+1privilegedignored; all-target/all-featureCLIClippyPASS6.10s;
+fmt/strictstrings/OpenSpec/scopedIssueOpsPASS beforelastdocs/metadata updates.
+Logs /tmp/projectatlas-741-feedback-publish-{unit,clippy}.log plus
+-feedback-final-{strings,issueops}.log. EarlierClippycfgOkclosure, ignoredOnceCell
+error anddouble-borrow issues were fixed, noallow/suppression. Latestfinalgates
+mustbecheckedbeforecommit. Task1/5/allacceptanceOPEN. Only741active, noRC.
+
 ## Sole active owner and release authority
 
 Only #741 / PR #743 is active. Normally merge it and verify BOTH CLOSED before
 resuming another issue. #731 / PR737 are CLOSED via main a5b1bebcaa79c8386b68e9c247eff73aa11e5e15.
-Public head before this candidate is ab3a9fa1acd8629b77b98b7c2b70864ba96a865f.
+Public head is b7d4b25ca7b845cf2a65309e41d1b6cb8ffffc18 before the follow-up.
 Selected Git HEAD/status and the native-push receipt own the candidate identity.
 Local/live tasks remain1/5 (only1.1); all five acceptance rows OPEN. PR ready/notdraft,
 base main, milestone37, body Refs741. Restore sole Fixes741 only at final readiness.
