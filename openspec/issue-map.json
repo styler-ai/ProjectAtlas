@@ -4,174 +4,559 @@
     "v0.5.1-00": {
       "release_issue": 715,
       "issues": {
-        "708": { "blocked_by": [] },
-        "715": { "blocked_by": [708, 718, 721, 722, 732] },
-        "718": { "blocked_by": [] },
-        "721": { "blocked_by": [] },
-        "722": { "blocked_by": [] },
-        "732": { "blocked_by": [] }
+        "708": {
+          "blocked_by": []
+        },
+        "715": {
+          "blocked_by": [
+            708,
+            718,
+            721,
+            722,
+            731,
+            732
+          ]
+        },
+        "718": {
+          "blocked_by": []
+        },
+        "721": {
+          "blocked_by": []
+        },
+        "722": {
+          "blocked_by": []
+        },
+        "731": {
+          "blocked_by": []
+        },
+        "732": {
+          "blocked_by": []
+        }
       }
     },
     "v0.5.0-stable-00": {
       "release_issue": 602,
       "issues": {
-        "602": { "blocked_by": [] }
+        "602": {
+          "blocked_by": []
+        }
       }
     },
     "v0.5.0-00": {
       "release_issue": 492,
       "issues": {
-        "339": { "blocked_by": [477, 586] },
-        "358": { "blocked_by": [476, 480, 488] },
-        "372": { "blocked_by": [] },
-        "384": { "blocked_by": [477] },
-        "390": { "blocked_by": [] },
-        "464": { "blocked_by": [] },
-        "465": { "blocked_by": [476, 480, 488, 570, 572] },
-        "476": { "blocked_by": [481] },
-        "477": { "blocked_by": [547] },
-        "480": { "blocked_by": [482] },
-        "481": { "blocked_by": [482] },
-        "482": { "blocked_by": [] },
-        "483": { "blocked_by": [482] },
-        "484": { "blocked_by": [476, 481, 547] },
-        "485": { "blocked_by": [484, 486] },
-        "486": { "blocked_by": [482, 483] },
-        "487": { "blocked_by": [518] },
-        "488": { "blocked_by": [] },
-        "489": { "blocked_by": [] },
-        "491": { "blocked_by": [] },
-        "492": { "blocked_by": [339, 358, 372, 384, 390, 464, 465, 476, 477, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489, 491, 495, 517, 518, 523, 525, 533, 544, 547, 549, 555, 560, 561, 564, 567, 568, 570, 572, 574, 586, 590, 593, 604, 605, 606, 607, 608, 609, 620, 624, 625, 627, 633, 639, 499, 645, 664, 666, 668, 669, 697, 698, 699] },
-        "495": { "blocked_by": [] },
-        "517": { "blocked_by": [] },
-        "518": { "blocked_by": [547] },
-        "523": { "blocked_by": [] },
-        "525": { "blocked_by": [523] },
-        "533": { "blocked_by": [] },
-        "544": { "blocked_by": [] },
-        "547": { "blocked_by": [] },
-        "549": { "blocked_by": [] },
-        "555": { "blocked_by": [487] },
-        "560": { "blocked_by": [] },
-        "561": { "blocked_by": [] },
-        "564": { "blocked_by": [] },
-        "567": { "blocked_by": [] },
-        "568": { "blocked_by": [] },
-        "570": { "blocked_by": [] },
-        "572": { "blocked_by": [574] },
-        "574": { "blocked_by": [] },
-        "586": { "blocked_by": [] },
-        "590": { "blocked_by": [] },
-        "593": { "blocked_by": [499, 664] },
-        "604": { "blocked_by": [] },
-        "605": { "blocked_by": [] },
-        "606": { "blocked_by": [] },
-        "607": { "blocked_by": [] },
-        "608": { "blocked_by": [] },
-        "609": { "blocked_by": [607] },
-        "620": { "blocked_by": [625] },
-        "624": { "blocked_by": [] },
-        "625": { "blocked_by": [] },
-        "627": { "blocked_by": [] },
-        "633": { "blocked_by": [] },
-        "639": { "blocked_by": [] },
-        "499": { "blocked_by": [639] },
-        "645": { "blocked_by": [620] },
-        "664": { "blocked_by": [] },
-        "666": { "blocked_by": [518, 620] },
-        "668": { "blocked_by": [] },
-        "669": { "blocked_by": [] },
-        "697": { "blocked_by": [] },
-        "698": { "blocked_by": [] },
-        "699": { "blocked_by": [] }
+        "339": {
+          "blocked_by": [
+            477,
+            586
+          ]
+        },
+        "358": {
+          "blocked_by": [
+            476,
+            480,
+            488
+          ]
+        },
+        "372": {
+          "blocked_by": []
+        },
+        "384": {
+          "blocked_by": [
+            477
+          ]
+        },
+        "390": {
+          "blocked_by": []
+        },
+        "464": {
+          "blocked_by": []
+        },
+        "465": {
+          "blocked_by": [
+            476,
+            480,
+            488,
+            570,
+            572
+          ]
+        },
+        "476": {
+          "blocked_by": [
+            481
+          ]
+        },
+        "477": {
+          "blocked_by": [
+            547
+          ]
+        },
+        "480": {
+          "blocked_by": [
+            482
+          ]
+        },
+        "481": {
+          "blocked_by": [
+            482
+          ]
+        },
+        "482": {
+          "blocked_by": []
+        },
+        "483": {
+          "blocked_by": [
+            482
+          ]
+        },
+        "484": {
+          "blocked_by": [
+            476,
+            481,
+            547
+          ]
+        },
+        "485": {
+          "blocked_by": [
+            484,
+            486
+          ]
+        },
+        "486": {
+          "blocked_by": [
+            482,
+            483
+          ]
+        },
+        "487": {
+          "blocked_by": [
+            518
+          ]
+        },
+        "488": {
+          "blocked_by": []
+        },
+        "489": {
+          "blocked_by": []
+        },
+        "491": {
+          "blocked_by": []
+        },
+        "492": {
+          "blocked_by": [
+            339,
+            358,
+            372,
+            384,
+            390,
+            464,
+            465,
+            476,
+            477,
+            480,
+            481,
+            482,
+            483,
+            484,
+            485,
+            486,
+            487,
+            488,
+            489,
+            491,
+            495,
+            517,
+            518,
+            523,
+            525,
+            533,
+            544,
+            547,
+            549,
+            555,
+            560,
+            561,
+            564,
+            567,
+            568,
+            570,
+            572,
+            574,
+            586,
+            590,
+            593,
+            604,
+            605,
+            606,
+            607,
+            608,
+            609,
+            620,
+            624,
+            625,
+            627,
+            633,
+            639,
+            499,
+            645,
+            664,
+            666,
+            668,
+            669,
+            697,
+            698,
+            699
+          ]
+        },
+        "495": {
+          "blocked_by": []
+        },
+        "517": {
+          "blocked_by": []
+        },
+        "518": {
+          "blocked_by": [
+            547
+          ]
+        },
+        "523": {
+          "blocked_by": []
+        },
+        "525": {
+          "blocked_by": [
+            523
+          ]
+        },
+        "533": {
+          "blocked_by": []
+        },
+        "544": {
+          "blocked_by": []
+        },
+        "547": {
+          "blocked_by": []
+        },
+        "549": {
+          "blocked_by": []
+        },
+        "555": {
+          "blocked_by": [
+            487
+          ]
+        },
+        "560": {
+          "blocked_by": []
+        },
+        "561": {
+          "blocked_by": []
+        },
+        "564": {
+          "blocked_by": []
+        },
+        "567": {
+          "blocked_by": []
+        },
+        "568": {
+          "blocked_by": []
+        },
+        "570": {
+          "blocked_by": []
+        },
+        "572": {
+          "blocked_by": [
+            574
+          ]
+        },
+        "574": {
+          "blocked_by": []
+        },
+        "586": {
+          "blocked_by": []
+        },
+        "590": {
+          "blocked_by": []
+        },
+        "593": {
+          "blocked_by": [
+            499,
+            664
+          ]
+        },
+        "604": {
+          "blocked_by": []
+        },
+        "605": {
+          "blocked_by": []
+        },
+        "606": {
+          "blocked_by": []
+        },
+        "607": {
+          "blocked_by": []
+        },
+        "608": {
+          "blocked_by": []
+        },
+        "609": {
+          "blocked_by": [
+            607
+          ]
+        },
+        "620": {
+          "blocked_by": [
+            625
+          ]
+        },
+        "624": {
+          "blocked_by": []
+        },
+        "625": {
+          "blocked_by": []
+        },
+        "627": {
+          "blocked_by": []
+        },
+        "633": {
+          "blocked_by": []
+        },
+        "639": {
+          "blocked_by": []
+        },
+        "499": {
+          "blocked_by": [
+            639
+          ]
+        },
+        "645": {
+          "blocked_by": [
+            620
+          ]
+        },
+        "664": {
+          "blocked_by": []
+        },
+        "666": {
+          "blocked_by": [
+            518,
+            620
+          ]
+        },
+        "668": {
+          "blocked_by": []
+        },
+        "669": {
+          "blocked_by": []
+        },
+        "697": {
+          "blocked_by": []
+        },
+        "698": {
+          "blocked_by": []
+        },
+        "699": {
+          "blocked_by": []
+        }
       }
     },
     "v0.6.0-00": {
       "release_issue": 493,
       "issues": {
-        "310": { "blocked_by": [] },
-        "314": { "blocked_by": [310] },
-        "388": { "blocked_by": [] },
-        "490": { "blocked_by": [310, 563] },
-        "493": { "blocked_by": [310, 314, 388, 490, 563] },
-        "563": { "blocked_by": [] }
+        "310": {
+          "blocked_by": []
+        },
+        "314": {
+          "blocked_by": [
+            310
+          ]
+        },
+        "388": {
+          "blocked_by": []
+        },
+        "490": {
+          "blocked_by": [
+            310,
+            563
+          ]
+        },
+        "493": {
+          "blocked_by": [
+            310,
+            314,
+            388,
+            490,
+            563
+          ]
+        },
+        "563": {
+          "blocked_by": []
+        }
       }
     }
   },
   "changes": {
-    "harden-release-dependencies": {
+    "normalize-supported-import-bindings": {
       "contract": "checklist-v1",
-      "primary_issue": 732,
-      "owners": [{ "issue": 732, "first_task": "1.1", "last_task": "3.1" }]
+      "primary_issue": 731,
+      "owners": [
+        {
+          "issue": 731,
+          "first_task": "1.1",
+          "last_task": "3.1"
+        }
+      ]
     },
     "resolve-parenthesized-python-imports": {
       "contract": "checklist-v1",
       "primary_issue": 722,
-      "owners": [{ "issue": 722, "first_task": "1.1", "last_task": "3.1" }]
+      "owners": [
+        {
+          "issue": 722,
+          "first_task": "1.1",
+          "last_task": "3.1"
+        }
+      ]
     },
     "bound-relation-navigation": {
       "contract": "checklist-v1",
       "primary_issue": 721,
-      "owners": [{ "issue": 721, "first_task": "1.1", "last_task": "3.1" }]
+      "owners": [
+        {
+          "issue": 721,
+          "first_task": "1.1",
+          "last_task": "3.1"
+        }
+      ]
     },
     "clarify-protected-branch-checks": {
       "contract": "checklist-v1",
       "primary_issue": 718,
-      "owners": [{ "issue": 718, "first_task": "1.1", "last_task": "2.1" }]
+      "owners": [
+        {
+          "issue": 718,
+          "first_task": "1.1",
+          "last_task": "2.1"
+        }
+      ]
     },
     "complete-v051-release-acceptance": {
       "contract": "checklist-v1",
       "primary_issue": 715,
-      "owners": [{ "issue": 715, "first_task": "1.1", "last_task": "3.2" }]
+      "owners": [
+        {
+          "issue": 715,
+          "first_task": "1.1",
+          "last_task": "3.2"
+        }
+      ]
     },
     "complete-language-navigation": {
       "contract": "checklist-v1",
       "primary_issue": 563,
-      "owners": [{ "issue": 563, "first_task": "1.1", "last_task": "4.3" }]
+      "owners": [
+        {
+          "issue": 563,
+          "first_task": "1.1",
+          "last_task": "4.3"
+        }
+      ]
     },
     "promote-v050-stable": {
       "contract": "checklist-v1",
       "primary_issue": 602,
-      "owners": [{ "issue": 602, "first_task": "1.1", "last_task": "4.2" }]
+      "owners": [
+        {
+          "issue": 602,
+          "first_task": "1.1",
+          "last_task": "4.2"
+        }
+      ]
     },
     "accelerate-incremental-refresh": {
       "contract": "checklist-v1",
       "primary_issue": 708,
-      "owners": [{ "issue": 708, "first_task": "1.1", "last_task": "3.2" }]
+      "owners": [
+        {
+          "issue": 708,
+          "first_task": "1.1",
+          "last_task": "3.2"
+        }
+      ]
     },
     "stabilize-v050-search-cleanup-timeouts": {
       "contract": "checklist-v1",
       "primary_issue": 697,
       "owners": [
-        { "issue": 697, "first_task": "1.1", "last_task": "2.3" },
-        { "issue": 698, "first_task": "3.1", "last_task": "3.2" },
-        { "issue": 699, "first_task": "4.1", "last_task": "4.2" }
+        {
+          "issue": 697,
+          "first_task": "1.1",
+          "last_task": "2.3"
+        },
+        {
+          "issue": 698,
+          "first_task": "3.1",
+          "last_task": "3.2"
+        },
+        {
+          "issue": 699,
+          "first_task": "4.1",
+          "last_task": "4.2"
+        }
       ]
     },
     "preserve-checksum-tool-fixture-companions": {
       "contract": "checklist-v1",
       "primary_issue": 669,
-      "owners": [{ "issue": 669, "first_task": "1.1", "last_task": "2.2" }]
+      "owners": [
+        {
+          "issue": 669,
+          "first_task": "1.1",
+          "last_task": "2.2"
+        }
+      ]
     },
     "bind-packaged-regressions-to-installed-runtime": {
       "contract": "checklist-v1",
       "primary_issue": 668,
-      "owners": [{ "issue": 668, "first_task": "1.1", "last_task": "2.2" }]
+      "owners": [
+        {
+          "issue": 668,
+          "first_task": "1.1",
+          "last_task": "2.2"
+        }
+      ]
     },
     "preserve-upgrade-registration-identity": {
       "contract": "checklist-v1",
       "primary_issue": 666,
-      "owners": [{ "issue": 666, "first_task": "1.1", "last_task": "2.2" }]
+      "owners": [
+        {
+          "issue": 666,
+          "first_task": "1.1",
+          "last_task": "2.2"
+        }
+      ]
     },
     "diagnose-parser-descendant-canary": {
       "contract": "checklist-v1",
       "primary_issue": 664,
-      "owners": [{ "issue": 664, "first_task": "1.1", "last_task": "2.3" }]
+      "owners": [
+        {
+          "issue": 664,
+          "first_task": "1.1",
+          "last_task": "2.3"
+        }
+      ]
     },
     "restore-subagent-skill-guidance": {
       "contract": "checklist-v1",
       "primary_issue": 645,
-      "owners": [{ "issue": 645, "first_task": "1.1", "last_task": "2.5" }]
+      "owners": [
+        {
+          "issue": 645,
+          "first_task": "1.1",
+          "last_task": "2.5"
+        }
+      ]
     },
     "prove-installed-release-upgrades-and-routes": 593,
     "allow-release-owner-through-publication": 590,
@@ -221,74 +606,226 @@
       "contract": "checklist-v1",
       "primary_issue": 481,
       "owners": [
-        { "issue": 481, "first_task": "1.1", "last_task": "2.4" },
-        { "issue": 339, "first_task": "3.1", "last_task": "3.4" },
-        { "issue": 342, "first_task": "4.1", "last_task": "4.4" },
-        { "issue": 358, "first_task": "5.1", "last_task": "5.4" },
-        { "issue": 372, "first_task": "6.1", "last_task": "6.4" },
-        { "issue": 384, "first_task": "7.1", "last_task": "7.4" },
-        { "issue": 388, "first_task": "8.1", "last_task": "8.4" },
-        { "issue": 390, "first_task": "9.1", "last_task": "9.4" },
-        { "issue": 456, "first_task": "10.1", "last_task": "10.4" },
-        { "issue": 464, "first_task": "11.1", "last_task": "11.4" },
-        { "issue": 465, "first_task": "12.1", "last_task": "12.4" },
-        { "issue": 476, "first_task": "13.1", "last_task": "13.4" },
-        { "issue": 477, "first_task": "14.1", "last_task": "14.4" },
-        { "issue": 480, "first_task": "15.1", "last_task": "15.4" },
-        { "issue": 482, "first_task": "16.1", "last_task": "16.4" },
-        { "issue": 483, "first_task": "17.1", "last_task": "17.4" },
-        { "issue": 484, "first_task": "18.1", "last_task": "18.4" },
-        { "issue": 485, "first_task": "19.1", "last_task": "19.4" },
-        { "issue": 486, "first_task": "20.1", "last_task": "20.4" },
-        { "issue": 487, "first_task": "21.1", "last_task": "21.4" },
-        { "issue": 488, "first_task": "22.1", "last_task": "22.4" },
-        { "issue": 489, "first_task": "23.1", "last_task": "23.4" },
-        { "issue": 490, "first_task": "24.1", "last_task": "24.4" },
-        { "issue": 491, "first_task": "25.1", "last_task": "25.4" },
-        { "issue": 492, "first_task": "26.1", "last_task": "29.5" }
+        {
+          "issue": 481,
+          "first_task": "1.1",
+          "last_task": "2.4"
+        },
+        {
+          "issue": 339,
+          "first_task": "3.1",
+          "last_task": "3.4"
+        },
+        {
+          "issue": 342,
+          "first_task": "4.1",
+          "last_task": "4.4"
+        },
+        {
+          "issue": 358,
+          "first_task": "5.1",
+          "last_task": "5.4"
+        },
+        {
+          "issue": 372,
+          "first_task": "6.1",
+          "last_task": "6.4"
+        },
+        {
+          "issue": 384,
+          "first_task": "7.1",
+          "last_task": "7.4"
+        },
+        {
+          "issue": 388,
+          "first_task": "8.1",
+          "last_task": "8.4"
+        },
+        {
+          "issue": 390,
+          "first_task": "9.1",
+          "last_task": "9.4"
+        },
+        {
+          "issue": 456,
+          "first_task": "10.1",
+          "last_task": "10.4"
+        },
+        {
+          "issue": 464,
+          "first_task": "11.1",
+          "last_task": "11.4"
+        },
+        {
+          "issue": 465,
+          "first_task": "12.1",
+          "last_task": "12.4"
+        },
+        {
+          "issue": 476,
+          "first_task": "13.1",
+          "last_task": "13.4"
+        },
+        {
+          "issue": 477,
+          "first_task": "14.1",
+          "last_task": "14.4"
+        },
+        {
+          "issue": 480,
+          "first_task": "15.1",
+          "last_task": "15.4"
+        },
+        {
+          "issue": 482,
+          "first_task": "16.1",
+          "last_task": "16.4"
+        },
+        {
+          "issue": 483,
+          "first_task": "17.1",
+          "last_task": "17.4"
+        },
+        {
+          "issue": 484,
+          "first_task": "18.1",
+          "last_task": "18.4"
+        },
+        {
+          "issue": 485,
+          "first_task": "19.1",
+          "last_task": "19.4"
+        },
+        {
+          "issue": 486,
+          "first_task": "20.1",
+          "last_task": "20.4"
+        },
+        {
+          "issue": 487,
+          "first_task": "21.1",
+          "last_task": "21.4"
+        },
+        {
+          "issue": 488,
+          "first_task": "22.1",
+          "last_task": "22.4"
+        },
+        {
+          "issue": 489,
+          "first_task": "23.1",
+          "last_task": "23.4"
+        },
+        {
+          "issue": 490,
+          "first_task": "24.1",
+          "last_task": "24.4"
+        },
+        {
+          "issue": 491,
+          "first_task": "25.1",
+          "last_task": "25.4"
+        },
+        {
+          "issue": 492,
+          "first_task": "26.1",
+          "last_task": "29.5"
+        }
       ]
     },
     "v050-rc2-remediation": {
       "contract": "checklist-v1",
       "primary_issue": 604,
       "owners": [
-        { "issue": 604, "first_task": "1.1", "last_task": "2.4" },
-        { "issue": 605, "first_task": "3.1", "last_task": "3.4" },
-        { "issue": 606, "first_task": "4.1", "last_task": "4.4" },
-        { "issue": 607, "first_task": "5.1", "last_task": "5.4" },
-        { "issue": 608, "first_task": "6.1", "last_task": "6.4" },
-        { "issue": 609, "first_task": "7.1", "last_task": "7.4" }
+        {
+          "issue": 604,
+          "first_task": "1.1",
+          "last_task": "2.4"
+        },
+        {
+          "issue": 605,
+          "first_task": "3.1",
+          "last_task": "3.4"
+        },
+        {
+          "issue": 606,
+          "first_task": "4.1",
+          "last_task": "4.4"
+        },
+        {
+          "issue": 607,
+          "first_task": "5.1",
+          "last_task": "5.4"
+        },
+        {
+          "issue": 608,
+          "first_task": "6.1",
+          "last_task": "6.4"
+        },
+        {
+          "issue": 609,
+          "first_task": "7.1",
+          "last_task": "7.4"
+        }
       ]
     },
     "v050-rc3-remediation": {
       "contract": "checklist-v1",
       "primary_issue": 620,
       "owners": [
-        { "issue": 620, "first_task": "1.1", "last_task": "2.3" },
-        { "issue": 624, "first_task": "3.1", "last_task": "3.4" },
-        { "issue": 625, "first_task": "4.1", "last_task": "4.4" }
+        {
+          "issue": 620,
+          "first_task": "1.1",
+          "last_task": "2.3"
+        },
+        {
+          "issue": 624,
+          "first_task": "3.1",
+          "last_task": "3.4"
+        },
+        {
+          "issue": 625,
+          "first_task": "4.1",
+          "last_task": "4.4"
+        }
       ]
     },
     "stabilize-windows-forwarder-migration-gate": {
       "contract": "checklist-v1",
       "primary_issue": 633,
       "owners": [
-        { "issue": 633, "first_task": "1.1", "last_task": "2.3" }
+        {
+          "issue": 633,
+          "first_task": "1.1",
+          "last_task": "2.3"
+        }
       ]
     },
     "retire-generated-legacy-map-file": {
       "contract": "checklist-v1",
       "primary_issue": 627,
       "owners": [
-        { "issue": 627, "first_task": "1.1", "last_task": "2.4" }
+        {
+          "issue": 627,
+          "first_task": "1.1",
+          "last_task": "2.4"
+        }
       ]
     },
     "accept-rc3-dependabot-updates": {
       "contract": "checklist-v1",
       "primary_issue": 639,
       "owners": [
-        { "issue": 639, "first_task": "1.1", "last_task": "2.2" },
-        { "issue": 499, "first_task": "3.1", "last_task": "9.2" }
+        {
+          "issue": 639,
+          "first_task": "1.1",
+          "last_task": "2.2"
+        },
+        {
+          "issue": 499,
+          "first_task": "3.1",
+          "last_task": "9.2"
+        }
       ]
     },
     "complete-v060-release-acceptance": {
@@ -377,6 +914,17 @@
     "stabilize-windows-authenticode-fixture": 547,
     "stabilize-windows-mcp-owner-fixture-readiness": 518,
     "stabilize-windows-runtime-output-bound-proof": 525,
-    "stabilize-parser-recovery-harness": 391
+    "stabilize-parser-recovery-harness": 391,
+    "harden-release-dependencies": {
+      "contract": "checklist-v1",
+      "primary_issue": 732,
+      "owners": [
+        {
+          "issue": 732,
+          "first_task": "1.1",
+          "last_task": "3.1"
+        }
+      ]
+    }
   }
 }

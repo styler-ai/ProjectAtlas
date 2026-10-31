@@ -1,6 +1,6 @@
 //! Validated repository-configured ECMAScript module scopes.
 
-use crate::resolution_keys::strip_known_source_extension;
+use crate::resolution_keys::ecmascript_module_scope;
 use std::error::Error;
 use std::fmt;
 
@@ -162,6 +162,27 @@ impl ConfiguredModuleResolution {
         Ok(Self { configs })
     }
 
+    /// Count the owned configuration vector, mappings, targets and text capacities.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.configs.iter().fold(
+            (self.configs.capacity() as u64).saturating_mul(std::mem::size_of::<EcmaScriptModuleConfig>() as u64),
+            |bytes, config| {
+                config.mappings.iter().fold(
+                    bytes.saturating_add(config.config_path.capacity() as u64)
+                        .saturating_add(config.directory.capacity() as u64)
+                        .saturating_add(config.base_url.as_ref().map_or(0, String::capacity) as u64)
+                        .saturating_add((config.mappings.capacity() as u64).saturating_mul(std::mem::size_of::<EcmaScriptPathMapping>() as u64)),
+                    |bytes, mapping| mapping.targets.iter().fold(
+                        bytes.saturating_add(mapping.pattern.capacity() as u64)
+                            .saturating_add((mapping.targets.capacity() as u64).saturating_mul(std::mem::size_of::<String>() as u64)),
+                        |bytes, target| bytes.saturating_add(target.capacity() as u64),
+                    ),
+                )
+            },
+        )
+    }
+
     /// Select the applicable compiler configuration once for a source graph.
     pub(crate) fn for_source(&self, caller_path: &str) -> ConfiguredModuleSource<'_> {
         ConfiguredModuleSource {
@@ -222,7 +243,7 @@ impl ConfiguredModuleSource<'_> {
                         ModulePatternMatch::Wildcard(capture) => target.replacen('*', capture, 1),
                     })
                 })
-                .map(|scope| strip_known_source_extension(&scope))
+                .map(|scope| ecmascript_module_scope(&scope))
                 .collect::<Vec<_>>();
             scopes.sort();
             scopes.dedup();
@@ -236,7 +257,7 @@ impl ConfiguredModuleSource<'_> {
         } else {
             format!("{base_url}/{module_spec}")
         };
-        vec![strip_known_source_extension(&scope)]
+        vec![ecmascript_module_scope(&scope)]
     }
 }
 
@@ -457,14 +478,14 @@ mod tests {
         if configured
             .for_source("packages/app/src/page.ts")
             .scopes_for_import("@/models/user")
-            != vec!["packages/shared/models/user"]
+            != vec!["module:packages/shared/models/user"]
         {
             return Err(std::io::Error::other("nearest config or specific pattern lost").into());
         }
         if configured
             .for_source("src/page.ts")
             .scopes_for_import("@/controller")
-            != vec!["src/controller"]
+            != vec!["module:src/controller"]
         {
             return Err(std::io::Error::other("root alias did not resolve").into());
         }
@@ -496,14 +517,14 @@ mod tests {
         if configured
             .for_source("src/page.tsx")
             .scopes_for_import("@/tools")
-            != vec!["src/typed/tools/index"]
+            != vec!["file:src/typed/tools/index.ts"]
         {
             return Err(std::io::Error::other("TypeScript config preference lost").into());
         }
         if configured
             .for_source("src/page.jsx")
             .scopes_for_import("@/tools")
-            != vec!["src/script/tools/index"]
+            != vec!["file:src/script/tools/index.js"]
         {
             return Err(std::io::Error::other("JavaScript config preference lost").into());
         }

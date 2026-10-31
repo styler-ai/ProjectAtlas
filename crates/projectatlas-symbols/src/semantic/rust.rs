@@ -28,7 +28,18 @@ pub(super) fn parse_import(import_text: &str) -> Vec<ImportReference> {
         let items = items.trim().strip_suffix(',').unwrap_or(items.trim());
         return items
             .split(',')
-            .map(|item| named_reference(ImportSyntax::Rust, module, item, " as "))
+            .map(|item| {
+                let (imported, alias) = split_alias(item.trim(), " as ")?;
+                if imported.trim() == "self" {
+                    module_reference(
+                        ImportSyntax::Rust,
+                        module,
+                        alias.unwrap_or_else(|| module.rsplit("::").next().unwrap_or(module)),
+                    )
+                } else {
+                    named_reference(ImportSyntax::Rust, module, item, " as ")
+                }
+            })
             .collect::<Option<Vec<_>>>()
             .filter(|references| !references.is_empty())
             .unwrap_or_default();
@@ -40,7 +51,11 @@ pub(super) fn parse_import(import_text: &str) -> Vec<ImportReference> {
     if path.contains(['{', '}', '(', ')', '[', ']', ',']) {
         return Vec::new();
     }
-    let components = path.split("::").collect::<Vec<_>>();
+    let components = path
+        .strip_prefix("::")
+        .unwrap_or(path)
+        .split("::")
+        .collect::<Vec<_>>();
     if components.iter().any(|component| component.is_empty()) {
         return Vec::new();
     }

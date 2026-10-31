@@ -3,18 +3,18 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "c4e20538ffe3f35ffa77f236cb68c5a3f46813b3f467aee2ed615ed8b0a31349",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "8b6cfc1b705f558effc8aac49aa66785de8db6b73b3edb66839a5c183d09751c",
       "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "4c4a53eff4375a14394515b572c45891c8b1980e902382a7aadb941a83b5fe2f",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "3f583175a078d607cbc7d7db0ac6d26361e7507e518e79e6113ae8a97e27ad08",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "3d89931cba182bb3ba816632182715e7ddb6139f2be69a50d58f758138837b39",
-      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "542f4c71c46a0fc857fba10e9bf4dbfa3ea41e546f6b7463e2785e6906ec654f"
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "82821d6136374241a25358d9fbdc45267662b36cfeea13bf9239131da9ef5f87",
+      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "e416034a42890de43892722fb21ec2f262734f165f3a67400d366a9cb8913643"
     }
   },
   "baseline_commit": "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb",
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 208,
+  "test_count": 219,
   "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -29,6 +29,13 @@
     "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
+    {
+      "name": "go_clause_bindings_agree_across_cli_mcp_and_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
     {
       "name": "parenthesized_python_imports_resolve_and_converge_after_refresh",
       "owner": "e2e_navigation",
@@ -1867,6 +1874,76 @@
     },
     {
       "name": "relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_root_aliases_follow_manifest_and_module_changes",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_namespace_aliases_keep_values_types_and_toolchain_identity",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_absolute_and_bare_use_paths_follow_the_owning_edition",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "lexical_capacity_preserves_navigation_and_repairs_after_source_reduction",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "python_directive_calls_agree_across_cli_mcp_and_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "reopened_container_calls_agree_across_cli_mcp_and_refresh",
       "owner": "e2e_navigation",
       "attributes": [
         "#[test]"

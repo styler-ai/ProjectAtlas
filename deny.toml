@@ -40,6 +40,11 @@ multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
 skip = [
+  { crate = "compact_str@0.10.0", reason = "Canonical ECMAScript identifier predicates in pinned oxc_syntax 0.156 require compact_str 0.10 through oxc_span/oxc_str; ratatui 0.30 requires 0.9. Remove when those upstream dependency ranges converge." },
+  { crate = "phf@0.14.0", reason = "Pinned oxc_syntax 0.156 and oxc_ast_macros require phf 0.14; cssparser/selectors/web_atoms require 0.13. Remove when the upstream ranges converge." },
+  { crate = "phf_generator@0.14.0", reason = "Required by the phf 0.14 macro line of pinned oxc_syntax 0.156; the HTML parser build graph retains phf_generator 0.13. Remove when upstream phf dependency ranges converge." },
+  { crate = "phf_macros@0.14.0", reason = "Required by phf 0.14 in pinned oxc_syntax 0.156; the HTML parser graph retains phf_macros 0.13. Remove when upstream phf dependency ranges converge." },
+  { crate = "phf_shared@0.14.0", reason = "Required by phf 0.14 in pinned oxc_syntax 0.156; the HTML parser graph retains phf_shared 0.13. Remove when upstream phf dependency ranges converge." },
   { crate = "hashbrown@0.16.1", reason = "yaml-rust2 0.11 and ratatui 0.30 resolve hashbrown 0.16; remove when both upstream paths converge on the retained hashbrown line." },
   { crate = "getrandom@0.2.17", reason = "tree-sitter-language-pack 1.13.2 resolves ahash through getrandom 0.2 only in the optional parser worker graph; remove when upstream adopts the retained getrandom line." },
   { crate = "darling@0.24.1", reason = "rmcp-macros 3.1.x requires darling 0.24 while ratatui 0.30 retains darling 0.23; remove when the upstream macro dependency lines converge." },

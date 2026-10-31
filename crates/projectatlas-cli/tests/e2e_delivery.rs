@@ -6701,7 +6701,7 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     let e2e_smoke = workflow_job_block(&ci, "e2e-smoke")?;
     for required in [
         r#""macos-x64": "macos-15-intel""#,
-        r#""macos-arm64": "macos-14""#,
+        r#""macos-arm64": "macos-15""#,
     ] {
         if !planner.contains(required) {
             return Err(io::Error::other(format!(
@@ -6712,6 +6712,84 @@ fn macos_all_features_warning_gate_contract_is_exact() -> Result<(), Box<dyn Err
     }
     if !e2e_smoke.contains("matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}") {
         return Err(io::Error::other("e2e-smoke omitted its affected platform matrix").into());
+    }
+
+    // A trusted base can still select an older image. Current workflow provisioning
+    // retains the logical ARM contract while Intel uses the original matrix row.
+    let documents = YamlLoader::load_from_str(&ci)?;
+    let document = documents
+        .first()
+        .ok_or_else(|| io::Error::other("CI workflow document is empty"))?;
+    if document["jobs"]["e2e-smoke"]["runs-on"].as_str()
+        != Some("${{ matrix.label == 'macos-arm64' && 'macos-15' || matrix.os }}")
+    {
+        return Err(io::Error::other(
+            "CI must provision supported ARM images for inherited accepted-base plans",
+        )
+        .into());
+    }
+    let plan = workflow_job_step(&ci, "plan", "Plan affected proof")?;
+    let bootstrap = plan["run"].as_str().unwrap_or_default();
+    for (label, runner) in [("macos-arm64", "macos-15"), ("macos-x64", "macos-15-intel")] {
+        let expected_label = format!("\"label\": \"{label}\",");
+        let expected_runner = format!("\"os\": \"{runner}\",");
+        if !bootstrap
+            .lines()
+            .zip(bootstrap.lines().skip(1))
+            .any(|(label, runner)| {
+                label.trim() == expected_label && runner.trim() == expected_runner
+            })
+        {
+            return Err(io::Error::other(format!(
+                "bootstrap logical platform {label} omitted runner {runner}"
+            ))
+            .into());
+        }
+    }
+    for path in [
+        ".github/workflows/release.yml",
+        ".github/workflows/optional-parser-pack.yml",
+    ] {
+        let contents = fs::read_to_string(workspace_root.join(path))?;
+        let documents = YamlLoader::load_from_str(&contents)?;
+        let jobs = documents
+            .first()
+            .and_then(|document| document["jobs"].as_hash())
+            .ok_or_else(|| io::Error::other("workflow jobs missing"))?;
+        let mut arm_rows = 0;
+        let mut intel_rows = 0;
+        for (_, job) in jobs {
+            let Some(rows) = job["strategy"]["matrix"]["include"].as_vec() else {
+                continue;
+            };
+            for row in rows {
+                let Some(label) = row["label"].as_str() else {
+                    continue;
+                };
+                let runner = row["os"].as_str().or_else(|| row["runner"].as_str());
+                let expected = if label.starts_with("macos-arm64") {
+                    arm_rows += 1;
+                    Some("macos-15")
+                } else if label.starts_with("macos-x64") {
+                    intel_rows += 1;
+                    Some("macos-15-intel")
+                } else {
+                    continue;
+                };
+                if runner != expected {
+                    return Err(io::Error::other(format!(
+                        "{path} logical platform {label} has incorrect runner {runner:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        if arm_rows == 0 || intel_rows == 0 {
+            return Err(io::Error::other(format!(
+                "{path} omitted required separate ARM and Intel runner rows"
+            ))
+            .into());
+        }
     }
 
     let target_compile = workflow_job_step(&ci, "e2e-smoke", "Affected package target compile")?;

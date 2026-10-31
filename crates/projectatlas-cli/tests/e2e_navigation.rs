@@ -11326,7 +11326,7 @@ fn pdf_parser_limits_preserve_cli_and_mcp_publication() -> Result<(), Box<dyn Er
     fs::create_dir_all(repo.join(SOURCE_DIR))?;
     fs::create_dir_all(repo.join("docs"))?;
     fs::create_dir_all(repo.join(ATLAS_DIR_NAME))?;
-    fs::write(repo.join("src/lib.rs"), "pub fn still_indexed() {}\n")?;
+    fs::write(repo.join(RUST_LIBRARY_PATH), "pub fn still_indexed() {}\n")?;
     fs::write(
         repo.join(ATLAS_DIR_NAME).join("config.toml"),
         "[project]\nroot = \".\"\n",
@@ -13082,5 +13082,3160 @@ fn relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries()
     if AtlasStore::open_read_only(&database)?.index_publication()? != publication {
         return Err(io::Error::other("relation reads mutated publication").into());
     }
+    Ok(())
+}
+
+/// Conventional library path shared by the Rust navigation fixtures.
+const RUST_LIBRARY_PATH: &str = "src/lib.rs";
+/// Worker module used by the Rust binding fixtures.
+const RUST_BINDING_WORKER_PATH: &str = "src/worker.rs";
+/// Source declaration behind Rust forwarding aliases.
+const RUST_BINDING_TARGET_PATH: &str = "src/target.rs";
+/// Intermediate Rust forwarding module edited to repair a cycle.
+const RUST_FORWARDING_MODULE_PATH: &str = "src/b.rs";
+/// Added automatic Cargo test target used to prove membership invalidation.
+const RUST_ADDED_TEST_TARGET_PATH: &str = "tests/two.rs";
+
+/// Run the real command without telemetry and retain its public JSON response.
+fn rust_binding_atlas(root: &Path, args: &[&str]) -> Result<Value, Box<dyn Error>> {
+    let output = Command::new(mcp_contract_executable())
+        .current_dir(root)
+        .env("PROJECTATLAS_NO_TELEMETRY", "1")
+        .args(["--format", "json"])
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    Ok(serde_json::from_slice(&output)?)
+}
+
+/// Create only the fixture's project-owned configuration and authored source root.
+fn rust_binding_project(root: &Path, edition: &str) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(root.join(SRC_DIR_NAME))?;
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[package]\nname='binding-proof'\nversion='0.1.0'\nedition='{edition}'\n"),
+    )?;
+    Ok(())
+}
+
+/// Read bounded call outcomes for one exact source declaration.
+fn rust_binding_calls(root: &Path, file: &str, symbol: &str) -> Result<Vec<Value>, Box<dyn Error>> {
+    let response = rust_binding_atlas(
+        root,
+        &[
+            "symbols",
+            "relations",
+            "--view",
+            "detailed",
+            "--file",
+            file,
+            "--symbol",
+            symbol,
+            "--relation",
+            "calls",
+            "--limit",
+            "30",
+        ],
+    )?;
+    Ok(response
+        .pointer("/symbol_relations/rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| io::Error::other("call rows missing"))?
+        .clone())
+}
+
+/// Exact canonical target files and names, independent from result ordering.
+fn rust_binding_targets(rows: &[Value]) -> BTreeSet<(String, String)> {
+    rows.iter()
+        .filter_map(|row| {
+            let symbol = row.pointer("/target/entity/selector/symbol")?;
+            Some((
+                symbol.get("file")?.as_str()?.to_string(),
+                symbol.get("name")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Preserve the honest unresolved state rather than accepting an empty result.
+fn rust_binding_unresolved(rows: &[Value]) {
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|row| row
+            .pointer("/relation/resolution/status")
+            .and_then(Value::as_str)
+            == Some("unresolved")),
+        "{rows:?}"
+    );
+}
+
+/// Report exact actual and expected values through the test's fallible boundary.
+fn rust_binding_equal<T: std::fmt::Debug + PartialEq>(
+    actual: &T,
+    expected: &T,
+) -> Result<(), Box<dyn Error>> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("expected {expected:?}, observed {actual:?}")).into())
+    }
+}
+
+/// Keep fallible test functions free of panicking assertions.
+fn rust_binding_require(condition: bool, detail: &str) -> Result<(), Box<dyn Error>> {
+    if condition {
+        Ok(())
+    } else {
+        Err(io::Error::other(detail.to_string()).into())
+    }
+}
+
+/// Compare persisted aliased callers and canonical summaries through the installed MCP runtime.
+fn assert_rust_binding_mcp_callers(root: &Path, library: &str) -> Result<(), Box<dyn Error>> {
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let before = mcp_database_snapshot(&database)?;
+    let mut session = McpContractSession::spawn(&mcp_contract_executable(), root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for (caller, expected) in [
+            (
+                "root_calls",
+                BTreeSet::from([
+                    (library.to_string(), "run".to_string()),
+                    (library.to_string(), "private_run".to_string()),
+                ]),
+            ),
+            (
+                "forwarded",
+                BTreeSet::from([("src/target.rs".to_string(), "work".to_string())]),
+            ),
+            ("shadow", BTreeSet::new()),
+        ] {
+            let text = session.call_tool(
+                "atlas_symbol_relations",
+                &json!({
+                    "project_path": root,
+                    "view": "detailed",
+                    "file": "src/worker.rs",
+                    "symbol": caller,
+                    "relation": "calls",
+                    "limit": 30
+                }),
+            )?;
+            let response: Value = toon_format::decode_default(&text)?;
+            let rows = response
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("MCP imported caller rows missing"))?;
+            rust_binding_require(!rows.is_empty(), "MCP lost raw caller evidence")?;
+            rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+            if caller == "shadow" {
+                rust_binding_unresolved(rows);
+            }
+        }
+        for (file, function, expected, excluded) in [
+            (
+                library,
+                "run",
+                "src/worker.rs::root_calls",
+                "src/worker.rs::shadow",
+            ),
+            (
+                "src/target.rs",
+                "work",
+                "src/worker.rs::forwarded",
+                "src/worker.rs::shadow",
+            ),
+        ] {
+            let text = session.call_tool(
+                "atlas_file_summary",
+                &json!({"project_path": root, "file": file}),
+            )?;
+            let response: Value = toon_format::decode_default(&text)?;
+            let functions = response
+                .pointer("/file_summary/functions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("MCP canonical summary functions missing"))?;
+            let function = functions
+                .iter()
+                .find(|item| item["name"] == function)
+                .ok_or_else(|| io::Error::other("MCP canonical target function missing"))?;
+            let callers = function["called_by"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("MCP canonical target callers missing"))?;
+            rust_binding_require(
+                callers.iter().any(|caller| caller == expected),
+                "MCP omitted imported caller",
+            )?;
+            rust_binding_require(
+                !callers.iter().any(|caller| caller == excluded),
+                "MCP admitted shadowed caller",
+            )?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())?;
+    rust_binding_equal(&mcp_database_snapshot(&database)?, &before)
+}
+/// Exercise shared root invalidation through both adapters and real publication.
+fn exercise_cargo_root_cohort_lifecycle() -> Result<(), Box<dyn Error>> {
+    const DISABLED_PACKAGE: &str = "disabled";
+    const DISABLED_HELPER: &str = "disabled/src/bin/helper.rs";
+    const LIBRARY_HELPER: &str = "src/helper.rs";
+    const CUSTOM_ROOT: &str = "app/target1.rs";
+    const RENAMED_ROOT: &str = "app/renamed.rs";
+    const MOVED_ROOT: &str = "elsewhere/moved.rs";
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    let root_source =
+        "use crate::run as launch;\nfn run(){}\nfn caller(){launch();}\nfn main(){}\n";
+    let mut manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    let mut root_files = Vec::new();
+    for directory in ["src/bin", "examples", "tests", "benches"] {
+        fs::create_dir_all(root.join(directory))?;
+        for index in 0..32 {
+            let file = format!("{directory}/target{index}.rs");
+            fs::write(root.join(&file), root_source)?;
+            root_files.push(file);
+        }
+    }
+    fs::create_dir_all(root.join("app"))?;
+    for index in 0..32 {
+        let file = format!("app/target{index}.rs");
+        std::fmt::Write::write_fmt(
+            &mut manifest,
+            format_args!("[[bin]]\nname='custom{index}'\npath='{file}'\n"),
+        )?;
+        fs::write(root.join(&file), root_source)?;
+        root_files.push(file);
+    }
+    for (index, file) in [
+        "one.rs",
+        "two.rs",
+        "single/entry.rs",
+        "nested/left/main.rs",
+        "nested/right/main.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(parent) = root.join(file).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        std::fmt::Write::write_fmt(
+            &mut manifest,
+            format_args!("[[bin]]\nname='control{index}'\npath='{file}'\n"),
+        )?;
+        fs::write(root.join(file), root_source)?;
+        root_files.push(file.to_string());
+    }
+    fs::write(root.join("Cargo.toml"), &manifest)?;
+    let disabled_manifest = "[package]\nname='disabled-proof'\nversion='0.1.0'\nedition='2024'\nautobins=false\nautoexamples=false\nautotests=false\nautobenches=false\n";
+    let mut disabled_manifest = disabled_manifest.to_string();
+    for directory in ["src/bin", "examples", "tests", "benches"] {
+        fs::create_dir_all(root.join(DISABLED_PACKAGE).join(directory))?;
+        for name in ["a", "b"] {
+            let file = format!("{directory}/{name}.rs");
+            std::fmt::Write::write_fmt(
+                &mut disabled_manifest,
+                format_args!(
+                    "[[bin]]\nname='disabled_{}_{}'\npath='{file}'\n",
+                    directory.replace('/', "_"),
+                    name
+                ),
+            )?;
+            fs::write(root.join(DISABLED_PACKAGE).join(file), root_source)?;
+        }
+    }
+    fs::write(root.join("disabled/Cargo.toml"), disabled_manifest)?;
+    fs::write(root.join(DISABLED_HELPER), "fn helper(){}")?;
+    fs::write(
+        root.join("src/lib.rs"),
+        "mod helper; fn run(){} fn caller(){run();}",
+    )?;
+    let helper_source = "use crate::run as launch; fn caller(){launch();}";
+    fs::write(root.join(LIBRARY_HELPER), helper_source)?;
+    fs::write(root.join("app/shared.rs"), helper_source)?;
+    fs::write(
+        root.join("app/target0.rs"),
+        format!("mod shared;\n{root_source}"),
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_atlas(
+        root,
+        &[
+            "purpose",
+            "set",
+            "app/shared.rs",
+            "Retain root cohort caller evidence.",
+        ],
+    )?;
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let purpose = || -> Result<(String, String, String, Option<String>), Box<dyn Error>> {
+        let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(connection.query_row("SELECT p.purpose,p.status,p.source,p.updated_by FROM purposes p JOIN nodes n ON n.id=p.node_id WHERE n.path='app/shared.rs'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?)
+    };
+    let authored = purpose()?;
+    let mut session = McpContractSession::spawn(&mcp_contract_executable(), root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for step in 0..11 {
+            match step {
+                1 | 3 => fs::write(
+                    root.join(CUSTOM_ROOT),
+                    format!("mod shared;\n{root_source}"),
+                )?,
+                2 => fs::remove_file(root.join(CUSTOM_ROOT))?,
+                4 => fs::rename(root.join(CUSTOM_ROOT), root.join(RENAMED_ROOT))?,
+                5 => fs::write(
+                    root.join("Cargo.toml"),
+                    manifest.replace("path='app/target1.rs'", "path='app/renamed.rs'"),
+                )?,
+                6 => {
+                    fs::create_dir_all(root.join("elsewhere"))?;
+                    fs::rename(root.join(RENAMED_ROOT), root.join(MOVED_ROOT))?;
+                }
+                7 => fs::write(
+                    root.join("Cargo.toml"),
+                    manifest.replace("path='app/target1.rs'", "path='elsewhere/moved.rs'"),
+                )?,
+                8 => fs::write(
+                    root.join(LIBRARY_HELPER),
+                    format!("{helper_source}\n// independent helper edit\n"),
+                )?,
+                9 => {
+                    fs::remove_file(root.join(MOVED_ROOT))?;
+                    fs::write(root.join(CUSTOM_ROOT), root_source)?;
+                    fs::write(root.join(LIBRARY_HELPER), helper_source)?;
+                    fs::write(root.join("Cargo.toml"), &manifest)?;
+                }
+                10 => fs::write(
+                    root.join(DISABLED_HELPER),
+                    "fn helper(){} // helper-only edit\n",
+                )?,
+                _ => {}
+            }
+            let refreshed = rust_binding_atlas(root, &["watch", "--once"])?;
+            if step == 1 {
+                let parsed = refreshed["last_symbols"]["parsed"]
+                    .as_u64()
+                    .ok_or_else(|| io::Error::other("cohort refresh counter missing"))?;
+                rust_binding_require(
+                    parsed <= 45,
+                    &format!(
+                        "custom-root edit recovered unrelated target directories: {parsed} parsed"
+                    ),
+                )?;
+            }
+            if step == 10 {
+                let parsed = refreshed["last_symbols"]["parsed"]
+                    .as_u64()
+                    .ok_or_else(|| io::Error::other("helper refresh counter missing"))?;
+                rust_binding_require(
+                    parsed <= 2,
+                    &format!("disabled helper edit refreshed unrelated roots: {parsed} parsed"),
+                )?;
+            }
+            let connection =
+                Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let dependencies: i64 = connection.query_row(
+                "SELECT count(*) FROM graph_relation_dependencies",
+                [],
+                |row| row.get(0),
+            )?;
+            rust_binding_require(
+                dependencies >= 0 && dependencies <= i64::try_from(root_files.len())? * 24,
+                &format!("unrelated root fan-out at step {step}: {dependencies} dependency rows"),
+            )?;
+            let helper_cohorts: i64 = connection.query_row(
+                "SELECT count(*) FROM graph_entity_exports e JOIN graph_entities entity ON entity.project_instance_id=e.project_instance_id AND entity.entity_key=e.entity_key JOIN graph_resolution_keys key ON key.project_instance_id=e.project_instance_id AND key.resolution_domain=e.resolution_domain AND key.key_digest=e.key_digest WHERE entity.canonical_identity LIKE '%src/helper.rs%' AND key.canonical_identity LIKE '%Cargo.toml%|3:app'", [], |row| row.get(0))?;
+            rust_binding_equal(&helper_cohorts, &0)?;
+            let disabled_intersection: i64 = connection.query_row(
+                "SELECT count(*) FROM graph_entity_exports producer JOIN graph_relation_dependencies consumer ON consumer.project_instance_id=producer.project_instance_id AND consumer.resolution_domain=producer.resolution_domain AND consumer.key_digest=producer.key_digest WHERE producer.owner_path='disabled/src/bin/helper.rs' AND consumer.owner_path='disabled/src/bin/a.rs'", [], |row| row.get(0))?;
+            rust_binding_equal(&disabled_intersection, &0)?;
+            drop(connection);
+            let mut selected = vec![
+                ("src/bin/target0.rs", "src/bin/target0.rs"),
+                ("examples/target0.rs", "examples/target0.rs"),
+                ("tests/target0.rs", "tests/target0.rs"),
+                ("benches/target0.rs", "benches/target0.rs"),
+                ("app/target0.rs", "app/target0.rs"),
+                ("one.rs", "one.rs"),
+                ("single/entry.rs", "single/entry.rs"),
+                ("nested/left/main.rs", "nested/left/main.rs"),
+                (LIBRARY_HELPER, "src/lib.rs"),
+                ("disabled/src/bin/a.rs", "disabled/src/bin/a.rs"),
+                ("disabled/examples/a.rs", "disabled/examples/a.rs"),
+                ("disabled/tests/a.rs", "disabled/tests/a.rs"),
+                ("disabled/benches/a.rs", "disabled/benches/a.rs"),
+            ];
+            if step == 5 {
+                selected.push((RENAMED_ROOT, RENAMED_ROOT));
+            }
+            if step == 7 || step == 8 {
+                selected.push((MOVED_ROOT, MOVED_ROOT));
+            }
+            for (file, target) in selected {
+                let cli = rust_binding_calls(root, file, "caller")?;
+                let text = session.call_tool("atlas_symbol_relations", &json!({"project_path":root,"view":"detailed","file":file,"symbol":"caller","relation":"calls","limit":10}))?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                let rows = mcp
+                    .pointer("/symbol_relations/rows")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| io::Error::other("root cohort MCP rows missing"))?;
+                for rows in [cli.as_slice(), rows.as_slice()] {
+                    rust_binding_equal(&rows.len(), &1)?;
+                    rust_binding_equal(
+                        &rust_binding_targets(rows),
+                        &[(target.to_string(), "run".to_string())].into(),
+                    )?;
+                    rust_binding_equal(
+                        &rows[0]["relation"]["resolution"]["status"],
+                        &json!("resolved"),
+                    )?;
+                }
+            }
+            let ambiguous = matches!(step, 1 | 3 | 5);
+            let cli = rust_binding_calls(root, "app/shared.rs", "caller")?;
+            let text = session.call_tool("atlas_symbol_relations", &json!({"project_path":root,"view":"detailed","file":"app/shared.rs","symbol":"caller","relation":"calls","limit":10}))?;
+            let mcp: Value = toon_format::decode_default(&text)?;
+            let rows = mcp
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("shared-root MCP rows missing"))?;
+            for rows in [cli.as_slice(), rows.as_slice()] {
+                rust_binding_equal(&rows.len(), &1)?;
+                if ambiguous {
+                    rust_binding_unresolved(rows);
+                } else {
+                    rust_binding_equal(
+                        &rust_binding_targets(rows),
+                        &[("app/target0.rs".to_string(), "run".to_string())].into(),
+                    )?;
+                }
+            }
+            let cli = rust_binding_atlas(root, &["summary", "app/target0.rs"])?;
+            let text = session.call_tool(
+                "atlas_file_summary",
+                &json!({"project_path":root,"file":"app/target0.rs"}),
+            )?;
+            let mcp: Value = toon_format::decode_default(&text)?;
+            for summary in [cli, mcp["file_summary"].clone()] {
+                let functions = summary["functions"]
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("root summary functions missing"))?;
+                let function = functions
+                    .iter()
+                    .find(|function| function["name"] == "run")
+                    .ok_or_else(|| io::Error::other("root run function missing"))?;
+                let callers = function["called_by"]
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("root summary callers missing"))?;
+                rust_binding_equal(
+                    &callers
+                        .iter()
+                        .any(|caller| caller == "app/shared.rs::caller"),
+                    &(!ambiguous),
+                )?;
+            }
+            let incremental = derived_result_snapshot(&database)?;
+            rust_binding_atlas(root, &["scan", "."])?;
+            rust_binding_equal(&derived_result_snapshot(&database)?, &incremental)?;
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+            rust_binding_equal(&purpose()?, &authored)?;
+            let before = mcp_database_snapshot(&database)?;
+            let noop = rust_binding_atlas(root, &["watch", "--once"])?;
+            rust_binding_equal(&noop["last_symbols"]["parsed"], &json!(0))?;
+            rust_binding_equal(&mcp_database_snapshot(&database)?, &before)?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn rust_root_aliases_follow_manifest_and_module_changes() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    let source = "pub fn run() {} fn private_run() {} pub mod run {pub fn child(){}} mod worker; pub mod target; pub use crate::target::work as forwarded; pub mod api {mod hidden {pub fn exposed(){}} pub use self::hidden::exposed as public;}";
+    fs::write(root.join(RUST_LIBRARY_PATH), source)?;
+    fs::write(root.join("src/api.rs"), source)?;
+    fs::write(root.join(RUST_BINDING_TARGET_PATH), "pub fn work() {}")?;
+    fs::write(
+        root.join(RUST_BINDING_WORKER_PATH),
+        "use crate::run as launch; use crate::{run as grouped}; use crate::private_run as local; use crate::forwarded as via; use crate::api::public as visible; fn root_calls(){launch(); grouped(); local();} fn namespace(){launch::child();} fn forwarded(){via();} fn public_alias(){visible();} fn shadow(launch:fn()){launch();}",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    for file in ["src/lib.rs", "src/api.rs"] {
+        if file == "src/api.rs" {
+            let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("{manifest}\n[lib]\npath='src/api.rs'\n"),
+            )?;
+            rust_binding_atlas(root, &["watch", "--once"])?;
+        }
+        let db = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+        assert_summary_called_by(root, &db, file, "run", "src/worker.rs::root_calls")?;
+        assert_summary_called_by(
+            root,
+            &db,
+            "src/target.rs",
+            "work",
+            "src/worker.rs::forwarded",
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "root_calls")?)),
+            &([
+                (file.to_string(), "run".to_string()),
+                (file.to_string(), "private_run".to_string()),
+            ]
+            .into()),
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "namespace")?)),
+            &([(file.to_string(), "child".to_string())].into()),
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "public_alias")?)),
+            &([(file.to_string(), "exposed".to_string())].into()),
+        )?;
+        rust_binding_equal(
+            &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "forwarded")?)),
+            &([("src/target.rs".to_string(), "work".to_string())].into()),
+        )?;
+        rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "shadow")?);
+        assert_rust_binding_mcp_callers(root, file)?;
+    }
+    rust_binding_require(
+        root.join(RUST_LIBRARY_PATH).is_file(),
+        "Rust CLI contract failed",
+    )?;
+    fs::remove_file(root.join(RUST_BINDING_TARGET_PATH))?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "forwarded")?);
+    fs::write(root.join(RUST_BINDING_TARGET_PATH), "pub fn work() {}")?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "forwarded")?)),
+        &([("src/target.rs".to_string(), "work".to_string())].into()),
+    )?;
+    let noop = rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &(noop.pointer("/last_symbols/parsed").and_then(Value::as_u64)),
+        &(Some(0)),
+    )?;
+    exercise_cargo_root_cohort_lifecycle()?;
+    Ok(())
+}
+
+#[test]
+fn rust_namespace_aliases_keep_values_types_and_toolchain_identity() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        "mod worker; mod namespace {pub fn run(){}} fn tool(){} use crate::tool as namespace; fn module_and_value(){namespace::run(); namespace();} fn value(){} mod onlymodule {} use crate::onlymodule as value; fn inverse(){value();} pub use std::mem as memory; pub use std::mem::drop as discard; pub struct Service; impl Service {pub fn work(){}} pub struct Public(pub u8); pub mod types {pub struct Private(u8); pub struct Exposed(pub u8);} mod m {pub struct Foo {} impl Foo {pub fn bar(){}}} fn foo(){} use crate::m::Foo; use crate::foo as Foo; fn split_imports(){Foo::bar(); Foo();} fn local_imports(){use crate::m::Foo; use crate::foo as Foo; Foo::bar(); Foo();} fn local_duplicates(){use crate::foo as Alias; use crate::tool as Alias; Alias();} fn local_shadow(){use crate::m::Foo; use crate::foo as Foo; let Foo = || {}; Foo();} fn local_declaration(){use crate::m::Foo; fn Foo(){} Foo(); Foo::bar();} pub struct T; impl T {pub fn work(){}} fn local_impl(){struct T; impl T {pub fn work(_value: bool){}}} fn actual_owner(){crate::T::work();}",
+    )?;
+    fs::write(
+        root.join(RUST_BINDING_WORKER_PATH),
+        "use crate::Service; use crate::memory as ns; use crate::discard as dispose; use ::std::mem::drop as absolute; use crate::Public; use crate::types::{Private,Exposed}; fn external(){dispose(1); ns::drop(1); absolute(1); ::std::mem::drop(1);} fn associated(){Service::work();} fn constructors(){Public(1); Private(1); Exposed(1);}",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "module_and_value")?)),
+        &([
+            ("src/lib.rs".to_string(), "run".to_string()),
+            ("src/lib.rs".to_string(), "tool".to_string()),
+        ]
+        .into()),
+    )?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "inverse")?)),
+        &([("src/lib.rs".to_string(), "value".to_string())].into()),
+    )?;
+    rust_binding_equal(
+        &rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "split_imports")?),
+        &[
+            ("src/lib.rs".to_string(), "bar".to_string()),
+            ("src/lib.rs".to_string(), "foo".to_string()),
+        ]
+        .into(),
+    )?;
+    rust_binding_equal(
+        &rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "local_imports")?),
+        &[
+            ("src/lib.rs".to_string(), "bar".to_string()),
+            ("src/lib.rs".to_string(), "foo".to_string()),
+        ]
+        .into(),
+    )?;
+    let duplicates = rust_binding_calls(root, "src/lib.rs", "local_duplicates")?;
+    rust_binding_require(
+        !duplicates.is_empty()
+            && duplicates.iter().all(|row| {
+                row.pointer("/relation/resolution/status")
+                    .and_then(Value::as_str)
+                    == Some("ambiguous")
+            }),
+        "local same-value import candidates lost ambiguity",
+    )?;
+    rust_binding_unresolved(&rust_binding_calls(root, "src/lib.rs", "local_shadow")?);
+    rust_binding_equal(
+        &rust_binding_targets(&rust_binding_calls(
+            root,
+            "src/lib.rs",
+            "local_declaration",
+        )?),
+        &[
+            ("src/lib.rs".to_string(), "bar".to_string()),
+            ("src/lib.rs".to_string(), "Foo".to_string()),
+        ]
+        .into(),
+    )?;
+    let actual_owner = rust_binding_calls(root, "src/lib.rs", "actual_owner")?;
+    rust_binding_equal(
+        &rust_binding_targets(&actual_owner),
+        &[("src/lib.rs".to_string(), "work".to_string())].into(),
+    )?;
+    rust_binding_require(
+        actual_owner.iter().all(|row| {
+            row.pointer("/target/entity/selector/symbol/parent")
+                .and_then(Value::as_str)
+                == Some("T")
+        }),
+        "associated method lost its actual nominal owner",
+    )?;
+    let external = rust_binding_calls(root, "src/worker.rs", "external")?;
+    rust_binding_require(!external.is_empty(), "Rust CLI contract failed")?;
+    rust_binding_require(
+        external.iter().all(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("external")
+                && row
+                    .pointer("/target/entity/selector/external/identity")
+                    .and_then(Value::as_str)
+                    == Some("std::mem::drop")
+        }),
+        &format!("{external:?}"),
+    )?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "associated")?)),
+        &([("src/lib.rs".to_string(), "work".to_string())].into()),
+    )?;
+    let constructors = rust_binding_calls(root, "src/worker.rs", "constructors")?;
+    rust_binding_equal(
+        &(rust_binding_targets(&constructors)),
+        &([
+            ("src/lib.rs".to_string(), "Public".to_string()),
+            ("src/lib.rs".to_string(), "Exposed".to_string()),
+        ]
+        .into()),
+    )?;
+    rust_binding_require(
+        constructors.iter().any(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("unresolved")
+        }),
+        "Rust CLI contract failed",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn rust_absolute_and_bare_use_paths_follow_the_owning_edition() -> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2015")?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        "mod std {pub mod mem {pub fn drop(_v:u8){}}} mod foo {pub fn run(){}} mod nested {use foo::run as launch; use ::std::mem::drop as absolute; pub fn caller(){launch(); absolute(1); ::std::mem::drop(1);}}",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/lib.rs", "caller")?)),
+        &([
+            ("src/lib.rs".to_string(), "run".to_string()),
+            ("src/lib.rs".to_string(), "drop".to_string()),
+        ]
+        .into()),
+    )?;
+    let manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    fs::write(root.join("Cargo.toml"), manifest.replace("2015", "2024"))?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    let rows = rust_binding_calls(root, "src/lib.rs", "caller")?;
+    rust_binding_require(rust_binding_targets(&rows).is_empty(), &format!("{rows:?}"))?;
+    rust_binding_require(
+        rows.iter().any(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("external")
+        }),
+        "Rust CLI contract failed",
+    )?;
+    rust_binding_require(
+        rows.iter().any(|row| {
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("unresolved")
+        }),
+        "Rust CLI contract failed",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    fs::create_dir_all(root.join("tests/shared"))?;
+    fs::write(root.join("tests/one.rs"), "mod shared; pub fn run(){}")?;
+    fs::write(
+        root.join("tests/shared/mod.rs"),
+        "use crate::run as launch; fn caller(){launch();}",
+    )?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        "mod worker; pub mod a; pub mod b;",
+    )?;
+    fs::write(
+        root.join(RUST_BINDING_WORKER_PATH),
+        "use crate::a::run as cycle; fn caller(){cycle();}",
+    )?;
+    fs::write(root.join("src/a.rs"), "pub use crate::b::run;")?;
+    fs::write(
+        root.join(RUST_FORWARDING_MODULE_PATH),
+        "pub use crate::a::run;",
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "tests/shared/mod.rs", "caller")?)),
+        &([("tests/one.rs".to_string(), "run".to_string())].into()),
+    )?;
+    rust_binding_unresolved(&rust_binding_calls(root, "src/worker.rs", "caller")?);
+    fs::write(
+        root.join(RUST_ADDED_TEST_TARGET_PATH),
+        "mod shared; pub fn run(){}",
+    )?;
+    fs::write(root.join(RUST_FORWARDING_MODULE_PATH), "pub fn run(){}")?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_unresolved(&rust_binding_calls(root, "tests/shared/mod.rs", "caller")?);
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "src/worker.rs", "caller")?)),
+        &([("src/b.rs".to_string(), "run".to_string())].into()),
+    )?;
+    fs::remove_file(root.join(RUST_ADDED_TEST_TARGET_PATH))?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &(rust_binding_targets(&rust_binding_calls(root, "tests/shared/mod.rs", "caller")?)),
+        &([("tests/one.rs".to_string(), "run".to_string())].into()),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn go_clause_bindings_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    let cases: &[(&str, &str, &[bool])] = &[
+        (
+            "expression",
+            "func caller(x int){switch x{case 0:run:=func(){};run();case 1:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "type-cases",
+            "func caller(x any){switch x.(type){case int:run:=func(){};run();case string:run();default:run()};run()}",
+            &[false, true, true, true],
+        ),
+        (
+            "select-default-first",
+            "func caller(ch chan int){select{default:run:=func(){};run();case <-ch:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "receive-binding",
+            "func caller(ch chan func()){select{case run:= <-ch:run();default:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "switch-initializer",
+            "func caller(x int){switch run:=func(){};x{case 0:run();default:run()};run()}",
+            &[false, false, true],
+        ),
+        (
+            "type-alias",
+            "func caller(x any){switch run:=x.(type){case func():run();case func()int:run();default:_=run};run()}",
+            &[false, false, true],
+        ),
+        (
+            "same-clause",
+            "func caller(x int){switch x{case 0:run();run:=func(){};run();default:run()}}",
+            &[true, false, true],
+        ),
+        (
+            "unicode-crlf",
+            "func caller(x int){switch x{case 0:run:=func(){};run();case 1:run()};run()}",
+            &[false, true, true],
+        ),
+        (
+            "only-shadow",
+            "func caller(x int){switch run:=func(){};x{case 0:run();default:run()}}",
+            &[false, false],
+        ),
+    ];
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    let sources = cases
+        .iter()
+        .map(|(label, body, _)| {
+            let source = format!("package fixture\nfunc run()int{{return 0}}\n{body}\n");
+            if *label == "unicode-crlf" {
+                source.replace("run", "rún").replace('\n', "\r\n")
+            } else {
+                source
+            }
+        })
+        .collect::<Vec<_>>();
+    for ((label, _, _), source) in cases.iter().zip(&sources) {
+        fs::create_dir_all(root.join(label))?;
+        fs::write(root.join(label).join("calls.go"), source)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let shadow_index = cases
+            .iter()
+            .position(|case| case.0 == "only-shadow")
+            .ok_or_else(|| io::Error::other("Go mutation fixture missing"))?;
+        for renamed in [false, true, false] {
+            let shadow_source = if renamed {
+                sources[shadow_index]
+                    .replace("run:=func(){}", "other:=func(){}")
+                    .replace("case 0:", "case 0:_=other;")
+            } else {
+                sources[shadow_index].clone()
+            };
+            fs::write(root.join("only-shadow/calls.go"), &shadow_source)?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuilt in [false, true] {
+                if rebuilt {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                for ((label, _, expected), source) in cases.iter().zip(&sources) {
+                    let file = format!("{label}/calls.go");
+                    let callee = if *label == "unicode-crlf" {
+                        "rún"
+                    } else {
+                        "run"
+                    };
+                    let current = if *label == "only-shadow" {
+                        &shadow_source
+                    } else {
+                        source
+                    };
+                    let expected = if *label == "only-shadow" && renamed {
+                        vec![true, true]
+                    } else {
+                        expected.to_vec()
+                    };
+                    let mut positions = Vec::new();
+                    for (byte, _) in current.match_indices(&format!("{callee}()")) {
+                        let prefix = &current[..byte];
+                        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+                        if line <= 2 {
+                            continue;
+                        }
+                        let column = prefix.rsplit('\n').next().unwrap_or("").chars().count();
+                        positions.push((u64::try_from(line)?, u64::try_from(column)?));
+                    }
+                    rust_binding_equal(&positions.len(), &expected.len())?;
+                    let expected_sites = positions
+                        .into_iter()
+                        .zip(&expected)
+                        .map(|((line, column), resolved)| (line, column, *resolved))
+                        .collect::<Vec<_>>();
+                    let cli = run_packaged_cli_json(
+                        &executable,
+                        root,
+                        &database,
+                        &[
+                            "symbols",
+                            "relations",
+                            "--view",
+                            "detailed",
+                            "--file",
+                            &file,
+                            "--symbol",
+                            "caller",
+                            "--relation",
+                            "calls",
+                            "--include-occurrences",
+                            "--occurrence-limit",
+                            "100",
+                            "--occurrence-total-limit",
+                            "100",
+                            "--limit",
+                            "10",
+                        ],
+                    )?;
+                    let text = session.call_tool(
+                        "atlas_symbol_relations",
+                        &json!({
+                            "project_path":root, "view":"detailed", "file":file, "symbol":"caller",
+                            "relation":"calls", "include_occurrences":true, "occurrence_limit":100,
+                            "occurrence_total_limit":100, "limit":10
+                        }),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    for response in [cli, mcp] {
+                        rust_binding_equal(
+                            &response["symbol_relations"]["truncated"],
+                            &json!(false),
+                        )?;
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| io::Error::other("Go clause call rows missing"))?;
+                        let mut sites = Vec::new();
+                        for row in rows {
+                            rust_binding_equal(&row["occurrences_truncated"], &json!(false))?;
+                            let resolved = row["relation"]["resolution"]["status"] == "resolved";
+                            if resolved {
+                                let symbol = &row["target"]["entity"]["selector"]["symbol"];
+                                rust_binding_equal(&symbol["file"], &json!(file))?;
+                                rust_binding_equal(&symbol["name"], &json!(callee))?;
+                                rust_binding_equal(&symbol["parent"], &Value::Null)?;
+                            }
+                            for occurrence in row["occurrences"]
+                                .as_array()
+                                .ok_or_else(|| io::Error::other("Go clause occurrences missing"))?
+                            {
+                                let line = occurrence["span"]["start_line"]
+                                    .as_u64()
+                                    .ok_or_else(|| io::Error::other("Go source line missing"))?;
+                                let column = occurrence["span"]["start_column"]
+                                    .as_u64()
+                                    .ok_or_else(|| io::Error::other("Go source column missing"))?;
+                                sites.push((line, column, resolved));
+                            }
+                        }
+                        sites.sort_unstable();
+                        if sites != expected_sites {
+                            return Err(io::Error::other(format!(
+                                "{label}: expected {expected_sites:?}, actual {sites:?}"
+                            ))
+                            .into());
+                        }
+                    }
+                    let cli =
+                        run_packaged_cli_json(&executable, root, &database, &["summary", &file])?;
+                    let text = session.call_tool(
+                        "atlas_file_summary",
+                        &json!({"project_path":root,"file":file}),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    for summary in [cli, mcp["file_summary"].clone()] {
+                        let function = summary["functions"]
+                            .as_array()
+                            .and_then(|functions| {
+                                functions.iter().find(|function| {
+                                    function["name"] == callee
+                                        && function["parent"].as_str().unwrap_or("").is_empty()
+                                })
+                            })
+                            .ok_or_else(|| {
+                                io::Error::other("Go package function summary missing")
+                            })?;
+                        let caller = format!("{file}::caller");
+                        let present = function["called_by"]
+                            .as_array()
+                            .ok_or_else(|| io::Error::other("Go summary callers missing"))?
+                            .iter()
+                            .any(|entry| entry == &caller);
+                        rust_binding_equal(&present, &expected.iter().any(|resolved| *resolved))?;
+                    }
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn python_directive_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    type ExpectedComprehensionTarget<'a> = (&'a str, &'a str, Option<&'a str>);
+    const WORKER_FILE: &str = "worker.py";
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join(WORKER_FILE),
+        "def run(): pass\ndef safe(): pass\n",
+    )?;
+    for (file, source) in [
+        (
+            "global.py",
+            "def run(): pass\ndef caller():\n global run\n run = run()\n run()\n",
+        ),
+        (
+            "nonlocal.py",
+            "def outer():\n def run(): pass\n def caller():\n  nonlocal run\n  run = run()\n  run()\n",
+        ),
+        (
+            "imported.py",
+            "def caller():\n global launch\n from worker import run as launch\n launch()\n launch = unknown\n launch()\ndef clean():\n from worker import safe\n safe()\n",
+        ),
+    ] {
+        fs::write(root.join(file), source)?;
+    }
+    let comprehension_cases: &[(
+        &str,
+        &str,
+        Option<&str>,
+        &[ExpectedComprehensionTarget<'_>],
+        usize,
+        usize,
+    )] = &[
+        (
+            "comp_module.py",
+            "def run():return [0]\ndef keep():return 0\n[(run:=None) for _ in run()]\n",
+            None,
+            &[("comp_module.py", "run", None)],
+            1,
+            1,
+        ),
+        (
+            "comp_global.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run:=None) for _ in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_global.py", "run", None),
+                ("comp_global.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_local.py",
+            "def keep():return 0\ndef caller():\n def run():return [0]\n [(run:=None) for _ in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_local.py", "run", Some("caller")),
+                ("comp_local.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_nonlocal.py",
+            "def keep():return 0\ndef outer():\n def run():return [0]\n def caller():\n  nonlocal run\n  [(run:=None) for _ in run()]\n  run()\n  keep()\n",
+            Some("caller"),
+            &[
+                ("comp_nonlocal.py", "run", Some("outer")),
+                ("comp_nonlocal.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_imported.py",
+            "from comprehension_worker import run as launch, keep\ndef caller():\n global launch\n [(launch:=None) for _ in launch()]\n launch()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comprehension_worker.py", "run", None),
+                ("comprehension_worker.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_repeated.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run(),keep(),(run:=None)) for _ in [0,1]]\n run()\n",
+            Some("caller"),
+            &[("comp_repeated.py", "keep", None)],
+            3,
+            1,
+        ),
+        (
+            "comp_filter.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run(),keep()) for _ in [0] if (run:=lambda:[1])]\n",
+            Some("caller"),
+            &[("comp_filter.py", "keep", None)],
+            2,
+            1,
+        ),
+        (
+            "comp_singleton.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run:=run()) for _ in [1]]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_singleton.py", "run", None),
+                ("comp_singleton.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_nested.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [[(run:=None) for _ in run()] for _ in [1]]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_nested.py", "run", None),
+                ("comp_nested.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_class_invalid.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n class C:\n  [(run:=None) for _ in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_class_invalid.py", "run", None),
+                ("comp_class_invalid.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_target_invalid.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [(run:=None) for run in run()]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_target_invalid.py", "run", None),
+                ("comp_target_invalid.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+        (
+            "comp_iterable_invalid.py",
+            "def run():return [0]\ndef keep():return 0\ndef caller():\n global run\n [keep() for _ in (run:=run())]\n run()\n keep()\n",
+            Some("caller"),
+            &[
+                ("comp_iterable_invalid.py", "run", None),
+                ("comp_iterable_invalid.py", "keep", None),
+            ],
+            4,
+            2,
+        ),
+        (
+            "comp_unicode.py",
+            "def rún():return [0]\r\ndef keep():return 0\r\ndef caller():\r\n global rún\r\n [(rún:=None) for _ in rún()]\r\n rún()\r\n keep()\r\n",
+            Some("caller"),
+            &[
+                ("comp_unicode.py", "rún", None),
+                ("comp_unicode.py", "keep", None),
+            ],
+            3,
+            2,
+        ),
+    ];
+    fs::write(
+        root.join("comprehension_worker.py"),
+        "def run():return [0]\ndef keep():return 0\n",
+    )?;
+    for (file, source, ..) in comprehension_cases {
+        fs::write(root.join(file), source)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for refreshed in [false, true] {
+            if refreshed {
+                fs::write(
+                    root.join(WORKER_FILE),
+                    "def run():\n return 1\ndef safe(): pass\n",
+                )?;
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            }
+            for (file, target_file) in [
+                ("global.py", "global.py"),
+                ("nonlocal.py", "nonlocal.py"),
+                ("imported.py", WORKER_FILE),
+            ] {
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    root,
+                    &database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--symbol",
+                        "caller",
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ],
+                )?;
+                let text = session.call_tool(
+                    "atlas_symbol_relations",
+                    &json!({
+                        "project_path": root, "view": "detailed", "file": file,
+                        "symbol": "caller", "relation": "calls", "limit": 10,
+                    }),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                for response in [cli, mcp] {
+                    let rows = response
+                        .pointer("/symbol_relations/rows")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| io::Error::other("Python directive caller rows missing"))?;
+                    rust_binding_equal(&rows.len(), &2)?;
+                    rust_binding_equal(
+                        &rust_binding_targets(rows),
+                        &BTreeSet::from([(target_file.to_string(), "run".to_string())]),
+                    )?;
+                    rust_binding_equal(
+                        &rows
+                            .iter()
+                            .filter(|row| {
+                                row.pointer("/relation/resolution/status")
+                                    .and_then(Value::as_str)
+                                    == Some("resolved")
+                            })
+                            .count(),
+                        &1,
+                    )?;
+                }
+                assert_summary_called_by(
+                    root,
+                    &database,
+                    target_file,
+                    "run",
+                    &format!("{file}::caller"),
+                )?;
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path": root, "file": target_file}),
+                )?;
+                let summary: Value = toon_format::decode_default(&text)?;
+                let callers = summary
+                    .pointer("/file_summary/functions")
+                    .and_then(Value::as_array)
+                    .and_then(|functions| {
+                        functions.iter().find(|function| function["name"] == "run")
+                    })
+                    .and_then(|function| function["called_by"].as_array())
+                    .ok_or_else(|| io::Error::other("Python directive summary callers missing"))?;
+                rust_binding_require(
+                    callers
+                        .iter()
+                        .any(|caller| caller == &format!("{file}::caller")),
+                    "MCP omitted Python directive caller",
+                )?;
+            }
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+        }
+        for (suffix, resolved) in [
+            ("def mutate():\n global run\n run = unknown\n", false),
+            ("run = unknown\n", false),
+            ("", true),
+        ] {
+            fs::write(
+                root.join(WORKER_FILE),
+                format!("def run(): pass\ndef safe(): pass\n{suffix}"),
+            )?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuilt in [false, true] {
+                if rebuilt {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                for (caller, expected, expected_rows) in [
+                    (
+                        "caller",
+                        if resolved {
+                            BTreeSet::from([(WORKER_FILE.to_string(), "run".to_string())])
+                        } else {
+                            BTreeSet::new()
+                        },
+                        if resolved { 2 } else { 1 },
+                    ),
+                    (
+                        "clean",
+                        BTreeSet::from([(WORKER_FILE.to_string(), "safe".to_string())]),
+                        1,
+                    ),
+                ] {
+                    let cli = run_packaged_cli_json(
+                        &executable,
+                        root,
+                        &database,
+                        &[
+                            "symbols",
+                            "relations",
+                            "--view",
+                            "detailed",
+                            "--file",
+                            "imported.py",
+                            "--symbol",
+                            caller,
+                            "--relation",
+                            "calls",
+                            "--limit",
+                            "10",
+                        ],
+                    )?;
+                    let text = session.call_tool(
+                        "atlas_symbol_relations",
+                        &json!({
+                            "project_path": root, "view": "detailed", "file": "imported.py",
+                            "symbol": caller, "relation": "calls", "limit": 10,
+                        }),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    for response in [cli, mcp] {
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| {
+                                io::Error::other("Python export repair caller rows missing")
+                            })?;
+                        rust_binding_equal(&rows.len(), &expected_rows)?;
+                        rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                    }
+                }
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path": root, "file": WORKER_FILE}),
+                )?;
+                let summary: Value = toon_format::decode_default(&text)?;
+                for (name, caller, present) in [
+                    ("run", "imported.py::caller", resolved),
+                    ("safe", "imported.py::clean", true),
+                ] {
+                    let callers = summary
+                        .pointer("/file_summary/functions")
+                        .and_then(Value::as_array)
+                        .and_then(|functions| {
+                            functions.iter().find(|function| function["name"] == name)
+                        })
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| io::Error::other("Python export repair summary missing"))?;
+                    rust_binding_equal(&callers.iter().any(|value| value == caller), &present)?;
+                }
+            }
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+        }
+        for restored in [false, true, false] {
+            let (file, source, ..) = comprehension_cases
+                .iter()
+                .find(|case| case.0 == "comp_global.py")
+                .ok_or_else(|| io::Error::other("comprehension mutation fixture missing"))?;
+            fs::write(
+                root.join(file),
+                if restored {
+                    source.replace("(run:=None)", "(other:=None)")
+                } else {
+                    (*source).to_string()
+                },
+            )?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuilt in [false, true] {
+                if rebuilt {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                for (file, _, caller, expected, expected_rows, resolved) in comprehension_cases {
+                    let mut args = vec![
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--relation",
+                        "calls",
+                        "--include-occurrences",
+                        "--limit",
+                        "10",
+                    ];
+                    if let Some(caller) = caller {
+                        args.extend(["--symbol", *caller]);
+                    }
+                    let cli = run_packaged_cli_json(&executable, root, &database, &args)?;
+                    let text=session.call_tool("atlas_symbol_relations",&json!({"project_path":root,"view":"detailed","file":file,"symbol":caller,"relation":"calls","limit":10,"include_occurrences":true}))?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    let targets = expected
+                        .iter()
+                        .map(|(file, name, _)| ((*file).to_string(), (*name).to_string()))
+                        .collect::<BTreeSet<_>>();
+                    let resolved = if *file == "comp_global.py" && restored {
+                        3
+                    } else {
+                        *resolved
+                    };
+                    for response in [cli, mcp] {
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| io::Error::other("comprehension rows missing"))?;
+                        let mut occurrences = 0;
+                        let mut resolved_occurrences = 0;
+                        for row in rows {
+                            rust_binding_equal(&row["occurrences_truncated"], &json!(false))?;
+                            let count = row["occurrences"]
+                                .as_array()
+                                .ok_or_else(|| io::Error::other("call occurrences missing"))?
+                                .len();
+                            occurrences += count;
+                            if row["relation"]["resolution"]["status"] == "resolved" {
+                                resolved_occurrences += count;
+                            }
+                        }
+                        if occurrences != *expected_rows {
+                            return Err(io::Error::other(format!(
+                                "{file}: expected {expected_rows} source calls, actual {occurrences}"
+                            ))
+                            .into());
+                        }
+                        rust_binding_equal(&rust_binding_targets(rows), &targets)?;
+                        rust_binding_equal(&resolved_occurrences, &resolved)?;
+                        for row in rows
+                            .iter()
+                            .filter(|row| row["relation"]["resolution"]["status"] == "resolved")
+                        {
+                            let symbol = &row["target"]["entity"]["selector"]["symbol"];
+                            let parent = expected
+                                .iter()
+                                .find(|(target, name, _)| {
+                                    symbol["file"] == *target && symbol["name"] == *name
+                                })
+                                .ok_or_else(|| io::Error::other("unexpected comprehension target"))?
+                                .2;
+                            rust_binding_equal(&symbol["parent"], &json!(parent))?;
+                        }
+                    }
+                    if let Some(caller) = caller {
+                        for (target, name, parent) in *expected {
+                            let cli = run_packaged_cli_json(
+                                &executable,
+                                root,
+                                &database,
+                                &["summary", target],
+                            )?;
+                            let text = session.call_tool(
+                                "atlas_file_summary",
+                                &json!({"project_path":root,"file":target}),
+                            )?;
+                            let mcp: Value = toon_format::decode_default(&text)?;
+                            for summary in [cli, mcp["file_summary"].clone()] {
+                                let function = summary["functions"]
+                                    .as_array()
+                                    .and_then(|functions| {
+                                        functions.iter().find(|function| {
+                                            function["name"] == *name
+                                                && function["parent"].as_str().unwrap_or("")
+                                                    == parent.unwrap_or("")
+                                        })
+                                    })
+                                    .ok_or_else(|| {
+                                        io::Error::other(format!(
+                                            "{file}: summary target missing {name}"
+                                        ))
+                                    })?;
+                                let callers =
+                                    function["called_by"].as_array().ok_or_else(|| {
+                                        io::Error::other("comprehension summary callers missing")
+                                    })?;
+                                rust_binding_require(
+                                    callers
+                                        .iter()
+                                        .any(|entry| entry == &format!("{file}::{caller}")),
+                                    "comprehension summary omitted caller",
+                                )?;
+                            }
+                        }
+                        if matches!(*file, "comp_repeated.py" | "comp_filter.py") {
+                            let text = session.call_tool(
+                                "atlas_file_summary",
+                                &json!({"project_path":root,"file":file}),
+                            )?;
+                            let summary: Value = toon_format::decode_default(&text)?;
+                            let run = summary["file_summary"]["functions"]
+                                .as_array()
+                                .and_then(|functions| {
+                                    functions.iter().find(|function| {
+                                        function["name"] == "run" && function["parent"] == ""
+                                    })
+                                })
+                                .ok_or_else(|| {
+                                    io::Error::other("loop negative summary target missing")
+                                })?;
+                            rust_binding_require(
+                                !run["called_by"].as_array().is_some_and(|callers| {
+                                    callers
+                                        .iter()
+                                        .any(|entry| entry == &format!("{file}::{caller}"))
+                                }),
+                                "loop-carried unknown gained a caller",
+                            )?;
+                        }
+                    }
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh() -> Result<(), Box<dyn Error>>
+{
+    use std::fmt::Write as _;
+    for extension in ["js", "ts", "tsx"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let worker = format!("worker.{extension}");
+        let barrel = format!("barrel.{extension}");
+        let importer = format!("main.{extension}");
+        let local = format!("local.{extension}");
+        let generator_worker = format!("generator_worker.{extension}");
+        let generator_barrel = format!("generator_barrel.{extension}");
+        let generator_importer = format!("generator_importer.{extension}");
+        let resource_barrel = format!("resource_barrel.{extension}");
+        let resource_importer = format!("resource_importer.{extension}");
+        let resource_target = format!("resource_target.{extension}");
+        let module = format!("./{}", "x".repeat(65_536));
+        let slots = (0..512)
+            .map(|index| format!("run as e{index}"))
+            .collect::<Vec<_>>();
+        let (first, second) = slots.split_at(slots.len() / 2);
+        fs::write(
+            root.join(&resource_barrel),
+            format!(
+                "export {{{}}} from \"{module}\";export {{{}}} from \"{module}\";",
+                first.join(","),
+                second.join(","),
+            ),
+        )?;
+        fs::write(root.join(&resource_target), "export function work(){}")?;
+        let mut member_calls = String::new();
+        for index in (0..512).step_by(2) {
+            write!(&mut member_calls, "ns.e{index}();")?;
+        }
+        fs::write(
+            root.join(&resource_importer),
+            format!(
+                "import * as ns from './{resource_barrel}'; import {{work}} from './{resource_target}'; function caller(){{{member_calls}}} function probe(){{ns.e0();}} function secondProbe(){{ns.e256();}} function clean(){{work();}}"
+            ),
+        )?;
+        fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+        fs::write(
+            root.join(&barrel),
+            format!("export {{run as launch}} from './{worker}';\n"),
+        )?;
+        fs::write(
+            root.join(&importer),
+            format!(
+                "import {{launch}} from './{barrel}'; import {{safe}} from './{worker}'; function caller(){{launch();}} function clean(){{safe();}}\n"
+            ),
+        )?;
+        fs::write(
+            root.join(&local),
+            "function run(){} var run; function caller(){run();}\n",
+        )?;
+        fs::write(
+            root.join(&generator_worker),
+            "export default function* generated(){} export async function* asynchronous(){}\n",
+        )?;
+        fs::write(
+            root.join(&generator_barrel),
+            format!("export {{default as sequence, asynchronous}} from './{generator_worker}';\n"),
+        )?;
+        fs::write(
+            root.join(&generator_importer),
+            format!(
+                "import {{sequence, asynchronous}} from './{generator_barrel}'; function generate(){{sequence();}} function asyncGenerate(){{asynchronous();}}\n"
+            ),
+        )?;
+        let mut environments = vec![
+            (
+                format!("body.{extension}"),
+                "function caller(replacement){function run(){} var run=replacement; run();}\n",
+                false,
+            ),
+            (
+                format!("parameters.{extension}"),
+                "function run(){} function caller(value=run()){var run=null;}\n",
+                true,
+            ),
+            (
+                format!("static.{extension}"),
+                "function run(){} class Example{static{var run=null;}} function caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("generator_scope.{extension}"),
+                "function run(){} function* unused(){var run=null;} function caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("async_generator_scope.{extension}"),
+                "function run(){} async function* unused(){var run=null;} function caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("generator_parameters.{extension}"),
+                "function run(){} function* caller(value=run()){var run=null;}\n",
+                true,
+            ),
+            (
+                format!("generator_calls.{extension}"),
+                "function run(){} function* caller(){run();}\n",
+                true,
+            ),
+            (
+                format!("generator_shadow.{extension}"),
+                "function run(){} function* caller(run){run();}\n",
+                false,
+            ),
+        ];
+        if matches!(extension, "ts" | "tsx") {
+            environments.push((
+                format!("namespace.{extension}"),
+                "function run(){} namespace N{var run=null;} function caller(){run();}\n",
+                true,
+            ));
+        }
+        for host in ["vue", "svelte", "html"] {
+            environments.push((
+                format!("generator_host.{host}"),
+                "<script>function run(){} async function* unused(){var run=null;} function* caller(){run();}</script>\n",
+                true,
+            ));
+        }
+        for (file, content, _) in &environments {
+            fs::write(root.join(file), content)?;
+        }
+        let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+        let executable = mcp_contract_executable();
+        fs::write(
+            root.join(&worker),
+            "export var run = () => {}; var run; export function safe(){}\n",
+        )?;
+        run_packaged_cli_json(&executable, root, &database, &["init"])?;
+        let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+        let mut session = McpContractSession::spawn(&executable, root, &database)?;
+        let result = (|| -> Result<(), Box<dyn Error>> {
+            for (suffix, resolved) in [
+                ("var run;", true),
+                ("var run = unknown;", false),
+                ("var run; var run;", true),
+            ] {
+                fs::write(
+                    root.join(&worker),
+                    format!("export var run = () => {{}}; {suffix} export function safe(){{}}\n"),
+                )?;
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+                for rebuilt in [false, true] {
+                    if rebuilt {
+                        run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                    }
+                    if rebuilt && extension == "js" && suffix == "var run;" {
+                        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+                        let path = root.join(&resource_importer);
+                        let mut content = fs::read_to_string(&path)?;
+                        content.push_str("\n// refresh forwarding source through MCP\n");
+                        fs::write(&path, content)?;
+                        session
+                            .call_tool("atlas_scan", &json!({"project_path": root, "path": "."}))?;
+                        rust_binding_require(
+                            AtlasStore::open_read_only(&database)?.index_publication()? != before,
+                            "MCP forwarding refresh did not publish its changed source",
+                        )?;
+                    }
+                    let mut checks = vec![
+                        (
+                            importer.as_str(),
+                            "caller",
+                            worker.as_str(),
+                            "run",
+                            resolved,
+                        ),
+                        (importer.as_str(), "clean", worker.as_str(), "safe", true),
+                        (local.as_str(), "caller", local.as_str(), "run", true),
+                        (
+                            generator_importer.as_str(),
+                            "generate",
+                            generator_worker.as_str(),
+                            "generated",
+                            true,
+                        ),
+                        (
+                            generator_importer.as_str(),
+                            "asyncGenerate",
+                            generator_worker.as_str(),
+                            "asynchronous",
+                            true,
+                        ),
+                    ];
+                    checks.extend([
+                        (
+                            resource_importer.as_str(),
+                            "probe",
+                            resource_target.as_str(),
+                            "work",
+                            false,
+                        ),
+                        (
+                            resource_importer.as_str(),
+                            "secondProbe",
+                            resource_target.as_str(),
+                            "work",
+                            false,
+                        ),
+                        (
+                            resource_importer.as_str(),
+                            "clean",
+                            resource_target.as_str(),
+                            "work",
+                            true,
+                        ),
+                    ]);
+                    checks.extend(environments.iter().map(|(file, _, present)| {
+                        (file.as_str(), "caller", file.as_str(), "run", *present)
+                    }));
+                    for (file, caller, target_file, target, present) in checks {
+                        let cli = run_packaged_cli_json(
+                            &executable,
+                            root,
+                            &database,
+                            &[
+                                "symbols",
+                                "relations",
+                                "--view",
+                                "detailed",
+                                "--file",
+                                file,
+                                "--symbol",
+                                caller,
+                                "--relation",
+                                "calls",
+                                "--include-occurrences",
+                                "--limit",
+                                "10",
+                            ],
+                        )?;
+                        let text = session.call_tool(
+                            "atlas_symbol_relations",
+                            &json!({
+                                "project_path": root, "view": "detailed", "file": file,
+                                "symbol": caller, "relation": "calls", "limit": 10, "include_occurrences": true,
+                            }),
+                        )?;
+                        let mcp: Value = toon_format::decode_default(&text)?;
+                        let expected = if present {
+                            BTreeSet::from([(target_file.to_string(), target.to_string())])
+                        } else {
+                            BTreeSet::new()
+                        };
+                        for response in [cli, mcp] {
+                            let rows = response
+                                .pointer("/symbol_relations/rows")
+                                .and_then(Value::as_array)
+                                .ok_or_else(|| io::Error::other("bare var caller rows missing"))?;
+                            rust_binding_equal(&rows.len(), &1)?;
+                            rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                            if file == resource_importer
+                                && matches!(caller, "probe" | "secondProbe")
+                            {
+                                rust_binding_equal(
+                                    &rows[0]["occurrences_truncated"],
+                                    &json!(false),
+                                )?;
+                                let occurrences =
+                                    rows[0]["occurrences"].as_array().ok_or_else(|| {
+                                        io::Error::other("forwarding probe occurrence missing")
+                                    })?;
+                                rust_binding_equal(&occurrences.len(), &1)?;
+                            }
+                        }
+                        // Nested body declarations are proved by exact graph targets above.
+                        if file.starts_with("body.") {
+                            continue;
+                        }
+                        let text = session.call_tool(
+                            "atlas_file_summary",
+                            &json!({
+                                "project_path": root, "file": target_file,
+                            }),
+                        )?;
+                        let summary: Value = toon_format::decode_default(&text)?;
+                        let callers = summary
+                            .pointer("/file_summary/functions")
+                            .and_then(Value::as_array)
+                            .and_then(|functions| {
+                                functions.iter().find(|function| function["name"] == target)
+                            })
+                            .and_then(|function| function["called_by"].as_array())
+                            .ok_or_else(|| io::Error::other("bare var summary callers missing"))?;
+                        rust_binding_equal(
+                            &callers
+                                .iter()
+                                .any(|value| value == &format!("{file}::{caller}")),
+                            &present,
+                        )?;
+                    }
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+            let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+            let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            rust_binding_equal(
+                &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+                &Some(0),
+            )?;
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.index_publication()?,
+                &before,
+            )?;
+            Ok(())
+        })();
+        complete_mcp_test_after_shutdown(result, || session.shutdown())?;
+    }
+    Ok(())
+}
+
+/// Shared ECMAScript dependency fixture used by binding and capacity contracts.
+const ECMASCRIPT_WORKER_FILE_NAME: &str = "worker.js";
+
+#[test]
+fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box<dyn Error>> {
+    const CPP_NAMESPACE_FILE: &str = "toggle.cpp";
+    const TS_NAMESPACE_FILE: &str = "toggle.ts";
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname=\"binding-owners\"\nversion=\"0.1.0\"\nedition=\"2024\"\n[lib]\npath=\"mixed_import.rs\"\n[[bin]]\nname=\"collision\"\npath=\"collision_import.rs\"\n",
+    )?;
+    fs::write(
+        root.join("module-info.java"),
+        "module atlas.core { exports atlas.api; }\n",
+    )?;
+    fs::write(root.join("valid_worker.ts"), "export function run(){}\n")?;
+    let qualified = [
+        (
+            "qualified_parenthesized.cpp",
+            "void run(){}\nnamespace N{void run(){}\nvoid caller();}\nvoid (N::caller)(){run();}\n",
+            "void ( N :: caller ) ( )",
+            Some("N"),
+            true,
+        ),
+        (
+            "qualified_inline.cpp",
+            "void run(){}\nnamespace N{inline namespace V{struct C{void run(){}\nvoid caller();};}}\nvoid N::V::C::caller(){run();}\n",
+            "void N :: V :: C :: caller ( )",
+            Some("N::V::C"),
+            true,
+        ),
+        (
+            "qualified_inline_barrier.cpp",
+            "void run(){}\nstruct C{void run(){}void caller();};\nnamespace N{inline namespace V{struct C{void run(){}\nvoid caller();};}\nvoid C::caller(){run();}}\n",
+            "void C :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_typedef.cpp",
+            "void run(){}\nstruct C{void run(){}void caller();};\nnamespace N{struct Other{void run(){}\nvoid caller();};typedef Other First,C;\nvoid C::caller(){run();}}\n",
+            "void C :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_late.cpp",
+            "void run(){}\nnamespace M{}\nnamespace N{void run(){}\nvoid caller();}\nvoid N::caller(){run();}\nusing namespace M;\n",
+            "void N :: caller ( )",
+            Some("N"),
+            true,
+        ),
+        (
+            "qualified_inline_global.cpp",
+            "inline namespace V{void other(){}}\nvoid run(){}\nvoid caller(){run();}\n",
+            "void caller ( )",
+            None,
+            true,
+        ),
+        (
+            "qualified_namespace.cpp",
+            "void run(){}\nnamespace N {void run(){}\nvoid caller();}\nvoid N::caller(){run();}\n",
+            "void N :: caller ( )",
+            Some("N"),
+            true,
+        ),
+        (
+            "qualified_class.cpp",
+            "void run(){}\nstruct C {void run(){}\nvoid caller();};\nvoid C::caller(){run();}\n",
+            "void C :: caller ( )",
+            Some("C"),
+            true,
+        ),
+        (
+            "qualified_nested.cpp",
+            "void run(){}\nnamespace B {struct C {void run(){}\nvoid caller();};}\nvoid B::C::caller(){run();}\n",
+            "void B :: C :: caller ( )",
+            Some("B::C"),
+            true,
+        ),
+        (
+            "qualified_global.cpp",
+            "void run(){}\nnamespace N {void caller();}\nvoid N::caller(){run();}\n",
+            "void N :: caller ( )",
+            None,
+            true,
+        ),
+        (
+            "qualified_unknown.cpp",
+            "void run(){}\nvoid External::caller(){run();}\n",
+            "void External :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_base.cpp",
+            "void run(){}\nstruct B {void run(){}};\nstruct C:B {void caller();};\nvoid C::caller(){run();}\n",
+            "void C :: caller ( )",
+            None,
+            false,
+        ),
+        (
+            "qualified_shadow.cpp",
+            "void run(){}\nnamespace N {void run(){}\nvoid caller();}\nvoid N::caller(){auto run=[]{};run();}\n",
+            "void N :: caller ( )",
+            Some("N"),
+            false,
+        ),
+        (
+            "qualified_leak.cpp",
+            "void run(){}\nnamespace N {void run();}\nvoid N::run(){}\nvoid caller(){run();}\n",
+            "void caller ( )",
+            None,
+            true,
+        ),
+    ];
+    let cases = [
+        (
+            "initializer_val.kt",
+            "fun run()=1\nfun initial(){val run=run()}\nfun later(){val run={1};run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_val.kt",
+            "fun run()=1\nfun initial(){val run=run()}\nfun later(){val run={1};run()}\n",
+            "later", "run", false,
+        ),
+        (
+            "initializer_var.kt", "fun run()=1\nfun initial(){var run=run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_destructured.kt", "fun run()=Pair(1,2)\nfun initial(){val (run,other)=run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_delegated.kt", "fun run()=lazy{1}\nfun initial(){val run by run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_loop.kt", "fun run()=listOf(1)\nfun initial(){for(run in run()){}}\nfun later(items:List<()->Int>){for(run in items){run()}}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_loop.kt", "fun run()=listOf(1)\nfun initial(){for(run in run()){}}\nfun later(items:List<()->Int>){for(run in items){run()}}\n",
+            "later", "run", false,
+        ),
+        (
+            "reopened.cpp",
+            "namespace N { void run() {} }\nnamespace N { void caller() { run(); } }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "nested.cpp",
+            "namespace A::B { void run() {} }\nnamespace A { namespace B { void caller() { run(); } } }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "anonymous.cpp",
+            "namespace { void run() {} }\nvoid caller() { run(); }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "conflict.cpp",
+            "namespace { void run() {} }\nvoid run() {}\nvoid caller() { run(); }\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "future.cpp",
+            "namespace N { void caller() { run(); } }\nnamespace N { void run() {} }\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "partial.cs",
+            "namespace @N { partial class @C<@T> { static void @Run() {} } }\nnamespace N { partial class C<T> { static void Caller() { Run(); } } }\n",
+            "Caller",
+            "@Run",
+            true,
+        ),
+        (
+            "private.ts",
+            "namespace N { function run() {} }\nnamespace N { export function caller() { run(); } }\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "closure.ts",
+            "namespace N { function run() {} export function caller() { run(); } }\nnamespace N { export function unrelated() {} }\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.cpp",
+            "void run(){}\nunion Owner {void run(){}};\nvoid caller(){run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.kt",
+            "fun run()=1\nobject Owner {fun run()=2}\nfun caller(){run()}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_enum.zig",
+            "fn run() void {}\nconst Owner=enum {value, pub fn run() void {}};\npub fn caller() void {run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_union.zig",
+            "fn run() void {}\nconst Owner=union {value:u8, pub fn run() void {}};\npub fn caller() void {run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_opaque.zig",
+            "fn run() void {}\nconst Owner=opaque {pub fn run() void {}};\npub fn caller() void {run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.rs",
+            "fn run(){}\nstruct Api; impl Api {const run:u8=0;fn caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner.java",
+            "interface Left {default void run(){}}\ninterface Right {default void run(){} default void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "constructor.kt",
+            "fun run(){}\nclass Api(val run:()->Unit){fun caller(){run()}}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "initializer.kt",
+            "fun run(){}\nclass Api(run:()->Unit){val value=run();fun caller(){run()}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_while.cpp",
+            "using Callback=void(*)(); void run(){}\nvoid caller(){while(auto run=static_cast<Callback>(nullptr)){} run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_nested.kt",
+            "fun run(){}\nclass Outer{\nfun run(){}\nclass Nested{fun caller(){run()}}\n}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "late_property.kt",
+            "fun run(){}\nclass Api{\nfun caller(){run()}\nval run:()->Unit={}\n}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "accessor_field.kt",
+            "fun field(){}\nclass Api{val item:Int get(){fun inside(){field()};return 0}}\nfun caller(){field()}\n",
+            "inside",
+            "field",
+            false,
+        ),
+        (
+            "accessor_field.kt",
+            "fun field(){}\nclass Api{val item:Int get(){fun inside(){field()};return 0}}\nfun caller(){field()}\n",
+            "caller",
+            "field",
+            true,
+        ),
+        (
+            "accessor_value.cs",
+            "using System;class Api{static void value(){} Action Item{set{void inside(){value();}}get{void caller(){value();}return null;}}}\n",
+            "inside",
+            "value",
+            false,
+        ),
+        (
+            "accessor_value.cs",
+            "using System;class Api{static void value(){} Action Item{set{void inside(){value();}}get{void caller(){value();}return null;}}}\n",
+            "caller",
+            "value",
+            true,
+        ),
+        (
+            "primary.cs",
+            "using System;class Outer{static void run(){}record Api(Action run){void inside(){run();}}static void caller(){run();}}\n",
+            "inside",
+            "run",
+            false,
+        ),
+        (
+            "primary.cs",
+            "using System;class Outer{static void run(){}record Api(Action run){void inside(){run();}}static void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "component.java",
+            "class Outer{static void run(){}record Api(Runnable run){void inside(){run();}}static void caller(){run();}}\n",
+            "inside",
+            "run",
+            false,
+        ),
+        (
+            "component.java",
+            "class Outer{static void run(){}record Api(Runnable run){void inside(){run();}}static void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "enum_method.java",
+            "class Outer{static void values(){}enum Api{ONE;void inside(){values();}}static void caller(){values();}}\n",
+            "inside",
+            "values",
+            false,
+        ),
+        (
+            "enum_method.java",
+            "class Outer{static void values(){}enum Api{ONE;void inside(){values();}}static void caller(){values();}}\n",
+            "caller",
+            "values",
+            true,
+        ),
+        (
+            "collision.cs",
+            "class Api{static void caller(){\n{void run(){}\nrun();}\n{void run(){}\nrun();}\n}}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "owner_record.java",
+            "record Left(){void run(){}}\nrecord Right(){void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_record.cs",
+            "record Left{void run(){}}\nrecord Right{void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_record_struct.cs",
+            "record struct Left{void run(){}}\nrecord struct Right{void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "owner_union.cpp",
+            "union Left{void run(){}};\nunion Right{void run(){}void caller(){run();}};\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "prototype.cpp",
+            "namespace N{void run();}\nnamespace N{void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "out_of_class.cpp",
+            "class Api{public:void run();void caller(){run();}};\nvoid Api::run(){}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "partial_method.cs",
+            "partial class Api{partial void run();}\npartial class Api{partial void run(){}void caller(){run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "collision.java",
+            "class Outer{void caller(){\n{record Box(){void run(){}void callerLeft(){run();}}}\n{record Box(){void run(){}void callerRight(){run();}}}\n}}\n",
+            "callerLeft",
+            "run",
+            false,
+        ),
+        (
+            "local_function.cs",
+            "class Api{static void run(){}static void caller(){void run(){}run();}}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "collision_import.rs",
+            "mod a{pub struct run{}}\nfn outer(){\n{fn caller(){use crate::a::run;fn run(){}run();}}\n{fn caller(){use crate::a::run;fn run(){}run();}}\n}\n",
+            "caller",
+            "run",
+            false,
+        ),
+        (
+            "mixed_import.rs",
+            "mod a{pub struct Run{}}\nfn caller(){use crate::a::Run;fn Run(){}Run();}\n",
+            "caller",
+            "Run",
+            true,
+        ),
+        (
+            "invalid_neighbor.ts",
+            "import {helper} from './LeakedIdentity\0one';\nimport './LeakedIdentity\0two';\nimport * as worker from './valid_worker.ts';\nexport function caller(){worker.run();}\n",
+            "caller",
+            "run",
+            true,
+        ),
+        (
+            "invalid_collision.js",
+            "import './bad\0identity';\nfunction caller(){\n{function run(){}\nrun();}\n{function run(){}\nrun();}\n}\n",
+            "caller",
+            "run",
+            false,
+        ),
+    ].into_iter().chain(qualified.iter().map(|(file, source, _, _, expected)| (*file, *source, "caller", "run", *expected))).collect::<Vec<_>>();
+    for (file, content, _, _, _) in &cases {
+        fs::write(root.join(file), content)?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    // Both toggle files exist at init and are edited in each subsequent phase.
+    fs::write(
+        root.join(CPP_NAMESPACE_FILE),
+        "namespace N { void run() {} }\nnamespace N { void caller() { run(); } }\n",
+    )?;
+    fs::write(
+        root.join(TS_NAMESPACE_FILE),
+        "namespace N { export function run() {} }\nnamespace N { export function caller() { run(); } }\n",
+    )?;
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for present in [true, false, true] {
+            fs::write(
+                root.join(CPP_NAMESPACE_FILE),
+                format!(
+                    "namespace N {{ void run() {{}} }}\nnamespace {} {{ void caller() {{ run(); }} }}\n",
+                    if present { "N" } else { "Other" }
+                ),
+            )?;
+            fs::write(
+                root.join(TS_NAMESPACE_FILE),
+                format!(
+                    "namespace N {{ {}function run() {{}} }}\nnamespace N {{ export function caller() {{ run(); }} }}\n",
+                    if present { "export " } else { "" }
+                ),
+            )?;
+            run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            for rebuild in [false, true] {
+                if rebuild {
+                    run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+                }
+                let checks = cases
+                    .iter()
+                    .map(|(file, _, caller, target, expected)| (*file, *caller, *target, *expected))
+                    .chain([
+                        (CPP_NAMESPACE_FILE, "caller", "run", present),
+                        (TS_NAMESPACE_FILE, "caller", "run", present),
+                    ]);
+                for (file, caller, target, expected) in checks {
+                    let qualified_case = qualified.iter().find(|case| case.0 == file);
+                    let mut query = vec![
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--symbol",
+                        caller,
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ];
+                    if let Some((_, _, signature, _, _)) = qualified_case {
+                        query.extend(["--symbol-signature", *signature]);
+                    }
+                    let cli = run_packaged_cli_json(&executable, root, &database, &query)?;
+                    let text = session.call_tool(
+                        "atlas_symbol_relations",
+                        &json!({
+                            "project_path": root, "view": "detailed", "file": file,
+                            "symbol": caller, "relation": "calls", "limit": 10,
+                            "symbol_signature": qualified_case.map(|case| case.2),
+                        }),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    let target_file = if file == "invalid_neighbor.ts" {
+                        "valid_worker.ts"
+                    } else {
+                        file
+                    };
+                    let targets = if expected {
+                        BTreeSet::from([(target_file.to_string(), target.to_string())])
+                    } else {
+                        BTreeSet::new()
+                    };
+                    for response in [cli, mcp] {
+                        let rows = response
+                            .pointer("/symbol_relations/rows")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| io::Error::other("container caller rows missing"))?;
+                        let expected_rows = if file == "owner_while.cpp" { 2 } else { 1 };
+                        if rows.len() != expected_rows {
+                            return Err(io::Error::other(format!(
+                                "container call count for {file}: {rows:?}"
+                            ))
+                            .into());
+                        }
+                        rust_binding_equal(&rust_binding_targets(rows), &targets)?;
+                        if expected && let Some((_, _, _, parent, _)) = qualified_case {
+                            for row in rows {
+                                rust_binding_equal(
+                                    &row["target"]["entity"]["selector"]["symbol"]["parent"],
+                                    &json!(parent),
+                                )?;
+                            }
+                        }
+                        if expected && (file.starts_with("owner") || file == "local_function.cs") {
+                            let parent = if matches!(
+                                file,
+                                "owner.java"
+                                    | "owner_record.java"
+                                    | "owner_record.cs"
+                                    | "owner_record_struct.cs"
+                                    | "owner_union.cpp"
+                            ) {
+                                json!("Right")
+                            } else if file == "local_function.cs" {
+                                json!("Api::caller")
+                            } else {
+                                Value::Null
+                            };
+                            for row in rows.iter().filter(|row| {
+                                row["target"]["entity"]["selector"]["symbol"]["name"] == target
+                            }) {
+                                rust_binding_equal(
+                                    &row["target"]["entity"]["selector"]["symbol"]["parent"],
+                                    &parent,
+                                )?;
+                            }
+                        }
+                    }
+                    let text = session.call_tool(
+                        "atlas_file_summary",
+                        &json!({"project_path": root, "file": target_file}),
+                    )?;
+                    let summary: Value = toon_format::decode_default(&text)?;
+                    if file == "partial.cs" {
+                        rust_binding_equal(&summary["file_summary"]["package"], &json!("@N"))?;
+                        let classes = summary["file_summary"]["classes"]
+                            .as_array()
+                            .ok_or_else(|| io::Error::other("partial classes missing"))?;
+                        let parents = classes
+                            .iter()
+                            .map(|class| (class["name"].as_str(), class["parent"].as_str()))
+                            .collect::<BTreeSet<_>>();
+                        rust_binding_equal(
+                            &parents,
+                            &BTreeSet::from([(Some("@C"), Some("@N")), (Some("C"), Some("N"))]),
+                        )?;
+                    }
+                    let callers = ["functions", "methods"]
+                        .into_iter()
+                        .filter_map(|kind| summary["file_summary"][kind].as_array())
+                        .flatten()
+                        .find(|function| {
+                            function["name"] == target
+                                && qualified_case.is_none_or(|case| {
+                                    function["parent"].as_str().unwrap_or("")
+                                        == case.3.unwrap_or("").rsplit("::").next().unwrap_or("")
+                                })
+                                && (file != "out_of_class.cpp" || function["parent"] == "Api")
+                                && (!matches!(file, "local_function.cs" | "mixed_import.rs")
+                                    || function["parent"] == "caller")
+                                && (!matches!(
+                                    file,
+                                    "owner.java"
+                                        | "owner_record.java"
+                                        | "owner_record.cs"
+                                        | "owner_record_struct.cs"
+                                        | "owner_union.cpp"
+                                ) || function["parent"] == "Right")
+                        })
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| {
+                            io::Error::other(format!(
+                                "container summary target missing: {file}: {summary}"
+                            ))
+                        })?;
+                    rust_binding_equal(
+                        &callers
+                            .iter()
+                            .any(|value| value == &format!("{file}::{caller}")),
+                        &expected,
+                    )?;
+                }
+                for (file, package) in [("module-info.java", "atlas.core"), ("partial.cs", "@N")] {
+                    let cli =
+                        run_packaged_cli_json(&executable, root, &database, &["summary", file])?;
+                    rust_binding_equal(&cli["package"], &json!(package))?;
+                    let text = session.call_tool(
+                        "atlas_file_summary",
+                        &json!({"project_path": root, "file": file}),
+                    )?;
+                    let mcp: Value = toon_format::decode_default(&text)?;
+                    rust_binding_equal(&mcp["file_summary"]["package"], &json!(package))?;
+                }
+                rust_binding_equal(
+                    &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                    &identity,
+                )?;
+            }
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles() -> Result<(), Box<dyn Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join(ECMASCRIPT_WORKER_FILE_NAME),
+        "export function run(){}\n",
+    )?;
+    let mut cases = Vec::new();
+    for extension in ["js", "ts", "tsx"] {
+        for name in ["eval", "arguments", "await", "yield", "interface"] {
+            let file = format!("loose_{name}.{extension}");
+            cases.push((
+                file.clone(),
+                format!("function {name}(){{}} const caller=()=>{name}();\n"),
+                file,
+                name.to_string(),
+                true,
+            ));
+        }
+    }
+    for (file, source, target, present) in [
+        (
+            "strict_reference.js",
+            "function eval(){} function caller(){'use strict';eval();}",
+            "eval",
+            true,
+        ),
+        (
+            "strict_binding.js",
+            "function eval(){'use strict';} function caller(){eval();}",
+            "eval",
+            false,
+        ),
+        (
+            "implicit_arguments.js",
+            "function arguments(){} function caller(){arguments();}",
+            "arguments",
+            false,
+        ),
+        (
+            "module_binding.js",
+            "export {}; function eval(){} function caller(){eval();}",
+            "eval",
+            false,
+        ),
+        (
+            "classic_globals.html",
+            "<script>function run(){}</script><script type=module>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "module_isolation.html",
+            "<script type=module>function run(){}</script><script>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+        (
+            "module_siblings.html",
+            "<script type=module>function run(){}</script><script type=module>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+        (
+            "classic_typescript.html",
+            "<script lang=ts>function run(){}</script><script lang=ts>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "normal_setup.vue",
+            "<script>function run(){}</script><script setup>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "setup_normal.vue",
+            "<script>function caller(){run();}</script><script setup>function run(){}</script>",
+            "run",
+            false,
+        ),
+        (
+            "module_instance.svelte",
+            "<script module>function run(){}</script><script>function caller(){run();}</script>",
+            "run",
+            true,
+        ),
+        (
+            "instance_module.svelte",
+            "<script module>function caller(){run();}</script><script>function run(){}</script>",
+            "run",
+            false,
+        ),
+        (
+            "duplicate_normal.vue",
+            "<script>function run(){}</script><script>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+        (
+            "duplicate_module.svelte",
+            "<script module>function run(){}</script><script module>function caller(){run();}</script>",
+            "run",
+            false,
+        ),
+    ] {
+        cases.push((
+            file.to_string(),
+            source.to_string(),
+            file.to_string(),
+            target.to_string(),
+            present,
+        ));
+    }
+    for (file, source, present) in [
+        (
+            "classic_import.html",
+            "<script>import {run} from './worker.js'; function caller(){run();}</script>",
+            false,
+        ),
+        (
+            "module_import.html",
+            "<script type=module>import {run} from './worker.js'; function caller(){run();}</script>",
+            true,
+        ),
+        (
+            "module_setup_import.vue",
+            "<script>function caller(){run();}</script><script setup>import {run} from './worker.js';</script>",
+            true,
+        ),
+        (
+            "module_instance_import.svelte",
+            "<script module>function caller(){run();}</script><script>import {run} from './worker.js';</script>",
+            true,
+        ),
+        (
+            "commonjs_import.cjs",
+            "import {run} from './worker.js'; function caller(){run();}",
+            false,
+        ),
+        (
+            "typed_module_import.ts",
+            "import {run} from './worker.js'; function caller(){run();}",
+            true,
+        ),
+    ] {
+        cases.push((
+            file.to_string(),
+            source.to_string(),
+            "worker.js".to_string(),
+            "run".to_string(),
+            present,
+        ));
+    }
+    for (target_file, attributes, present) in [
+        ("normal_target.vue", "", true),
+        ("setup_target.vue", "setup", false),
+        ("module_target.svelte", "module", true),
+        ("instance_target.svelte", "", false),
+        ("module_target.html", "type=module", true),
+        ("classic_target.html", "", false),
+        (
+            "conflicting_target.svelte",
+            "context=instance context=module",
+            false,
+        ),
+    ] {
+        fs::write(
+            root.join(target_file),
+            format!("<script {attributes}>export function run(){{}}</script>"),
+        )?;
+        let file = format!("consumer_{}.js", target_file.replace('.', "_"));
+        cases.push((
+            file,
+            format!("import {{run}} from './{target_file}'; function caller(){{run();}}"),
+            target_file.to_string(),
+            "run".to_string(),
+            present,
+        ));
+    }
+    for (file, source, ..) in &cases {
+        fs::write(root.join(file), source)?;
+    }
+    let mut field_cases = Vec::new();
+    for (extension, open, close) in [
+        ("js", "", ""),
+        ("ts", "", ""),
+        ("tsx", "", ""),
+        ("html", "<script>", "</script>"),
+        ("htm", "<script type=module>", "</script>"),
+        ("vue", "<script lang=ts>", "</script>"),
+        ("svelte", "<script>", "</script>"),
+    ] {
+        for (kind, member, present) in [
+            ("instance", "value = run()", true),
+            ("static", "static value = run()", false),
+            ("computed", "[run()] = 0", false),
+            ("capture", "value=(run=unknown)", false),
+        ] {
+            let file = format!("field_{kind}.{extension}");
+            let source = format!("{open}class Api {{ {member}; }} const run = () => {{}};{close}");
+            let source = if kind == "capture" {
+                format!(
+                    "{open}class Mutator {{value=(run=unknown);}} let run=()=>{{}}; class Api {{value=run();}}{close}"
+                )
+            } else {
+                source
+            };
+            fs::write(root.join(&file), &source)?;
+            field_cases.push((file, source, present));
+        }
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for phase in 0..3 {
+            if phase == 1 {
+                let (file, source, _, _, present) = &mut cases[0];
+                source.push_str("\nexport {};\n");
+                fs::write(root.join(file), source)?;
+                *present = false;
+                let (file, source, present) = &mut field_cases[0];
+                *source = source.replace("value = run()", "static value = run()");
+                *present = false;
+                fs::write(root.join(file), source)?;
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            } else if phase == 2 {
+                run_packaged_cli_json(&executable, root, &database, &["symbols", "build"])?;
+            }
+            for (file, _, target_file, target, present) in &cases {
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    root,
+                    &database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--symbol",
+                        "caller",
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ],
+                )?;
+                let text = session.call_tool(
+                    "atlas_symbol_relations",
+                    &json!({
+                        "project_path": root, "view": "detailed", "file": file,
+                        "symbol": "caller", "relation": "calls", "limit": 10,
+                    }),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                let expected = if *present {
+                    BTreeSet::from([(target_file.clone(), target.clone())])
+                } else {
+                    BTreeSet::new()
+                };
+                for response in [cli, mcp] {
+                    let rows = response
+                        .pointer("/symbol_relations/rows")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| {
+                            io::Error::other(format!("source context caller rows missing: {file}"))
+                        })?;
+                    if rows.len() != 1 || rust_binding_targets(rows) != expected {
+                        return Err(io::Error::other(format!("source context targets differ: phase={phase} file={file} expected={expected:?} rows={rows:?}")).into());
+                    }
+                }
+                let cli_summary =
+                    run_packaged_cli_json(&executable, root, &database, &["summary", target_file])?;
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path": root, "file": target_file}),
+                )?;
+                let mcp_summary: Value = toon_format::decode_default(&text)?;
+                for summary in [
+                    &cli_summary,
+                    mcp_summary.get("file_summary").ok_or_else(|| {
+                        io::Error::other("MCP source context summary envelope missing")
+                    })?,
+                ] {
+                    let function =
+                        summary
+                            .get("functions")
+                            .and_then(Value::as_array)
+                            .and_then(|functions| {
+                                functions
+                                    .iter()
+                                    .find(|function| function["name"] == *target)
+                            });
+                    // Conflicting host attributes can exclude the whole region;
+                    // absence is valid only for this deliberately unadmitted case.
+                    if function.is_none() && target_file == "conflicting_target.svelte" && !present
+                    {
+                        continue;
+                    }
+                    let callers = function
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| {
+                            io::Error::other(format!(
+                                "source context target summary missing: {target_file}::{target}"
+                            ))
+                        })?;
+                    rust_binding_equal(
+                        &callers
+                            .iter()
+                            .any(|value| value == &format!("{file}::caller")),
+                        present,
+                    )?;
+                }
+            }
+            for (file, _, present) in &field_cases {
+                let cli = run_packaged_cli_json(
+                    &executable,
+                    root,
+                    &database,
+                    &[
+                        "symbols",
+                        "relations",
+                        "--view",
+                        "detailed",
+                        "--file",
+                        file,
+                        "--relation",
+                        "calls",
+                        "--limit",
+                        "10",
+                    ],
+                )?;
+                let text = session.call_tool("atlas_symbol_relations",
+                    &json!({"project_path":root,"view":"detailed","file":file,"relation":"calls","limit":10}))?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                let expected = if *present {
+                    BTreeSet::from([(file.clone(), "run".to_string())])
+                } else {
+                    BTreeSet::new()
+                };
+                for response in [cli, mcp] {
+                    let rows = response
+                        .pointer("/symbol_relations/rows")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| io::Error::other("field caller rows missing"))?;
+                    rust_binding_equal(&rows.len(), &1)?;
+                    rust_binding_equal(&rust_binding_targets(rows), &expected)?;
+                }
+                let cli = run_packaged_cli_json(&executable, root, &database, &["summary", file])?;
+                let text = session.call_tool(
+                    "atlas_file_summary",
+                    &json!({"project_path":root,"file":file}),
+                )?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                for summary in [&cli, &mcp["file_summary"]] {
+                    let callers = summary["functions"]
+                        .as_array()
+                        .and_then(|functions| {
+                            functions.iter().find(|function| function["name"] == "run")
+                        })
+                        .and_then(|function| function["called_by"].as_array())
+                        .ok_or_else(|| io::Error::other("field target summary missing"))?;
+                    rust_binding_equal(&!callers.is_empty(), present)?;
+                }
+            }
+        }
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+            &identity,
+        )?;
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn lexical_capacity_preserves_navigation_and_repairs_after_source_reduction()
+-> Result<(), Box<dyn Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    fs::write(root.join(".gitignore"), ".projectatlas/\n")?;
+    fs::write(
+        root.join(ECMASCRIPT_WORKER_FILE_NAME),
+        "export function run() {}\n",
+    )?;
+    let source = "import {run as launch} from './worker.js'; function caller(){launch();}\n";
+    for index in 0..4 {
+        fs::write(
+            root.join(format!("main_{index}.js")),
+            format!("{source}{}", "{} ".repeat(50_000)),
+        )?;
+    }
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let executable = mcp_contract_executable();
+    run_packaged_cli_json(&executable, root, &database, &["init"])?;
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let mut session = McpContractSession::spawn(&executable, root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for reduced in [false, true] {
+            if reduced {
+                for index in 0..4 {
+                    fs::write(root.join(format!("main_{index}.js")), source)?;
+                }
+                run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+            }
+            let slice = run_packaged_cli_json(
+                &executable,
+                root,
+                &database,
+                &["slice", "main_0.js", "--start-line", "1", "--end-line", "1"],
+            )?;
+            rust_binding_require(
+                slice.to_string().contains("function caller"),
+                "capacity refusal lost exact source navigation",
+            )?;
+            let text = session.call_tool(
+                "atlas_symbol_relations",
+                &json!({
+                    "project_path": root, "view": "detailed", "file": "main_0.js",
+                    "symbol": "caller", "relation": "calls", "limit": 10
+                }),
+            )?;
+            let response: Value = toon_format::decode_default(&text)?;
+            let rows = response
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("capacity regression omitted raw MCP call rows"))?;
+            rust_binding_equal(&rows.len(), &1)?;
+            if reduced {
+                rust_binding_equal(
+                    &rust_binding_targets(rows),
+                    &BTreeSet::from([("worker.js".to_string(), "run".to_string())]),
+                )?;
+                assert_summary_called_by(root, &database, "worker.js", "run", "main_0.js::caller")?;
+            } else {
+                rust_binding_unresolved(rows);
+            }
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+        }
+        let before = AtlasStore::open_read_only(&database)?.index_publication()?;
+        let noop = run_packaged_cli_json(&executable, root, &database, &["watch", "--once"])?;
+        rust_binding_equal(
+            &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+            &Some(0),
+        )?;
+        rust_binding_equal(
+            &AtlasStore::open_read_only(&database)?.index_publication()?,
+            &before,
+        )?;
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
+#[test]
+fn same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild()
+-> Result<(), Box<dyn Error>> {
+    /// Read the deduplicated call edge while retaining each admitted source site.
+    fn occurrences(root: &Path) -> Result<Vec<Value>, Box<dyn Error>> {
+        let response = rust_binding_atlas(
+            root,
+            &[
+                "symbols",
+                "relations",
+                "--view",
+                "detailed",
+                "--file",
+                RUST_LIBRARY_PATH,
+                "--symbol",
+                "caller",
+                "--relation",
+                "calls",
+                "--include-occurrences",
+                "--occurrence-limit",
+                "300",
+                "--occurrence-total-limit",
+                "300",
+                "--output-bytes",
+                "1048576",
+                "--limit",
+                "10",
+            ],
+        )?;
+        let rows = response
+            .pointer("/symbol_relations/rows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("missing occurrence rows"))?;
+        rust_binding_require(
+            rows.len() == 1,
+            "same-target calls lost logical deduplication",
+        )?;
+        let row = &rows[0];
+        rust_binding_require(
+            row.pointer("/relation/resolution/status")
+                .and_then(Value::as_str)
+                == Some("resolved")
+                && row
+                    .pointer("/target/entity/selector/symbol/name")
+                    .and_then(Value::as_str)
+                    == Some("target")
+                && row.get("occurrences_truncated").and_then(Value::as_bool) == Some(false),
+            &format!("{row:?}"),
+        )?;
+        Ok(row
+            .get("occurrences")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("missing source occurrences"))?
+            .clone())
+    }
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    let mut source = "pub fn target() {}\n".to_string();
+    for alias in 0..256 {
+        writeln!(source, "use crate::target as alias{alias};")?;
+    }
+    let mut caller = "fn caller(){let _=\"💡π\";target();".to_string();
+    for alias in 0..256 {
+        write!(caller, "alias{alias}();")?;
+    }
+    caller.push_str("}\n");
+    let first_column = caller[..caller
+        .find("target();")
+        .ok_or_else(|| io::Error::other("missing first call fixture"))?]
+        .chars()
+        .count();
+    source.push_str(&caller);
+    fs::write(root.join(RUST_LIBRARY_PATH), &source)?;
+    rust_binding_atlas(root, &["init"])?;
+    let initial = occurrences(root)?;
+    rust_binding_equal(&initial.len(), &257)?;
+    rust_binding_equal(
+        &initial[0]
+            .pointer("/span/start_column")
+            .and_then(Value::as_u64),
+        &Some(first_column as u64),
+    )?;
+    rust_binding_require(
+        initial.windows(2).all(|pair| {
+            pair[0]
+                .pointer("/span/start_column")
+                .and_then(Value::as_u64)
+                < pair[1]
+                    .pointer("/span/start_column")
+                    .and_then(Value::as_u64)
+        }),
+        "distinct same-line sites lost source order",
+    )?;
+    fs::write(
+        root.join(RUST_LIBRARY_PATH),
+        source.replace("💡π", "💡π追加"),
+    )?;
+    rust_binding_atlas(root, &["watch", "--once"])?;
+    let incremental = occurrences(root)?;
+    rust_binding_equal(&incremental.len(), &257)?;
+    rust_binding_equal(
+        &incremental[0]
+            .pointer("/span/start_column")
+            .and_then(Value::as_u64),
+        &Some(first_column as u64 + 2),
+    )?;
+    rust_binding_atlas(root, &["symbols", "build"])?;
+    let rebuilt = occurrences(root)?;
+    let spans = |rows: &[Value]| {
+        rows.iter()
+            .map(|row| row.get("span").cloned())
+            .collect::<Vec<_>>()
+    };
+    rust_binding_equal(&spans(&incremental), &spans(&rebuilt))?;
+    let db = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    assert_summary_called_by(root, &db, RUST_LIBRARY_PATH, "target", "src/lib.rs::caller")?;
+    let before_noop = AtlasStore::open_read_only(&db)?.index_publication()?;
+    let noop = rust_binding_atlas(root, &["watch", "--once"])?;
+    rust_binding_equal(
+        &noop.pointer("/last_symbols/parsed").and_then(Value::as_u64),
+        &Some(0),
+    )?;
+    rust_binding_equal(
+        &AtlasStore::open_read_only(&db)?.index_publication()?,
+        &before_noop,
+    )?;
     Ok(())
 }

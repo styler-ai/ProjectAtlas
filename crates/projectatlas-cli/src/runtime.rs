@@ -38,8 +38,9 @@ use projectatlas_core::health::{
 use projectatlas_core::language::{
     ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, ContentClassification, ContentSelection,
     LANGUAGE_CAPABILITY_REGISTRY_VERSION, LanguageRegistryReport, SymbolParserOwner,
-    accepted_language_capability_digest, content_classification, language_capability,
-    language_registry_digest, language_registry_report,
+    accepted_language_capability_digest, content_classification, detect_language_for_path,
+    language_capability, language_registry_digest, language_registry_report,
+    normalized_language_extension,
 };
 #[cfg(all(test, feature = "optional-parser-supervisor"))]
 use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
@@ -93,9 +94,9 @@ use projectatlas_service::{
 };
 use projectatlas_symbols::{
     DocumentExtractionError, DocumentLimit, MAX_DOCUMENT_COMPRESSED_BYTES, MarkdownFacts,
-    document_format_for_path, extract_document_symbol_facts_controlled,
+    SourceSemanticFacts, document_format_for_path, extract_document_symbol_facts_controlled,
     extract_document_text_controlled, extract_markdown_facts_controlled,
-    extract_symbol_graph_with_source_controlled, semantic_resolution_contract_digest,
+    extract_symbol_graph_with_semantics_controlled, semantic_resolution_contract_digest,
 };
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -267,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "4";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "24";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -3071,7 +3072,7 @@ fn stage_full_index_publication_from_source(
             ))
             .saturating_add(staged_purpose_bytes(purpose_import.as_ref()));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let symbols = stage_symbols_for_nodes_with_limits(
+    let mut symbols = stage_symbols_for_nodes_with_limits(
         store,
         &plan.root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -3087,7 +3088,7 @@ fn stage_full_index_publication_from_source(
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_limit(
         store,
         &plan.root,
         base_generation,
@@ -3095,7 +3096,9 @@ fn stage_full_index_publication_from_source(
         &scan_policy,
         &symbols,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
         &nodes,
@@ -3585,7 +3588,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_limit(
         store,
         &plan.root,
         base_generation,
@@ -3593,7 +3596,9 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         &scan_policy,
         &staged,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    graph.account_source_recovery(&mut staged.report)?;
     enforce_publication_staging_budget(
         retained_before_symbols
             .saturating_add(staged.retained_bytes)
@@ -6240,6 +6245,8 @@ pub(crate) struct SymbolParseSuccess {
     graph: SymbolGraph,
     /// Bounded Markdown headings and explicit document candidates from the same parse.
     markdown_facts: Option<Box<MarkdownFacts>>,
+    /// Source-owned lexical/import occurrences from the same captured parse.
+    source_semantics: Option<Box<SourceSemanticFacts>>,
     /// File-level parser kept independent from fact-level parser provenance.
     source_parser: ParserKind,
     /// Observed one-line source summary.
@@ -6655,7 +6662,14 @@ fn stage_symbols_for_nodes_with_limits(
         retained_bytes: output_bytes,
         identity_admission: graph_projection::GraphIdentityAdmission::default(),
     };
-    staged.identity_admission = graph_projection::admit_symbol_build_stage(&mut staged, control)?;
+    staged.identity_admission = graph_projection::admit_symbol_build_stage_with_limit(
+        &mut staged,
+        control,
+        limits.output_bytes.saturating_sub(output_bytes),
+    )?;
+    staged.retained_bytes = staged
+        .retained_bytes
+        .saturating_add(staged.identity_admission.retained_bytes());
     Ok(staged)
 }
 
@@ -6689,7 +6703,14 @@ fn apply_symbol_build_stage(
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
     if !staged.identity_admission.source_admitted() {
-        staged.identity_admission = graph_projection::admit_symbol_build_stage(staged, control)?;
+        staged.identity_admission = graph_projection::admit_symbol_build_stage_with_limit(
+            staged,
+            control,
+            MAX_PUBLICATION_STAGING_BYTES.saturating_sub(staged.retained_bytes),
+        )?;
+        staged.retained_bytes = staged
+            .retained_bytes
+            .saturating_add(staged.identity_admission.retained_bytes());
     }
     for change in &staged.changes {
         control.check(IndexWorkStage::Publication)?;
@@ -6784,6 +6805,9 @@ fn symbol_parse_output_bytes(parsed: &SymbolParseSuccess) -> u64 {
                 + relation.target_name.len() as u64
                 + relation.context.len() as u64,
         );
+    }
+    if let Some(facts) = &parsed.source_semantics {
+        bytes = bytes.saturating_add(facts.retained_bytes());
     }
     if let Some(facts) = &parsed.markdown_facts {
         for heading in &facts.headings {
@@ -6945,6 +6969,7 @@ fn parse_document_symbol_job(
         path: job.path.clone(),
         graph,
         markdown_facts: None,
+        source_semantics: None,
         source_parser: ParserKind::Structural,
         summary,
         summary_is_structural: false,
@@ -7035,7 +7060,7 @@ fn parse_admitted_symbol_job(
             stage: IndexWorkStage::SymbolParsing,
         });
     }
-    let (observed_source_parser, graph, markdown_facts) = if job
+    let (observed_source_parser, graph, markdown_facts, source_semantics) = if job
         .language
         .as_deref()
         .and_then(language_capability)
@@ -7046,18 +7071,18 @@ fn parse_admitted_symbol_job(
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
         let graph = facts.symbol_graph(&job.path, job.language.as_deref());
-        (graph.parser, graph, Some(Box::new(facts)))
+        (graph.parser, graph, Some(Box::new(facts)), None)
     } else {
-        let (parser, graph) = match extract_symbol_graph_with_source_controlled(
+        let (parser, graph, semantics) = match extract_symbol_graph_with_semantics_controlled(
             &job.path,
             job.language.as_deref(),
             content,
             control,
         ) {
-            Ok(graph) => graph,
+            Ok(extraction) => extraction.into_parts(),
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
-        (parser, graph, None)
+        (parser, graph, None, Some(Box::new(semantics)))
     };
     let source_parser = source_parser.unwrap_or(observed_source_parser);
     let structural_summary = if let Some(facts) = &markdown_facts {
@@ -7083,6 +7108,7 @@ fn parse_admitted_symbol_job(
         path: job.path.clone(),
         graph,
         markdown_facts,
+        source_semantics,
         source_parser,
         summary,
         summary_is_structural,
@@ -7554,19 +7580,26 @@ fn summary_between<'a>(summary: &'a str, start: &str, end: &str) -> Option<&'a s
 /// Return whether a language should be parsed for symbols.
 pub(crate) fn is_symbol_candidate(path: &str, language: Option<&str>) -> bool {
     let Some(language) = language else {
-        return path.ends_with("Cargo.toml")
+        let embedded_host = normalized_language_extension(Path::new(path))
+            .and_then(|extension| detect_language_for_path(path, Some(&extension)))
+            .and_then(|language| language_capability(&language))
+            .is_some_and(|capability| capability.embedded_language.is_some());
+        return embedded_host
+            || path.ends_with("Cargo.toml")
             || path.ends_with("Cargo.lock")
             || Path::new(path)
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| {
-                    ["vue", "ps1", "psm1", "psd1"]
+                    ["ps1", "psm1", "psd1"]
                         .iter()
                         .any(|expected| extension.eq_ignore_ascii_case(expected))
                 });
     };
-    language_capability(language)
-        .is_none_or(|capability| capability.symbol_parser != SymbolParserOwner::Unavailable)
+    language_capability(language).is_none_or(|capability| {
+        capability.symbol_parser != SymbolParserOwner::Unavailable
+            || capability.embedded_language.is_some()
+    })
 }
 
 /// Apply the project-selected optional-language boundary to symbol work admission.
@@ -8614,7 +8647,7 @@ fn refresh_index_for_changes_from_source_controlled(
             &content_classifications,
         ));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let symbols = stage_symbols_for_nodes_with_limits(
+    let mut symbols = stage_symbols_for_nodes_with_limits(
         store,
         root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -8628,7 +8661,7 @@ fn refresh_index_for_changes_from_source_controlled(
         control,
         symbol_limits,
     )?;
-    let graph = graph_projection::stage_incremental_repository_graph(
+    let graph = graph_projection::stage_incremental_repository_graph_with_limit(
         store,
         root,
         base_generation,
@@ -8637,7 +8670,9 @@ fn refresh_index_for_changes_from_source_controlled(
         &scan_policy,
         &symbols,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
         &nodes,
@@ -10755,6 +10790,35 @@ mod tests {
     }
 
     #[test]
+    fn registered_embedded_hosts_admit_native_symbol_work() {
+        for capability in projectatlas_core::language::language_documentation_rows()
+            .iter()
+            .filter(|capability| capability.embedded_language.is_some())
+        {
+            assert!(
+                is_symbol_candidate("selected.host", Some(capability.id)),
+                "{}",
+                capability.id
+            );
+        }
+        for path in [
+            "page.html",
+            "page.htm",
+            "page.HTML",
+            "View.vue",
+            "View.svelte",
+        ] {
+            assert!(is_symbol_candidate(path, None), "{path}");
+            assert!(
+                !is_symbol_candidate(path, Some("toon")),
+                "explicit language overrides host extension"
+            );
+        }
+        assert!(!is_symbol_candidate("page.css", Some("css")));
+        assert!(!is_symbol_candidate("page.xml", Some("xml")));
+    }
+
+    #[test]
     fn supplied_language_controls_symbol_candidate_owner() {
         for path in ["Cargo.toml", "src/App.vue", "scripts/Get-Atlas.ps1"] {
             assert!(!is_symbol_candidate(path, Some("toon")), "{path}");
@@ -12604,6 +12668,44 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     fn projection_contract_revisions_force_full_projection_refresh() -> Result<(), Box<dyn Error>> {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
+        const PRE_BINDING_OWNERSHIP_DIGEST: &str =
+            "70149049f404b00bd7d956adabda377be3509080bea68a8978eac3501fee0929";
+        const PRE_OCCURRENCE_PROJECTION_DIGEST: &str =
+            "8e0d5f3a34d88507e9d3c64857949a299bdbf516a1eca06adf0cbcd7ca7962a4";
+        const STABLE_050_SEMANTIC_DIGEST: &str =
+            "deba1bcef2b03869c211b5ba91036bb87e7cdd9c9ebb565ed447d6aea78ca535";
+        const PRE_GENERATOR_DECLARATION_DIGEST: &str =
+            "4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d";
+        const PRE_SOURCE_CONTEXT_DIGEST: &str =
+            "784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424";
+        const PRE_CARGO_COHORT_DIGEST: &str =
+            "77ce9ef63aa9da217f35e41d59470395e7be08d45f167c14b2477eb29309d2ca";
+        const PRE_GO_CLAUSE_DIGEST: &str =
+            "e0bc8aa6d30d159c0e1eae3b80773fb0f4031398608b01e1bba31b6b8d6cbd04";
+        const PRE_COMPREHENSION_ORDER_DIGEST: &str =
+            "9d16d41a80b1115f4d0706d7046f1be092fd2bd4a2abc41ba5d78749970d0eb6";
+        const PRE_QUALIFIED_OWNER_DIGEST: &str =
+            "d662ae01fce4a173b5b0e520a7cf0465d7b7184528b914afa24b9145c3efe8ed";
+        const PRE_IDENTITY_NEIGHBOR_DIGEST: &str =
+            "79d37888e9dff0e1ac37dfce6970a34b3ee8058b32dc0f973338153a20ac523b";
+        const PRE_ACCESSOR_PARAMETER_DIGEST: &str =
+            "4c7a58829b2910e38015f4576ad26e458a8192363e3024d732467db2355abac4";
+        const PRE_MEMBER_OWNERSHIP_DIGEST: &str =
+            "5627189a6bc0d67d2483073582b55ba3d9ea04c55ef3177462ce584361c7c355";
+        const PRE_INSTANCE_FIELD_DIGEST: &str =
+            "1b695fb9372249524c55c19c6969478f8a10b0414471de4eb8e467249c4baaf1";
+        const PRE_REOPENED_CONTAINER_DIGEST: &str =
+            "6a6912198f2cc054d76072375eb328f285f5c232710a6dc2d698169b3e7ef65a";
+        const PRE_ARROW_CONTEXT_DIGEST: &str =
+            "66cab1855f1689308cdc5bb858a63e8d3ed42e825b073d62cada7347383731a7";
+        const PRE_FUNCTION_ENVIRONMENT_DIGEST: &str =
+            "a1d3ff14480c0efd0dc36ab9abe78ea6ac9423b62ef2ce52b36996436e06b421";
+        const PRE_RECOVERY_ADMISSION_DIGEST: &str =
+            "7ebce4c0ac31d1a9bb12313ae7777133d6f7c3c712ec3a147a244b2cc0edf7de";
+        const PRE_VAR_RESERVATION_DIGEST: &str =
+            "a5fd0cc0717afd6c733563637f6f24ba86f08ec447422edc319f26d480f24267";
+        const PRE_DIRECTIVE_BINDING_DIGEST: &str =
+            "4f50804d1e3b708c7081f654b39287fbca88adaeb4dfbbbb60fb5c708404e626";
         let temp = tempfile::tempdir()?;
         let atlas_dir = temp.path().join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
@@ -12637,8 +12739,160 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             text_index_options(plan.config.as_ref(), None),
             #[cfg(feature = "optional-parser-supervisor")]
             &plan.optional_parser_selection,
-            "2",
-            &semantic_resolution_contract_digest(),
+            "23",
+            PRE_CARGO_COHORT_DIGEST,
+        );
+        let cargo_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "22",
+            PRE_CARGO_COHORT_DIGEST,
+        );
+        let go_clause_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "21",
+            PRE_GO_CLAUSE_DIGEST,
+        );
+        let comprehension_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "20",
+            PRE_COMPREHENSION_ORDER_DIGEST,
+        );
+        let qualified_owner_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "19",
+            PRE_QUALIFIED_OWNER_DIGEST,
+        );
+        let identity_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "18",
+            PRE_IDENTITY_NEIGHBOR_DIGEST,
+        );
+        let accessor_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "17",
+            PRE_ACCESSOR_PARAMETER_DIGEST,
+        );
+        let member_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "16",
+            PRE_MEMBER_OWNERSHIP_DIGEST,
+        );
+        let instance_field_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "15",
+            PRE_INSTANCE_FIELD_DIGEST,
+        );
+        let container_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "14",
+            PRE_REOPENED_CONTAINER_DIGEST,
+        );
+        let arrow_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "13",
+            PRE_ARROW_CONTEXT_DIGEST,
+        );
+        let source_context_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "12",
+            PRE_SOURCE_CONTEXT_DIGEST,
+        );
+        let generator_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "11",
+            PRE_GENERATOR_DECLARATION_DIGEST,
+        );
+        let function_environment_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "10",
+            PRE_FUNCTION_ENVIRONMENT_DIGEST,
+        );
+        let recovery_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "9",
+            PRE_RECOVERY_ADMISSION_DIGEST,
+        );
+        let var_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "8",
+            PRE_VAR_RESERVATION_DIGEST,
+        );
+        let directive_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "7",
+            PRE_DIRECTIVE_BINDING_DIGEST,
+        );
+        let deferred_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "6",
+            PRE_OCCURRENCE_PROJECTION_DIGEST,
+        );
+        let occurrence_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "5",
+            PRE_OCCURRENCE_PROJECTION_DIGEST,
+        );
+        let binding_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "4",
+            PRE_BINDING_OWNERSHIP_DIGEST,
         );
         let prior_semantic_fingerprint = index_derivation_fingerprint_for_contract(
             &plan.scan_options,
@@ -12648,8 +12902,45 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             INDEX_DERIVATION_CONTRACT_VERSION,
             PRE_MODULE_CALLBACK_DIGEST,
         );
+        let binding_semantic_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            INDEX_DERIVATION_CONTRACT_VERSION,
+            PRE_BINDING_OWNERSHIP_DIGEST,
+        );
+        let stable_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "3",
+            STABLE_050_SEMANTIC_DIGEST,
+        );
         if prior_projection_fingerprint == current_fingerprint
+            || cargo_projection_fingerprint == current_fingerprint
+            || go_clause_projection_fingerprint == current_fingerprint
+            || comprehension_projection_fingerprint == current_fingerprint
+            || qualified_owner_projection_fingerprint == current_fingerprint
+            || identity_projection_fingerprint == current_fingerprint
+            || accessor_projection_fingerprint == current_fingerprint
+            || member_projection_fingerprint == current_fingerprint
+            || instance_field_projection_fingerprint == current_fingerprint
+            || container_projection_fingerprint == current_fingerprint
+            || arrow_projection_fingerprint == current_fingerprint
+            || source_context_projection_fingerprint == current_fingerprint
+            || generator_projection_fingerprint == current_fingerprint
+            || function_environment_projection_fingerprint == current_fingerprint
+            || recovery_projection_fingerprint == current_fingerprint
+            || var_projection_fingerprint == current_fingerprint
+            || directive_projection_fingerprint == current_fingerprint
+            || deferred_projection_fingerprint == current_fingerprint
+            || occurrence_projection_fingerprint == current_fingerprint
+            || binding_projection_fingerprint == current_fingerprint
             || prior_semantic_fingerprint == current_fingerprint
+            || binding_semantic_fingerprint == current_fingerprint
+            || stable_fingerprint == current_fingerprint
         {
             return Err(io::Error::other(
                 "projection or semantic contract revision did not change the derivation fingerprint",
@@ -12657,13 +12948,19 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             .into());
         }
 
-        let current_generation = store
-            .index_publication()?
-            .ok_or_else(|| io::Error::other("current publication missing"))?
-            .generation;
-        store
-            .begin_index_publication_from(&prior_projection_fingerprint, current_generation)?
-            .complete()?;
+        let prior_control = standalone_index_work_control();
+        let mut prior_batch = stage_full_index_publication(
+            &store,
+            &plan,
+            &symbol_options,
+            true,
+            false,
+            &prior_control,
+        )?;
+        // Seed a preceding contract through the full native owner so raw and
+        // canonical graph generations remain consistent with its publication.
+        prior_batch.contract_fingerprint = prior_projection_fingerprint;
+        publish_index_batch(&mut store, prior_batch, &prior_control)?;
         if publication_contract_matches(&store, &plan)? {
             return Err(io::Error::other(
                 "prior semantic contract unexpectedly matched the current plan",
@@ -12689,6 +12986,51 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             .ok_or_else(|| io::Error::other("stale publication missing"))?
             .generation;
         let control = standalone_index_work_control();
+        let before_repair = store.index_publication()?;
+        let before_identity = store.project_instance_id()?;
+        let source_paths = vec![
+            "src/config.rs".to_string(),
+            "src/handler.rs".to_string(),
+            "src/router.rs".to_string(),
+        ];
+        let before_graphs = store.load_symbol_graphs_for_paths(&source_paths)?;
+        let call_query = RepositoryGraphRelationQuery::Family {
+            relation: GraphRelationKind::Legacy(RelationKind::Calls),
+        };
+        let before_calls = store
+            .repository_graph_relations(call_query.clone(), 100)?
+            .rows;
+        let repair =
+            stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
+        // Cancel after complete repair staging, before the atomic publication owner.
+        let cancelled = standalone_index_work_control();
+        cancelled.cancel();
+        if !matches!(
+            publish_index_batch(&mut store, repair, &cancelled),
+            Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+        ) {
+            return Err(io::Error::other("cancelled contract repair was not refused").into());
+        }
+        require_eq(
+            &store.index_publication()?,
+            &before_repair,
+            "cancelled repair publication",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &before_identity,
+            "cancelled repair identity",
+        )?;
+        require_eq(
+            &store.load_symbol_graphs_for_paths(&source_paths)?,
+            &before_graphs,
+            "cancelled repair raw symbol graphs",
+        )?;
+        require_eq(
+            &store.repository_graph_relations(call_query, 100)?.rows,
+            &before_calls,
+            "cancelled repair canonical calls",
+        )?;
         refresh_index_controlled(&mut store, &plan, &symbol_options, &control)?;
         let refreshed = store
             .index_publication()?
@@ -14001,7 +14343,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         fs::create_dir_all(&removed_dir)?;
         fs::write(
             source_dir.join("caller.rs"),
-            "pub fn caller() { target(); }\n",
+            "use crate::removed::target::target;\npub fn caller() { target(); }\n",
         )?;
         fs::write(removed_dir.join("target.rs"), "pub fn target() {}\n")?;
 
@@ -14787,6 +15129,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             path: "guide.docx".to_owned(),
             graph: facts.symbol_graph("guide.docx", None),
             markdown_facts: None,
+            source_semantics: None,
             source_parser: ParserKind::Structural,
             summary: "Hello".to_owned(),
             summary_is_structural: true,
