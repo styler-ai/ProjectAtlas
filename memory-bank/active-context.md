@@ -1,3 +1,18 @@
+## Diagnostic publication retry after required workflow-contract failure
+
+18462ec normalpush60016 TERMINALFAIL253.97s, process1132294gone; public remains
+e222. Existing delivery test hardcoded the old4-job CI needs list:51pass/1fail/
+2ignored. Corrected owning assertion for Windows diagnostics; aggregate now also
+rejects unexpected skip when CLI is selected. Exact delivery contract testPASS
+0.25s;10selected/omitted/status nativeaggregate controlsPASS. LunaMax independently
+reviewed correction and approved normalpublication only. No productpolicy change.
+THREE findings resolved individually/readback: Macname4433526580, MacACL4433527823,
+SELinux4433539384; FIVE remainOPEN. SELinuxproof is xattrpreserve/refuse, notLSM.
+Next retry normalpush with new cleanHEAD and NEWreceiptprefix; no bypass/force.
+AfterterminalPASS bind fresh138inputs using a unique newhead-prefixed artifact
+path, then actual CLI/MCP/registered/5upgrades and fastWindows SDK results.
+Only741active;1/5tasks/allacceptanceOPEN. No RC or merge.
+
 ## Diagnostic candidate review and proven Mac resolutions
 
 Primary + Luna Max reviewed diagnostic SDK job and fixture, not final acceptance.

@@ -1129,7 +1129,8 @@ jobs:
             echo "proof planning concluded $PLAN_RESULT" >&2
             exit 1
           fi
-          if [[ "$WINDOWS_SECURITY_RESULT" != "success" && "$WINDOWS_SECURITY_RESULT" != "skipped" ]]; then
+          windows_security_expected="$(python3 -c 'import json,os; print("success" if "projectatlas-cli" in json.loads(os.environ["PLAN"])["rust_packages"] else "skipped")')"
+          if [[ "$WINDOWS_SECURITY_RESULT" != "$windows_security_expected" ]]; then
             echo "Windows security diagnostics concluded $WINDOWS_SECURITY_RESULT" >&2
             exit 1
           fi
