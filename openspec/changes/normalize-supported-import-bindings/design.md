@@ -809,3 +809,68 @@ atomicity, ordinary callers, exact equality across allocations, unequal long-pre
 values, cycles and cancellation. Permanent causal controls and optimized real CLI
 costs must cover one and multiple equal-literal source statements. Keep required
 combined release performance and installed acceptance open.
+
+### Cargo root cohorts bound membership dependency retention
+
+The actual native128/512 automatic-target fixtures retain34176/529920 relation
+dependency rows and take1.41/21.65 seconds; explicit16/32 sibling targets retain
+624/2272 rows. Membership candidate roots sharing a parent cause repeated file-key
+copies in every source. Sharing only recognized automatic directories would leave
+the same confirmed defect for manifest-listed custom paths.
+
+Use one private, bounded root-cohort index derived from admitted Cargo target
+sidecars per needed package. Preserve SourceGraph wrappers at the three production
+PackageIndex construction paths; hydrate only missing manifest sidecars needed
+by Rust projection through the existing hash-checked SourceBindingCache. Cache
+only derived exact-root/cohort metadata, reuse captured parses, and charge before
+index/cache growth under existing staging limits. Do not reconstruct targets from
+display symbols, parse a second time or scan unrelated workspace manifests.
+
+Existing flat automatic-directory inventory keys retain their producer. Only
+enabled automatic target kinds consume those keys. For explicit sibling roots
+outside enabled automatic discovery, group distinct listed
+paths with one parent and emit the identical cohort key only on those exact root
+files through a narrow source-projection context. Singleton, conventional, helper
+and unclassified paths keep exact causes. Root-directory identities are nonempty
+and remain project/package/manifest scoped. Invalid/unemittable cohort identity
+falls back to exact causes, rather than dropping invalidation authority.
+Explicit cohorts use the existing Configures relation discriminator, while
+automatic inventory keys retain Imports. Thus a helper under a disabled automatic
+directory cannot emit the configured cohort's cause. The exact root-only producer
+and consumer use the same canonical key helper.
+
+Membership uses shared cohort causes for candidate inspection without retaining
+every unrelated root file. Actual declared-module and helper causes stay exact.
+Old owned source keys survive until closure discovery, preserving deleted/renamed
+root invalidation; additions publish current keys, while manifest edits already
+affect membership. Preserve actual targets, project identity and approved purposes
+through incremental/full/no-op and rollback. No extracted Rust fact change is
+intended; bump the derivation projection contract and prove the semantic digest
+unchanged. If implementation changes facts, advance semantic invalidation too.
+
+Cover all four automatic directories, explicit sibling and distinct-parent roots,
+package/root-directory identities, conventional/nested/singleton controls, root
+add/edit/delete/rename, manifest path changes and normal helper edits. Measure
+512/2048 root workloads including persisted rows/bytes, RSS and CPU. Retention-only
+exploratory measurements confirmed material repeated traversal (512→2048 automatic
+roots: .75→5.07s). A private per-manifest directory/first-module-name index therefore
+shares the admitted sorted root array and buckets paths/negative causes without
+opening root source. Actual top-level module slots are recovered lazily once per
+queried ancestor directory, leaving unrelated target directories unopened. A
+membership lookup visits source ancestors, its exact root via binary
+search, and only roots declaring the first candidate module. Direct-root ordinals
+are deduplicated from declaration candidates. Negative observations remain shared
+cohort causes or exact unclassified root causes. Missing automatic nested-main
+and manifest/inventory causes are still collected per source before cache lookup.
+Actual declarations, module files, uncertainty and ambiguity stay authoritative;
+the index does not infer ownership from placement alone. All index growth is
+admitted before insertion and failed construction cannot publish partial cache
+state. No input rejection, new public limit, parser/provider or schema change.
+
+The permanent multi-directory CLI/MCP fixture also guards affected-only work:
+editing a configured app root must not recover every automatic target directory.
+The eager-index artifact fails that control with168 parsed sources; lazy recovery
+passes its45-source ceiling. A real hash-checked source-recovery unit proves exact
+captured paths, additional-candidate counters, untouched unrelated slots and cache
+reuse. The original22 artifact separately fails the retained-row bound at12867
+dependency rows in the same permanent fixture.

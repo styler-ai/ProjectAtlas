@@ -320,7 +320,7 @@ impl SourceCargoTargetKind {
     }
 }
 
-/// Canonical invalidation cause for additions to one automatic Cargo target directory.
+/// Canonical invalidation cause for one Cargo target-root directory inventory.
 ///
 /// This is a dependency key, not proof of a call target or crate membership.
 ///
@@ -336,12 +336,60 @@ pub fn cargo_target_inventory_key(
     projectatlas_core::graph::CanonicalResolutionKey,
     projectatlas_core::graph::GraphContractError,
 > {
+    cargo_directory_key(
+        project,
+        package,
+        manifest,
+        directory,
+        projectatlas_core::graph::GraphRelationKind::from_legacy(
+            projectatlas_core::symbols::RelationKind::Imports,
+        ),
+    )
+}
+
+/// Canonical invalidation cause emitted only by admitted explicit sibling roots.
+///
+/// Its configuration role is distinct from automatic inventory, so an unlisted
+/// helper cannot invalidate explicit roots when automatic discovery is disabled.
+///
+/// # Errors
+///
+/// Returns a graph contract error for invalid package, manifest or directory identity.
+pub fn cargo_root_cohort_key(
+    project: projectatlas_core::graph::ProjectInstanceId,
+    package: &str,
+    manifest: &str,
+    directory: &str,
+) -> Result<
+    projectatlas_core::graph::CanonicalResolutionKey,
+    projectatlas_core::graph::GraphContractError,
+> {
+    cargo_directory_key(
+        project,
+        package,
+        manifest,
+        directory,
+        projectatlas_core::graph::GraphRelationKind::Extended(
+            projectatlas_core::graph::ExtendedRelationKind::Configures,
+        ),
+    )
+}
+
+/// Share text admission while preserving distinct automatic/configured root roles.
+fn cargo_directory_key(
+    project: projectatlas_core::graph::ProjectInstanceId,
+    package: &str,
+    manifest: &str,
+    directory: &str,
+    kind: projectatlas_core::graph::GraphRelationKind,
+) -> Result<
+    projectatlas_core::graph::CanonicalResolutionKey,
+    projectatlas_core::graph::GraphContractError,
+> {
     use projectatlas_core::graph::{
-        CanonicalResolutionKey, GraphContractError, GraphIdentityText, GraphRelationKind,
-        ResolutionKeyDomain,
+        CanonicalResolutionKey, GraphContractError, GraphIdentityText, ResolutionKeyDomain,
     };
     use projectatlas_core::language::SemanticProviderOwner;
-    use projectatlas_core::symbols::RelationKind;
     let owner = SemanticProviderOwner::Rust;
     let provider = GraphIdentityText::new(owner.as_str())?;
     let language = GraphIdentityText::new(owner.resolution_family().ok_or(
@@ -359,13 +407,21 @@ pub fn cargo_target_inventory_key(
         &language,
         Some(&package),
         Some(&manifest),
-        Some(GraphRelationKind::from_legacy(RelationKind::Imports)),
+        Some(kind),
         &directory,
     ))
 }
 
-/// Narrow potential automatic root additions without interpreting source ownership.
-pub(crate) fn automatic_target_directory<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+/// Return the inventory directory for a flat potential automatic Cargo root.
+///
+/// This classifies source placement, not actual target membership or discovery policy.
+///
+/// ```
+/// assert_eq!(projectatlas_symbols::cargo_automatic_target_directory("src/bin/app.rs", ""), Some("src/bin"));
+/// assert_eq!(projectatlas_symbols::cargo_automatic_target_directory("src/bin/app/main.rs", ""), None);
+/// ```
+#[must_use]
+pub fn cargo_automatic_target_directory<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     let relative = if root.is_empty() {
         path
     } else {

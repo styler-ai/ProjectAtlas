@@ -397,3 +397,20 @@ queries without re-reading long module text on repeated lookups after admission.
 #### Scenario: Equal module literals have different source allocations
 - **WHEN** supported source statements contain equal long module literals and repeated callers require the same forwarded binding
 - **THEN** one resolver assigns the same exact value identity, repeated lookups compare bounded identity fields, unequal strings remain distinct, retained metadata is admitted before insertion, and positive callers, cycles, cancellation, resource refusals and long-module support remain intact
+
+### Requirement: Cargo membership retains bounded root cohort causes
+The system SHALL avoid copying unrelated candidate root causes into every member
+while preserving exact Cargo ownership, incremental invalidation and resource limits.
+
+#### Scenario: Automatic and explicit flat sibling roots
+- **WHEN** many admitted automatic or manifest-listed explicit Rust targets share a physical parent
+- **THEN** root-cohort dependency retention scales with admitted roots and actual relationships rather than their unrelated Cartesian product, source projection and membership share the same scoped cause identity, and targets and raw navigation remain compatible
+- **AND** cached physical directories and actual first module declarations narrow traversal without rescanning every unrelated root for each source; exact roots, competing module owners and missing discovery causes preserve their existing meaning
+
+#### Scenario: Cohort roots change while independent helpers remain local
+- **WHEN** a cohort root is added, edited, deleted or renamed, or manifest target paths change
+- **THEN** current and old owned keys invalidate affected membership before publication, incremental results converge with full results, and project identity and approved purposes survive; ordinary helper/module files retain exact-path causes instead of becoming arbitrary directory watchers
+
+#### Scenario: Root cohort admission cannot prove a shared identity
+- **WHEN** root metadata or a publishable shared identity is unavailable or a root is singleton, conventional or outside a proven cohort
+- **THEN** exact existing causes remain authoritative, growth is admitted before insertion, failure/cancellation preserves the prior publication, and no supported input or resource limit is removed

@@ -1,4 +1,5 @@
 //! Cargo-root and module ownership for Rust static bindings.
+use super::super::cargo_roots::{CargoRootCohort, repository_join};
 use super::{
     BindingResolver, BindingSource, CallBindingResolution, CallBindings, CanonicalResolutionKey,
     CauseWorkspace, CliError, EntitySelector, GraphEntity, IndexWorkStage, MAX_FORWARDING_DEPTH,
@@ -128,6 +129,36 @@ struct Request {
     toolchain: bool,
 }
 
+/// One admitted Cargo root and its optional shared sibling invalidation cause.
+struct RootCandidate {
+    /// Exact source path from the manifest/discovery inventory.
+    path: String,
+    /// Whether Cargo ownership is proven for this target.
+    certain: bool,
+    /// Shared only when multiple actual candidates have this physical parent.
+    cohort: Option<Arc<CargoRootCohort>>,
+}
+
+/// Physical directories narrow ownership before following actual module declarations.
+#[derive(Default)]
+struct RootDirectoryCandidates {
+    /// Negative observations share a cohort, or retain an exact ungrouped root.
+    causes: BTreeSet<CanonicalResolutionKey>,
+    /// Source-free ordinals allow unrelated directories to remain unopened.
+    roots: Vec<usize>,
+}
+
+/// Top-level module spelling selects only roots that could own that module.
+type RootModuleCandidates = BTreeMap<String, Vec<usize>>;
+
+/// One manifest-local index shares the already admitted, sorted root inventory.
+struct RootMembershipIndex {
+    /// Ordinals below address this exact immutable inventory.
+    roots: Arc<[RootCandidate]>,
+    /// A source visits only its physical ancestors, rather than every Cargo root.
+    directories: BTreeMap<String, RootDirectoryCandidates>,
+}
+
 /// Bounded query caches reuse the existing source capture and entity hydration.
 struct RustResolver<'r, 'a, 'g, 'n> {
     /// Shared operation authority and budgets.
@@ -135,7 +166,11 @@ struct RustResolver<'r, 'a, 'g, 'n> {
     /// Each source membership is checked once.
     memberships: BTreeMap<String, Arc<Membership>>,
     /// Actual manifest target candidates are collected once.
-    roots: BTreeMap<String, Arc<[(String, bool)]>>,
+    roots: BTreeMap<String, Arc<[RootCandidate]>>,
+    /// Source-free root path/cause buckets are built once per owning manifest.
+    root_memberships: BTreeMap<String, Arc<RootMembershipIndex>>,
+    /// Source slots are inspected lazily, only in queried ancestor directories.
+    root_modules: BTreeMap<String, BTreeMap<String, Arc<RootModuleCandidates>>>,
     /// Module/value slots indexed once per required source.
     slots: BTreeMap<String, Slots>,
     /// Identical calls share one complete result and cause set.
@@ -164,6 +199,8 @@ pub(super) fn resolve_rust_bindings<'g>(
         shared,
         memberships: BTreeMap::new(),
         roots: BTreeMap::new(),
+        root_memberships: BTreeMap::new(),
+        root_modules: BTreeMap::new(),
         slots: BTreeMap::new(),
         queries: BTreeMap::new(),
         ambiguous: 0,
@@ -448,13 +485,14 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
         &mut self,
         path: &str,
         causes: &mut CauseWorkspace<'_>,
-    ) -> Result<Arc<[(String, bool)]>, CliError> {
+    ) -> Result<Arc<[RootCandidate]>, CliError> {
         let Some(package) = self.shared.packages.package_owner(path) else {
             return Ok(Arc::from([]));
         };
         let manifest = package.manifest.clone();
         let directory = package.root.clone();
         let package_name = package.name.clone();
+        let cohort_index = package.cohorts.as_ref().map(Arc::clone);
         if !self.cause(&manifest, causes)? {
             return Ok(Arc::from([]));
         }
@@ -559,19 +597,181 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
                     this.insert_root(scratch, &mut roots, (*path).to_string(), auto.certain)?;
                 }
             }
-            let roots: Arc<[(String, bool)]> = roots.into_iter().collect::<Vec<_>>().into();
+            let mut parent_counts = BTreeMap::<String, usize>::new();
+            for path in roots.keys() {
+                this.shared.control.check(IndexWorkStage::SymbolParsing)?;
+                let directory = parent(path);
+                if let Some(count) = parent_counts.get_mut(directory) {
+                    *count += 1;
+                } else {
+                    scratch.reserve(
+                        this.shared,
+                        STAGED_GRAPH_ROW_BYTES.saturating_add(directory.len() as u64),
+                    )?;
+                    parent_counts.insert(directory.to_string(), 1);
+                }
+            }
+            let roots: Arc<[RootCandidate]> = roots
+                .into_iter()
+                .map(|(path, certain)| {
+                    let cohort = if parent_counts
+                        .get(parent(&path))
+                        .is_some_and(|count| *count > 1)
+                    {
+                        cohort_index
+                            .as_ref()
+                            .and_then(|index| index.candidate(&path, &directory))
+                    } else {
+                        None
+                    };
+                    RootCandidate {
+                        path,
+                        certain,
+                        cohort,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into();
             let retained_bytes = roots.iter().fold(
                 STAGED_GRAPH_ROW_BYTES.saturating_add(manifest.capacity() as u64),
-                |bytes, (path, _)| {
+                |bytes, root| {
                     bytes
                         .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                        .saturating_add(path.capacity() as u64)
+                        .saturating_add(root.path.capacity() as u64)
                 },
             );
             Ok((roots, retained_bytes))
         })?;
         self.roots.insert(manifest, Arc::clone(&roots));
         Ok(roots)
+    }
+
+    /// Bucket paths and negative causes without opening any candidate root source.
+    fn root_membership_index(
+        &mut self,
+        path: &str,
+        roots: Arc<[RootCandidate]>,
+    ) -> Result<Arc<RootMembershipIndex>, CliError> {
+        let manifest = self
+            .shared
+            .packages
+            .package_owner(path)
+            .map(|package| package.manifest.as_str())
+            .unwrap_or_default();
+        if let Some(index) = self.root_memberships.get(manifest) {
+            return Ok(Arc::clone(index));
+        }
+        let manifest = manifest.to_string();
+        let index = self.with_scratch(|this, scratch| {
+            let mut bytes = STAGED_GRAPH_ROW_BYTES.saturating_add(manifest.len() as u64);
+            scratch.reserve(this.shared, bytes)?;
+            let mut directories = BTreeMap::<String, RootDirectoryCandidates>::new();
+            for (ordinal, candidate) in roots.iter().enumerate() {
+                this.shared.check_budget()?;
+                let directory = parent(&candidate.path);
+                if !directories.contains_key(directory) {
+                    let extra = STAGED_GRAPH_ROW_BYTES.saturating_add(directory.len() as u64);
+                    scratch.reserve(this.shared, extra)?;
+                    bytes = bytes.saturating_add(extra);
+                    directories.insert(directory.to_string(), RootDirectoryCandidates::default());
+                }
+                let Some(entry) = directories.get_mut(directory) else {
+                    return Err(CliError::InvalidInput(
+                        "root directory index disappeared".to_string(),
+                    ));
+                };
+                let key = if let Some(cohort) = &candidate.cohort {
+                    &cohort.key
+                } else {
+                    &document_file_resolution_key(this.shared.project, &candidate.path)?
+                };
+                if !entry.causes.contains(key) {
+                    let extra = STAGED_GRAPH_ROW_BYTES
+                        .saturating_add(key.canonical_identity().len() as u64);
+                    scratch.reserve(this.shared, extra)?;
+                    bytes = bytes.saturating_add(extra);
+                    entry.causes.insert(key.clone());
+                }
+                // A row envelope covers amortized ordinal-vector spare capacity.
+                scratch.reserve(this.shared, STAGED_GRAPH_ROW_BYTES)?;
+                bytes = bytes.saturating_add(STAGED_GRAPH_ROW_BYTES);
+                entry.roots.push(ordinal);
+            }
+            Ok((RootMembershipIndex { roots, directories }, bytes))
+        })?;
+        let index = Arc::new(index);
+        self.root_memberships.insert(manifest, Arc::clone(&index));
+        Ok(index)
+    }
+
+    /// Recover module slots once per relevant directory, leaving other roots unopened.
+    fn root_directory_modules(
+        &mut self,
+        path: &str,
+        index: &RootMembershipIndex,
+        directory: &str,
+        candidates: &RootDirectoryCandidates,
+    ) -> Result<Arc<RootModuleCandidates>, CliError> {
+        let manifest = self
+            .shared
+            .packages
+            .package_owner(path)
+            .map(|package| package.manifest.as_str())
+            .unwrap_or_default();
+        if let Some(modules) = self
+            .root_modules
+            .get(manifest)
+            .and_then(|rows| rows.get(directory))
+        {
+            return Ok(Arc::clone(modules));
+        }
+        let manifest = manifest.to_string();
+        let modules = self.with_scratch(|this, scratch| {
+            let mut bytes = STAGED_GRAPH_ROW_BYTES.saturating_add(directory.len() as u64);
+            if !this.root_modules.contains_key(&manifest) {
+                bytes = bytes
+                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                    .saturating_add(manifest.len() as u64);
+            }
+            scratch.reserve(this.shared, bytes)?;
+            let mut selected = RootModuleCandidates::new();
+            for ordinal in &candidates.roots {
+                this.shared.check_budget()?;
+                let root = &index.roots[*ordinal].path;
+                if !this.shared.sources.nodes.contains_key(root.as_str())
+                    || this.source(root)?.is_none()
+                {
+                    continue;
+                }
+                let Some(modules) = this
+                    .slots
+                    .get(root)
+                    .and_then(|slots| slots.modules.get::<[String]>(&[]))
+                else {
+                    continue;
+                };
+                for name in modules.keys() {
+                    this.shared.check_budget()?;
+                    // The row envelope covers vector growth, including spare capacity.
+                    let extra =
+                        STAGED_GRAPH_ROW_BYTES.saturating_add(if selected.contains_key(name) {
+                            0
+                        } else {
+                            STAGED_GRAPH_ROW_BYTES.saturating_add(name.len() as u64)
+                        });
+                    scratch.reserve(this.shared, extra)?;
+                    bytes = bytes.saturating_add(extra);
+                    selected.entry(name.clone()).or_default().push(*ordinal);
+                }
+            }
+            Ok((selected, bytes))
+        })?;
+        let modules = Arc::new(modules);
+        self.root_modules
+            .entry(manifest)
+            .or_default()
+            .insert(directory.to_string(), Arc::clone(&modules));
+        Ok(modules)
     }
 
     /// Prove membership through actual module declarations along a narrowed path.
@@ -583,42 +783,72 @@ impl<'g> RustResolver<'_, '_, 'g, '_> {
             let mut causes = CauseWorkspace::new(scratch);
             let mut selected_owner = None;
             let roots = this.roots(path, &mut causes)?;
+            let index = this.root_membership_index(path, roots)?;
             let mut owner = None;
             let mut count = 0;
-            for (root, certain) in roots.iter() {
+            let direct = index
+                .roots
+                .binary_search_by(|candidate| candidate.path.as_str().cmp(path))
+                .ok();
+            let mut directory = parent(path);
+            loop {
                 this.shared.check_budget()?;
-                let directory = parent(root).to_string();
-                let Some(parts) = candidate_path(&directory, path) else {
-                    continue;
-                };
-                if !this.cause(root, &mut causes)? {
-                    continue;
-                }
-                let mut module = Module {
-                    root: root.clone(),
-                    file: root.clone(),
-                    inline: Arc::from([]),
-                    logical: Vec::new(),
-                    directory,
-                    visibility: Visibility::Public,
-                };
-                if module.file != path {
-                    for part in parts {
-                        let Some(child) = this.declared_module(&module, &part, &mut causes)? else {
-                            break;
+                if let Some(entry) = index.directories.get(directory)
+                    && let Some(parts) = candidate_path(directory, path)
+                {
+                    for key in &entry.causes {
+                        this.insert_cause(&mut causes, key)?;
+                    }
+                    let direct =
+                        direct.filter(|ordinal| parent(&index.roots[*ordinal].path) == directory);
+                    let modules = this.root_directory_modules(path, &index, directory, entry)?;
+                    let declared = parts.first().and_then(|name| modules.get(name));
+                    for ordinal in direct.into_iter().chain(
+                        declared
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .filter(|ordinal| Some(*ordinal) != direct),
+                    ) {
+                        this.shared.check_budget()?;
+                        let candidate = &index.roots[ordinal];
+                        let root = &candidate.path;
+                        if !this.cause(root, &mut causes)? {
+                            continue;
+                        }
+                        let mut module = Module {
+                            root: root.clone(),
+                            file: root.clone(),
+                            inline: Arc::from([]),
+                            logical: Vec::new(),
+                            directory: directory.to_string(),
+                            visibility: Visibility::Public,
                         };
-                        module = child;
-                        if module.file == path {
-                            break;
+                        if module.file != path {
+                            for part in &parts {
+                                let Some(child) =
+                                    this.declared_module(&module, part, &mut causes)?
+                                else {
+                                    break;
+                                };
+                                module = child;
+                                if module.file == path {
+                                    break;
+                                }
+                            }
+                        }
+                        if module.file == path && module.inline.is_empty() {
+                            count += 1;
+                            if candidate.certain {
+                                owner = Some(module);
+                            }
                         }
                     }
                 }
-                if module.file == path && module.inline.is_empty() {
-                    count += 1;
-                    if *certain {
-                        owner = Some(module);
-                    }
+                if directory.is_empty() {
+                    break;
                 }
+                directory = parent(directory);
             }
             if count == 1 {
                 selected_owner = owner;
@@ -1342,28 +1572,6 @@ fn join(directory: &str, path: &str) -> String {
     }
 }
 
-/// Admit manifest-relative paths only inside this repository.
-fn repository_join(directory: &str, path: &str) -> Option<String> {
-    let mut parts = directory
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    for component in std::path::Path::new(path).components() {
-        match component {
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                parts.pop()?;
-            }
-            std::path::Component::Normal(part) => parts.push(part.to_str()?),
-        }
-    }
-    let path = parts.join("/");
-    RepositoryFilePath::new(std::path::Path::new(&path))
-        .ok()
-        .map(|_| path)
-}
-
 /// Layout only narrows candidates; actual module declarations establish membership.
 fn candidate_path(directory: &str, path: &str) -> Option<Vec<String>> {
     let relative = if directory.is_empty() {
@@ -1423,8 +1631,36 @@ mod tests {
     fn with_empty_resolver(
         check: impl FnOnce(&mut RustResolver<'_, '_, '_, '_>, &Module) -> Result<(), Box<dyn Error>>,
     ) -> Result<(), Box<dyn Error>> {
+        with_source_resolver(&[], check)
+    }
+
+    /// Capture real source identities while allowing recovery-work assertions.
+    fn with_source_resolver(
+        files: &[(&str, &str)],
+        check: impl FnOnce(&mut RustResolver<'_, '_, '_, '_>, &Module) -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
+        let mut nodes = Vec::new();
+        for (path, source) in files {
+            let native = root.join(path);
+            if let Some(parent) = native.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(native, source)?;
+            nodes.push(projectatlas_core::Node {
+                path: (*path).to_string(),
+                kind: projectatlas_core::NodeKind::File,
+                parent_path: path
+                    .rsplit_once('/')
+                    .map(|(directory, _)| directory.to_string()),
+                extension: Some(".rs".to_string()),
+                language: Some("rust".to_string()),
+                size_bytes: Some(source.len() as u64),
+                mtime_ns: None,
+                content_hash: Some(blake3::hash(source.as_bytes()).to_hex().to_string()),
+            });
+        }
         let store = AtlasStore::open_for_project(&root.join("atlas.db"), root)?;
         let project = store
             .project_instance_id()?
@@ -1436,7 +1672,8 @@ mod tests {
         let configured = ConfiguredModuleResolution::default();
         let entities =
             build_entity_projection(project, generation, &[], graphs, &packages, true, &control)?;
-        let mut sources = SourceBindingCache::new(root, &[], None);
+        let direct = BTreeSet::from(["src/bin/a.rs".to_string()]);
+        let mut sources = SourceBindingCache::new(root, &nodes, Some(&direct));
         let mut candidates = ProjectResolutionRegistry::default();
         let replaced = BTreeSet::new();
         let mut shared = BindingResolver {
@@ -1464,6 +1701,8 @@ mod tests {
             shared: &mut shared,
             memberships: BTreeMap::new(),
             roots: BTreeMap::new(),
+            root_memberships: BTreeMap::new(),
+            root_modules: BTreeMap::new(),
             slots: BTreeMap::new(),
             queries: BTreeMap::new(),
             ambiguous: 0,
@@ -1478,6 +1717,124 @@ mod tests {
             visibility: Visibility::Public,
         };
         check(&mut resolver, &module)
+    }
+
+    #[test]
+    fn root_directory_recovery_keeps_unrelated_target_sources_unopened()
+    -> Result<(), Box<dyn Error>> {
+        with_source_resolver(
+            &[
+                ("src/bin/a.rs", "mod needed; fn main(){}"),
+                ("src/bin/b.rs", "fn main(){}"),
+                ("examples/unrelated.rs", "mod unrelated; fn main(){}"),
+            ],
+            |resolver, _| {
+                let roots: Arc<[super::RootCandidate]> =
+                    ["examples/unrelated.rs", "src/bin/a.rs", "src/bin/b.rs"]
+                        .into_iter()
+                        .map(|path| super::RootCandidate {
+                            path: path.to_string(),
+                            certain: true,
+                            cohort: None,
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                let index = resolver.root_membership_index("src/bin/a.rs", roots)?;
+                require(
+                    resolver.shared.sources.captured.is_empty(),
+                    "path buckets opened source files",
+                )?;
+                let candidates = index
+                    .directories
+                    .get("src/bin")
+                    .ok_or_else(|| io::Error::other("root directory missing"))?;
+                let modules = resolver.root_directory_modules(
+                    "src/bin/a.rs",
+                    &index,
+                    "src/bin",
+                    candidates,
+                )?;
+                require_eq(&modules.get("needed"), &Some(&vec![1]))?;
+                require_eq(
+                    &resolver
+                        .shared
+                        .sources
+                        .captured
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    &vec!["src/bin/a.rs", "src/bin/b.rs"],
+                )?;
+                require_eq(&resolver.shared.sources.work.additional_candidates, &1)?;
+                require(
+                    !resolver.slots.contains_key("examples/unrelated.rs"),
+                    "unrelated slots were retained",
+                )?;
+                let bytes = resolver.shared.retained_staging_bytes();
+                let repeated = resolver.root_directory_modules(
+                    "src/bin/a.rs",
+                    &index,
+                    "src/bin",
+                    candidates,
+                )?;
+                require(
+                    Arc::ptr_eq(&modules, &repeated),
+                    "directory modules were rebuilt",
+                )?;
+                require_eq(&resolver.shared.retained_staging_bytes(), &bytes)?;
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn root_candidate_index_refuses_without_partial_publication_and_reuses_complete_state()
+    -> Result<(), Box<dyn Error>> {
+        with_empty_resolver(|resolver, _| {
+            let cohort = Arc::new(super::CargoRootCohort {
+                directory: Arc::from("src/bin"),
+                key: super::document_file_resolution_key(resolver.shared.project, "Cargo.toml")?,
+            });
+            let roots: Arc<[super::RootCandidate]> = (0..256)
+                .map(|ordinal| super::RootCandidate {
+                    path: format!("src/bin/t{ordinal:03}.rs"),
+                    certain: true,
+                    cohort: Some(Arc::clone(&cohort)),
+                })
+                .collect::<Vec<_>>()
+                .into();
+            let before = resolver.shared.retained_bytes;
+            let limit = resolver.shared.retained_limit;
+            resolver.shared.retained_limit = resolver.shared.retained_staging_bytes() + 1;
+            let refused = resolver.root_membership_index("src/bin/t000.rs", Arc::clone(&roots));
+            require(
+                matches!(
+                    refused,
+                    Err(super::CliError::IndexWork(
+                        IndexWorkFailure::ResourceLimitExceeded { .. }
+                    ))
+                ),
+                "root index must refuse before publication",
+            )?;
+            require(
+                resolver.root_memberships.is_empty(),
+                "refused root index was published",
+            )?;
+            require_eq(&resolver.shared.retained_bytes, &before)?;
+            resolver.shared.retained_limit = limit;
+            let first = resolver.root_membership_index("src/bin/t000.rs", Arc::clone(&roots))?;
+            let charged = resolver.shared.retained_bytes;
+            let second = resolver.root_membership_index("src/bin/t255.rs", roots)?;
+            require(
+                Arc::ptr_eq(&first, &second),
+                "completed root index was rebuilt",
+            )?;
+            require_eq(&resolver.shared.retained_bytes, &charged)?;
+            // Missing sibling observations must remain one shared invalidation cause.
+            let causes = first.directories.get("src/bin").map(|entry| &entry.causes);
+            require_eq(&causes, &Some(&BTreeSet::from([cohort.key.clone()])))?;
+            Ok(())
+        })
     }
 
     #[test]

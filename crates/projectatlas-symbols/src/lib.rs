@@ -20,7 +20,7 @@ pub use rust_binding_source::{
     SourceRustAnchor, SourceRustAssociated, SourceRustBinding, SourceRustCall,
     SourceRustCallImports, SourceRustCallOrigin, SourceRustDeclaration, SourceRustFacts,
     SourceRustModule, SourceRustPath, SourceRustUse, SourceRustUseRole, SourceRustVisibility,
-    cargo_target_inventory_key,
+    cargo_automatic_target_directory, cargo_root_cohort_key, cargo_target_inventory_key,
 };
 pub use source_semantics::{
     SourceByteSpan, SourceCallBinding, SourceCallFact, SourceExportBinding, SourceExportFact,

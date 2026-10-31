@@ -13280,6 +13280,287 @@ fn assert_rust_binding_mcp_callers(root: &Path, library: &str) -> Result<(), Box
     complete_mcp_test_after_shutdown(result, || session.shutdown())?;
     rust_binding_equal(&mcp_database_snapshot(&database)?, &before)
 }
+/// Exercise shared root invalidation through both adapters and real publication.
+fn exercise_cargo_root_cohort_lifecycle() -> Result<(), Box<dyn Error>> {
+    const DISABLED_PACKAGE: &str = "disabled";
+    const DISABLED_HELPER: &str = "disabled/src/bin/helper.rs";
+    const LIBRARY_HELPER: &str = "src/helper.rs";
+    const CUSTOM_ROOT: &str = "app/target1.rs";
+    const RENAMED_ROOT: &str = "app/renamed.rs";
+    const MOVED_ROOT: &str = "elsewhere/moved.rs";
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    rust_binding_project(root, "2024")?;
+    let root_source =
+        "use crate::run as launch;\nfn run(){}\nfn caller(){launch();}\nfn main(){}\n";
+    let mut manifest = fs::read_to_string(root.join("Cargo.toml"))?;
+    let mut root_files = Vec::new();
+    for directory in ["src/bin", "examples", "tests", "benches"] {
+        fs::create_dir_all(root.join(directory))?;
+        for index in 0..32 {
+            let file = format!("{directory}/target{index}.rs");
+            fs::write(root.join(&file), root_source)?;
+            root_files.push(file);
+        }
+    }
+    fs::create_dir_all(root.join("app"))?;
+    for index in 0..32 {
+        let file = format!("app/target{index}.rs");
+        std::fmt::Write::write_fmt(
+            &mut manifest,
+            format_args!("[[bin]]\nname='custom{index}'\npath='{file}'\n"),
+        )?;
+        fs::write(root.join(&file), root_source)?;
+        root_files.push(file);
+    }
+    for (index, file) in [
+        "one.rs",
+        "two.rs",
+        "single/entry.rs",
+        "nested/left/main.rs",
+        "nested/right/main.rs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(parent) = root.join(file).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        std::fmt::Write::write_fmt(
+            &mut manifest,
+            format_args!("[[bin]]\nname='control{index}'\npath='{file}'\n"),
+        )?;
+        fs::write(root.join(file), root_source)?;
+        root_files.push(file.to_string());
+    }
+    fs::write(root.join("Cargo.toml"), &manifest)?;
+    let disabled_manifest = "[package]\nname='disabled-proof'\nversion='0.1.0'\nedition='2024'\nautobins=false\nautoexamples=false\nautotests=false\nautobenches=false\n";
+    let mut disabled_manifest = disabled_manifest.to_string();
+    for directory in ["src/bin", "examples", "tests", "benches"] {
+        fs::create_dir_all(root.join(DISABLED_PACKAGE).join(directory))?;
+        for name in ["a", "b"] {
+            let file = format!("{directory}/{name}.rs");
+            std::fmt::Write::write_fmt(
+                &mut disabled_manifest,
+                format_args!(
+                    "[[bin]]\nname='disabled_{}_{}'\npath='{file}'\n",
+                    directory.replace('/', "_"),
+                    name
+                ),
+            )?;
+            fs::write(root.join(DISABLED_PACKAGE).join(file), root_source)?;
+        }
+    }
+    fs::write(root.join("disabled/Cargo.toml"), disabled_manifest)?;
+    fs::write(root.join(DISABLED_HELPER), "fn helper(){}")?;
+    fs::write(
+        root.join("src/lib.rs"),
+        "mod helper; fn run(){} fn caller(){run();}",
+    )?;
+    let helper_source = "use crate::run as launch; fn caller(){launch();}";
+    fs::write(root.join(LIBRARY_HELPER), helper_source)?;
+    fs::write(root.join("app/shared.rs"), helper_source)?;
+    fs::write(
+        root.join("app/target0.rs"),
+        format!("mod shared;\n{root_source}"),
+    )?;
+    rust_binding_atlas(root, &["init"])?;
+    rust_binding_atlas(
+        root,
+        &[
+            "purpose",
+            "set",
+            "app/shared.rs",
+            "Retain root cohort caller evidence.",
+        ],
+    )?;
+    let database = root.join(ATLAS_DIR_NAME).join("projectatlas.db");
+    let identity = AtlasStore::open_read_only(&database)?.project_instance_id()?;
+    let purpose = || -> Result<(String, String, String, Option<String>), Box<dyn Error>> {
+        let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(connection.query_row("SELECT p.purpose,p.status,p.source,p.updated_by FROM purposes p JOIN nodes n ON n.id=p.node_id WHERE n.path='app/shared.rs'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?)
+    };
+    let authored = purpose()?;
+    let mut session = McpContractSession::spawn(&mcp_contract_executable(), root, &database)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        for step in 0..11 {
+            match step {
+                1 | 3 => fs::write(
+                    root.join(CUSTOM_ROOT),
+                    format!("mod shared;\n{root_source}"),
+                )?,
+                2 => fs::remove_file(root.join(CUSTOM_ROOT))?,
+                4 => fs::rename(root.join(CUSTOM_ROOT), root.join(RENAMED_ROOT))?,
+                5 => fs::write(
+                    root.join("Cargo.toml"),
+                    manifest.replace("path='app/target1.rs'", "path='app/renamed.rs'"),
+                )?,
+                6 => {
+                    fs::create_dir_all(root.join("elsewhere"))?;
+                    fs::rename(root.join(RENAMED_ROOT), root.join(MOVED_ROOT))?;
+                }
+                7 => fs::write(
+                    root.join("Cargo.toml"),
+                    manifest.replace("path='app/target1.rs'", "path='elsewhere/moved.rs'"),
+                )?,
+                8 => fs::write(
+                    root.join(LIBRARY_HELPER),
+                    format!("{helper_source}\n// independent helper edit\n"),
+                )?,
+                9 => {
+                    fs::remove_file(root.join(MOVED_ROOT))?;
+                    fs::write(root.join(CUSTOM_ROOT), root_source)?;
+                    fs::write(root.join(LIBRARY_HELPER), helper_source)?;
+                    fs::write(root.join("Cargo.toml"), &manifest)?;
+                }
+                10 => fs::write(
+                    root.join(DISABLED_HELPER),
+                    "fn helper(){} // helper-only edit\n",
+                )?,
+                _ => {}
+            }
+            let refreshed = rust_binding_atlas(root, &["watch", "--once"])?;
+            if step == 1 {
+                let parsed = refreshed["last_symbols"]["parsed"]
+                    .as_u64()
+                    .ok_or_else(|| io::Error::other("cohort refresh counter missing"))?;
+                rust_binding_require(
+                    parsed <= 45,
+                    &format!(
+                        "custom-root edit recovered unrelated target directories: {parsed} parsed"
+                    ),
+                )?;
+            }
+            if step == 10 {
+                let parsed = refreshed["last_symbols"]["parsed"]
+                    .as_u64()
+                    .ok_or_else(|| io::Error::other("helper refresh counter missing"))?;
+                rust_binding_require(
+                    parsed <= 2,
+                    &format!("disabled helper edit refreshed unrelated roots: {parsed} parsed"),
+                )?;
+            }
+            let connection =
+                Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let dependencies: i64 = connection.query_row(
+                "SELECT count(*) FROM graph_relation_dependencies",
+                [],
+                |row| row.get(0),
+            )?;
+            rust_binding_require(
+                dependencies >= 0 && dependencies <= i64::try_from(root_files.len())? * 24,
+                &format!("unrelated root fan-out at step {step}: {dependencies} dependency rows"),
+            )?;
+            let helper_cohorts: i64 = connection.query_row(
+                "SELECT count(*) FROM graph_entity_exports e JOIN graph_entities entity ON entity.project_instance_id=e.project_instance_id AND entity.entity_key=e.entity_key JOIN graph_resolution_keys key ON key.project_instance_id=e.project_instance_id AND key.resolution_domain=e.resolution_domain AND key.key_digest=e.key_digest WHERE entity.canonical_identity LIKE '%src/helper.rs%' AND key.canonical_identity LIKE '%Cargo.toml%|3:app'", [], |row| row.get(0))?;
+            rust_binding_equal(&helper_cohorts, &0)?;
+            let disabled_intersection: i64 = connection.query_row(
+                "SELECT count(*) FROM graph_entity_exports producer JOIN graph_relation_dependencies consumer ON consumer.project_instance_id=producer.project_instance_id AND consumer.resolution_domain=producer.resolution_domain AND consumer.key_digest=producer.key_digest WHERE producer.owner_path='disabled/src/bin/helper.rs' AND consumer.owner_path='disabled/src/bin/a.rs'", [], |row| row.get(0))?;
+            rust_binding_equal(&disabled_intersection, &0)?;
+            drop(connection);
+            let mut selected = vec![
+                ("src/bin/target0.rs", "src/bin/target0.rs"),
+                ("examples/target0.rs", "examples/target0.rs"),
+                ("tests/target0.rs", "tests/target0.rs"),
+                ("benches/target0.rs", "benches/target0.rs"),
+                ("app/target0.rs", "app/target0.rs"),
+                ("one.rs", "one.rs"),
+                ("single/entry.rs", "single/entry.rs"),
+                ("nested/left/main.rs", "nested/left/main.rs"),
+                (LIBRARY_HELPER, "src/lib.rs"),
+                ("disabled/src/bin/a.rs", "disabled/src/bin/a.rs"),
+                ("disabled/examples/a.rs", "disabled/examples/a.rs"),
+                ("disabled/tests/a.rs", "disabled/tests/a.rs"),
+                ("disabled/benches/a.rs", "disabled/benches/a.rs"),
+            ];
+            if step == 5 {
+                selected.push((RENAMED_ROOT, RENAMED_ROOT));
+            }
+            if step == 7 || step == 8 {
+                selected.push((MOVED_ROOT, MOVED_ROOT));
+            }
+            for (file, target) in selected {
+                let cli = rust_binding_calls(root, file, "caller")?;
+                let text = session.call_tool("atlas_symbol_relations", &json!({"project_path":root,"view":"detailed","file":file,"symbol":"caller","relation":"calls","limit":10}))?;
+                let mcp: Value = toon_format::decode_default(&text)?;
+                let rows = mcp
+                    .pointer("/symbol_relations/rows")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| io::Error::other("root cohort MCP rows missing"))?;
+                for rows in [cli.as_slice(), rows.as_slice()] {
+                    rust_binding_equal(&rows.len(), &1)?;
+                    rust_binding_equal(
+                        &rust_binding_targets(rows),
+                        &[(target.to_string(), "run".to_string())].into(),
+                    )?;
+                    rust_binding_equal(
+                        &rows[0]["relation"]["resolution"]["status"],
+                        &json!("resolved"),
+                    )?;
+                }
+            }
+            let ambiguous = matches!(step, 1 | 3 | 5);
+            let cli = rust_binding_calls(root, "app/shared.rs", "caller")?;
+            let text = session.call_tool("atlas_symbol_relations", &json!({"project_path":root,"view":"detailed","file":"app/shared.rs","symbol":"caller","relation":"calls","limit":10}))?;
+            let mcp: Value = toon_format::decode_default(&text)?;
+            let rows = mcp
+                .pointer("/symbol_relations/rows")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("shared-root MCP rows missing"))?;
+            for rows in [cli.as_slice(), rows.as_slice()] {
+                rust_binding_equal(&rows.len(), &1)?;
+                if ambiguous {
+                    rust_binding_unresolved(rows);
+                } else {
+                    rust_binding_equal(
+                        &rust_binding_targets(rows),
+                        &[("app/target0.rs".to_string(), "run".to_string())].into(),
+                    )?;
+                }
+            }
+            let cli = rust_binding_atlas(root, &["summary", "app/target0.rs"])?;
+            let text = session.call_tool(
+                "atlas_file_summary",
+                &json!({"project_path":root,"file":"app/target0.rs"}),
+            )?;
+            let mcp: Value = toon_format::decode_default(&text)?;
+            for summary in [cli, mcp["file_summary"].clone()] {
+                let functions = summary["functions"]
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("root summary functions missing"))?;
+                let function = functions
+                    .iter()
+                    .find(|function| function["name"] == "run")
+                    .ok_or_else(|| io::Error::other("root run function missing"))?;
+                let callers = function["called_by"]
+                    .as_array()
+                    .ok_or_else(|| io::Error::other("root summary callers missing"))?;
+                rust_binding_equal(
+                    &callers
+                        .iter()
+                        .any(|caller| caller == "app/shared.rs::caller"),
+                    &(!ambiguous),
+                )?;
+            }
+            let incremental = derived_result_snapshot(&database)?;
+            rust_binding_atlas(root, &["scan", "."])?;
+            rust_binding_equal(&derived_result_snapshot(&database)?, &incremental)?;
+            rust_binding_equal(
+                &AtlasStore::open_read_only(&database)?.project_instance_id()?,
+                &identity,
+            )?;
+            rust_binding_equal(&purpose()?, &authored)?;
+            let before = mcp_database_snapshot(&database)?;
+            let noop = rust_binding_atlas(root, &["watch", "--once"])?;
+            rust_binding_equal(&noop["last_symbols"]["parsed"], &json!(0))?;
+            rust_binding_equal(&mcp_database_snapshot(&database)?, &before)?;
+        }
+        Ok(())
+    })();
+    complete_mcp_test_after_shutdown(result, || session.shutdown())
+}
+
 #[test]
 fn rust_root_aliases_follow_manifest_and_module_changes() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
@@ -13353,6 +13634,7 @@ fn rust_root_aliases_follow_manifest_and_module_changes() -> Result<(), Box<dyn 
         &(noop.pointer("/last_symbols/parsed").and_then(Value::as_u64)),
         &(Some(0)),
     )?;
+    exercise_cargo_root_cohort_lifecycle()?;
     Ok(())
 }
 

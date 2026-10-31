@@ -1,6 +1,9 @@
 //! Normalize parser-owned symbol facts into one generation-bound repository graph.
 
 mod binding_resolution;
+mod cargo_roots;
+
+use cargo_roots::CargoRootCohortIndex;
 
 #[cfg(test)]
 use projectatlas_core::graph::QUALIFIED_SYMBOL_SCOPE_PREFIX;
@@ -1645,7 +1648,12 @@ pub(super) fn stage_full_repository_graph(
     control.check(IndexWorkStage::SymbolParsing)?;
     let configured_modules =
         super::module_resolution::load_configured_module_resolution(root, nodes, control)?;
-    let packages = PackageIndex::from_graphs(&graphs)?;
+    let packages = PackageIndex::from_sources(
+        project,
+        &graphs.iter().collect::<Vec<_>>(),
+        &mut sources,
+        control,
+    )?;
     admit_resolution_key_failures(
         project,
         generation,
@@ -1840,10 +1848,10 @@ fn stage_incremental_repository_graph_with_limit(
         admit_symbol_graphs(package_graphs, control)?;
     let package_index_graphs = direct_graphs
         .iter()
-        .map(SourceGraph::graph)
-        .chain(package_graphs.iter().map(SourceGraph::graph))
+        .chain(package_graphs.iter())
         .collect::<Vec<_>>();
-    let direct_packages = PackageIndex::from_graphs(&package_index_graphs)?;
+    let direct_packages =
+        PackageIndex::from_sources(project, &package_index_graphs, &mut sources, control)?;
     admit_resolution_key_failures(
         project,
         generation,
@@ -1973,11 +1981,10 @@ fn stage_incremental_repository_graph_with_limit(
     }
     let admitted_graphs = direct_graphs
         .iter()
-        .map(SourceGraph::graph)
-        .chain(newly_affected_graphs.iter().map(SourceGraph::graph))
-        .chain(package_graphs.iter().map(SourceGraph::graph))
+        .chain(newly_affected_graphs.iter())
+        .chain(package_graphs.iter())
         .collect::<Vec<_>>();
-    let packages = PackageIndex::from_graphs(&admitted_graphs)?;
+    let packages = PackageIndex::from_sources(project, &admitted_graphs, &mut sources, control)?;
     admit_resolution_key_failures(
         project,
         generation,
@@ -2361,14 +2368,23 @@ struct PackageOwner {
     name: String,
     /// Repository-relative manifest path proving ownership.
     manifest: String,
+    /// Derived source-proved sibling roots; absent in graph-only compatibility fixtures.
+    cohorts: Option<Arc<CargoRootCohortIndex>>,
 }
 
 impl PackageIndex {
     /// Build deterministic longest-prefix package ownership from manifest graphs.
+    #[cfg(test)]
     fn from_graphs(graphs: &[impl Borrow<SymbolGraph>]) -> Result<Self, CliError> {
+        Self::from_graph_iter(graphs.iter().map(Borrow::borrow))
+    }
+
+    /// Build package names without discarding source proof at production call sites.
+    fn from_graph_iter<'a>(
+        graphs: impl IntoIterator<Item = &'a SymbolGraph>,
+    ) -> Result<Self, CliError> {
         let mut packages = Vec::new();
         for graph in graphs {
-            let graph = graph.borrow();
             for symbol in &graph.symbols {
                 if symbol.kind != SymbolKind::Package {
                     continue;
@@ -2382,6 +2398,7 @@ impl PackageIndex {
                     root,
                     name: symbol.name.clone(),
                     manifest: graph.path.clone(),
+                    cohorts: None,
                 });
             }
         }
@@ -6516,6 +6533,8 @@ struct SourceBindingCache<'a> {
     direct_paths: Option<BTreeSet<&'a str>>,
     /// One immutable parse per required unchanged path.
     captured: BTreeMap<String, Arc<CapturedSourceGraph>>,
+    /// Derived Cargo cohorts retain no second manifest graph or parser facts.
+    cargo_cohorts: BTreeMap<String, Arc<CargoRootCohortIndex>>,
     /// Additional actual parser work, separate from reused fresh sidecars.
     work: SourceRecoveryWork,
     /// Bounded owned source graphs/evidence retained during projection.
@@ -6542,6 +6561,7 @@ impl<'a> SourceBindingCache<'a> {
                     .collect()
             }),
             captured: BTreeMap::new(),
+            cargo_cohorts: BTreeMap::new(),
             work: SourceRecoveryWork::default(),
             retained_bytes: (nodes.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES),
         }
@@ -7667,6 +7687,9 @@ fn resolution_projection_context<'a>(
     let mut context = ResolutionProjectionContext::with_configured_modules(configured);
     if let Some(package) = packages.package_owner(path) {
         context = context.with_rust_package(&package.manifest, &package.root);
+        if let Some(directory) = packages.root_cohort_directory(path) {
+            context = context.with_rust_root_cohort(directory);
+        }
     }
     context
 }

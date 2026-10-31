@@ -199,6 +199,8 @@ pub struct ResolutionProjectionContext<'a> {
     source_semantics: Option<&'a SourceSemanticFacts>,
     /// Owning Cargo manifest and repository-relative package root, when established.
     rust_package: Option<(&'a str, &'a str)>,
+    /// Shared parent identity for this exact manifest-listed sibling root.
+    rust_root_cohort: Option<&'a str>,
 }
 
 /// Provider scopes expanded once per unique import in one source graph.
@@ -284,6 +286,7 @@ impl<'a> ResolutionProjectionContext<'a> {
             configured_modules: Some(configured_modules),
             source_semantics: None,
             rust_package: None,
+            rust_root_cohort: None,
         }
     }
 
@@ -298,6 +301,13 @@ impl<'a> ResolutionProjectionContext<'a> {
     #[must_use]
     pub const fn with_rust_package(mut self, manifest: &'a str, root: &'a str) -> Self {
         self.rust_package = Some((manifest, root));
+        self
+    }
+
+    /// Attach an admitted cohort only for this exact Cargo root source.
+    #[must_use]
+    pub const fn with_rust_root_cohort(mut self, directory: &'a str) -> Self {
+        self.rust_root_cohort = Some(directory);
         self
     }
 }
@@ -895,10 +905,21 @@ pub fn derive_resolution_keys_with_context(
     if provider_owner == SemanticProviderOwner::Rust
         && let Some((manifest, root)) = context.rust_package
         && let Some(package) = package.as_ref()
-        && let Some(directory) =
-            crate::rust_binding_source::automatic_target_directory(&graph.path, root)
+        && let Some(directory) = crate::cargo_automatic_target_directory(&graph.path, root)
         && let Some(key) = retain_derived_key(
             crate::cargo_target_inventory_key(project, package.as_str(), manifest, directory),
+            ResolutionProjectionFact::Source,
+            &mut contract_failures,
+        )
+    {
+        source_keys.push(key);
+    }
+    if provider_owner == SemanticProviderOwner::Rust
+        && let Some((manifest, _root)) = context.rust_package
+        && let Some(package) = package.as_ref()
+        && let Some(directory) = context.rust_root_cohort
+        && let Some(key) = retain_derived_key(
+            crate::cargo_root_cohort_key(project, package.as_str(), manifest, directory),
             ResolutionProjectionFact::Source,
             &mut contract_failures,
         )
