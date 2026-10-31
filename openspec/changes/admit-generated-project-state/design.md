@@ -79,6 +79,16 @@ publication boundary; bound the actual guarantees and do not claim universal TOC
 elimination. Do not introduce lock files, retained directory-handle frameworks or
 new dependencies without a demonstrated need and explicit reviewed tradeoff.
 
+Retaining only the publication directory does not establish ownership of a staged
+filename. A causal callback can rename the held temporary file and substitute a
+foreign leaf without changing that directory; the prior path-based persistence or
+cleanup then publishes or unlinks the wrong object. Check the direct regular stage
+entry against the retained file handle before path-based metadata changes, payload
+writes, publication and failed-publication cleanup. Withhold cleanup when either
+directory or file identity changes, using the existing typed retention error. Keep
+the same bounded final-check guarantee, without claiming an atomic adversarial race
+barrier. Cover both normal-publication and controlled-failure substitutions.
+
 ### Manual helpers share exact automatic document ownership
 
 Actual installed 0.5.0 CLI and MCP tests confirm that `ignore add` follows a dangling
@@ -173,8 +183,8 @@ The affected registry is all three generated host files, private and legacy mana
 TOML config, and the default JSON sidecar. Create-only Gitignore/defaults are separate.
 
 Keep atomic replacement and outside-hardlink safety. Snapshot the admitted target's
-native access controls and apply them to the operation-owned stage before writing
-bytes or publishing. On Unix preserve uid/gid as well as mode so owner/group ACL
+native access controls and preserve them before exposing replacement payload bytes.
+On Unix preserve uid/gid as well as mode so owner/group ACL
 entries retain their subjects; test the mode/ACL-mask ordering. Linux reuses locked
 xattr to copy kernel-owned POSIX/NFSv4 ACL values without decoding them; remove a
 stage's inherited ACL when absent on the source. A source query that proves the
@@ -215,6 +225,43 @@ No project unsafe code, shell runtime dependency, global ACL change, or blanket 
 on regeneration is introduced. Native failures keep the old valid output; do not
 fall back to a publication that drops access controls. All platform-specific proof
 and dependency gates remain required; current Linux evidence is not Windows proof.
+
+### Prepare native policy before exposing replacement payloads
+
+Linux captures uid/gid, mode, POSIX/NFSv4 ACL values and SELinux/Smack file-label
+values through a no-follow descriptor bound to the admitted regular destination.
+The source descriptor is retained. Skip only a proven unsupported attribute
+namespace; preserve absence as well as bytes. Include the Smack object, exec and
+mmap labels, not directory/socket-only attributes or content-bound IMA/EVM data.
+
+A newly created empty named probe may be used only when its complete captured
+access policy already equals the destination policy. No setters are necessary in
+that case. Otherwise identity-check and discard that empty inode permanently.
+Smack checks access at open rather than every subsequent I/O, so relabeling a
+visible inode cannot revoke an already-open data handle. Use already-locked rustix
+safe filesystem APIs to create O_TMPFILE, write and sync complete bytes while
+unnamed under the creator's policy, then apply and verify all captured metadata
+and sync before linking a generated staging name
+and atomically publish. Link by descriptor where permitted or the documented
+proc-self-fd symlink route for unprivileged callers. Unsupported anonymous creation,
+linking or policy assignment refuses before replacing valid output. Equivalent
+named-probe policy retains ordinary filesystems and avoids gratuitous relabeling.
+This ordering also avoids requesting further data writes after a SELinux SID
+change could revoke them on the retained handle. Revalidate the admitted target's
+inode and captured access policy before replacement; an absent Replace target
+must remain absent. Create-only no-clobber races retain their existing result.
+
+macOS inherited ACL allows can override0600. Existing-target stages with inheritable
+parent ACLs therefore use a private same-volume staging directory, whose ACL is
+cleared and0700 mode verified before payload file creation. Keep that directory
+owned by the writer even when the destination has a different owner. Keep genuinely new
+outputs in their original parent to preserve supported inherited grants. Retain
+private-directory identity, verify both stage parent and held file, and remove only
+the verified empty directory without recursive TempDir cleanup. A failed cleanup
+after successful persist is explicitly a committed-publication follow-up error.
+Native nobody-held-FD controls prove the original window and the protected actual
+publisher; positive new-file controls retain normal inheritance. No project unsafe
+code, process-global security-context changes or shell runtime dependency.
 
 ### Explicit paths remain supported
 

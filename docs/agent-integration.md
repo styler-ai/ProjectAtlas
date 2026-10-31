@@ -148,6 +148,17 @@ custom filenames directly inside `.projectatlas`; the parent directory alone doe
 not make them managed. JSON output still refuses to overwrite its legacy TOON
 import through an alias.
 
+Replacement retains existing ownership and native file access controls: Linux
+POSIX/NFSv4 ACLs and SELinux/Smack file labels, macOS ordered ACLs, and Windows
+owner/group/DACL policy. A policy that cannot be preserved causes a causal refusal
+before valid output is replaced. Linux prepares changed policy and complete bytes
+on an unnamed inode; macOS isolates payload creation from broader inherited ACLs.
+New outputs retain ordinary parent inheritance. The destination and staging file
+identities are rechecked before publication; uncertain staging ownership withholds
+cleanup. A private-directory cleanup error after publication explicitly reports
+that the replacement already committed. These are bounded mutation checks, not
+a lock against arbitrary concurrent filesystem changes.
+
 Canonical source-root aliases and explicit external database/configuration paths remain
 supported. A conventional-looking database filename outside the independently selected
 root remains an operator-selected binding. Before startup database discovery, explicit

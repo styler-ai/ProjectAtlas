@@ -5,6 +5,14 @@ use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(target_os = "linux")]
+#[path = "project_state_linux.rs"]
+mod linux_access;
+
+#[cfg(target_os = "macos")]
+#[path = "project_state_macos.rs"]
+mod macos_access;
+
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";
 /// Automatic SQLite filename whose aliases must be checked before opening SQLite.
@@ -381,6 +389,18 @@ impl ProjectStateGuard {
         publication: FilePublication,
         before_publication: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<bool> {
+        self.publish_with_stage_check(path, bytes, publication, |_| Ok(()), before_publication)
+    }
+
+    /// Observe the real protected stage through a local causal-test seam.
+    fn publish_with_stage_check(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        publication: FilePublication,
+        stage_check: impl FnOnce(&tempfile::NamedTempFile) -> io::Result<()>,
+        before_publication: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<bool> {
         if matches!(self.admission, StateAdmission::Database) {
             return Err(refusal(
                 path,
@@ -415,86 +435,289 @@ impl ProjectStateGuard {
                 Ok::<_, io::Error>(metadata)
             })
             .transpose()?;
-        #[cfg(unix)]
-        let mut builder = tempfile::Builder::new();
-        #[cfg(not(unix))]
-        let builder = tempfile::Builder::new();
-        #[cfg(unix)]
-        if metadata.is_none() {
-            use std::os::unix::fs::PermissionsExt;
-            builder.permissions(fs::Permissions::from_mode(0o666));
-        }
-        #[cfg(not(windows))]
-        let mut temporary = builder.tempfile_in(&self.directory)?;
-        #[cfg(windows)]
-        let mut temporary = {
-            use std::os::windows::fs::OpenOptionsExt;
-            // Deny other data handles while inherited access is being replaced.
-            // Delete sharing is required for atomic publication of our open file.
-            builder.make_in(&self.directory, |path| {
-                fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .share_mode(0x0000_0004)
-                    .open(path)
-            })?
-        };
-        let prepared = (|| {
-            if let Some(metadata) = &metadata {
-                preserve_replacement_access(path, metadata, &temporary)?;
+        #[cfg(target_os = "linux")]
+        let access = metadata
+            .as_ref()
+            .map(|metadata| linux_access::ReplacementPolicy::capture(path, metadata))
+            .transpose()?;
+        #[cfg(any(target_os = "macos", windows))]
+        let access = metadata
+            .as_ref()
+            .map(|metadata| ReplacementSource::capture(path, metadata))
+            .transpose()?;
+        #[cfg(target_os = "macos")]
+        let private = macos_access::ReplacementDirectory::create(self, metadata.as_ref())?;
+        #[cfg(target_os = "macos")]
+        let staging_directory = private
+            .as_ref()
+            .map_or(self.directory.as_path(), |private| private.path());
+        #[cfg(not(target_os = "macos"))]
+        let staging_directory = self.directory.as_path();
+        let result = (|| {
+            let staging_identity = Handle::from_path(staging_directory)?;
+            #[cfg(target_os = "macos")]
+            if let Some(private) = &private {
+                private.verify()?;
             }
-            temporary.write_all(bytes)?;
-            temporary.as_file().sync_all()?;
-            before_publication()?;
-            self.verify()
-        })();
-        if let Err(source) = prepared {
-            return Err(self.staging_failure(&mut temporary, source));
-        }
-        let result = match publication {
-            FilePublication::Create => temporary.persist_noclobber(path),
-            FilePublication::Replace => temporary.persist(path),
-        };
-        match result {
-            Ok(_) => Ok(true),
-            Err(mut failure) => {
-                if matches!(publication, FilePublication::Create)
-                    && failure.error.kind() == io::ErrorKind::AlreadyExists
+            #[cfg(unix)]
+            let mut builder = tempfile::Builder::new();
+            #[cfg(not(unix))]
+            let builder = tempfile::Builder::new();
+            #[cfg(unix)]
+            if metadata.is_none() {
+                use std::os::unix::fs::PermissionsExt;
+                builder.permissions(fs::Permissions::from_mode(0o666));
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(access) = &access {
+                builder.permissions(access.permissions());
+            }
+            #[cfg(not(windows))]
+            let mut temporary = builder.tempfile_in(staging_directory)?;
+            #[cfg(windows)]
+            let mut temporary = {
+                use std::os::windows::fs::OpenOptionsExt;
+                // Deny other data handles while inherited access is being replaced.
+                // Delete sharing is required for atomic publication of our open file.
+                builder.make_in(staging_directory, |path| {
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .share_mode(0x0000_0004)
+                        .open(path)
+                })?
+            };
+            #[cfg(target_os = "linux")]
+            let content_prepared = if let Some(access) = &access {
+                let equivalent = match self
+                    .verify_staging_file(&temporary, &staging_identity)
+                    .and_then(|()| access.matches(temporary.as_file()))
                 {
-                    if gitignore_creation {
-                        let existing = self
-                            .verify_directories()
-                            .and_then(|()| optional_metadata(path));
-                        match existing {
-                            Ok(Some(_)) => return Ok(false),
-                            Err(source) => {
-                                return Err(self.staging_failure(&mut failure.file, source));
-                            }
-                            Ok(None) => {}
-                        }
+                    Ok(equivalent) => equivalent,
+                    Err(source) => {
+                        return Err(self.staging_failure(
+                            &mut temporary,
+                            source,
+                            &staging_identity,
+                        ));
                     }
-                    let existing = self.verify().and_then(|()| optional_metadata(path));
-                    match existing {
-                        Ok(Some(metadata)) if !indirect(&metadata) && metadata.is_file() => {
-                            return Ok(false);
-                        }
-                        Err(source) => return Err(self.staging_failure(&mut failure.file, source)),
-                        Ok(_) => {}
+                };
+                if equivalent {
+                    false
+                } else {
+                    if let Err(source) = self.verify_staging_file(&temporary, &staging_identity) {
+                        return Err(self.staging_failure(
+                            &mut temporary,
+                            source,
+                            &staging_identity,
+                        ));
+                    }
+                    // A mismatched named probe never receives generated bytes.
+                    self.discard_staging_probe(temporary, &staging_identity)?;
+                    temporary = access.anonymous_stage(&builder, self, bytes)?;
+                    true
+                }
+            } else {
+                false
+            };
+            #[cfg(not(target_os = "linux"))]
+            let content_prepared = false;
+            let prepared = (|| {
+                self.verify_staging_file(&temporary, &staging_identity)?;
+                stage_check(&temporary)?;
+                self.verify_staging_file(&temporary, &staging_identity)?;
+                #[cfg(any(target_os = "macos", windows))]
+                if let Some(access) = &access {
+                    access.verify_destination(path)?;
+                    access.apply(path, &temporary)?;
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+                if let Some(metadata) = &metadata {
+                    preserve_replacement_access(path, metadata, &temporary)?;
+                }
+                self.verify_staging_file(&temporary, &staging_identity)?;
+                if !content_prepared {
+                    temporary.write_all(bytes)?;
+                    temporary.as_file().sync_all()?;
+                }
+                before_publication()?;
+                self.verify()?;
+                self.verify_staging_file(&temporary, &staging_identity)?;
+                #[cfg(target_os = "linux")]
+                if let Some(access) = &access
+                    && !access.matches(temporary.as_file())?
+                {
+                    return Err(refusal(
+                        path,
+                        "staged native access policy changed before publication",
+                    ));
+                }
+                if matches!(publication, FilePublication::Replace) {
+                    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+                    if let Some(access) = &access {
+                        access.verify_destination(path)?;
+                    }
+                    if metadata.is_none() && optional_metadata(path)?.is_some() {
+                        return Err(refusal(
+                            path,
+                            "absent destination appeared before publication",
+                        ));
                     }
                 }
-                Err(self.staging_failure(&mut failure.file, failure.error))
+                Ok(())
+            })();
+            if let Err(source) = prepared {
+                return Err(self.staging_failure(&mut temporary, source, &staging_identity));
             }
+            let result = match publication {
+                FilePublication::Create => temporary.persist_noclobber(path),
+                FilePublication::Replace => temporary.persist(path),
+            };
+            match result {
+                Ok(_) => Ok(true),
+                Err(mut failure) => {
+                    if let Err(source) = self.verify_staging_file(&failure.file, &staging_identity)
+                    {
+                        return Err(self.staging_failure(
+                            &mut failure.file,
+                            source,
+                            &staging_identity,
+                        ));
+                    }
+                    if matches!(publication, FilePublication::Create)
+                        && failure.error.kind() == io::ErrorKind::AlreadyExists
+                    {
+                        if gitignore_creation {
+                            let existing = self
+                                .verify_directories()
+                                .and_then(|()| optional_metadata(path));
+                            match existing {
+                                Ok(Some(_)) => return Ok(false),
+                                Err(source) => {
+                                    return Err(self.staging_failure(
+                                        &mut failure.file,
+                                        source,
+                                        &staging_identity,
+                                    ));
+                                }
+                                Ok(None) => {}
+                            }
+                        }
+                        let existing = self.verify().and_then(|()| optional_metadata(path));
+                        match existing {
+                            Ok(Some(metadata)) if !indirect(&metadata) && metadata.is_file() => {
+                                return Ok(false);
+                            }
+                            Err(source) => {
+                                return Err(self.staging_failure(
+                                    &mut failure.file,
+                                    source,
+                                    &staging_identity,
+                                ));
+                            }
+                            Ok(_) => {}
+                        }
+                    }
+                    Err(self.staging_failure(&mut failure.file, failure.error, &staging_identity))
+                }
+            }
+        })();
+        #[cfg(target_os = "macos")]
+        if let Some(private) = private {
+            return private.finish(result);
         }
+        result
     }
 
-    /// Never unlink a temporary pathname through a changed directory owner.
+    /// Bind path-based metadata, publication and cleanup to the retained file.
+    fn verify_staging_file(
+        &self,
+        temporary: &tempfile::NamedTempFile,
+        directory_identity: &Handle,
+    ) -> io::Result<()> {
+        self.verify_staging_entry(temporary.path(), temporary.as_file(), directory_identity)
+    }
+
+    /// Retain file authority even when an explicit probe unlink fails.
+    #[cfg(target_os = "linux")]
+    fn discard_staging_probe(
+        &self,
+        mut temporary: tempfile::NamedTempFile,
+        directory_identity: &Handle,
+    ) -> io::Result<()> {
+        if let Err(source) = self.verify_staging_file(&temporary, directory_identity) {
+            return Err(self.staging_failure(&mut temporary, source, directory_identity));
+        }
+        let (file, path) = temporary.into_parts();
+        let name = path.to_path_buf();
+        if let Err(operation) = path.close() {
+            return match self.verify_staging_entry(&name, &file, directory_identity) {
+                Ok(()) => Err(operation),
+                Err(ownership) => Err(io::Error::new(
+                    operation.kind(),
+                    RetainedStaging {
+                        operation,
+                        ownership,
+                    },
+                )),
+            };
+        }
+        Ok(())
+    }
+
+    /// Verify a direct stage name against both retained directory and file objects.
+    fn verify_staging_entry(
+        &self,
+        path: &Path,
+        file: &fs::File,
+        directory_identity: &Handle,
+    ) -> io::Result<()> {
+        self.verify_directories()?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| refusal(path, "staging parent is unavailable"))?;
+        require_directory(directory, &fs::symlink_metadata(directory)?)?;
+        if Handle::from_path(directory)? != *directory_identity {
+            return Err(refusal(directory, "staging directory object changed"));
+        }
+        let named = fs::symlink_metadata(path)?;
+        require_regular(path, &named)?;
+        #[cfg(unix)]
+        let same = {
+            use std::os::unix::fs::MetadataExt;
+            let retained = file.metadata()?;
+            named.dev() == retained.dev() && named.ino() == retained.ino()
+        };
+        #[cfg(windows)]
+        let same = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Metadata access does not request competing file-data access.
+            // Keep DELETE-only sharing on the original payload handle.
+            const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+            let current = Handle::from_file(
+                fs::OpenOptions::new()
+                    .access_mode(FILE_READ_ATTRIBUTES)
+                    .open(path)?,
+            )?;
+            current == Handle::from_file(file.try_clone()?)?
+        };
+        #[cfg(not(any(unix, windows)))]
+        let same = Handle::from_path(path)? == Handle::from_file(file.try_clone()?)?;
+        if !same {
+            return Err(refusal(path, "temporary staging file object changed"));
+        }
+        Ok(())
+    }
+
+    /// Never unlink a temporary pathname through a changed directory or file owner.
     fn staging_failure(
         &self,
         temporary: &mut tempfile::NamedTempFile,
         operation: io::Error,
+        directory_identity: &Handle,
     ) -> io::Error {
-        match self.verify_directories() {
+        match self.verify_staging_file(temporary, directory_identity) {
             Ok(()) => operation,
             Err(ownership) => {
                 // keep() itself performs path I/O on Windows. Only disable cleanup:
@@ -512,7 +735,143 @@ impl ProjectStateGuard {
     }
 }
 
+/// Retain the admitted native file and policy instead of reopening a mutable source name.
+#[cfg(any(target_os = "macos", windows))]
+struct ReplacementSource {
+    /// Keep the captured destination alive until publication completes.
+    file: fs::File,
+    /// Compare the destination name with this retained object before replacing it.
+    identity: Handle,
+    /// Original permissions and, on Unix, ownership and inode identity.
+    metadata: Metadata,
+    /// macOS access ACL entries in their original order.
+    #[cfg(target_os = "macos")]
+    acl: Vec<exacl::AclEntry>,
+    /// Windows owner, group and complete DACL, excluding privileged SACL access.
+    #[cfg(windows)]
+    security: std::ffi::OsString,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl ReplacementSource {
+    /// Capture through a non-following descriptor, preserving write-only workflows.
+    fn capture(path: &Path, expected: &Metadata) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        let file = {
+            use rustix::fs::{CWD, Mode, OFlags, openat};
+            let flags = OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            fs::File::from(
+                match openat(CWD, path, flags | OFlags::RDONLY, Mode::empty()) {
+                    Ok(file) => file,
+                    Err(rustix::io::Errno::ACCESS) => {
+                        openat(CWD, path, flags | OFlags::WRONLY, Mode::empty())?
+                    }
+                    Err(source) => return Err(source.into()),
+                },
+            )
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_permissions::constants::AccessRights;
+            const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            fs::OpenOptions::new()
+                .access_mode(AccessRights::ReadControl.bits() | FILE_READ_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?
+        };
+        require_regular(path, &file.metadata()?)?;
+        let identity = Handle::from_file(file.try_clone()?)?;
+        #[cfg(target_os = "macos")]
+        let acl = exacl::getfacl(path, None)?;
+        #[cfg(windows)]
+        let security = windows_access_snapshot(&file)?;
+        let source = Self {
+            file,
+            identity,
+            metadata: expected.clone(),
+            #[cfg(target_os = "macos")]
+            acl,
+            #[cfg(windows)]
+            security,
+        };
+        source.verify_destination(path)?;
+        Ok(source)
+    }
+
+    /// Refuse a changed destination name, ownership, permissions or native policy.
+    fn verify_destination(&self, path: &Path) -> io::Result<()> {
+        let named = fs::symlink_metadata(path)?;
+        require_regular(path, &named)?;
+        #[cfg(target_os = "macos")]
+        let matches = {
+            use std::os::unix::fs::MetadataExt;
+            let held = self.file.metadata()?;
+            named.dev() == self.metadata.dev()
+                && named.ino() == self.metadata.ino()
+                && held.dev() == self.metadata.dev()
+                && held.ino() == self.metadata.ino()
+                && held.uid() == self.metadata.uid()
+                && held.gid() == self.metadata.gid()
+                && held.mode() == self.metadata.mode()
+                && exacl::getfacl(path, None)? == self.acl
+                && Handle::from_file(self.file.try_clone()?)? == self.identity
+        };
+        #[cfg(windows)]
+        let matches = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            let current = fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?;
+            require_regular(path, &current.metadata()?)?;
+            Handle::from_file(current)? == self.identity
+                && self.file.metadata()?.permissions() == self.metadata.permissions()
+                && windows_access_snapshot(&self.file)? == self.security
+        };
+        if !matches {
+            return Err(refusal(path, "destination object or access policy changed"));
+        }
+        Ok(())
+    }
+
+    /// Preserve the captured file policy before payload I/O and verify native readback.
+    fn apply(&self, path: &Path, staged: &tempfile::NamedTempFile) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let current = staged.as_file().metadata()?;
+            if current.uid() != self.metadata.uid() || current.gid() != self.metadata.gid() {
+                std::os::unix::fs::fchown(
+                    staged.as_file(),
+                    Some(self.metadata.uid()),
+                    Some(self.metadata.gid()),
+                )?;
+            }
+            exacl::setfacl(&[staged.path()], &self.acl, None)?;
+        }
+        #[cfg(windows)]
+        preserve_windows_access(path, &self.file, staged)?;
+        // Ownership changes can clear mode bits. Restore mode after ownership/ACL.
+        staged
+            .as_file()
+            .set_permissions(self.metadata.permissions())?;
+        #[cfg(target_os = "macos")]
+        if exacl::getfacl(staged.path(), None)? != self.acl {
+            return Err(refusal(
+                path,
+                "staged access ACL differs from the destination",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Keep access controls on the staged object before writing or publishing bytes.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn preserve_replacement_access(
     path: &Path,
     metadata: &Metadata,
@@ -530,64 +889,33 @@ fn preserve_replacement_access(
             )?;
         }
     }
-    #[cfg(target_os = "linux")]
-    let access_acls = {
-        use xattr::FileExt;
-        // The kernel owns these ACL encodings; copy them without interpreting
-        // entries or numeric principals. Both are fixed access-control roles.
-        const ACCESS_ACLS: [&str; 2] = ["system.posix_acl_access", "system.nfs4_acl"];
-        let mut captured = Vec::with_capacity(ACCESS_ACLS.len());
-        for name in ACCESS_ACLS {
-            let access = match xattr::get(path, name) {
-                Ok(value) => value,
-                Err(source) if source.kind() == io::ErrorKind::Unsupported => continue,
-                Err(source) => return Err(source),
-            };
-            if let Some(access) = &access {
-                staged.as_file().set_xattr(name, access)?;
-            } else if staged.as_file().get_xattr(name)?.is_some() {
-                staged.as_file().remove_xattr(name)?;
-            }
-            captured.push((name, access));
-        }
-        captured
-    };
-    #[cfg(target_os = "macos")]
-    let access_acl = {
-        let access = exacl::getfacl(path, None)?;
-        exacl::setfacl(&[staged.path()], &access, None)?;
-        access
-    };
-    #[cfg(windows)]
-    preserve_windows_access(path, staged)?;
     // chown can clear mode bits, and a POSIX ACL controls the group-class mask.
     // Restore the original mode only after restoring ownership and ACL entries.
     staged.as_file().set_permissions(metadata.permissions())?;
-    #[cfg(target_os = "linux")]
-    {
-        use xattr::FileExt;
-        for (name, access) in access_acls {
-            if staged.as_file().get_xattr(name)? != access {
-                return Err(refusal(
-                    path,
-                    "staged access ACL differs from the destination",
-                ));
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if exacl::getfacl(staged.path(), None)? != access_acl {
-        return Err(refusal(
-            path,
-            "staged access ACL differs from the destination",
-        ));
-    }
+    let _ = path;
     Ok(())
+}
+
+/// Capture owner/group/DACL through the retained file without requesting SACL privilege.
+#[cfg(windows)]
+fn windows_access_snapshot(file: &fs::File) -> io::Result<std::ffi::OsString> {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{
+        ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo,
+    };
+    let information =
+        SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
+    let access = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, information)?;
+    ConvertSecurityDescriptorToStringSecurityDescriptor(&access, information)
 }
 
 /// Copy the destination DACL and inheritance policy using native file handles.
 #[cfg(windows)]
-fn preserve_windows_access(path: &Path, staged: &tempfile::NamedTempFile) -> io::Result<()> {
+fn preserve_windows_access(
+    path: &Path,
+    original: &fs::File,
+    staged: &tempfile::NamedTempFile,
+) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_permissions::constants::{AccessRights, SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::{
@@ -597,12 +925,9 @@ fn preserve_windows_access(path: &Path, staged: &tempfile::NamedTempFile) -> io:
     const DACL_PREFIX: &str = "D:";
     const NULL_DACL_FLAG: &str = "NO_ACCESS_CONTROL";
     const PROTECTED_FLAG: char = 'P';
-    let original = fs::OpenOptions::new()
-        .access_mode(AccessRights::ReadControl.bits())
-        .open(path)?;
     let information =
         SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
-    let access = GetSecurityInfo(&original, SeObjectType::SE_FILE_OBJECT, information)?;
+    let access = GetSecurityInfo(original, SeObjectType::SE_FILE_OBJECT, information)?;
     let current = GetSecurityInfo(staged.as_file(), SeObjectType::SE_FILE_OBJECT, information)?;
     let owner_changed = access.owner() != current.owner();
     let group_changed = access.group() != current.group();

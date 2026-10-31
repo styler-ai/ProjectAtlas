@@ -147,6 +147,7 @@ tree-sitter-zig = "=1.1.2"
 whichdisk = { version = "0.7.0", default-features = false, features = ["list"] }
 unicode-casefold = "=0.2.0"
 xattr = "1.6.1"
+rustix = { version = "1.1.4", features = ["fs"] }
 exacl = { version = "=0.13.0", default-features = false }
 windows-permissions = "=0.2.4"
 yaml-rust2 = "0.12"

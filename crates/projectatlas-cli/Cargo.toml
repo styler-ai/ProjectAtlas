@@ -61,6 +61,7 @@ cli-core = [
     "dep:whichdisk",
     "dep:unicode-casefold",
     "dep:xattr",
+    "dep:rustix",
     "dep:exacl",
     "dep:windows-permissions",
     "dep:tempfile",
@@ -136,9 +137,11 @@ zstd = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 whichdisk = { workspace = true, optional = true }
 exacl = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true, features = ["process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 xattr = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = { workspace = true, optional = true }

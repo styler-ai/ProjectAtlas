@@ -31,6 +31,11 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   config, managed TOML config or JSON sidecar, including native inheritance policy
   and effective ownership. Refuse before publication if preservation cannot be proved;
   keep ordinary regeneration, outside-hardlink safety and owned failure cleanup.
+- Preserve existing Linux mandatory file labels as well as discretionary ACLs.
+  Snapshot access policy through the admitted file object, and prepare changed
+  policy on an anonymous stage before exposing a pathname. Protect macOS replacement
+  stages from inherited ACL grants before opening payload data; retain normal
+  direct-parent inheritance when creating genuinely new outputs.
 
 ## Capabilities
 
@@ -57,7 +62,9 @@ no unsafe binding or schema change. Native ACL preservation additionally uses th
 already locked Linux xattr API, macOS-only exacl and Windows-only windows-permissions;
 the latter needs an exact reviewed bitflags 1 dependency exception. APFS expanding
 aliases use pinned Unicode 9 tables from unicode-casefold 0.2.0. These additions
-require dependency gates and native behavior proof before acceptance.
+require dependency gates and native behavior proof before acceptance. Anonymous
+Linux staging and non-following source snapshots reuse the already locked rustix
+safe filesystem APIs; macOS also uses its effective-user-ID accessor.
 
 ## Release Scope
 

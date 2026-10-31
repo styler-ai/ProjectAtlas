@@ -82,6 +82,97 @@ fn document_creation_uses_ordinary_umask_and_replacement_preserves_permissions()
 
 #[cfg(unix)]
 #[test]
+fn write_only_destination_remains_replaceable_without_payload_read_access() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    fs::write(&output, b"old output")?;
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o200))?;
+    guard.write_generated(&output, b"write-only replacement")?;
+    require(
+        fs::metadata(&output)?.permissions().mode() & 0o777 == 0o200,
+        "write-only destination permissions changed",
+    )?;
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o600))?;
+    require(
+        fs::read(output)? == b"write-only replacement",
+        "write-only replacement bytes were lost",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn replacement_refuses_destination_entry_and_access_changes() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for change in ["replace", "remove", "permissions", "appear"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+        guard.ensure_directory()?;
+        let output = guard.directory.join(HOST_FILES[0]);
+        let retired = root.join("previous-destination");
+        if change != "appear" {
+            fs::write(&output, b"old output")?;
+            fs::set_permissions(&output, fs::Permissions::from_mode(0o640))?;
+        }
+        let result = guard.publish(
+            &output,
+            b"candidate",
+            FilePublication::Replace,
+            || match change {
+                "replace" => {
+                    fs::rename(&output, &retired)?;
+                    fs::write(&output, b"racing complete output")?;
+                    fs::set_permissions(&output, fs::Permissions::from_mode(0o600))
+                }
+                "remove" => fs::rename(&output, &retired),
+                "permissions" => fs::set_permissions(&output, fs::Permissions::from_mode(0o600)),
+                "appear" => fs::write(&output, b"racing complete output"),
+                _ => Err(io::Error::other("unknown destination change fixture")),
+            },
+        );
+        require(
+            result.is_err(),
+            &format!("destination {change} was overwritten: {result:?}"),
+        )?;
+        if change == "remove" {
+            require(!output.exists(), "removed destination was recreated")?;
+        } else {
+            let expected = if change == "permissions" {
+                b"old output".as_slice()
+            } else {
+                b"racing complete output".as_slice()
+            };
+            require(
+                fs::read(&output)? == expected,
+                "changed output was overwritten",
+            )?;
+            if change != "appear" {
+                require(
+                    fs::metadata(&output)?.permissions().mode() & 0o777 == 0o600,
+                    "changed output permissions were overwritten",
+                )?;
+            }
+        }
+        if retired.exists() {
+            require(
+                fs::read(retired)? == b"old output",
+                "retained source changed",
+            )?;
+        }
+        require(
+            fs::read_dir(&guard.directory)?.count() == usize::from(change != "remove"),
+            "destination refusal leaked owned staging",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn generated_creation_preserves_ordinary_modes_for_all_host_and_default_roles() -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
@@ -973,6 +1064,53 @@ fn publication_failure_preserves_existing_output_and_cleans_owned_staging() -> i
 
 #[test]
 #[cfg(any(unix, windows))]
+fn staging_entry_replacement_never_publishes_or_unlinks_the_foreign_file() -> io::Result<()> {
+    let mut failures = Vec::new();
+    for fail_before_publication in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+        guard.ensure_directory()?;
+        let state = root.join(STATE_DIRECTORY);
+        let output = state.join(HOST_FILES[0]);
+        fs::write(&output, b"last valid output")?;
+        let retained_stage = root.join("retained-owned-stage");
+        let mut foreign = None;
+        let result = guard.publish(&output, b"candidate", FilePublication::Replace, || {
+            let path = fs::read_dir(&state)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()?
+                .into_iter()
+                .find(|path| path != &output)
+                .ok_or_else(|| io::Error::other("missing owned stage"))?;
+            fs::rename(&path, &retained_stage)?;
+            fs::write(&path, b"foreign sentinel")?;
+            foreign = Some(path);
+            if fail_before_publication {
+                Err(io::Error::other("controlled pre-publication failure"))
+            } else {
+                Ok(())
+            }
+        });
+        let foreign = foreign.ok_or_else(|| io::Error::other("stage replacement did not run"))?;
+        if result.is_ok()
+            || fs::read(&output)? != b"last valid output"
+            || !fs::read(&foreign).is_ok_and(|bytes| bytes == b"foreign sentinel")
+            || fs::read(&retained_stage)? != b"candidate"
+        {
+            failures.push(format!(
+                "failure={fail_before_publication}, result={result:?}"
+            ));
+        }
+    }
+    require(
+        failures.is_empty(),
+        &format!("foreign stage ownership lost: {failures:?}"),
+    )
+}
+
+#[test]
+#[cfg(any(unix, windows))]
 fn directory_replacement_never_unlinks_a_foreign_staging_name() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("checkout");
@@ -1170,6 +1308,168 @@ fn replacement_preserves_posix_access_acl_and_outside_owner() -> io::Result<()> 
     Ok(())
 }
 
+/// Kernel attribute-storage proof, distinct from an enforced SELinux/Smack policy test.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root security-xattr access and setpriv; selected explicitly in Linux CI"]
+fn replacement_preserves_linux_security_labels_without_optional_relabel_privilege() -> io::Result<()>
+{
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use xattr::FileExt;
+    const CHILD_ROOT: &str = "PROJECTATLAS_TEST_SECURITY_LABEL_ROOT";
+    const LABELS: [(&str, &[u8]); 4] = [
+        ("security.selinux", b"system_u:object_r:tmp_t:s0\0"),
+        ("security.SMACK64", b"projectatlas-fixture"),
+        ("security.SMACK64EXEC", b"projectatlas-exec"),
+        ("security.SMACK64MMAP", b"projectatlas-mmap"),
+    ];
+    require(
+        fs::metadata("/proc/self")?.uid() == 0,
+        "native security-label fixture requires root",
+    )?;
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = std::path::PathBuf::from(root).canonicalize()?;
+        let output = root.join(STATE_DIRECTORY).join(HOST_FILES[0]);
+        let probe = root.join("equivalent-policy-probe");
+        let policy = super::linux_access::ReplacementPolicy::capture(
+            &output,
+            &fs::symlink_metadata(&output)?,
+        )?;
+        let probe = fs::OpenOptions::new().read(true).write(true).open(probe)?;
+        require(policy.matches(&probe)?, "equivalent-policy fixture differs")?;
+        let prohibited = probe.set_xattr(LABELS[0].0, LABELS[0].1);
+        require(
+            prohibited
+                .as_ref()
+                .is_err_and(|source| matches!(source.raw_os_error(), Some(1 | 13))),
+            &format!("label setter was not privilege-restricted: {prohibited:?}"),
+        )?;
+        policy.apply(&probe)?;
+        require(
+            policy.matches(&probe)?,
+            "equal-policy preservation requested setters",
+        )?;
+        let guard = ProjectStateGuard::preflight(&root, None, None)?;
+        let result = guard.write_generated(&output, b"must remain unpublished");
+        require(
+            result
+                .as_ref()
+                .is_err_and(|source| matches!(source.raw_os_error(), Some(1 | 13))),
+            &format!("mismatched policy failed without a relabel refusal: {result:?}"),
+        )?;
+        require(
+            fs::read(&output)? == b"last valid output",
+            "refusal replaced source",
+        )?;
+        for (name, value) in LABELS {
+            require(
+                xattr::get(&output, name)?.as_deref() == Some(value),
+                "refusal changed source security label",
+            )?;
+        }
+        return require(
+            fs::read_dir(root.join(STATE_DIRECTORY))?.count() == 1,
+            "relabel refusal leaked named staging",
+        );
+    }
+    for (private, filename, host) in replacement_targets() {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let directory = if private {
+            let directory = root.join(STATE_DIRECTORY);
+            fs::create_dir(&directory)?;
+            directory
+        } else {
+            root.clone()
+        };
+        let output = directory.join(filename);
+        fs::write(&output, b"last valid output")?;
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o640))?;
+        // The privileged fixture also exercises a real ownership change on
+        // the anonymous replacement, rather than only equal-owner metadata.
+        std::os::unix::fs::chown(&output, Some(65534), Some(65534))?;
+        for (name, value) in LABELS {
+            xattr::set(&output, name, value)?;
+            require(
+                xattr::get(&output, name)?.as_deref() == Some(value),
+                "kernel did not retain native label fixture",
+            )?;
+        }
+        let outside = root.join("outside-owner");
+        fs::hard_link(&output, &outside)?;
+        let owner = fs::metadata(&output)?;
+        let mut guard = if host {
+            ProjectStateGuard::preflight(&root, None, None)?
+        } else {
+            ProjectStateGuard::preflight_document(&root, &output)?
+                .ok_or_else(|| io::Error::other("native-label document was not admitted"))?
+        };
+        let entries = fs::read_dir(&directory)?.count();
+        let failed = guard.publish(&output, b"unpublished", FilePublication::Replace, || {
+            Err(io::Error::other("controlled labeled publication failure"))
+        });
+        require(
+            failed.is_err()
+                && fs::read(&output)? == b"last valid output"
+                && fs::read_dir(&directory)?.count() == entries,
+            "failed labeled replacement changed source or leaked staging",
+        )?;
+        if host {
+            guard.write_generated(&output, b"owned replacement")?;
+        } else {
+            guard.write_document(b"owned replacement")?;
+        }
+        let after = fs::metadata(&output)?;
+        require(
+            fs::read(&output)? == b"owned replacement"
+                && fs::read(&outside)? == b"last valid output"
+                && (after.uid(), after.gid(), after.mode())
+                    == (owner.uid(), owner.gid(), owner.mode())
+                && fs::read_dir(&directory)?.count() == entries,
+            "native-label replacement changed ownership, outside bytes or cleanup",
+        )?;
+        for path in [&output, &outside] {
+            for (name, value) in LABELS {
+                require(
+                    xattr::get(path, name)?.as_deref() == Some(value),
+                    "replacement lost a native file access label",
+                )?;
+            }
+        }
+    }
+    // Prove equivalent policy needs no optional relabel capability, while a
+    // real mismatched replacement refuses without changing its old output.
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let state = root.join(STATE_DIRECTORY);
+    fs::create_dir(&state)?;
+    for path in [
+        state.join(HOST_FILES[0]),
+        root.join("equivalent-policy-probe"),
+    ] {
+        fs::write(&path, b"last valid output")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+        for (name, value) in LABELS {
+            xattr::set(&path, name, value)?;
+        }
+    }
+    let child = std::process::Command::new("setpriv")
+        .args(["--bounding-set=-sys_admin,-mac_admin", "--inh-caps=-all", "--ambient-caps=-all"])
+        .arg(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "project_state::tests::replacement_preserves_linux_security_labels_without_optional_relabel_privilege",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, &root)
+        .output()?;
+    require(
+        child.status.success(),
+        &format!("capability control failed: {child:?}"),
+    )
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn replacement_preserves_ordered_extended_acl_and_outside_owner() -> io::Result<()> {
@@ -1255,6 +1555,280 @@ fn replacement_preserves_ordered_extended_acl_and_outside_owner() -> io::Result<
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires passwordless fixture-only sudo as nobody; selected explicitly in macOS CI"]
+fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries()
+-> io::Result<()> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::process::{Command, Stdio};
+
+    fn chmod_acl(path: &Path, entry: &str) -> io::Result<()> {
+        let output = Command::new("chmod")
+            .args(["+a", entry])
+            .arg(path)
+            .output()?;
+        require(
+            output.status.success(),
+            &format!("ACL fixture failed: {output:?}"),
+        )
+    }
+    fn nobody_open(path: &Path, write: bool) -> io::Result<std::process::Output> {
+        Command::new("sudo")
+            .args([
+                "-n",
+                "-u",
+                "nobody",
+                "/bin/sh",
+                "-c",
+                "if [ \"$2\" = write ]; then exec 3>>\"$1\"; else exec 3<\"$1\"; fi",
+                "projectatlas-access",
+            ])
+            .arg(path)
+            .arg(if write { "write" } else { "read" })
+            .output()
+    }
+    fn check_private(stage: &tempfile::NamedTempFile, writer: u32) -> io::Result<()> {
+        let parent = stage
+            .path()
+            .parent()
+            .ok_or_else(|| io::Error::other("stage has no parent"))?;
+        let metadata = fs::metadata(parent)?;
+        require(
+            parent
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".publication-"))
+                && metadata.uid() == writer
+                && metadata.permissions().mode() & 0o777 == 0o700
+                && exacl::getfacl(parent, None)?.is_empty(),
+            "replacement workspace is not writer-owned, private and ACL-empty",
+        )?;
+        for write in [false, true] {
+            let output = nobody_open(stage.path(), write)?;
+            require(
+                !output.status.success()
+                    && String::from_utf8_lossy(&output.stderr).contains("Permission denied"),
+                &format!("private stage did not deny native data open: {output:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    let sudo = Command::new("sudo")
+        .args(["-n", "-u", "nobody", "/usr/bin/true"])
+        .output()?;
+    require(
+        sudo.status.success(),
+        "native ACL fixture requires passwordless sudo as nobody",
+    )?;
+    // A private runner TMPDIR would make every nobody open fail at an unrelated
+    // ancestor. CI supplies a traversable disposable volume; ordinary proof uses
+    // the public temporary directory and hardens only this fixture's own roots.
+    let base = std::env::var_os("PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT").map_or_else(
+        || std::path::PathBuf::from("/private/tmp"),
+        std::path::PathBuf::from,
+    );
+    let temp = tempfile::tempdir_in(&base)?;
+    let root = temp.path().canonicalize()?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))?;
+    let writer = fs::metadata(&root)?.uid();
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    fs::set_permissions(&guard.directory, fs::Permissions::from_mode(0o755))?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    fs::write(&output, b"last valid output")?;
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o640))?;
+    chmod_acl(&output, "user:nobody deny read,write")?;
+    let original_acl = exacl::getfacl(&output, None)?;
+    chmod_acl(
+        &guard.directory,
+        "user:nobody allow read,write,file_inherit,only_inherit",
+    )?;
+
+    let baseline = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o600))
+        .tempfile_in(&guard.directory)?;
+    let mut child = Command::new("sudo")
+        .args(["-n", "-u", "nobody", "/bin/sh", "-c",
+            "exec 3>\"$1\" || exit; printf 'ready\\n'; IFS= read -r signal || exit; printf retained-fd >&3",
+            "projectatlas-held-fd"])
+        .arg(baseline.path())
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn()?;
+    let causal = (|| {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("missing fixture stdout"))?;
+        let mut ready = String::new();
+        std::io::BufReader::new(stdout).read_line(&mut ready)?;
+        require(
+            ready == "ready\n",
+            "inherited ACL did not override baseline mode0600",
+        )?;
+        exacl::setfacl(&[baseline.path()], &[], None)?;
+        baseline
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+        require(
+            !nobody_open(baseline.path(), true)?.status.success(),
+            "narrowed ACL still permits new handles",
+        )?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing fixture stdin"))?
+            .write_all(b"continue\n")
+    })();
+    drop(child.stdin.take());
+    let status = child.wait_with_output()?;
+    causal?;
+    require(
+        status.status.success() && fs::read(baseline.path())? == b"retained-fd",
+        &format!("baseline held descriptor did not survive ACL narrowing: {status:?}"),
+    )?;
+    baseline.close()?;
+    for write in [false, true] {
+        require(
+            !nobody_open(&output, write)?.status.success(),
+            "old target allows nobody access",
+        )?;
+    }
+    guard.publish_with_stage_check(
+        &output,
+        b"owned replacement",
+        FilePublication::Replace,
+        |stage| check_private(stage, writer),
+        || Ok(()),
+    )?;
+    require(
+        fs::read(&output)? == b"owned replacement"
+            && exacl::getfacl(&output, None)? == original_acl
+            && !nobody_open(&output, true)?.status.success(),
+        "protected replacement lost bytes or restrictive ACL",
+    )?;
+    let created = guard.directory.join(HOST_FILES[1]);
+    guard.write_new(&created, b"fresh output")?;
+    require(
+        nobody_open(&created, true)?.status.success()
+            && !exacl::getfacl(&created, None)?.is_empty(),
+        "new output lost legitimate direct-parent ACL inheritance",
+    )?;
+
+    for substitute_directory in [false, true] {
+        let parked = root.join("retained-private-workspace");
+        let mut workspace = None;
+        let result = guard.publish_with_stage_check(
+            &output,
+            b"unpublished",
+            FilePublication::Replace,
+            |stage| {
+                check_private(stage, writer)?;
+                workspace = Some(
+                    stage
+                        .path()
+                        .parent()
+                        .ok_or_else(|| io::Error::other("missing parent"))?
+                        .to_path_buf(),
+                );
+                Ok(())
+            },
+            || {
+                // Obtain the exact active workspace independently of the stage
+                // observer borrow; no process-global test hook is needed.
+                let private = fs::read_dir(&guard.directory)?
+                    .collect::<io::Result<Vec<_>>>()?
+                    .into_iter()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".publication-")
+                    })
+                    .ok_or_else(|| io::Error::other("missing private fixture directory"))?
+                    .path();
+                if substitute_directory {
+                    fs::rename(&private, &parked)?;
+                    fs::create_dir(&private)?;
+                }
+                fs::write(private.join("foreign-sentinel"), b"foreign owner")?;
+                Err(io::Error::other("controlled private cleanup failure"))
+            },
+        );
+        require(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("cleanup was withheld"))
+                && fs::read(&output)? == b"owned replacement",
+            &format!("private cleanup failure was concealed: {result:?}"),
+        )?;
+        let private = workspace.ok_or_else(|| io::Error::other("stage observer did not run"))?;
+        require(
+            fs::read(private.join("foreign-sentinel"))? == b"foreign owner",
+            "foreign workspace entry was removed",
+        )?;
+        if substitute_directory {
+            require(
+                fs::read_dir(&parked)?.count() == 1,
+                "retained payload stage was removed",
+            )?;
+            fs::remove_dir_all(&parked)?;
+        } else {
+            require(
+                fs::read_dir(&private)?.count() == 1,
+                "owned payload stage was not cleaned",
+            )?;
+        }
+        fs::remove_file(private.join("foreign-sentinel"))?;
+        fs::remove_dir(private)?;
+    }
+
+    let owner_temp = tempfile::tempdir_in(&base)?;
+    let owner_root = owner_temp.path().canonicalize()?;
+    fs::set_permissions(&owner_root, fs::Permissions::from_mode(0o755))?;
+    let mut owner_guard = ProjectStateGuard::preflight(&owner_root, None, None)?;
+    owner_guard.ensure_directory()?;
+    exacl::setfacl(&[&owner_root, &owner_guard.directory], &[], None)?;
+    require(
+        exacl::getfacl(&owner_guard.directory, None)?.is_empty(),
+        "owner-mismatch fixture still has an ACL inheritance trigger",
+    )?;
+    fs::set_permissions(&owner_guard.directory, fs::Permissions::from_mode(0o755))?;
+    let owned = owner_guard.directory.join(HOST_FILES[0]);
+    fs::write(&owned, b"other owner's output")?;
+    fs::set_permissions(&owned, fs::Permissions::from_mode(0o644))?;
+    let chown = Command::new("sudo")
+        .args(["-n", "chown", "nobody"])
+        .arg(&owned)
+        .output()?;
+    require(
+        chown.status.success() && fs::metadata(&owned)?.uid() != writer,
+        "owner-mismatch fixture failed",
+    )?;
+    let identity = fs::metadata(&owned)?.ino();
+    let mut observed = false;
+    let result = owner_guard.publish_with_stage_check(
+        &owned,
+        b"unpublished",
+        FilePublication::Replace,
+        |stage| {
+            observed = true;
+            check_private(stage, writer)?;
+            Err(io::Error::other("controlled owner-mismatch stage failure"))
+        },
+        || Ok(()),
+    );
+    require(
+        observed
+            && result.is_err()
+            && fs::metadata(&owned)?.ino() == identity
+            && fs::read(&owned)? == b"other owner's output"
+            && fs::read_dir(&owner_guard.directory)?.count() == 1,
+        "owner-mismatch staging changed source or leaked a private workspace",
+    )
+}
+
 /// Prepare a native Windows ACL independently of the Rust publication adapter.
 #[cfg(windows)]
 fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
@@ -1285,6 +1859,121 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
     String::from_utf8(result.stdout)
         .map(|value| value.trim().to_owned())
         .map_err(io::Error::other)
+}
+
+#[cfg(windows)]
+#[test]
+fn replacement_refuses_changed_windows_destination_identity_and_policy() -> io::Result<()> {
+    for change in ["replace", "remove", "DACL", "readonly", "appear"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+        guard.ensure_directory()?;
+        let output = guard.directory.join(HOST_FILES[0]);
+        let retired = root.join("retained-destination");
+        if change != "appear" {
+            fs::write(&output, b"last valid output")?;
+        }
+        let mut observed = false;
+        let mut changed_acl = None;
+        let result = guard.publish(&output, b"candidate", FilePublication::Replace, || {
+            observed = true;
+            match change {
+                "replace" => {
+                    fs::rename(&output, &retired)?;
+                    fs::write(&output, b"racing complete output")
+                }
+                "remove" => fs::rename(&output, &retired),
+                "DACL" => {
+                    changed_acl = Some(windows_acl(&output, Some(true))?);
+                    Ok(())
+                }
+                "readonly" => {
+                    let mut permissions = fs::metadata(&output)?.permissions();
+                    permissions.set_readonly(true);
+                    fs::set_permissions(&output, permissions)
+                }
+                "appear" => fs::write(&output, b"racing complete output"),
+                _ => Err(io::Error::other("unknown native destination change")),
+            }
+        });
+        require(
+            observed && result.is_err(),
+            &format!("changed Windows destination was not refused: {change}, {result:?}"),
+        )?;
+        if change == "remove" {
+            require(!output.exists(), "removed destination was recreated")?;
+        } else {
+            let expected = if matches!(change, "replace" | "appear") {
+                b"racing complete output".as_slice()
+            } else {
+                b"last valid output".as_slice()
+            };
+            require(
+                fs::read(&output)? == expected,
+                "changed native output was overwritten",
+            )?;
+            if let Some(acl) = changed_acl {
+                require(
+                    windows_acl(&output, None)? == acl,
+                    "changed DACL was overwritten",
+                )?;
+            }
+            if change == "readonly" {
+                let mut permissions = fs::metadata(&output)?.permissions();
+                require(
+                    permissions.readonly(),
+                    "changed readonly policy was overwritten",
+                )?;
+                permissions.set_readonly(false);
+                fs::set_permissions(&output, permissions)?;
+            }
+        }
+        require(
+            fs::read_dir(&guard.directory)?.count() == usize::from(change != "remove"),
+            "changed native destination leaked staging",
+        )?;
+        if retired.exists() {
+            require(
+                fs::read(retired)? == b"last valid output",
+                "retained native source changed",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn staged_file_identity_checks_keep_competing_data_handles_excluded() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let state = root.join(STATE_DIRECTORY);
+    let output = state.join(HOST_FILES[0]);
+    let mut observed = false;
+    guard.publish(&output, b"owned output", FilePublication::Replace, || {
+        observed = true;
+        let stage = fs::read_dir(&state)?
+            .next()
+            .ok_or_else(|| io::Error::other("missing owned stage"))??
+            .path();
+        for read in [true, false] {
+            let open = fs::OpenOptions::new().read(read).write(!read).open(&stage);
+            require(
+                open.as_ref()
+                    .err()
+                    .is_some_and(|error| error.raw_os_error() == Some(32)),
+                &format!("stage allowed competing data access: read={read}, result={open:?}"),
+            )?;
+        }
+        Ok(())
+    })?;
+    require(
+        observed && fs::read(output)? == b"owned output",
+        "metadata verification prevented valid publication",
+    )
 }
 
 #[cfg(windows)]

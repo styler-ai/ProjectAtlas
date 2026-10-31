@@ -479,6 +479,24 @@ jobs:
           PROJECTATLAS_CI_PLATFORM: ${{ matrix.label }}
         run: |
           cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::
+          if [ "$RUNNER_OS" = Linux ]; then
+            # Build as the runner; elevate only the disposable native-label test.
+            target_receipt="$RUNNER_TEMP/project-state-unit-target.jsonl"
+            cargo test --locked -p projectatlas-cli --bin projectatlas --no-run --message-format=json > "$target_receipt"
+            test_executable="$(python3 - "$target_receipt" <<'PY'
+          import json
+          import sys
+          artifacts = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+          binaries = {row["executable"] for row in artifacts if row.get("reason") == "compiler-artifact" and row.get("target", {}).get("name") == "projectatlas" and row.get("profile", {}).get("test") and row.get("executable")}
+          if len(binaries) != 1:
+              raise SystemExit("expected one exact native unit-test executable")
+          print(next(iter(binaries)))
+          PY
+            )"
+            sudo -n env TMPDIR="$RUNNER_TEMP" "$test_executable" --exact project_state::tests::replacement_preserves_linux_security_labels_without_optional_relabel_privilege --ignored --nocapture
+          elif [ "$RUNNER_OS" = macOS ]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
+          fi
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::init_admits_legacy_config_before_repairing_missing_root_identity -- --exact
           cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
           cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
@@ -496,6 +514,9 @@ jobs:
           set -euo pipefail
           original_tmpdir="${TMPDIR:-$RUNNER_TEMP}"
           fixture="$(mktemp -d "$RUNNER_TEMP/projectatlas-case-modes.XXXXXX")"
+          # Native nobody ACL controls must reach this disposable mount through
+          # its ancestors; otherwise an unrelated 0700 temp parent masks access.
+          chmod 755 "$fixture"
           volume="$fixture/volume"
           mounted=false
           nested_mounted=false
@@ -503,7 +524,7 @@ jobs:
           cleanup() {
             export TMPDIR="$original_tmpdir"
             if [ "$nested_mounted" = true ]; then
-              hdiutil detach "$nested" || return
+              sudo -n hdiutil detach "$nested" || return
             fi
             if [ "$mounted" = true ]; then
               hdiutil detach "$volume" || return
@@ -533,19 +554,26 @@ jobs:
             fi
             nested_image="$fixture/nested-$filesystem.dmg"
             create_case_image "$nested_filesystem" ProjectAtlasNested "$nested_image"
-            hdiutil attach -nobrowse -mountpoint "$nested" "$nested_image"
+            # The runner's unprivileged mount is refused below another volume.
+            # Scope elevation to this disposable image and return its root to
+            # the runner before executing any product command.
+            sudo -n hdiutil attach -nobrowse -owners on -mountpoint "$nested" "$nested_image"
             nested_mounted=true
+            sudo -n chown "$(id -u):$(id -g)" "$nested"
             export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
             export TMPDIR="$volume/tmp"
+            export PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT="$volume/tmp"
             export PROJECTATLAS_TEST_CASE_SENSITIVE=false
             if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
               export PROJECTATLAS_TEST_CASE_SENSITIVE=true
             fi
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
             export TMPDIR="$original_tmpdir"
-            hdiutil detach "$nested"
+            unset PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT
+            sudo -n hdiutil detach "$nested"
             nested_mounted=false
             hdiutil detach "$volume"
             mounted=false
