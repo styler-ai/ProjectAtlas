@@ -4998,7 +4998,6 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             root.join(ATLAS_DIR_NAME.to_ascii_uppercase())
                 .join(DATABASE_NAME),
         ];
-        #[cfg(target_os = "macos")]
         let candidates = {
             let mut candidates = candidates;
             candidates.push(state.join(DATABASE_NAME.replace('s', "ſ")));
@@ -5686,87 +5685,94 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
 
             // A volume alias is managed; a separate case-sensitive name keeps
             // its intentional custom writer, even when both names share an inode.
-            let upper_config = config.with_file_name("config.toml".to_ascii_uppercase());
-            let case_alias = upper_config.try_exists()?;
-            let case_owner = root.with_extension("case-config-owner");
-            let upper_map = root
-                .join(ATLAS_DIR_NAME)
-                .join("projectatlas.toon".to_ascii_uppercase());
-            let case_output = root.with_extension("case-map-owner");
-            document["project"]["map_path"] = toml::Value::String(
-                upper_map
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("case map path is not UTF-8"))?
-                    .to_owned(),
-            );
-            let case_config_before = toml::to_string(&document)?;
-            fs::write(&case_owner, &case_config_before)?;
-            if case_alias {
-                fs::remove_file(&config)?;
+            for config_name in [
+                "CONFIG.TOML",
+                "conﬁg.toml",
+                "confıg.toml",
+                "config\u{200d}.toml",
+            ] {
+                let upper_config = config.with_file_name(config_name);
+                let case_alias = upper_config.try_exists()?;
+                let case_owner = root.with_extension("case-config-owner");
+                let upper_map = root
+                    .join(ATLAS_DIR_NAME)
+                    .join("projectatlas.toon".to_ascii_uppercase());
+                let case_output = root.with_extension("case-map-owner");
+                document["project"]["map_path"] = toml::Value::String(
+                    upper_map
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("case map path is not UTF-8"))?
+                        .to_owned(),
+                );
+                let case_config_before = toml::to_string(&document)?;
+                fs::write(&case_owner, &case_config_before)?;
+                if case_alias {
+                    fs::remove_file(&config)?;
+                }
+                fs::hard_link(&case_owner, &upper_config)?;
+                fs::write(&case_output, b"case map bytes")?;
+                fs::hard_link(&case_output, upper_map.with_extension("json"))?;
+                let (mut case_session, _) = McpContractSession::spawn_configured(
+                    &executable,
+                    &root,
+                    &root.join(DATABASE_PATH),
+                    Some(&upper_config),
+                    &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+                )?;
+                let case_result = (|| -> Result<(), Box<dyn Error>> {
+                    let config_argument = upper_config
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("case config path is not UTF-8"))?;
+                    invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut case_session),
+                        &[
+                            "--config",
+                            config_argument,
+                            "ignore",
+                            "add",
+                            "--kind",
+                            "path-prefix",
+                            "generated",
+                        ],
+                        "atlas_ignore_add",
+                        &json!({"kind": "path-prefix", "value": "generated"}),
+                        false,
+                    )?;
+                    if (fs::read_to_string(&case_owner)? == case_config_before) != case_alias {
+                        return Err(io::Error::other(
+                            "case config ownership ignored actual filesystem behavior",
+                        )
+                        .into());
+                    }
+                    invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut case_session),
+                        &["--config", config_argument, "map", "--json", "--force"],
+                        "atlas_map",
+                        &json!({"json": true, "force": true}),
+                        false,
+                    )?;
+                    if (fs::read(&case_output)? == b"case map bytes") != case_alias {
+                        return Err(io::Error::other(
+                            "case map ownership ignored actual filesystem behavior",
+                        )
+                        .into());
+                    }
+                    let published: Value =
+                        serde_json::from_slice(&fs::read(upper_map.with_extension("json"))?)?;
+                    if !published.is_object() {
+                        return Err(io::Error::other("case map did not publish JSON").into());
+                    }
+                    Ok(())
+                })();
+                complete_mcp_test_after_shutdown(case_result, || case_session.shutdown())?;
+                fs::remove_file(&upper_config)?;
+                fs::remove_file(upper_map.with_extension("json"))?;
+                fs::write(&config, &original_config)?;
             }
-            fs::hard_link(&case_owner, &upper_config)?;
-            fs::write(&case_output, b"case map bytes")?;
-            fs::hard_link(&case_output, upper_map.with_extension("json"))?;
-            let (mut case_session, _) = McpContractSession::spawn_configured(
-                &executable,
-                &root,
-                &root.join(DATABASE_PATH),
-                Some(&upper_config),
-                &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
-            )?;
-            let case_result = (|| -> Result<(), Box<dyn Error>> {
-                let config_argument = upper_config
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("case config path is not UTF-8"))?;
-                invoke(
-                    &executable,
-                    &root,
-                    mcp.then_some(&mut case_session),
-                    &[
-                        "--config",
-                        config_argument,
-                        "ignore",
-                        "add",
-                        "--kind",
-                        "path-prefix",
-                        "generated",
-                    ],
-                    "atlas_ignore_add",
-                    &json!({"kind": "path-prefix", "value": "generated"}),
-                    false,
-                )?;
-                if (fs::read_to_string(&case_owner)? == case_config_before) != case_alias {
-                    return Err(io::Error::other(
-                        "case config ownership ignored actual filesystem behavior",
-                    )
-                    .into());
-                }
-                invoke(
-                    &executable,
-                    &root,
-                    mcp.then_some(&mut case_session),
-                    &["--config", config_argument, "map", "--json", "--force"],
-                    "atlas_map",
-                    &json!({"json": true, "force": true}),
-                    false,
-                )?;
-                if (fs::read(&case_output)? == b"case map bytes") != case_alias {
-                    return Err(io::Error::other(
-                        "case map ownership ignored actual filesystem behavior",
-                    )
-                    .into());
-                }
-                let published: Value =
-                    serde_json::from_slice(&fs::read(upper_map.with_extension("json"))?)?;
-                if !published.is_object() {
-                    return Err(io::Error::other("case map did not publish JSON").into());
-                }
-                Ok(())
-            })();
-            complete_mcp_test_after_shutdown(case_result, || case_session.shutdown())?;
-            fs::remove_file(&upper_config)?;
-            fs::remove_file(upper_map.with_extension("json"))?;
-            fs::write(&config, &original_config)?;
 
             for private in [false, true] {
                 let operator_config = root.with_extension(if private {

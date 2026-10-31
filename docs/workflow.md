@@ -297,6 +297,9 @@ not require resetting the index or deleting approved purposes.
 If a changed default configuration or default JSON map sidecar is refused because
 it is indirect, restore a direct file at that managed destination before retrying.
 The helper commands preserve outside link targets and existing file permissions.
+Replacement also preserves native access ACLs and their owner/group subjects. If
+the platform cannot retain that access policy, publication refuses while keeping
+the existing output; retry with the access policy and ownership intact.
 Unchanged config edits and existing `.gitignore` entries remain no-ops, including a
 dangling `.gitignore` link. Explicit external config and custom map output selection
 remain supported through their existing options.

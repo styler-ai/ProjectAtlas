@@ -409,10 +409,10 @@ impl ProjectStateGuard {
         } else {
             optional_metadata(path)?
         };
-        let permissions = metadata
+        let metadata = metadata
             .map(|metadata| {
                 require_regular(path, &metadata)?;
-                Ok::<_, io::Error>(metadata.permissions())
+                Ok::<_, io::Error>(metadata)
             })
             .transpose()?;
         #[cfg(unix)]
@@ -420,16 +420,31 @@ impl ProjectStateGuard {
         #[cfg(not(unix))]
         let builder = tempfile::Builder::new();
         #[cfg(unix)]
-        if permissions.is_none() && matches!(self.admission, StateAdmission::Document(_)) {
+        if metadata.is_none() && matches!(self.admission, StateAdmission::Document(_)) {
             use std::os::unix::fs::PermissionsExt;
             builder.permissions(fs::Permissions::from_mode(0o666));
         }
+        #[cfg(not(windows))]
         let mut temporary = builder.tempfile_in(&self.directory)?;
+        #[cfg(windows)]
+        let mut temporary = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Deny other data handles while inherited access is being replaced.
+            // Delete sharing is required for atomic publication of our open file.
+            builder.make_in(&self.directory, |path| {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .share_mode(0x0000_0004)
+                    .open(path)
+            })?
+        };
         let prepared = (|| {
-            temporary.write_all(bytes)?;
-            if let Some(permissions) = permissions {
-                temporary.as_file().set_permissions(permissions)?;
+            if let Some(metadata) = &metadata {
+                preserve_replacement_access(path, metadata, &temporary)?;
             }
+            temporary.write_all(bytes)?;
             temporary.as_file().sync_all()?;
             before_publication()?;
             self.verify()
@@ -495,6 +510,170 @@ impl ProjectStateGuard {
             }
         }
     }
+}
+
+/// Keep access controls on the staged object before writing or publishing bytes.
+fn preserve_replacement_access(
+    path: &Path,
+    metadata: &Metadata,
+    staged: &tempfile::NamedTempFile,
+) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current = staged.as_file().metadata()?;
+        if current.uid() != metadata.uid() || current.gid() != metadata.gid() {
+            std::os::unix::fs::fchown(
+                staged.as_file(),
+                Some(metadata.uid()),
+                Some(metadata.gid()),
+            )?;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let access_acls = {
+        use xattr::FileExt;
+        // The kernel owns these ACL encodings; copy them without interpreting
+        // entries or numeric principals. Both are fixed access-control roles.
+        const ACCESS_ACLS: [&str; 2] = ["system.posix_acl_access", "system.nfs4_acl"];
+        let mut captured = Vec::with_capacity(ACCESS_ACLS.len());
+        for name in ACCESS_ACLS {
+            let access = match xattr::get(path, name) {
+                Ok(value) => value,
+                Err(source) if source.kind() == io::ErrorKind::Unsupported => continue,
+                Err(source) => return Err(source),
+            };
+            if let Some(access) = &access {
+                staged.as_file().set_xattr(name, access)?;
+            } else if staged.as_file().get_xattr(name)?.is_some() {
+                staged.as_file().remove_xattr(name)?;
+            }
+            captured.push((name, access));
+        }
+        captured
+    };
+    #[cfg(target_os = "macos")]
+    let access_acl = {
+        let access = exacl::getfacl(path, None)?;
+        exacl::setfacl(&[staged.path()], &access, None)?;
+        access
+    };
+    #[cfg(windows)]
+    preserve_windows_access(path, staged)?;
+    // chown can clear mode bits, and a POSIX ACL controls the group-class mask.
+    // Restore the original mode only after restoring ownership and ACL entries.
+    staged.as_file().set_permissions(metadata.permissions())?;
+    #[cfg(target_os = "linux")]
+    {
+        use xattr::FileExt;
+        for (name, access) in access_acls {
+            if staged.as_file().get_xattr(name)? != access {
+                return Err(refusal(
+                    path,
+                    "staged access ACL differs from the destination",
+                ));
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if exacl::getfacl(staged.path(), None)? != access_acl {
+        return Err(refusal(
+            path,
+            "staged access ACL differs from the destination",
+        ));
+    }
+    Ok(())
+}
+
+/// Copy the destination DACL and inheritance policy using native file handles.
+#[cfg(windows)]
+fn preserve_windows_access(path: &Path, staged: &tempfile::NamedTempFile) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_permissions::constants::{AccessRights, SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{
+        ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo, SetSecurityInfo,
+    };
+
+    const DACL_PREFIX: &str = "D:";
+    const NULL_DACL_FLAG: &str = "NO_ACCESS_CONTROL";
+    const PROTECTED_FLAG: char = 'P';
+    let original = fs::OpenOptions::new()
+        .access_mode(AccessRights::ReadControl.bits())
+        .open(path)?;
+    let information =
+        SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
+    let access = GetSecurityInfo(&original, SeObjectType::SE_FILE_OBJECT, information)?;
+    let current = GetSecurityInfo(staged.as_file(), SeObjectType::SE_FILE_OBJECT, information)?;
+    let owner_changed = access.owner() != current.owner();
+    let group_changed = access.group() != current.group();
+    // This safe wrapper exposes no control-bit getter. Read only the native
+    // DACL SDDL header, never ACE text or a lossy filesystem path conversion.
+    let sddl =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(&access, SecurityInformation::Dacl)?;
+    let header = sddl
+        .to_str()
+        .ok_or_else(|| refusal(path, "native DACL header is not text"))?;
+    let flags = if header.is_empty() {
+        None
+    } else {
+        Some(
+            header
+                .strip_prefix(DACL_PREFIX)
+                .ok_or_else(|| refusal(path, "native DACL header is invalid"))?
+                .split('(')
+                .next()
+                .ok_or_else(|| refusal(path, "native DACL flags are unavailable"))?,
+        )
+    };
+    let protected = flags.is_some_and(|flags| flags.contains(PROTECTED_FLAG));
+    // The wrapper's accessor assumes a present ACL pointer is non-null. A
+    // native NULL DACL is valid; keep it out of that accessor. Native systems
+    // unable to serialize it return a causal error above before any mutation.
+    let dacl = if flags.is_none_or(|flags| flags.contains(NULL_DACL_FLAG)) {
+        None
+    } else {
+        access.dacl()
+    };
+    let mut information = SecurityInformation::Dacl
+        | if protected {
+            SecurityInformation::ProtectedDacl
+        } else {
+            SecurityInformation::UnprotectedDacl
+        };
+    let mut rights = AccessRights::ReadControl | AccessRights::WriteDac;
+    if owner_changed {
+        information |= SecurityInformation::Owner;
+        rights |= AccessRights::WriteOwner;
+    }
+    if group_changed {
+        information |= SecurityInformation::Group;
+        rights |= AccessRights::WriteOwner;
+    }
+    let mut destination = fs::OpenOptions::new()
+        .access_mode(rights.bits())
+        .open(staged.path())?;
+    SetSecurityInfo(
+        &mut destination,
+        SeObjectType::SE_FILE_OBJECT,
+        information,
+        access.owner(),
+        access.group(),
+        dacl,
+        None,
+    )?;
+    let applied = GetSecurityInfo(
+        &destination,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl,
+    )?;
+    if applied.owner() != access.owner()
+        || applied.group() != access.group()
+        || ConvertSecurityDescriptorToStringSecurityDescriptor(&applied, SecurityInformation::Dacl)?
+            != sddl
+    {
+        return Err(refusal(path, "staged DACL differs from the destination"));
+    }
+    Ok(())
 }
 
 /// Recognize a managed entry without treating unresolved ownership as external.
@@ -614,10 +793,12 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
     if name.eq_ignore_ascii_case(expected) {
         return Ok(true);
     }
-    // Fixed product names are ASCII, but APFS simple Unicode folding also
-    // admits long-s aliases. Reuse regex's non-expanding Unicode fold tables;
-    // full uppercasing would incorrectly admit ligatures and sharp-s names.
+    // This is only a candidate filter: APFS also folds multi-scalar aliases
+    // such as the fi ligature. The containing filesystem decides ownership.
     if !name.is_ascii() && expected.is_ascii() {
+        if unicode_name_matches(name, expected) {
+            return Ok(true);
+        }
         let pattern = format!(r"\A{}\z", regex::escape(expected));
         return regex::RegexBuilder::new(&pattern)
             .case_insensitive(true)
@@ -626,6 +807,13 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
             .map_err(io::Error::other);
     }
     Ok(false)
+}
+
+/// Compare ASCII product names using APFS's Unicode 9 full, non-Turkic fold.
+fn unicode_name_matches(name: &str, expected: &str) -> bool {
+    use unicode_casefold::{Locale, UnicodeCaseFold, Variant};
+    name.case_fold_with(Variant::Full, Locale::NonTurkic)
+        .eq(expected.chars())
 }
 
 /// Match fixed components using the supported platform's case behavior.
@@ -664,8 +852,23 @@ fn named(path: &Path, expected: &str) -> io::Result<bool> {
                 Err(source) => return Err(source),
             }
         };
-        match whichdisk::resolve(&probe)?.case_sensitive() {
-            Some(case_sensitive) => Ok(!case_sensitive),
+        let volume = whichdisk::resolve(&probe)?;
+        match volume.case_sensitive() {
+            Some(true) => Ok(false),
+            Some(false) if name.eq_ignore_ascii_case(expected) => Ok(true),
+            Some(false) if volume.fs_type().eq_ignore_ascii_case("apfs") => {
+                Ok(unicode_name_matches(name, expected))
+            }
+            Some(false) => {
+                // HFS+ uses older non-expanding comparison rules; do not apply
+                // APFS's full fold to distinct names on another filesystem.
+                let pattern = format!(r"\A{}\z", regex::escape(expected));
+                regex::RegexBuilder::new(&pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map(|pattern| pattern.is_match(name))
+                    .map_err(io::Error::other)
+            }
             None => Err(refusal(
                 path,
                 "managed case-alias volume behavior is unknown",

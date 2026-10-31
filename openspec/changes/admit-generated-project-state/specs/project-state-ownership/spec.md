@@ -36,9 +36,14 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** ownership uncertainty never silently selects an external writer; selected-root aliases and physically external symlink-parent paths retain their supported behavior
 
 #### Scenario: Managed case aliases follow macOS volume behavior
-- **WHEN** a selected fixed filename or private-directory component is a case alias on macOS, including Unicode simple-fold spellings
+- **WHEN** a selected fixed filename or private-directory component is a case alias on macOS, including native Unicode spellings and APFS expanding folds
 - **THEN** classification uses the actual containing volume's case behavior, protects case aliases before database/document writes even when the main file is absent, and propagates unresolved ownership rather than choosing an external writer
 - **AND** case-distinct custom names on case-sensitive volumes remain available, including separate hardlink entries and unrelated external paths
+
+#### Scenario: Replacement preserves existing access controls
+- **WHEN** an admitted generated host config, managed TOML config or JSON sidecar is replaced
+- **THEN** publication preserves its existing access ACL/DACL and effective ownership, including applicable inheritance protection, and does not broaden access through the staging directory's defaults
+- **AND** unsupported or failed metadata preservation refuses before replacing valid output; ordinary regeneration, outside-hardlink preservation and owned staging cleanup remain available
 
 #### Scenario: Legacy configuration admission precedes identity repair
 - **WHEN** initialization selects a missing managed legacy configuration and a current database needs native root identity repair

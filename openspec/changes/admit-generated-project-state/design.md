@@ -135,29 +135,63 @@ root aliases, external physical parents and the existing-DB repair ordering.
 
 ### Recognize case aliases using the containing macOS volume
 
-Exact fixed ASCII component spellings retain the no-query fast path. A filesystem-independent
-Unicode simple-fold prefilter selects candidate roles without probing unrelated external paths.
-Establish the logical parent owner before testing a file's case variant. For the
-private directory component, establish its containing selected root before querying
-case behavior, without following that final directory component as ownership proof.
-On macOS use the already workspace-locked whichdisk safe volume capability API;
-Some(false) admits the alias, Some(true) preserves a distinct custom name, and
-unknown/failed capability evidence propagates before mutation. Resolve existing
-original parent prefixes, reduce only the unresolved suffix, then query the prospective
-parent's volume (or its nearest existing ancestor), including across mount boundaries.
-Never infer case behavior from
-following the selected file itself or from equality of hardlink object identities.
-The capability lookup may follow the parent solely to learn its volume behavior;
-existing guard/reduction evidence, not that lookup, establishes logical ownership.
+Exact fixed ASCII component spellings retain the no-query fast path. A pure candidate
+filter includes Unicode simple and full folds, then establishes logical ownership
+before querying the prospective containing volume. Resolve existing original parent
+prefixes before reducing only unresolved suffixes, including across mount boundaries.
+The whichdisk capability lookup supplies volume behavior, never ownership proof.
 
-This adds a direct macOS CLI use of an existing dependency, no new crate, platform
-unsafe code, directory scan, write probe, cache or path framework. Ordinary fixed-name
-admission remains constant in the closed output family. Owning/platform tests cover
-all five DB/document roles, absent leaves, aliased state directories and case-sensitive
-custom/hardlink positives. Actual macOS hosted proof is required; Linux directory
-casefold and Windows per-directory case sensitivity are adjacent unverified behaviors,
-not covered by this macOS-volume fix. No analogous supported-route reproduction was
-established in the bounded review; preserve existing non-macOS classification policy.
+Native APFS evidence confirms that conﬁg.toml aliases config.toml: simple folding
+alone is insufficient. Pin unicode-casefold 0.2.0, whose Unicode 9 full non-Turkic
+iterator matches the documented APFS version, and apply that expanding comparison
+only to a case-insensitive APFS volume. Preserve distinct names on sensitive volumes.
+Do not infer aliasing from two hardlink identities or apply APFS full folding to HFS+.
+The current non-APFS simple-fold path requires native HFS+/HFSX verification; do not
+claim those Unicode rules are equivalent before the controlled volume tests pass.
+
+Owning fixtures measure each native spelling pair before checking missing-leaf
+admission, outside hardlinks, dangling namespaces and parent reductions. Permanent
+CLI/configured-MCP controls include expanding config aliases and distinct custom
+names. Controlled macOS CI covers APFS/APFSX and HFS+/HFSX with an opposite-case
+nested mount. Windows Unicode aliases remain a native proof lead, not a claimed fix;
+its fixtures must establish actual lookup behavior before changing classification.
+
+### Preserve native access controls during replacement
+
+The shared publication boundary replaces a file object rather than truncating it.
+Copying std::fs::Permissions alone loses explicit ACLs. A native Linux fixture with
+stricter destination access and broader inherited defaults reproduces the loss.
+The affected registry is all three generated host files, private and legacy managed
+TOML config, and the default JSON sidecar. Create-only Gitignore/defaults are separate.
+
+Keep atomic replacement and outside-hardlink safety. Snapshot the admitted target's
+native access controls and apply them to the operation-owned stage before writing
+bytes or publishing. On Unix preserve uid/gid as well as mode so owner/group ACL
+entries retain their subjects; test the mode/ACL-mask ordering. Linux reuses locked
+xattr to copy kernel-owned POSIX/NFSv4 ACL values without decoding them; remove a
+stage's inherited ACL when absent on the source. A source query that proves the
+namespace unsupported does not authorize ignoring a successfully captured ACL.
+macOS uses exacl's ordered extended-ACL representation. Verify native roundtrips.
+
+Windows uses safe handle-based windows-permissions APIs with READ_CONTROL on the
+source and appropriate WRITE_DAC/WRITE_OWNER rights on the stage. Preserve DACL
+protection and ownership without lossy path conversion. The wrapper lacks a safe
+control getter, so use only the native DACL SDDL header for inheritance flags, not
+an application ACL parser. Avoid its NULL-DACL accessor trap; a native descriptor
+that cannot be preserved must fail causally before replacement. Keep original stage
+handles and deny competing data handles while inherited access is being replaced.
+Verify protected, inherited, absent/NULL/empty ACL behavior, stage ACL readback,
+publication failures and cleanup on Windows before accepting this implementation.
+
+The safe native wrappers require direct macOS-only exacl and Windows-only
+windows-permissions dependencies. The latter retains bitflags 1; the dependency ban
+exception is exact and justified by safe handle/OsStr compatibility. Alternatives
+using in-place writes violate hardlink/atomicity guarantees; a common ReplaceFile
+wrapper accepts only str paths and has different partial-publication failures.
+No project unsafe code, shell runtime dependency, global ACL change, or blanket ban
+on regeneration is introduced. Native failures keep the old valid output; do not
+fall back to a publication that drops access controls. All platform-specific proof
+and dependency gates remain required; current Linux evidence is not Windows proof.
 
 ### Explicit paths remain supported
 

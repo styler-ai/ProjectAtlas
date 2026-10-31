@@ -27,6 +27,10 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   volumes and resolve missing-parent reductions across mount boundaries before writes.
 - Trace analogous producer/write/admission paths and prove positive compatibility,
   causal failures and real installed CLI/MCP behavior on supported platforms.
+- Preserve existing access-control lists when replacing an admitted generated host
+  config, managed TOML config or JSON sidecar, including native inheritance policy
+  and effective ownership. Refuse before publication if preservation cannot be proved;
+  keep ordinary regeneration, outside-hardlink safety and owned failure cleanup.
 
 ## Capabilities
 
@@ -49,7 +53,11 @@ hydration activation, existing filesystem/project-binding helpers, native init t
 installed selector inventory and #715 release acceptance. Reuse existing same-file/tempfile helpers and the already locked canonical
 winapi-util as a direct Windows-only dependency for stable hard-link counts and
 whichdisk as a direct macOS-only dependency for existing volume capabilities; add
-no transitive package, unsafe binding or schema change.
+no unsafe binding or schema change. Native ACL preservation additionally uses the
+already locked Linux xattr API, macOS-only exacl and Windows-only windows-permissions;
+the latter needs an exact reviewed bitflags 1 dependency exception. APFS expanding
+aliases use pinned Unicode 9 tables from unicode-casefold 0.2.0. These additions
+require dependency gates and native behavior proof before acceptance.
 
 ## Release Scope
 

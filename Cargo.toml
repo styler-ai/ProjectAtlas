@@ -145,4 +145,8 @@ tree-sitter-typescript = "=0.23.2"
 zstd = "=0.14.3"
 tree-sitter-zig = "=1.1.2"
 whichdisk = { version = "0.7.0", default-features = false, features = ["list"] }
+unicode-casefold = "=0.2.0"
+xattr = "1.6.1"
+exacl = { version = "=0.13.0", default-features = false }
+windows-permissions = "=0.2.4"
 yaml-rust2 = "0.12"

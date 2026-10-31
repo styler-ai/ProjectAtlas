@@ -488,7 +488,7 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored
           fi
 
-      - name: Managed state on both macOS volume case modes
+      - name: Managed state across macOS volume case and Unicode modes
         if: runner.os == 'macOS' && contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
         timeout-minutes: 5
         shell: bash
@@ -512,14 +512,14 @@ jobs:
           }
           trap cleanup EXIT
           mkdir "$volume"
-          for filesystem in APFS APFSX; do
+          for filesystem in APFS APFSX HFS+ HFSX; do
             image="$fixture/$filesystem.dmg"
             hdiutil create -size 128m -fs "$filesystem" -volname ProjectAtlasCase -ov "$image"
             hdiutil attach -nobrowse -mountpoint "$volume" "$image"
             mounted=true
             mkdir -p "$volume/tmp" "$nested"
             nested_filesystem=APFSX
-            if [ "$filesystem" = APFSX ]; then
+            if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
               nested_filesystem=APFS
             fi
             nested_image="$fixture/nested-$filesystem.dmg"
@@ -529,7 +529,7 @@ jobs:
             export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
             export TMPDIR="$volume/tmp"
             export PROJECTATLAS_TEST_CASE_SENSITIVE=false
-            if [ "$filesystem" = APFSX ]; then
+            if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
               export PROJECTATLAS_TEST_CASE_SENSITIVE=true
             fi
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::

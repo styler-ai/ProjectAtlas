@@ -122,25 +122,71 @@ fn fixture_names_are_case_sensitive(root: &Path) -> io::Result<bool> {
     Ok(sensitive)
 }
 
-/// Include Unicode APFS case aliases without changing other platform policies.
+/// Measure each spelling pair, since filesystem Unicode rules differ by format.
+fn fixture_names_alias(directory: &Path, fixed: &str, variant: &str) -> io::Result<bool> {
+    let target = directory.join(fixed);
+    require(
+        !target.try_exists()?,
+        "name probe would overwrite a fixture",
+    )?;
+    fs::write(&target, b"name comparison")?;
+    let selected = directory.join(variant);
+    let aliases = selected.try_exists()?;
+    if aliases {
+        require(
+            same_file::is_same_file(&target, &selected)?,
+            "name comparison found an unrelated fixture entry",
+        )?;
+    }
+    fs::remove_file(target)?;
+    Ok(aliases)
+}
+
+/// Exercise ASCII, simple-fold, expanding-fold and native uppercase spellings.
 fn managed_name_case_variants(name: &str) -> Vec<String> {
-    #[cfg(unix)]
-    {
-        let mut variants = vec![name.to_ascii_uppercase()];
-        let long_s = name.replace('s', "ſ");
-        if long_s != name {
-            variants.push(long_s);
+    let mut variants = vec![name.to_ascii_uppercase()];
+    for variant in [
+        name.replace('s', "ſ"),
+        name.replace("fi", "ﬁ"),
+        name.replace('i', "ı"),
+        name.replace('.', "\u{200d}."),
+        name.replace('.', "\u{feff}."),
+    ] {
+        if variant != name && !variants.contains(&variant) {
+            variants.push(variant);
         }
-        variants
     }
-    #[cfg(not(unix))]
-    {
-        vec![name.to_ascii_uppercase()]
-    }
+    variants
+}
+
+#[test]
+fn apfs_full_fold_recognizes_expanding_aliases_without_compatibility_folding() {
+    assert_eq!(unicode_casefold::UNICODE_VERSION, (9, 0, 0));
+    assert!(super::unicode_name_matches(
+        "conﬁg.toml",
+        super::CONFIG_FILE
+    ));
+    assert!(super::unicode_name_matches(
+        "projectatlaſ.db",
+        DATABASE_FILE
+    ));
+    assert!(!super::unicode_name_matches(
+        "conﬃg.toml",
+        super::CONFIG_FILE
+    ));
+    assert!(!super::unicode_name_matches(
+        "confıg.toml",
+        super::CONFIG_FILE
+    ));
+    assert!(!super::unicode_name_matches(
+        "projectatlaß.db",
+        DATABASE_FILE
+    ));
 }
 
 #[test]
 fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() -> io::Result<()> {
+    let mut failures = Vec::new();
     for (private, filename, database) in [
         (true, DATABASE_FILE, true),
         (true, super::CONFIG_FILE, false),
@@ -151,7 +197,7 @@ fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() 
         for variant in managed_name_case_variants(filename) {
             let temp = tempfile::tempdir()?;
             let root = temp.path().canonicalize()?;
-            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            fixture_names_are_case_sensitive(&root)?;
             let directory = if private {
                 let state = root.join(STATE_DIRECTORY);
                 fs::create_dir(&state)?;
@@ -160,7 +206,8 @@ fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() 
                 root.clone()
             };
             let target = directory.join(filename);
-            let selected = directory.join(variant);
+            let aliases = fixture_names_alias(&directory, filename, &variant)?;
+            let selected = directory.join(&variant);
             let admit = || {
                 if database {
                     ProjectStateGuard::preflight_database_path(&selected, &root)
@@ -168,14 +215,21 @@ fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() 
                     ProjectStateGuard::preflight_document(&root, &selected)
                 }
             };
-            require(
-                admit()?.is_some() != sensitive,
-                "missing case variant lost its actual volume ownership",
-            )?;
+            let missing = admit();
+            if !missing
+                .as_ref()
+                .is_ok_and(|guard| guard.is_some() == aliases)
+            {
+                failures.push(format!(
+                    "missing {variant:?} lost native alias ownership ({aliases}); error={:?}",
+                    missing.err(),
+                ));
+                continue;
+            }
             let outside = root.join("outside-owner");
             fs::write(&outside, b"outside bytes")?;
             fs::hard_link(&outside, &target)?;
-            if sensitive {
+            if !aliases {
                 // Distinct directory entries can share an inode on a sensitive FS.
                 fs::hard_link(&target, &selected)?;
                 require(
@@ -208,7 +262,7 @@ fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() 
     let directory = root.join(STATE_DIRECTORY);
     fs::create_dir(&directory)?;
     for (fixed, custom) in [
-        (super::CONFIG_FILE, "conﬁg.toml"),
+        (super::CONFIG_FILE, "conﬃg.toml"),
         (DATABASE_FILE, "projectatlaß.db"),
         (super::CONFIG_FILE, "prefix-config.toml"),
     ] {
@@ -226,7 +280,7 @@ fn managed_case_aliases_preserve_volume_ownership_and_distinct_custom_entries() 
         )?;
         fs::remove_file(&fixed)?;
     }
-    Ok(())
+    require(failures.is_empty(), &failures.join("\n"))
 }
 
 #[cfg(unix)]
@@ -236,19 +290,20 @@ fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::R
         for variant in managed_name_case_variants(DATABASE_FILE) {
             let temp = tempfile::tempdir()?;
             let root = temp.path().canonicalize()?;
-            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            fixture_names_are_case_sensitive(&root)?;
             let directory = root.join(STATE_DIRECTORY);
             fs::create_dir(&directory)?;
+            let aliases = fixture_names_alias(&directory, DATABASE_FILE, &variant)?;
             let outside = root.join("outside-owner");
             fs::write(&outside, b"outside bytes")?;
             fs::hard_link(&outside, directory.join(format!("{DATABASE_FILE}{suffix}")))?;
             let selected = directory.join(variant);
             let admission = ProjectStateGuard::preflight_database_path(&selected, &root);
             require(
-                if sensitive {
-                    admission?.is_none()
-                } else {
+                if aliases {
                     admission.is_err()
+                } else {
+                    admission?.is_none()
                 },
                 "case variant bypassed main/sidecar ownership or blocked a distinct custom name",
             )?;
@@ -267,15 +322,16 @@ fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::R
         for variant in managed_name_case_variants(document.filename()) {
             let temp = tempfile::tempdir()?;
             let root = temp.path().canonicalize()?;
-            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            fixture_names_are_case_sensitive(&root)?;
             let directory = document.directory(&root);
             fs::create_dir_all(&directory)?;
+            let aliases = fixture_names_alias(&directory, document.filename(), &variant)?;
             let outside = root.join("outside-owner");
             let target = directory.join(document.filename());
             let selected = directory.join(variant);
             std::os::unix::fs::symlink(&outside, &target)?;
             let admission = ProjectStateGuard::preflight_document(&root, &selected);
-            if sensitive {
+            if !aliases {
                 require(
                     admission?.is_none(),
                     "distinct custom name became a managed dangling alias",
@@ -305,7 +361,8 @@ fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::R
             let root = temp.path().join("checkout");
             fs::create_dir(&root)?;
             let root = root.canonicalize()?;
-            let sensitive = fixture_names_are_case_sensitive(&root)?;
+            fixture_names_are_case_sensitive(&root)?;
+            let aliases = fixture_names_alias(&root, STATE_DIRECTORY, &variant)?;
             let outside = temp.path().join("outside-state");
             if !dangling {
                 fs::create_dir(&outside)?;
@@ -315,10 +372,10 @@ fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::R
             let selected = upper_state.join(DATABASE_FILE);
             let admission = ProjectStateGuard::preflight_database_path(&selected, &root);
             require(
-                if sensitive {
-                    admission?.is_none()
-                } else {
+                if aliases {
                     admission.is_err()
+                } else {
+                    admission?.is_none()
                 },
                 "case-aliased state directory was followed or distinct custom directory refused",
             )?;
@@ -352,6 +409,12 @@ fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::R
             (false, super::GITIGNORE_FILE, false),
         ] {
             for variant in managed_name_case_variants(filename) {
+                let directory = if private {
+                    root.join(STATE_DIRECTORY)
+                } else {
+                    root.to_path_buf()
+                };
+                let aliases = fixture_names_alias(&directory, filename, &variant)?;
                 let mut parent = mount.join("missing").join("..").join("..");
                 if !private {
                     parent.push("..");
@@ -363,10 +426,10 @@ fn managed_case_aliases_admit_sidecars_and_refuse_indirect_namespaces() -> io::R
                     ProjectStateGuard::preflight_document(root, &selected)
                 };
                 require(
-                    if sensitive {
-                        admission?.is_none()
-                    } else {
+                    if aliases {
                         admission.is_err()
+                    } else {
+                        admission?.is_none()
                     },
                     "unresolved reduction used the prefix volume instead of the destination volume",
                 )?;
@@ -921,16 +984,47 @@ fn directory_replacement_never_unlinks_a_foreign_staging_name() -> io::Result<()
     let name = stage_name
         .ok_or_else(|| io::Error::other(format!("staging enumeration failed: {result:?}")))?;
     require(
+        fs::read(outside.join(&name))? == b"foreign sentinel",
+        "cleanup unlinked foreign state",
+    )?;
+    #[cfg(windows)]
+    if !renamed {
+        require(
+            result.as_ref().err().is_some_and(|error| {
+                error.raw_os_error() == Some(5) && error.kind() == io::ErrorKind::PermissionDenied
+            }),
+            &format!("directory rename failed without native access denial: {result:?}"),
+        )?;
+        require(!aliased, "blocked rename still replaced the directory")?;
+        guard.verify()?;
+        let metadata = fs::symlink_metadata(&state)?;
+        require(
+            metadata.is_dir() && !super::indirect(&metadata),
+            "blocked rename changed the direct owner",
+        )?;
+        require(
+            !parked.try_exists()? && !output.try_exists()? && !state.join(&name).try_exists()?,
+            "blocked rename published output or retained owned staging",
+        )?;
+        require(
+            fs::read_dir(&state)?.next().is_none(),
+            "blocked rename left an unexpected directory entry",
+        )?;
+        // The native retained handle prevented replacement; this is not swap coverage.
+        guard.write_generated(&output, b"recovered output")?;
+        return require(
+            fs::read(&output)? == b"recovered output"
+                && fs::read(outside.join(&name))? == b"foreign sentinel",
+            "original owner could not retry without changing foreign state",
+        );
+    }
+    require(
         renamed,
         &format!("native directory rename failed: {result:?}"),
     )?;
     require(
         aliased,
         &format!("replacement alias creation failed: {result:?}"),
-    )?;
-    require(
-        fs::read(outside.join(&name))? == b"foreign sentinel",
-        "cleanup unlinked foreign state",
     )?;
     require(
         parked.join(&name).is_file(),
@@ -946,4 +1040,343 @@ fn directory_replacement_never_unlinks_a_foreign_staging_name() -> io::Result<()
         fs::read(&output)? == b"recovered output",
         "restored owner could not recover",
     )
+}
+
+/// Derive replacement coverage from the host registry and exact document roles.
+fn replacement_targets() -> impl Iterator<Item = (bool, &'static str, bool)> {
+    HOST_FILES
+        .into_iter()
+        .map(|name| (true, name, true))
+        .chain([
+            (true, super::CONFIG_FILE, false),
+            (false, super::LEGACY_CONFIG_FILE, false),
+            (true, super::JSON_MAP_FILE, false),
+        ])
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn replacement_preserves_posix_access_acl_and_outside_owner() -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // Native setfacl fixtures: owner/group rw, other none, mask rw, uid65534
+    // denied on the destination but allowed by the parent's default ACL.
+    const RESTRICTED: &[u8] = &[
+        2, 0, 0, 0, 1, 0, 6, 0, 255, 255, 255, 255, 2, 0, 0, 0, 254, 255, 0, 0, 4, 0, 6, 0, 255,
+        255, 255, 255, 16, 0, 6, 0, 255, 255, 255, 255, 32, 0, 0, 0, 255, 255, 255, 255,
+    ];
+    const INHERITED: &[u8] = &[
+        2, 0, 0, 0, 1, 0, 6, 0, 255, 255, 255, 255, 2, 0, 6, 0, 254, 255, 0, 0, 4, 0, 6, 0, 255,
+        255, 255, 255, 16, 0, 6, 0, 255, 255, 255, 255, 32, 0, 0, 0, 255, 255, 255, 255,
+    ];
+    const ACCESS: &str = "system.posix_acl_access";
+    const DEFAULT: &str = "system.posix_acl_default";
+    for (private, filename, host) in replacement_targets() {
+        for explicit in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = if private {
+                let directory = root.join(STATE_DIRECTORY);
+                fs::create_dir(&directory)?;
+                directory
+            } else {
+                root.clone()
+            };
+            xattr::set(&directory, DEFAULT, INHERITED)?;
+            let output = directory.join(filename);
+            fs::write(&output, b"last valid output")?;
+            if explicit {
+                xattr::set(&output, ACCESS, RESTRICTED)?;
+            } else {
+                xattr::remove(&output, ACCESS)?;
+            }
+            fs::set_permissions(&output, fs::Permissions::from_mode(0o660))?;
+            let acl = xattr::get(&output, ACCESS)?;
+            let owner = fs::metadata(&output)?;
+            let ownership = (owner.uid(), owner.gid());
+            require(
+                acl.as_deref() == explicit.then_some(RESTRICTED),
+                "native ACL fixture changed",
+            )?;
+            let outside = root.join("outside-owner");
+            fs::hard_link(&output, &outside)?;
+            let mut guard = if host {
+                ProjectStateGuard::preflight(&root, None, None)?
+            } else {
+                ProjectStateGuard::preflight_document(&root, &output)?
+                    .ok_or_else(|| io::Error::other("ACL document was not admitted"))?
+            };
+            let before_entries = fs::read_dir(&directory)?.count();
+            let failed = guard.publish(
+                &output,
+                b"unpublished bytes",
+                FilePublication::Replace,
+                || Err(io::Error::other("controlled ACL publication failure")),
+            );
+            require(
+                failed.is_err()
+                    && fs::read(&output)? == b"last valid output"
+                    && xattr::get(&output, ACCESS)? == acl
+                    && fs::read_dir(&directory)?.count() == before_entries,
+                "ACL publication failure changed the destination or leaked staging",
+            )?;
+            if host {
+                guard.write_generated(&output, b"owned replacement")?;
+            } else {
+                guard.write_document(b"owned replacement")?;
+            }
+            require(
+                xattr::get(&output, ACCESS)? == acl,
+                &format!("replacement lost explicit ACL for {filename}"),
+            )?;
+            require(
+                fs::read(&output)? == b"owned replacement"
+                    && fs::metadata(&output)?.permissions().mode() & 0o777 == 0o660
+                    && (fs::metadata(&output)?.uid(), fs::metadata(&output)?.gid()) == ownership,
+                "ACL preservation changed output or mode",
+            )?;
+            require(
+                fs::read(&outside)? == b"last valid output" && xattr::get(&outside, ACCESS)? == acl,
+                "ACL replacement changed the outside owner",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn replacement_preserves_ordered_extended_acl_and_outside_owner() -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for (private, filename, host) in replacement_targets() {
+        for explicit in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = if private {
+                let directory = root.join(STATE_DIRECTORY);
+                fs::create_dir(&directory)?;
+                directory
+            } else {
+                root.clone()
+            };
+            let output = directory.join(filename);
+            fs::write(&output, b"last valid output")?;
+            if explicit {
+                let changed = std::process::Command::new("chmod")
+                    .args(["+a", "group:everyone deny write"])
+                    .arg(&output)
+                    .output()?;
+                require(
+                    changed.status.success(),
+                    &format!("native ACL fixture failed: {changed:?}"),
+                )?;
+                let inherited = std::process::Command::new("chmod")
+                    .args(["+a", "group:everyone allow read,write,file_inherit,directory_inherit,only_inherit"])
+                    .arg(&directory)
+                    .output()?;
+                require(
+                    inherited.status.success(),
+                    &format!("native inherited ACL failed: {inherited:?}"),
+                )?;
+            }
+            let acl = exacl::getfacl(&output, None)?;
+            let owner = fs::metadata(&output)?;
+            let ownership = (owner.uid(), owner.gid());
+            require(
+                acl.is_empty() != explicit,
+                "native ACL fixture has unexpected entries",
+            )?;
+            let outside = root.join("outside-owner");
+            fs::hard_link(&output, &outside)?;
+            let mut guard = if host {
+                ProjectStateGuard::preflight(&root, None, None)?
+            } else {
+                ProjectStateGuard::preflight_document(&root, &output)?
+                    .ok_or_else(|| io::Error::other("ACL document was not admitted"))?
+            };
+            let before_entries = fs::read_dir(&directory)?.count();
+            let failed = guard.publish(
+                &output,
+                b"unpublished bytes",
+                FilePublication::Replace,
+                || Err(io::Error::other("controlled ACL publication failure")),
+            );
+            require(
+                failed.is_err()
+                    && fs::read(&output)? == b"last valid output"
+                    && exacl::getfacl(&output, None)? == acl
+                    && fs::read_dir(&directory)?.count() == before_entries,
+                "ACL failure changed the destination or leaked staging",
+            )?;
+            if host {
+                guard.write_generated(&output, b"owned replacement")?;
+            } else {
+                guard.write_document(b"owned replacement")?;
+            }
+            require(
+                fs::read(&output)? == b"owned replacement"
+                    && exacl::getfacl(&output, None)? == acl
+                    && (fs::metadata(&output)?.uid(), fs::metadata(&output)?.gid()) == ownership,
+                "replacement lost ordered extended ACL",
+            )?;
+            require(
+                fs::read(&outside)? == b"last valid output"
+                    && exacl::getfacl(&outside, None)? == acl,
+                "ACL replacement changed outside owner",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Prepare a native Windows ACL independently of the Rust publication adapter.
+#[cfg(windows)]
+fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
+    const READ: &str = "(Get-Acl -LiteralPath $env:PROJECTATLAS_TEST_ACL_PATH).Sddl";
+    let script = if let Some(protected) = prepare {
+        format!(
+            "$ErrorActionPreference='Stop'; $p=$env:PROJECTATLAS_TEST_ACL_PATH; \
+            $a=Get-Acl -LiteralPath $p; $a.SetAccessRuleProtection($true,$false); \
+            $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; \
+            $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'FullControl','Allow')); \
+            $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'Delete','Deny')); \
+            $guest=[System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-546'); \
+            $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($guest,'Write','Deny')); \
+            $a.SetAccessRuleProtection({},$true); Set-Acl -LiteralPath $p -AclObject $a; {READ}",
+            if protected { "$true" } else { "$false" },
+        )
+    } else {
+        format!("$ErrorActionPreference='Stop'; {READ}")
+    };
+    let result = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env("PROJECTATLAS_TEST_ACL_PATH", path)
+        .output()?;
+    require(
+        result.status.success(),
+        &format!("native ACL query failed: {result:?}"),
+    )?;
+    String::from_utf8(result.stdout)
+        .map(|value| value.trim().to_owned())
+        .map_err(io::Error::other)
+}
+
+#[cfg(windows)]
+#[test]
+fn replacement_preserves_native_dacl_inheritance_and_outside_owner() -> io::Result<()> {
+    for (private, filename, host) in replacement_targets() {
+        for protected in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = if private {
+                let directory = root.join(STATE_DIRECTORY);
+                fs::create_dir(&directory)?;
+                directory
+            } else {
+                root.clone()
+            };
+            let output = directory.join(filename);
+            fs::write(&output, b"last valid output")?;
+            let inherited = windows_acl(&output, None)?;
+            let acl = windows_acl(&output, Some(protected))?;
+            require(
+                acl != inherited,
+                "native DACL fixture did not differ from inheritance",
+            )?;
+            let outside = root.join("outside-owner");
+            fs::hard_link(&output, &outside)?;
+            let mut guard = if host {
+                ProjectStateGuard::preflight(&root, None, None)?
+            } else {
+                ProjectStateGuard::preflight_document(&root, &output)?
+                    .ok_or_else(|| io::Error::other("ACL document was not admitted"))?
+            };
+            let before_entries = fs::read_dir(&directory)?.count();
+            let failed = guard.publish(
+                &output,
+                b"unpublished bytes",
+                FilePublication::Replace,
+                || Err(io::Error::other("controlled DACL publication failure")),
+            );
+            require(
+                failed.is_err()
+                    && fs::read(&output)? == b"last valid output"
+                    && windows_acl(&output, None)? == acl
+                    && fs::read_dir(&directory)?.count() == before_entries,
+                "DACL failure changed the destination or leaked staging",
+            )?;
+            if host {
+                guard.write_generated(&output, b"owned replacement")?;
+            } else {
+                guard.write_document(b"owned replacement")?;
+            }
+            require(
+                fs::read(&output)? == b"owned replacement" && windows_acl(&output, None)? == acl,
+                &format!("replacement lost native DACL for {filename}, protected={protected}"),
+            )?;
+            require(
+                fs::read(&outside)? == b"last valid output" && windows_acl(&outside, None)? == acl,
+                "DACL replacement changed outside owner",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::Result<()> {
+    for sddl in ["D:NO_ACCESS_CONTROL", "D:P"] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+        guard.ensure_directory()?;
+        let directory = root.join(STATE_DIRECTORY);
+        let output = directory.join(HOST_FILES[0]);
+        fs::write(&output, b"last valid output")?;
+        let original = same_file::Handle::from_path(&output)?;
+        let setup = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; $p=$env:PROJECTATLAS_TEST_ACL_PATH; $a=Get-Acl -LiteralPath $p; $a.SetSecurityDescriptorSddlForm($env:PROJECTATLAS_TEST_ACL_SDDL); Set-Acl -LiteralPath $p -AclObject $a",
+            ])
+            .env("PROJECTATLAS_TEST_ACL_PATH", &output)
+            .env("PROJECTATLAS_TEST_ACL_SDDL", sddl)
+            .output()?;
+        require(
+            setup.status.success(),
+            &format!("native special DACL setup failed: {setup:?}"),
+        )?;
+        let acl = windows_acl(&output, None)?;
+        let result = guard.write_generated(&output, b"owned replacement");
+        require(
+            windows_acl(&output, None)? == acl && fs::read_dir(&directory)?.count() == 1,
+            "special DACL publication changed access or leaked staging",
+        )?;
+        if let Err(source) = &result {
+            require(
+                matches!(source.raw_os_error(), Some(5 | 1336))
+                    || source.kind() == io::ErrorKind::InvalidInput,
+                &format!("special DACL failed without a preservation/access cause: {source}"),
+            )?;
+        }
+        // Empty DACLs prohibit fresh data handles. Restore test access only after
+        // checking the native ACL, then inspect bytes and the retained old owner.
+        windows_acl(&output, Some(true))?;
+        require(
+            fs::read(&output)?
+                == if result.is_ok() {
+                    b"owned replacement"
+                } else {
+                    b"last valid output"
+                },
+            "special DACL failure lost valid bytes",
+        )?;
+        if result.is_err() {
+            require(
+                same_file::Handle::from_path(&output)? == original,
+                "special DACL refusal replaced the owner",
+            )?;
+        }
+    }
+    Ok(())
 }
