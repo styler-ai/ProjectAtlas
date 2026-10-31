@@ -1325,12 +1325,17 @@ fn replacement_preserves_native_dacl_inheritance_and_outside_owner() -> io::Resu
 #[cfg(windows)]
 #[test]
 fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::Result<()> {
-    for sddl in ["D:NO_ACCESS_CONTROL", "D:P"] {
+    for sddl in ["D:NO_ACCESS_CONTROL", "D:P", "D:"] {
         let temp = tempfile::tempdir()?;
         let root = temp.path().canonicalize()?;
         let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
         guard.ensure_directory()?;
         let directory = root.join(STATE_DIRECTORY);
+        if sddl == "D:" {
+            // Keep directory deletion rights but remove inheritable ACEs, so
+            // setting an unprotected empty file DACL stays genuinely empty.
+            windows_acl(&directory, Some(true))?;
+        }
         let output = directory.join(HOST_FILES[0]);
         fs::write(&output, b"last valid output")?;
         let original = same_file::Handle::from_path(&output)?;
@@ -1347,6 +1352,18 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
             &format!("native special DACL setup failed: {setup:?}"),
         )?;
         let acl = windows_acl(&output, None)?;
+        let dacl = acl
+            .split_once("D:")
+            .map(|(_, dacl)| dacl)
+            .ok_or_else(|| io::Error::other("native file descriptor has no DACL"))?;
+        require(
+            if sddl == "D:NO_ACCESS_CONTROL" {
+                dacl.contains("NO_ACCESS_CONTROL")
+            } else {
+                !dacl.contains('(') && dacl.contains('P') == (sddl == "D:P")
+            },
+            "native special DACL fixture did not retain its requested access class",
+        )?;
         let result = guard.write_generated(&output, b"owned replacement");
         require(
             windows_acl(&output, None)? == acl && fs::read_dir(&directory)?.count() == 1,
@@ -1379,4 +1396,33 @@ fn replacement_handles_null_and_empty_dacl_without_losing_valid_output() -> io::
         }
     }
     Ok(())
+}
+
+#[test]
+fn dacl_diagnostics_separate_native_flags_from_ordered_aces_without_identity_text() -> io::Result<()>
+{
+    use std::ffi::OsStr;
+    let expected = OsStr::new("D:(A;ID;FA;;;S-1-5-21-12345)");
+    let inherited =
+        super::windows_dacl_difference(expected, OsStr::new("D:AI(A;ID;FA;;;S-1-5-21-12345)"))?;
+    require(
+        inherited.contains("auto_inherited_matches=false")
+            && inherited.contains("ordered_aces_match=true")
+            && inherited.contains("protection_matches=true")
+            && !inherited.contains("S-1-")
+            && !inherited.contains("12345"),
+        "DACL diagnostics conflated native flags or exposed principal text",
+    )?;
+    let changed =
+        super::windows_dacl_difference(expected, OsStr::new("D:P(D;ID;FA;;;S-1-5-21-12345)"))?;
+    require(
+        changed.contains("ordered_aces_match=false")
+            && changed.contains("protection_matches=false"),
+        "DACL diagnostics concealed access-policy changes",
+    )?;
+    let null = super::windows_dacl_difference(OsStr::new("D:"), OsStr::new("D:NO_ACCESS_CONTROL"))?;
+    require(
+        null.contains("null_matches=false"),
+        "NULL and empty DACL were conflated",
+    )
 }

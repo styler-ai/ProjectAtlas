@@ -180,8 +180,12 @@ control getter, so use only the native DACL SDDL header for inheritance flags, n
 an application ACL parser. Avoid its NULL-DACL accessor trap; a native descriptor
 that cannot be preserved must fail causally before replacement. Keep original stage
 handles and deny competing data handles while inherited access is being replaced.
-Verify protected, inherited, absent/NULL/empty ACL behavior, stage ACL readback,
+Verify protected, inherited, NULL, protected-empty and unprotected-empty ACL behavior, stage ACL readback,
 publication failures and cleanup on Windows before accepting this implementation.
+An absent DACL belongs to an unattached descriptor, not the real-file snapshot:
+the Windows SDK's `SE_DACL_PRESENT` contract guarantees that bit once associated
+with a securable object. Keep synthetic diagnostic handling distinct from native
+NULL/empty file ACL controls; do not require an impossible absent-file fixture.
 
 The safe native wrappers require direct macOS-only exacl and Windows-only
 windows-permissions dependencies. The latter retains bitflags 1; the dependency ban

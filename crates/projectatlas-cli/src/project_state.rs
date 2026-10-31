@@ -666,14 +666,63 @@ fn preserve_windows_access(path: &Path, staged: &tempfile::NamedTempFile) -> io:
         SeObjectType::SE_FILE_OBJECT,
         SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl,
     )?;
-    if applied.owner() != access.owner()
-        || applied.group() != access.group()
-        || ConvertSecurityDescriptorToStringSecurityDescriptor(&applied, SecurityInformation::Dacl)?
-            != sddl
-    {
-        return Err(refusal(path, "staged DACL differs from the destination"));
+    let applied_sddl =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(&applied, SecurityInformation::Dacl)?;
+    let owner_matches = applied.owner() == access.owner();
+    let group_matches = applied.group() == access.group();
+    if !owner_matches || !group_matches || applied_sddl != sddl {
+        let difference = windows_dacl_difference(&sddl, &applied_sddl)?;
+        return Err(refusal(
+            path,
+            &format!(
+                "staged DACL differs from the destination: owner_matches={owner_matches}, group_matches={group_matches}, {difference}"
+            ),
+        ));
     }
     Ok(())
+}
+
+/// Describe native DACL differences without exposing ACEs or principal identities.
+#[cfg(any(windows, test))]
+fn windows_dacl_difference(
+    expected: &std::ffi::OsStr,
+    observed: &std::ffi::OsStr,
+) -> io::Result<String> {
+    /// Borrow the native header and opaque ordered ACE suffix; do not parse ACEs.
+    fn parts(value: &std::ffi::OsStr) -> io::Result<(Option<&str>, &str)> {
+        const DACL_PREFIX: &str = "D:";
+        let text = value.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "native DACL header is not text")
+        })?;
+        if text.is_empty() {
+            return Ok((None, ""));
+        }
+        let dacl = text.strip_prefix(DACL_PREFIX).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "native DACL header is invalid")
+        })?;
+        let (flags, entries) = dacl.split_at(dacl.find('(').unwrap_or(dacl.len()));
+        Ok((Some(flags), entries))
+    }
+
+    const NULL_FLAG: &str = "NO_ACCESS_CONTROL";
+    const PROTECTED_FLAG: &str = "P";
+    const INHERIT_REQUEST_FLAG: &str = "AR";
+    const AUTO_INHERITED_FLAG: &str = "AI";
+    let (expected_flags, expected_entries) = parts(expected)?;
+    let (observed_flags, observed_entries) = parts(observed)?;
+    let flag_matches = |flag| {
+        expected_flags.is_some_and(|flags| flags.contains(flag))
+            == observed_flags.is_some_and(|flags| flags.contains(flag))
+    };
+    Ok(format!(
+        "presence_matches={}, null_matches={}, protection_matches={}, inherit_request_matches={}, auto_inherited_matches={}, ordered_aces_match={}",
+        expected_flags.is_some() == observed_flags.is_some(),
+        flag_matches(NULL_FLAG),
+        flag_matches(PROTECTED_FLAG),
+        flag_matches(INHERIT_REQUEST_FLAG),
+        flag_matches(AUTO_INHERITED_FLAG),
+        expected_entries == observed_entries,
+    ))
 }
 
 /// Recognize a managed entry without treating unresolved ownership as external.

@@ -5342,6 +5342,7 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
 fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dyn Error>> {
     const CONFIG_PATH: &str = ".projectatlas/config.toml";
     const DATABASE_PATH: &str = ".projectatlas/projectatlas.db";
+    const JSON_SIDECAR_FILE_NAME: &str = "projectatlas.json";
 
     fn command(executable: &Path, root: &Path) -> StdCommand {
         let mut command = StdCommand::new(executable);
@@ -5528,7 +5529,7 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                     .to_owned(),
             );
             fs::write(&config, toml::to_string(&document)?)?;
-            let reduced_sidecar = root.join(ATLAS_DIR_NAME).join("projectatlas.json");
+            let reduced_sidecar = root.join(ATLAS_DIR_NAME).join(JSON_SIDECAR_FILE_NAME);
             let reduced_outside = root.with_extension("reduced-map");
             fs::write(&reduced_outside, b"outside reduced map")?;
             fs::hard_link(&reduced_outside, &reduced_sidecar)?;
@@ -5697,6 +5698,21 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                 let upper_map = root
                     .join(ATLAS_DIR_NAME)
                     .join("projectatlas.toon".to_ascii_uppercase());
+                let map_sidecar = upper_map.with_extension("json");
+                let default_sidecar = root.join(ATLAS_DIR_NAME).join(JSON_SIDECAR_FILE_NAME);
+                if !default_sidecar.try_exists()? {
+                    fs::write(&default_sidecar, b"native map name comparison")?;
+                }
+                let map_alias = map_sidecar.try_exists()?;
+                if map_alias {
+                    if !same_file::is_same_file(&default_sidecar, &map_sidecar)? {
+                        return Err(io::Error::other(
+                            "case map probe found an unrelated fixture entry",
+                        )
+                        .into());
+                    }
+                    fs::remove_file(&map_sidecar)?;
+                }
                 let case_output = root.with_extension("case-map-owner");
                 document["project"]["map_path"] = toml::Value::String(
                     upper_map
@@ -5711,7 +5727,7 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                 }
                 fs::hard_link(&case_owner, &upper_config)?;
                 fs::write(&case_output, b"case map bytes")?;
-                fs::hard_link(&case_output, upper_map.with_extension("json"))?;
+                fs::hard_link(&case_output, &map_sidecar)?;
                 let (mut case_session, _) = McpContractSession::spawn_configured(
                     &executable,
                     &root,
@@ -5755,14 +5771,13 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                         &json!({"json": true, "force": true}),
                         false,
                     )?;
-                    if (fs::read(&case_output)? == b"case map bytes") != case_alias {
+                    if (fs::read(&case_output)? == b"case map bytes") != map_alias {
                         return Err(io::Error::other(
                             "case map ownership ignored actual filesystem behavior",
                         )
                         .into());
                     }
-                    let published: Value =
-                        serde_json::from_slice(&fs::read(upper_map.with_extension("json"))?)?;
+                    let published: Value = serde_json::from_slice(&fs::read(&map_sidecar)?)?;
                     if !published.is_object() {
                         return Err(io::Error::other("case map did not publish JSON").into());
                     }
@@ -5770,7 +5785,7 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                 })();
                 complete_mcp_test_after_shutdown(case_result, || case_session.shutdown())?;
                 fs::remove_file(&upper_config)?;
-                fs::remove_file(upper_map.with_extension("json"))?;
+                fs::remove_file(&map_sidecar)?;
                 fs::write(&config, &original_config)?;
             }
 

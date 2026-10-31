@@ -1,5 +1,64 @@
 # Active context
 
+## Published ACL candidate: native results and diagnostic follow-up
+
+Public/localHEAD3a6409c20da52af43167edb4005c3ae1aab7a035. Normal native retry8236
+TERMINALPASS792.50s,34suites/1718passing/10conditionalignored; owned3547566gone.
+Exact receipt/log /tmp/projectatlas-741-acl-native-push-retry.*. AllRust/docs/dependency/
+repository/actualscan+lint passed;14knownnonfatalassetadvisories remain. No activelease.
+Current sourceCI41196745927, CodeQL41196744289, prstate41196744970+41196946308PASS.
+PRbodyupdated/readbackexact toRefs741 and currentproof/pendinggaps (closingkeyword
+must return only at finalreadiness). MetadataCI41196946146 tracks source, no sourcecancel.
+
+Default immutable native eee8d5cc174272c9d8f4b15196153f9fa3df4d95d23a1135216464a378257487
+at marker /tmp/projectatlas-741-acl-debug-path.txt;131inputs bound clean3a +normalpush
+receipt. Artifact/inputs reverified unchanged afterproof. Exact CLI/MCP admission
+PASS3.41s, writerPASS4.84s, registeredholistic inclignoredPASS8.50s;1830TERMINAL0.
+5stable050upgrade/refusal/retrylayoutsPASSidentity/allapprovedpurposes/config,
+/tmp/projectatlas-741-acl-native-upgrade-proof.json/log/py. This proves published3a;
+current diagnostic-only production delta below needs own sourcebinding if published.
+
+Both native Mac jobs124524363792/124524363825 TERMINALFAIL: all20owning units including
+orderedACL passed, legacyrepair andautomaticCLI/MCP passed. WriterE2E EEXIST before
+controlledfourvolume step. Source diagnosis: uppercaseJSONsidecar aliases an already
+existing lower default; newconfigvariants also wrongly reused configalias for mapalias.
+Primary fixture fix now independently probes mapalias and removes only its confirmed
+fixture-owned collision before outsidehardlink setup. LinuxwriterPASS4.86s. Bothhash
+pins updated to736c83fbce7c9ebb27cd336dc9ca8fc1c3c57d248cd6a9b1278cd6b5e8cdbae3;
+3inventorycontrolsPASS2.64s. HFS+/HFSX still UNOBSERVED; Macunitpass is APFSdefault only.
+Logs /tmp/projectatlas-741-acl-{macos-arm64,macos-x64}-job.log.
+
+Windows job124524363941 TERMINALFAIL16/18units. Newprotected/inherited restrictiveDACL,
+NULL/empty andstrictrename5 controlsPASS. Existing externalhardlink replacement and
+managedcase fixture refuse ordinary host/config writes with 'staged DACL differs'.
+Current predicate conflates owner/group/full-SDDL; actual mismatch property UNKNOWN.
+Do not guess anAI/ARwaiver or disableACLpreservation. Primary added DIAGNOSTICS ONLY:
+owner/group,presence,NULL,P,AR,AI,opaqueorderedACE equality booleans, no SDDL/SID text.
+Newprivacy/differenceunit+all21LinuxowningPASS0.08s; workspaceClippyPASS7.53s. Predicate
+unchanged; native nexthead must provide exactfielddifferences before fixingowner.
+WindowsUnicode stillmasked/unconfirmed. Log /tmp/projectatlas-741-acl-windows-job.log.
+Native specialfixture expandedtoD:unprotectedempty with noninheritable directoryACL,
+and verifies actualrequestedNULL/empty/protectionclass before assertingpreservation.
+
+SDK SE_DACL_PRESENT guarantee (Microsoft SECURITY_DESCRIPTOR_CONTROL) +independent
+Luna confirmation disposes impossible 'absent file DACL' proofgap: absent means an
+unattached descriptor; GetSecurityInfo(realfile) alwayshaspresentbit. Designupdated;
+retainnativeNULL/emptycontrols. No LinuxNFS4 filesystem proof. Potentialstagecleanup
+edge with sourceDELETEdenial ANDparentNO_DELETE_CHILD remains unconfirmed; current
+nativeWindowscontrols retainparentdeletionandpass. Preserve this boundeduncertainty.
+
+Current3aCodeQLreconciled: Rust2068152217 fivealerts/all20flowscfgtest; Actions2068117750
+twoalerts same event-bound producer. No new actionablesecuritythread; two Codexthreads
+remainopen. CurrentSARIF /tmp/projectatlas-741-{rust,actions}-3a.sarif.json and
+/tmp/projectatlas-741-security-3a-reconciliation.json. No alertdismissal/suppression.
+
+NEXT: publish coherent Macfixture +Windows diagnostic delta through normal CLEAN push
+after finalscopedgates. New receipt /tmp/projectatlas-741-native-acl-diagnostics.json/log;
+do not overwrite3a receipts. IndependentLuna found no publicationblocker, not acceptance.
+Only741active, live/local1/5/allacceptanceOPEN. No merge/release claim. Keepimmutable
+andnativeproofboundtoactualsource; afterdiagnosticdatafixconfirmedWinowner, thenfull
+nativefourformat/interface/upgrade proof +finalreviews before normalmerge+BOTHCLOSED.
+
 ## Native push stopped on inventory metadata; corrected retry ready
 
 Unpublished4e574484f345e8021c58a9873870c0930af87aa4 normalpush33584 TERMINALFAIL
