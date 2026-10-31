@@ -451,3 +451,31 @@ unequal long-prefix values, cache/visited reuse, retained witnesses and admissio
 failure/cancellation; the existing forwarding selector observes both source
 allocations across JavaScript, TypeScript and TSX. Contract22 repairs prior21 and
 older compatible indexes through the normal fingerprint refresh.
+
+## Cargo root dependency retention
+
+Automatic flat targets and manifest-listed sibling targets share a scoped Cargo
+root inventory cause. This avoids retaining every unrelated root file in every
+source membership. All four automatic target directories keep their discovery
+keys. Explicit root-only configuration keys also cover custom and package-root
+paths, while helpers under disabled automatic discovery remain independent.
+Singleton, conventional and unclassified roots retain exact file causes.
+
+Physical path buckets do not read source. Module candidates are recovered lazily
+only in ancestor directories relevant to a query and reused within that operation.
+Actual declarations still prove membership; competing owners stay unresolved.
+Real module files and missing automatic nested-main paths keep their exact causes.
+Growth remains subject to the existing staging and cancellation boundaries, with
+complete cache insertion and atomic graph publication. No input limit is added.
+
+DER23 repairs compatible prior projections while SEM22 and its source-fact digest
+remain unchanged. The existing Rust-root CLI/MCP selector checks bounded stored
+rows, custom-root lifecycle, helper isolation, exact targets/callers, affected-only
+recovery and full/incremental agreement. Separate source-bound native proof covers
+automatic root edits, addition, deletion, rename and missing nested-main ownership
+across all four layouts, preserving identity, approved purposes and no-op refresh.
+The cost handoff records the paired initialization, RSS and stored-row results.
+
+The source-evidence/publication/read-boundary diagram still describes this path:
+these are private operation-local derived caches inside the existing resolver;
+there is no additional persistent store, parser, provider or public query flow.

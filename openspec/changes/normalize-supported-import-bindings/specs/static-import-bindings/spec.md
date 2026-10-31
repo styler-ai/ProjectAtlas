@@ -405,7 +405,7 @@ while preserving exact Cargo ownership, incremental invalidation and resource li
 #### Scenario: Automatic and explicit flat sibling roots
 - **WHEN** many admitted automatic or manifest-listed explicit Rust targets share a physical parent
 - **THEN** root-cohort dependency retention scales with admitted roots and actual relationships rather than their unrelated Cartesian product, source projection and membership share the same scoped cause identity, and targets and raw navigation remain compatible
-- **AND** cached physical directories and actual first module declarations narrow traversal without rescanning every unrelated root for each source; exact roots, competing module owners and missing discovery causes preserve their existing meaning
+- **AND** cached physical directories and actual first module declarations narrow traversal without rescanning every unrelated root for each source; source recovery leaves disjoint target directories unopened, while exact roots, competing module owners and missing discovery causes preserve their existing meaning
 
 #### Scenario: Cohort roots change while independent helpers remain local
 - **WHEN** a cohort root is added, edited, deleted or renamed, or manifest target paths change

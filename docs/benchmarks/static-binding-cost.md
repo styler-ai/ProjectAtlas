@@ -1,12 +1,13 @@
 # Static binding cost and release handoff
 
-The current Linux measurements bind reviewed contract22 source `232186edd902a7dd7538fc80c8d934bef7bae41d` and
-optimized binary `74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504`. Exact baseline identities, fixture hashes, work counters
+The current Linux measurements bind reviewed contract23 source `ff50d228b30b858d03a8f656d68fdb2f1d980c46` and
+optimized binary `e963f7fac2ceacbf3ea9caf38df46895fb863d825705da5afb31798606770eec`. Exact baseline identities, fixture hashes, work counters
 and protocol are in [the compact result](static-binding-cost.json). The published
 0.5.0 baseline archive and extracted binary were checksum verified.
 
-There are 96 initialization measurements in 48 baseline/candidate pairs: three
-alternating pairs for each of 16 fixtures. Each initializes a fresh non-Git fixture
+There are 132 initialization measurements in 66 baseline/candidate pairs: three
+alternating pairs for each of 22 fixtures (96 measurements from the 16 existing
+fixtures and 36 from six Cargo root fixtures). Each initializes a fresh non-Git fixture
 in a fresh process on the same Ryzen 7 5700U host. Telemetry is disabled; ordinary
 filesystem/page caches remain warm. Wall time includes GNU time; RSS is the process
 maximum. Per-sample no-op and target probes are separate from that sample count.
@@ -16,13 +17,13 @@ These are bounded affected-work measurements, not exceptions to issue708 SLOs or
 issue715 installed release acceptance. Baselines can perform incorrect or incomplete
 work, so timing differences do not establish a general speedup or asymptotic bound.
 
-| Fixture | 0.5.0 median seconds | Current22 median seconds | 0.5.0 max RSS KiB | Current22 max RSS KiB |
+| Fixture | 0.5.0 median seconds | Current23 median seconds | 0.5.0 max RSS KiB | Current23 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Four Cargo roots, 256 callers | 0.2811 | 0.3538 | 27452 | 32636 |
-| 64 Cargo roots, 256 callers | 0.3262 | 0.3844 | 28568 | 34212 |
-| Dense/comment/nested Rust | 0.1694 | 0.1631 | 26708 | 29208 |
-| 256 contextual-keyword calls | 0.1011 | 0.1146 | 23228 | 25160 |
-| 64 script programs, 63 callers | 0.1154 | 0.1468 | 23528 | 26820 |
+| Four Cargo roots, 256 callers | 0.2855 | 0.3524 | 28464 | 32216 |
+| 64 Cargo roots, 256 callers | 0.3244 | 0.3902 | 28864 | 33552 |
+| Dense/comment/nested Rust | 0.1681 | 0.1648 | 27492 | 28500 |
+| 256 contextual-keyword calls | 0.1018 | 0.1175 | 23756 | 24468 |
+| 64 script programs, 63 callers | 0.1133 | 0.1457 | 24632 | 26112 |
 
 The root fixtures hold 256 worker callers constant and add 60 root files when moving
 from four to 64 explicit Cargo targets (261 versus321 parsed candidates). Each
@@ -41,12 +42,12 @@ These cases preserve existing roles and recovery bounds without compiler inferen
 
 ## Additional current comparisons
 
-| Fixture | Baseline contract | Baseline median seconds | Current22 median seconds | Baseline max RSS KiB | Current22 max RSS KiB |
+| Fixture | Baseline contract | Baseline median seconds | Current23 median seconds | Baseline max RSS KiB | Current23 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 256 reopened C++ namespaces | 14 | 0.1827 | 0.1906 | 31968 | 31284 |
-| 256 deferred instance fields | 15 | 0.1166 | 0.1184 | 26860 | 24932 |
-| Shared forwarding query modules | 16 | 3.7478 | 1.8773 | 131632 | 129844 |
-| Two equal source module allocations | 21 | 1.9945 | 1.8713 | 128424 | 129448 |
+| 256 reopened C++ namespaces | 14 | 0.1880 | 0.1950 | 29972 | 30120 |
+| 256 deferred instance fields | 15 | 0.1209 | 0.1222 | 26048 | 24340 |
+| Shared forwarding query modules | 16 | 3.8508 | 1.8794 | 131556 | 129184 |
+| Two equal source module allocations | 21 | 1.9646 | 1.8710 | 128376 | 128496 |
 
 The namespace fixture checks selected exact callers and no-op. The field fixture
 checks 256 resolved occurrences to a unique later callable and no-op; its older
@@ -57,16 +58,16 @@ The forwarding fixture has 8,000 aliases, a 1,902,910-byte exporter and 1,800,00
 module shared by 7,997 namespace-member calls plus one ordinary positive call. Every
 sample checks the complete 7,998-call summary, normal incoming caller and no-op.
 A bounded one-row query reports an at_least total and is not a completeness oracle.
-The additional two-allocation fixture splits 8,000 exports across two statements
-with the same 900,002-byte module value, retaining a roughly 1.9 MB exporter and all
-7,998 calls. It compares 21→22 and preserves the normal incoming caller and no-op.
+The additional two-allocation fixture splits8,000 exports across two statements
+with the same900,002-byte module value, retaining a roughly1.9MB exporter and all
+7,998 calls. It compares21→23 and preserves the normal incoming caller and no-op.
 The resolver interns exact values once per source allocation and uses local IDs
 for query-cache and recursive visited ordering. Equal separate Arcs share an ID;
 original Arc witnesses prevent pointer reuse. Interner growth remains admitted and
 charged before insertion. Cold unique modules still require exact text work.
 The historical copying fix removes cumulative module copying; it does not claim a material
-peak-memory reduction. The resource fixture also passes native21→22 repair, full
-convergence, identity/all-approved-purpose preservation and current22 no-op.
+peak-memory reduction. The resource fixture also passes native22→23 repair, full
+convergence, identity/all-approved-purpose preservation and current23 no-op.
 
 ## Native owner and admission costs
 
@@ -80,22 +81,22 @@ selected calls must use their exact owner rather than the same-name global. Its
 baseline already has correct qualified-owner behavior. The Python comprehension
 fixture uses128 functions with a local run declaration, initial iterable call,
 post-write unknown call and unrelated keep call. Its contract21 baseline already preserves the valid
-iterable target. Go repeats 128 switch functions with one local unknown and two
+iterable target. Go repeats128 switch functions with one local unknown and two
 resolved package-call occurrences; contract21 incorrectly loses a sibling target. The ordinary Python control uses128 functions with four calls to
 the global run and one to keep, with no walrus or comprehension. Exact source
 occurrences and target parents are checked in every candidate sample. These
 compare against optimized contract21; only equivalent work supports overhead
 comparisons.
 
-| Fixture | Contract21 median seconds | Current22 median seconds | Contract21 max RSS KiB | Current22 max RSS KiB |
+| Fixture | Contract21 median seconds | Current23 median seconds | Contract21 max RSS KiB | Current23 max RSS KiB |
 | --- | ---: | ---: | ---: | ---: |
-| Native member containers | 0.2189 | 0.2173 | 40888 | 42448 |
-| Kotlin constructor views | 0.1644 | 0.1628 | 30908 | 31664 |
-| C# accessor and constructor views | 0.2314 | 0.2287 | 36060 | 37352 |
-| C++ qualified namespace and type bodies | 0.1721 | 0.1700 | 30720 | 31244 |
-| Python comprehension order | 0.1484 | 0.1498 | 27372 | 28136 |
-| Ordinary Python calls without walrus | 0.1342 | 0.1347 | 26292 | 26948 |
-| Go independent switch clauses | 0.1275 | 0.1296 | 25328 | 25964 |
+| Native member containers | 0.2179 | 0.2196 | 41296 | 40900 |
+| Kotlin constructor views | 0.1583 | 0.1664 | 30652 | 30604 |
+| C# accessor and constructor views | 0.2281 | 0.2318 | 36320 | 35892 |
+| C++ qualified namespace and type bodies | 0.1734 | 0.1712 | 30772 | 30668 |
+| Python comprehension order | 0.1465 | 0.1462 | 27280 | 27292 |
+| Ordinary Python calls without walrus | 0.1345 | 0.1364 | 25904 | 26160 |
+| Go independent switch clauses | 0.1294 | 0.1258 | 25400 | 24888 |
 
 The per-record admission vector replaces the previous all-row sort order; it does
 not copy source graphs. Additional borrowed field validation remains bounded by
@@ -106,6 +107,41 @@ Dense owner queries preserve the default 32KiB output envelope and request 1MiB
 intermediate headroom for anchor hydration. Earlier default 128KiB intermediate
 refusals on contract16/17 remain bounded-refusal controls. No public default,
 maximum resource limit or normal navigation capability was relaxed.
+
+
+## Cargo root retention and traversal
+
+The final23 artifact shares invalidation causes for admitted sibling Cargo roots
+and indexes module candidates lazily per relevant directory. Six additional fresh
+fixtures run three alternating baseline/candidate pairs each. Every sample checks
+all stored caller targets, exact first/middle/last CLI targets and zero-parsed no-op.
+The 128/512 cases compare immutable contract22; the 2048 cases compare the retention-only23
+exploratory artifact to isolate traversal. The latter is an uncommitted historical
+probe, not an accepted release or a contract22→23 performance claim.
+
+| Roots | Baseline | Baseline median seconds | Current23 median seconds | Baseline median RSS KiB | Current23 median RSS KiB | Baseline dependencies | Current23 dependencies |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| automatic-128 | 22 | 1.1787 | 0.2208 | 53280 | 27780 | 34176 | 1664 |
+| automatic-512 | 22 | 21.8066 | 0.6021 | 464260 | 40528 | 529920 | 6656 |
+| explicit-128 | 22 | 1.1636 | 0.2140 | 52204 | 27768 | 33664 | 1408 |
+| explicit-512 | 22 | 21.3045 | 0.5634 | 456956 | 39432 | 527872 | 5632 |
+| automatic-2048 | retention-only23 | 5.0363 | 2.4078 | 97372 | 98496 | 26624 | 26624 |
+| explicit-2048 | retention-only23 | 4.8311 | 2.2371 | 93032 | 92016 | 22528 | 22528 |
+
+Causal permanent controls reject the old22 dependency fan-out and the eager index's
+168-source recovery on an app-only edit. The lazy index passes the 45-source ceiling;
+an exact source-recovery unit proves that unrelated directories remain unopened.
+Automatic discovery retains its inventory keys; explicit root-only Configures
+keys keep helpers under disabled automatic layouts out of unrelated invalidation.
+DER23 repairs compatible projections while the unchanged SEM22 digest preserves
+source-fact compatibility. These local results do not waive combined release SLOs.
+
+A separate native22→23 functional fixture exercises all four automatic directories
+through 13 phases: root edits, deletion, addition, rename, ambiguous ownership,
+and nested automatic main-file creation/deletion with exact child retargeting.
+Every phase agrees with all 16 normalized stored projections after a full scan,
+preserves project identity and approved purposes, and ends in a no-op. These
+functional checks are excluded from the 132 timing samples.
 
 ## Permanent installed selectors
 
@@ -174,9 +210,9 @@ name/parent, invalid/oversized/padded signature and rejected-ancestor source-mod
 controls prevent rejected rows from poisoning valid declarations or parent stacks.
 The Go selector adds nine independent clause fixtures, checks every occurrence
 and exact package target, and preserves CLI/MCP summaries through valid shadow
-removal/restore, full rebuild, identity and no-op. A 15-case source matrix plus
+removal/restore, full rebuild, identity and no-op. A15-case source matrix plus
 near-cap/overflow controls preserve retained raw navigation and scope admission.
-Go 1.27.3 compiles all 15 cases; the reported sibling expression case executes the
+Go1.27.3 compiles all15 cases; the reported sibling expression case executes the
 package function. Other matrix bodies are not claimed executed.
 The existing Python directive selector adds13 comprehension fixtures across
 module/global/local/nonlocal/import ownership, repeated/filter/singleton/nested
@@ -205,13 +241,13 @@ contract reconciliation separately from current-contract reuse. Recover each req
 unchanged source once per operation, reuse captured sidecars and account work honestly.
 No measurement here waives that acceptance.
 
-Current DER22/SEM22 repairs compatible private indexes, including the contract18
+Current DER23/SEM22 repairs compatible private indexes, including the contract18
 invalid-neighbor regression caught before publication. The optimized candidate passes
-18 actual native baselines: stable 0.5.0 and contracts5–21. Those prove unchanged-source
+19 actual native baselines: stable 0.5.0 and contracts5–22. Those prove unchanged-source
 repair, full convergence, all-approved-purpose/project-identity preservation, no-op,
 early deadline/publication preservation, compatible rollback and re-upgrade. Early
 deadline proof is separate from the unit control that cancels after staging.
-A separate native comparison reuses each of the18 exact fixture roots, rolls back
+A separate native comparison reuses each of the19 exact fixture roots, rolls back
 to its original baseline and upgrades again, then compares all normalized graph,
 symbol/source relation, span, summary, purpose, text and classification projections with a
 full scan. Surrogate row IDs, operation timestamps, rejection generations and node
@@ -223,7 +259,7 @@ equality oracle.
 
 Issue 715 must run these permanent selectors against exact installed candidate packages
 on Linux, Windows, macOS Intel and macOS ARM, retain complete CLI/MCP/plugin/host route
-acceptance, and reconcile the final combined source. Its derivation must exceed22 and
+acceptance, and reconcile the final combined source. Its derivation must exceed23 and
 retain SEM22 so old private candidates cannot bypass corrected facts. Keep separate
 0.4.5 schema-upgrade proof, clean parser-pack construction, exact RC version/pins,
 checksums and non-draft prerelease/Latest=false readback. Stable0.5.0 stays Latest.
@@ -231,5 +267,5 @@ checksums and non-draft prerelease/Latest=false readback. Stable0.5.0 stays Late
 The retained reexport_storage entry in the compact result is historical contract14
 allocation evidence with its original source/binary identities and three paired
 rounds. Its shared-module ownership, clone/accounting and cancellation controls
-remain useful causal evidence; it is not a current22 timing campaign. The existing
+remain useful causal evidence; it is not a current23 timing campaign. The existing
 source-evidence/publication/read-boundary architecture diagram remains accurate.

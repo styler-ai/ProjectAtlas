@@ -63,4 +63,6 @@ implicit blocks and repeated forwarding-cache key comparisons scaling with a sha
 module literal's length. Isolate the registered Go clause scopes and intern module
 identity within one resolver, preserving exact cross-allocation value equality,
 existing resource/cancellation limits, long-module support and ordinary callers.
-Contract22 repairs prior21 and older projections; no provider or public schema is added.
+DER23/SEM22 repairs prior22 and older projections, including shared Cargo root
+causes and lazy recovery confined to relevant target directories. The source-fact
+digest remains unchanged; no provider or public schema is added.
