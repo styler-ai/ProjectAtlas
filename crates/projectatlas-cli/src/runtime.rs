@@ -268,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "23";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "24";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -3088,7 +3088,7 @@ fn stage_full_index_publication_from_source(
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_limit(
         store,
         &plan.root,
         base_generation,
@@ -3096,6 +3096,7 @@ fn stage_full_index_publication_from_source(
         &scan_policy,
         &symbols,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
     graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
@@ -3587,7 +3588,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_limit(
         store,
         &plan.root,
         base_generation,
@@ -3595,6 +3596,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         &scan_policy,
         &staged,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
     graph.account_source_recovery(&mut staged.report)?;
     enforce_publication_staging_budget(
@@ -6660,7 +6662,14 @@ fn stage_symbols_for_nodes_with_limits(
         retained_bytes: output_bytes,
         identity_admission: graph_projection::GraphIdentityAdmission::default(),
     };
-    staged.identity_admission = graph_projection::admit_symbol_build_stage(&mut staged, control)?;
+    staged.identity_admission = graph_projection::admit_symbol_build_stage_with_limit(
+        &mut staged,
+        control,
+        limits.output_bytes.saturating_sub(output_bytes),
+    )?;
+    staged.retained_bytes = staged
+        .retained_bytes
+        .saturating_add(staged.identity_admission.retained_bytes());
     Ok(staged)
 }
 
@@ -6694,7 +6703,14 @@ fn apply_symbol_build_stage(
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
     if !staged.identity_admission.source_admitted() {
-        staged.identity_admission = graph_projection::admit_symbol_build_stage(staged, control)?;
+        staged.identity_admission = graph_projection::admit_symbol_build_stage_with_limit(
+            staged,
+            control,
+            MAX_PUBLICATION_STAGING_BYTES.saturating_sub(staged.retained_bytes),
+        )?;
+        staged.retained_bytes = staged
+            .retained_bytes
+            .saturating_add(staged.identity_admission.retained_bytes());
     }
     for change in &staged.changes {
         control.check(IndexWorkStage::Publication)?;
@@ -8645,7 +8661,7 @@ fn refresh_index_for_changes_from_source_controlled(
         control,
         symbol_limits,
     )?;
-    let graph = graph_projection::stage_incremental_repository_graph(
+    let graph = graph_projection::stage_incremental_repository_graph_with_limit(
         store,
         root,
         base_generation,
@@ -8654,6 +8670,7 @@ fn refresh_index_for_changes_from_source_controlled(
         &scan_policy,
         &symbols,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
     graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
@@ -12722,6 +12739,14 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             text_index_options(plan.config.as_ref(), None),
             #[cfg(feature = "optional-parser-supervisor")]
             &plan.optional_parser_selection,
+            "23",
+            PRE_CARGO_COHORT_DIGEST,
+        );
+        let cargo_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
             "22",
             PRE_CARGO_COHORT_DIGEST,
         );
@@ -12894,6 +12919,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             STABLE_050_SEMANTIC_DIGEST,
         );
         if prior_projection_fingerprint == current_fingerprint
+            || cargo_projection_fingerprint == current_fingerprint
             || go_clause_projection_fingerprint == current_fingerprint
             || comprehension_projection_fingerprint == current_fingerprint
             || qualified_owner_projection_fingerprint == current_fingerprint

@@ -15081,6 +15081,36 @@ fn reopened_container_calls_agree_across_cli_mcp_and_refresh() -> Result<(), Box
     ];
     let cases = [
         (
+            "initializer_val.kt",
+            "fun run()=1\nfun initial(){val run=run()}\nfun later(){val run={1};run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_val.kt",
+            "fun run()=1\nfun initial(){val run=run()}\nfun later(){val run={1};run()}\n",
+            "later", "run", false,
+        ),
+        (
+            "initializer_var.kt", "fun run()=1\nfun initial(){var run=run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_destructured.kt", "fun run()=Pair(1,2)\nfun initial(){val (run,other)=run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_delegated.kt", "fun run()=lazy{1}\nfun initial(){val run by run()}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_loop.kt", "fun run()=listOf(1)\nfun initial(){for(run in run()){}}\nfun later(items:List<()->Int>){for(run in items){run()}}\n",
+            "initial", "run", true,
+        ),
+        (
+            "initializer_loop.kt", "fun run()=listOf(1)\nfun initial(){for(run in run()){}}\nfun later(items:List<()->Int>){for(run in items){run()}}\n",
+            "later", "run", false,
+        ),
+        (
             "reopened.cpp",
             "namespace N { void run() {} }\nnamespace N { void caller() { run(); } }\n",
             "caller",

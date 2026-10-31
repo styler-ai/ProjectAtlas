@@ -5,11 +5,10 @@ mod rust;
 use super::{
     CliError, EntityProjection, MAX_INCREMENTAL_RESOLUTION_ITEMS, PackageIndex,
     ProjectResolutionRegistry, ResolutionCandidateKind, STAGED_GRAPH_ROW_BYTES, SourceBindingCache,
-    SourceGraph, dependency_closure_limit, document_file_resolution_key,
-    enforce_resolution_registry_budget_with_limit, entity_retained_bytes, invalid_graph_contract,
-    merge_resolution_registries, qualified_symbol_parents, registry_resolution_matches,
-    relation_reference, resolution_key_limit_failure, resolution_registry_from_persisted,
-    resolution_retained_bytes, source_symbol_entity,
+    SourceGraph, append_persisted_resolution_candidates, dependency_closure_limit,
+    document_file_resolution_key, enforce_resolution_registry_budget_with_limit,
+    entity_retained_bytes, invalid_graph_contract, registry_resolution_matches, relation_reference,
+    resolution_key_limit_failure, resolution_retained_bytes, source_symbol_entity,
 };
 use projectatlas_core::graph::{
     CanonicalResolutionKey, EntitySelector, GraphEntity, GraphIdentityText, GraphLimits,
@@ -367,9 +366,10 @@ pub(super) fn resolve_source_bindings<'g>(
     sources: &mut SourceBindingCache<'_>,
     entities: &'g EntityProjection,
     candidates: &mut ProjectResolutionRegistry,
-    loaded: Option<&BTreeSet<CanonicalResolutionKey>>,
+    loaded: Option<BTreeSet<CanonicalResolutionKey>>,
     replaced: &BTreeSet<String>,
     control: &IndexWorkControl,
+    staging_limit: u64,
 ) -> Result<(CallBindings, u64), CliError> {
     control.check(IndexWorkStage::SymbolParsing)?;
     let rust_needed = graphs.iter().any(|graph| {
@@ -410,6 +410,11 @@ pub(super) fn resolve_source_bindings<'g>(
     if !needed {
         return Ok((CallBindings::new(), 0));
     }
+    let loaded_bytes = loaded.as_ref().map_or(0, |keys| {
+        keys.iter()
+            .map(super::resolution_workspace_key_bytes)
+            .fold(0_u64, u64::saturating_add)
+    });
     let mut resolver = BindingResolver {
         store,
         project,
@@ -430,7 +435,7 @@ pub(super) fn resolve_source_bindings<'g>(
         sources,
         candidates,
         replaced,
-        loaded: loaded.cloned(),
+        loaded,
         context: BTreeMap::new(),
         modules: ModuleInterner::default(),
         queries: BTreeMap::new(),
@@ -438,15 +443,9 @@ pub(super) fn resolve_source_bindings<'g>(
         retained_bytes: (graphs.len() as u64)
             .saturating_mul(STAGED_GRAPH_ROW_BYTES)
             .saturating_add(std::mem::size_of::<ModuleInterner>() as u64)
-            .saturating_add(loaded.map_or(0, |keys| {
-                keys.iter().fold(0_u64, |bytes, key| {
-                    bytes
-                        .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                        .saturating_add(key.canonical_identity().len() as u64)
-                })
-            })),
+            .saturating_add(loaded_bytes),
         control,
-        retained_limit: super::super::MAX_PUBLICATION_STAGING_BYTES,
+        retained_limit: staging_limit,
     };
     resolver.check_budget()?;
     let mut bindings = CallBindings::new();
@@ -638,18 +637,34 @@ impl<'g> BindingResolver<'_, 'g, '_> {
                 SourceProjection::Staged(keys),
             )
         } else {
+            let source_limit = self
+                .retained_limit
+                .saturating_sub(self.entities.retained_bytes)
+                .saturating_sub(self.candidates.retained_bytes)
+                .saturating_sub(self.retained_bytes);
+            self.sources.set_retained_limit(source_limit)?;
             let captured = self.sources.capture(path, self.control)?;
+            self.check_budget()?;
             let keys = match derive_resolution_keys_with_context(
                 self.project,
                 self.packages.package_name(path),
                 &captured.graph,
                 super::resolution_projection_context(path, self.packages, self.configured)
-                    .with_source_semantics(&captured.semantics),
+                    .with_source_semantics(&captured.semantics)
+                    .with_retained_bytes_limit(
+                        self.retained_limit
+                            .saturating_sub(self.retained_staging_bytes()),
+                    ),
             ) {
                 Ok(keys) => keys,
                 Err(ResolutionProjectionError::Contract(failure)) => failure.into_parts().2,
                 Err(ResolutionProjectionError::KeyLimit { requested, .. }) => {
                     return Err(resolution_key_limit_failure(requested));
+                }
+                Err(ResolutionProjectionError::MemoryLimit { limit, requested }) => {
+                    return Err(super::resolution_projection_memory_failure(
+                        limit, requested,
+                    ));
                 }
                 Err(ResolutionProjectionError::SourceEvidenceMismatch) => {
                     return Err(CliError::InvalidInput(
@@ -671,6 +686,13 @@ impl<'g> BindingResolver<'_, 'g, '_> {
                 for (index, export) in facts.exports().iter().enumerate() {
                     self.control.check(IndexWorkStage::SymbolParsing)?;
                     if export.namespace == SourceExportNamespace::Value {
+                        let bytes = (4 * std::mem::size_of::<usize>()) as u64
+                            + if slots.contains_key(&export.name) {
+                                0
+                            } else {
+                                STAGED_GRAPH_ROW_BYTES.saturating_add(export.name.len() as u64)
+                            };
+                        self.reserve_scratch(bytes)?;
                         slots.entry(export.name.clone()).or_default().push(index);
                     }
                 }
@@ -678,49 +700,40 @@ impl<'g> BindingResolver<'_, 'g, '_> {
             for import in facts.imports() {
                 self.control.check(IndexWorkStage::SymbolParsing)?;
                 if let Some(module) = &import.module {
-                    modules.entry(module.clone()).or_default().extend(
-                        relation_keys(projection.get(), import.relation)
-                            .iter()
-                            .cloned(),
-                    );
+                    if !modules.contains_key(module) {
+                        self.reserve_scratch(
+                            STAGED_GRAPH_ROW_BYTES.saturating_add(module.len() as u64),
+                        )?;
+                        modules.insert(module.clone(), BTreeSet::new());
+                    }
+                    for key in relation_keys(projection.get(), import.relation) {
+                        if !modules.get(module).is_some_and(|keys| keys.contains(key)) {
+                            self.reserve_scratch(
+                                STAGED_GRAPH_ROW_BYTES
+                                    .saturating_add(key.canonical_identity().len() as u64),
+                            )?;
+                            if let Some(keys) = modules.get_mut(module) {
+                                keys.insert(key.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
+        let vector_rows = modules.values().map(BTreeSet::len).sum::<usize>();
+        self.reserve_scratch(
+            (vector_rows as u64)
+                .saturating_mul(std::mem::size_of::<CanonicalResolutionKey>() as u64),
+        )?;
         let modules = modules
             .into_iter()
             .map(|(name, keys)| (name, keys.into_iter().collect::<Vec<_>>()))
             .collect::<BTreeMap<_, _>>();
-        let parents = qualified_symbol_parents(source.graph())?;
-        let index_bytes = slots
-            .iter()
-            .fold(0_u64, |bytes, (name, indices)| {
-                bytes
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                    .saturating_add(name.capacity() as u64)
-                    .saturating_add(
-                        (indices.capacity() as u64)
-                            .saturating_mul(std::mem::size_of::<usize>() as u64),
-                    )
-            })
-            .saturating_add(modules.iter().fold(0_u64, |bytes, (name, keys)| {
-                keys.iter().fold(
-                    bytes.saturating_add(name.capacity() as u64),
-                    |bytes, key| {
-                        bytes
-                            .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                            .saturating_add(key.canonical_identity().len() as u64)
-                    },
-                )
-            }))
-            .saturating_add(parents.iter().fold(0_u64, |bytes, parent| {
-                bytes.saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(parent.as_ref().map_or(0, |parent| parent.as_str().len()) as u64)
-            }));
-        self.retained_bytes = self
-            .retained_bytes
-            .saturating_add(index_bytes)
-            .saturating_add(STAGED_GRAPH_ROW_BYTES)
-            .saturating_add(path.len() as u64);
+        let parents = projectatlas_symbols::declaration_identity::qualified_symbol_parents_checked(
+            source.graph(),
+            &mut |bytes| self.reserve_scratch(bytes),
+        )?;
+        self.reserve_scratch(STAGED_GRAPH_ROW_BYTES.saturating_add(path.len() as u64))?;
         drop(projection);
         self.retained_bytes = self.retained_bytes.saturating_sub(projection_bytes);
         let source = Arc::new(BindingSource {
@@ -751,27 +764,34 @@ impl<'g> BindingResolver<'_, 'g, '_> {
                 let needed = needed.keys.into_iter().collect::<Vec<_>>();
                 if !needed.is_empty() {
                     this.control.check(IndexWorkStage::SymbolParsing)?;
-                    let candidates = this.store.repository_resolution_candidates_for_keys(
-                        this.project,
-                        &needed,
-                        MAX_INCREMENTAL_RESOLUTION_ITEMS,
-                    )?;
-                    if candidates.truncated {
+                    let candidates = this
+                        .store
+                        .repository_resolution_candidates_for_keys_with_byte_limit(
+                            this.project,
+                            &needed,
+                            MAX_INCREMENTAL_RESOLUTION_ITEMS,
+                            this.retained_limit
+                                .saturating_sub(this.retained_staging_bytes()),
+                        )
+                        .map_err(super::resolution_read_error)?;
+                    if candidates.page.truncated {
                         return Err(dependency_closure_limit(
                             this.sources.root,
                             std::iter::empty(),
                             GraphLimits::MAX_ROWS as usize + 1,
                         ));
                     }
-                    merge_resolution_registries(
+                    this.candidates.retained_limit = this
+                        .retained_limit
+                        .saturating_sub(this.entities.retained_bytes)
+                        .saturating_sub(this.sources.retained_bytes)
+                        .saturating_sub(this.retained_bytes);
+                    append_persisted_resolution_candidates(
                         this.candidates,
-                        resolution_registry_from_persisted(
-                            this.project,
-                            this.generation,
-                            candidates.rows,
-                            this.replaced,
-                            this.control,
-                        )?,
+                        this.project,
+                        this.generation,
+                        candidates,
+                        this.replaced,
                         this.control,
                     )?;
                     this.check_budget()?;

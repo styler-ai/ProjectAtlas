@@ -3297,6 +3297,8 @@ impl LexicalCollector<'_> {
             )
         {
             0
+        } else if self.language == "kotlin" && node.kind() == "variable_declaration" {
+            kotlin_statement_binding_start(node)
         } else {
             node.end_byte()
         };
@@ -4433,6 +4435,37 @@ fn csharp_initializer_child(node: Node<'_>, child: Node<'_>, content: &str) -> b
                     "field_declaration" | "event_field_declaration"
                 ) && !static_owner(owner)
             })
+}
+
+/// Statement-local names enter scope after their actual property or iteration input.
+fn kotlin_statement_binding_start(node: Node<'_>) -> usize {
+    let Some(mut owner) = node.parent() else {
+        return node.end_byte();
+    };
+    if owner.kind() == "multi_variable_declaration" {
+        let Some(parent) = owner.parent() else {
+            return node.end_byte();
+        };
+        owner = parent;
+    }
+    if owner.kind() == "property_declaration" {
+        return owner.end_byte();
+    }
+    if owner.kind() == "for_statement" {
+        let mut after_in = false;
+        for child in owner.children(&mut owner.walk()) {
+            if child.kind() == "in" {
+                after_in = true;
+            } else if after_in && child.is_named() {
+                return if child.is_error() || child.is_missing() {
+                    node.end_byte()
+                } else {
+                    child.end_byte()
+                };
+            }
+        }
+    }
+    node.end_byte()
 }
 
 /// Only an explicit Kotlin inner modifier retains an enclosing instance environment.
@@ -5605,6 +5638,118 @@ function caller() { renamed(); tools.work(); }
             assert_eq!(imported.len(), 2, "{language}");
             assert_ne!(imported[0], imported[1], "{language}");
         }
+    }
+
+    #[test]
+    fn kotlin_statement_inputs_precede_their_value_bindings() {
+        let cases: &[(&str, &str, &[bool])] = &[
+            (
+                "val",
+                "fun run() = {}\nfun caller(){val run=run();run()}",
+                &[true, false],
+            ),
+            (
+                "var",
+                "fun run() = {}\nfun caller(){var run=run();run()}",
+                &[true, false],
+            ),
+            (
+                "destructuring",
+                "fun run()=Pair({}, {})\nfun caller(){val (run, other)=run();run()}",
+                &[true, false],
+            ),
+            (
+                "delegated",
+                "fun run() = {}\nfun caller(){val run by lazy {run()};run()}",
+                &[true, false],
+            ),
+            (
+                "loop",
+                "fun run()=listOf({})\nfun caller(){for(run in run()){run()};run()}",
+                &[true, false, true],
+            ),
+            (
+                "destructured loop",
+                "fun run()=listOf(Pair({},{}))\nfun caller(){for((run, other) in run()){run()};run()}",
+                &[true, false, true],
+            ),
+            (
+                "different name",
+                "fun run() = {}\nfun caller(){val other=run();run()}",
+                &[true, true],
+            ),
+            (
+                "nested block",
+                "fun run() = {}\nfun caller(){if(true){val run=run();run()};run()}",
+                &[true, false, true],
+            ),
+            (
+                "lambda initializer",
+                "fun run()=1\nfun caller(){val run:()->Int={run()}}",
+                &[true],
+            ),
+            (
+                "class member",
+                "fun run()={}\nclass Api{val run:()->Unit={}\nfun caller(){run()}}",
+                &[false],
+            ),
+            (
+                "init block",
+                "fun run()={}\nclass Api{init{val run=run();run()}}",
+                &[true, false],
+            ),
+            (
+                "constructor",
+                "fun run()={}\nclass Api{constructor(){val run=run();run()}}",
+                &[true, false],
+            ),
+            (
+                "getter",
+                "fun run()={}\nclass Api{val value:Int get(){val run=run();run();return 0}}",
+                &[true, false],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (label, content, expected) in cases {
+            let result = extract_symbol_graph_with_semantics_controlled(
+                "boundary.kt",
+                Some("kotlin"),
+                content,
+                &IndexWorkControl::new(projectatlas_core::IndexCancellation::new(), None),
+            );
+            assert!(result.is_ok(), "{label}: {result:?}");
+            let Ok(extracted) = result else { return };
+            let (_, graph, facts) = extracted.into_parts();
+            let calls = facts
+                .calls()
+                .iter()
+                .filter(|call| graph.relations[call.relation].target_name == "run")
+                .collect::<Vec<_>>();
+            if calls.len() != expected.len() {
+                failures.push(format!(
+                    "{label}: expected {} run calls, found {}",
+                    expected.len(),
+                    calls.len()
+                ));
+                continue;
+            }
+            for (call, outer) in calls.into_iter().zip(*expected) {
+                let correct = match (&call.binding, outer) {
+                    (SourceCallBinding::LocalDeclaration(symbol), true) => {
+                        graph.symbols[*symbol].parent.is_none()
+                    }
+                    (SourceCallBinding::Shadowed, false) => true,
+                    _ => false,
+                };
+                if !correct {
+                    failures.push(format!(
+                        "{label}: outer={outer}, observed {:?}",
+                        call.binding
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

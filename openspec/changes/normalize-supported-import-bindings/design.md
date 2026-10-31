@@ -874,3 +874,73 @@ passes its45-source ceiling. A real hash-checked source-recovery unit proves exa
 captured paths, additional-candidate counters, untouched unrelated slots and cache
 reuse. The original22 artifact separately fails the retained-row bound at12867
 dependency rows in the same permanent fixture.
+
+### Kotlin statement inputs and operation-wide projection admission
+
+Immutable23 incorrectly makes a local Kotlin variable_declaration leaf visible
+before the enclosing property's initializer. The same declaration leaf appears
+before a for-loop container expression. Actual stable050/current23 CLI comparisons
+confirm local val/var, destructured/delegated properties and simple/destructured
+loop inputs lose outer calls. Use the actual property completion or container
+expression completion for statement-scope transitions. Keep file/class member
+reservation unchanged. Trace callable initializer/lambda ownership separately:
+an empty caller query is not proof that its nested calls were extracted or bound.
+
+Configured imports expose a separate aggregate lifetime error. Per-fact fanout is
+bounded, but admit_resolution_key_failures retains all per-file projections before
+the later global staging check. Full staging and incremental direct/affected phases
+must share one operation-owned projection-byte budget. Include existing entries,
+path/map/vector metadata, canonical key payloads and valid partial projections
+retained beside rejected identities. Supply the remaining per-graph allowance to
+the symbols producer through a narrow Copy context seam, with a typed budget error
+mapped to the existing CLI resource refusal. Check before owning key/vector growth;
+completed projections transfer actual retained accounting without resetting the
+operation counter. Apply the same boundary to recovery/hydration and the bounded
+fallback projection path. Avoid changing CanonicalResolutionKey layout or adding
+an arbitrary target/module-length cap. Existing per-fact configured limits remain.
+
+Use a scaled five-source/16-import/64-target fixture and an injected2MiB ceiling to
+causally demonstrate pre-growth refusal without allocating the reported2.52GB.
+Prove a smaller positive workload, invalid-neighbor compatibility, direct+affected
+budget sharing, captured/reused graphs and atomic refusal/cancellation. Kotlin
+source facts require semantic invalidation; retain immutable23 and older artifacts
+as compatibility baselines and advance the derivation contract with the fix.
+
+
+The implementation uses scalar phase allowances because these owners are synchronous
+and each phase already exposes its retained payload estimate. A shared Rc/Cell ledger
+would add lifetime hooks to report clones without a concurrent owner. Runtime supplies
+the pre-symbol remainder; source identity, projection maps, captured/cache/package
+owners, configured snapshots, document facts and candidate registries coexist under
+that inherited allowance. Preflight the finite coordinator path inventories, including
+inbound affected paths and deleted direct paths, before constructing their sets.
+Retain the existing512MiB identity/spill sublimit separately from the2GiB publication
+ceiling. These are conservative staging estimates; RSS is measured independently.
+
+Canonical workspaces admit each new distinct key before insertion at both existing
+row and byte ceilings. Query-vector copies are admitted while their sets remain live.
+Move the dependency set into the resolver instead of cloning it. Old-export/affected/
+candidate database reads receive the remaining allowance before normalizing query
+inputs or decoding owned rows. Existing unbounded library wrappers retain their
+source-compatible result type and semantics; bounded indexing overloads carry a
+returned-page ownership receipt, without changing CLI/MCP payloads or user options.
+The read's conservative conversion envelope covers typed reconstruction and temporary
+vector/tree transitions. Keep the returned owner charged while registry rows are
+cloned, then restore the allowance when the page is consumed. Old key pages transfer
+into the guarded workspace; affected paths transfer into the pre-admitted inventory.
+
+Identity ordinal sidecars and filtered report clones are charged too. Report merges
+pre-admit a conservative incoming-copy envelope; hydration scratch collections reserve
+before accumulating across chunks. Scoped allowances restore on every exit, including
+legacy incomplete-publication repair. Source recovery admits its projection and
+lookup indexes while they coexist; failed package construction releases only its own
+temporary reservations and preserves completed captured/cohort caches. Resource
+failure never returns a partial successful projection as authority.
+
+Owning controls cover the real invalid-export-neighbor Contract branch, distinct-key
+and query-copy refusal, duplicate/row boundaries, persisted long-witness reads,
+returned-page/registry coexistence and scoped cleanup. The page-transfer regression
+must fail when its ownership charge is removed. Existing publication identity,
+approved-purpose, rollback and incremental/full/no-op scenarios remain required.
+The existing architecture view still describes this synchronous evidence/publication
+boundary; no new provider, transport, storage model or diagram participant is added.

@@ -162,6 +162,27 @@ impl ConfiguredModuleResolution {
         Ok(Self { configs })
     }
 
+    /// Count the owned configuration vector, mappings, targets and text capacities.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        self.configs.iter().fold(
+            (self.configs.capacity() as u64).saturating_mul(std::mem::size_of::<EcmaScriptModuleConfig>() as u64),
+            |bytes, config| {
+                config.mappings.iter().fold(
+                    bytes.saturating_add(config.config_path.capacity() as u64)
+                        .saturating_add(config.directory.capacity() as u64)
+                        .saturating_add(config.base_url.as_ref().map_or(0, String::capacity) as u64)
+                        .saturating_add((config.mappings.capacity() as u64).saturating_mul(std::mem::size_of::<EcmaScriptPathMapping>() as u64)),
+                    |bytes, mapping| mapping.targets.iter().fold(
+                        bytes.saturating_add(mapping.pattern.capacity() as u64)
+                            .saturating_add((mapping.targets.capacity() as u64).saturating_mul(std::mem::size_of::<String>() as u64)),
+                        |bytes, target| bytes.saturating_add(target.capacity() as u64),
+                    ),
+                )
+            },
+        )
+    }
+
     /// Select the applicable compiler configuration once for a source graph.
     pub(crate) fn for_source(&self, caller_path: &str) -> ConfiguredModuleSource<'_> {
         ConfiguredModuleSource {

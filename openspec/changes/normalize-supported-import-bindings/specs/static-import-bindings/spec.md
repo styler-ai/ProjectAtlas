@@ -414,3 +414,31 @@ while preserving exact Cargo ownership, incremental invalidation and resource li
 #### Scenario: Root cohort admission cannot prove a shared identity
 - **WHEN** root metadata or a publishable shared identity is unavailable or a root is singleton, conventional or outside a proven cohort
 - **THEN** exact existing causes remain authoritative, growth is admitted before insertion, failure/cancellation preserves the prior publication, and no supported input or resource limit is removed
+
+### Requirement: Kotlin statement bindings respect initializer ownership
+The system SHALL activate local Kotlin value bindings after their owning declaration or iteration input, while preserving declaration-scope member reservation.
+
+#### Scenario: Local properties evaluate their input before introducing names
+- **WHEN** a local val, var, destructured or delegated property contains a same-name outer callable reference in its initializer
+- **THEN** the initializer retains the outer lexical binding, later statements observe the local binding, nested scopes keep their actual owners, and file/class members retain their existing reservation policy
+
+#### Scenario: Loop input precedes iteration-variable ownership
+- **WHEN** a Kotlin for-loop container expression calls an outer callable whose name is used by a simple or destructured iteration variable
+- **THEN** the container expression retains the outer binding, body references observe iteration variables, and references after the loop return to their enclosing scope
+
+### Requirement: Canonical projection admission is bounded across an operation
+The system SHALL apply the existing staging-byte ceiling before retaining canonical projection growth across all sources and phases of one indexing operation.
+
+#### Scenario: Configured import fanout spans several source files
+- **WHEN** individually admitted imports expand through supported configured targets across several direct or affected sources
+- **THEN** one shared operation budget admits canonical key/vector/map ownership before growth, successful and rejected-neighbor projections remain counted, and exhaustion returns the existing typed resource refusal without partial publication
+
+#### Scenario: Bounded navigation and recovery preserve capability
+- **WHEN** configured fanout fits the existing budget or source facts are captured or reused during recovery
+- **THEN** valid targets and ambiguity remain compatible, existing configured-target and module-length support is preserved, and failure/cancellation retains identity, approved purposes and the last complete publication
+
+
+#### Scenario: Incremental query workspaces and returned database pages coexist
+- **WHEN** old/new exports or dependency causes are copied into an incremental lookup workspace and database pages feed later graph or registry construction
+- **THEN** excess unique rows are rejected before insertion, duplicates consume no additional key reservation, query copies and decoded rows use the operation remainder, and returned owners remain counted through transfer
+- **AND** affected path inventories, candidate pages, identity sidecars and recovery indexes cannot mint fresh staging allowance; scoped reservations restore on success, refusal, cancellation and compatible repair while completed caches and the prior publication remain intact

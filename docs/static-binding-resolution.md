@@ -468,8 +468,8 @@ Real module files and missing automatic nested-main paths keep their exact cause
 Growth remains subject to the existing staging and cancellation boundaries, with
 complete cache insertion and atomic graph publication. No input limit is added.
 
-DER23 repairs compatible prior projections while SEM22 and its source-fact digest
-remain unchanged. The existing Rust-root CLI/MCP selector checks bounded stored
+The Cargo-cohort change first advanced this branch to DER23 while SEM22 and its
+source-fact digest remained unchanged. The existing Rust-root CLI/MCP selector checks bounded stored
 rows, custom-root lifecycle, helper isolation, exact targets/callers, affected-only
 recovery and full/incremental agreement. Separate source-bound native proof covers
 automatic root edits, addition, deletion, rename and missing nested-main ownership
@@ -479,3 +479,37 @@ The cost handoff records the paired initialization, RSS and stored-row results.
 The source-evidence/publication/read-boundary diagram still describes this path:
 these are private operation-local derived caches inside the existing resolver;
 there is no additional persistent store, parser, provider or public query flow.
+
+
+## Kotlin statement inputs and projection staging
+
+Local Kotlin val/var, destructured and delegated property names become visible after
+their complete declaration. A for-loop variable becomes visible after the actual
+container expression, so a same-name outer callable remains available in that input.
+Later statements and loop bodies retain local shadowing; file/class members retain
+their existing reservation policy. Anonymous-lambda input facts are checked at the
+source-owned call boundary; an empty named-caller query is not absence proof.
+DER24/SEM23 invalidates compatible unchanged indexes for this source-fact correction.
+
+Configured imports retain all64 supported targets and existing module-length rules.
+Projection admission uses the remaining2GiB operation staging estimate before owning
+keys, vectors, maps or valid partial projections beside rejected facts. It includes
+coexisting source identity/cache/package/configuration/document and lookup owners;
+the existing512MiB identity/spill boundary remains separate. Distinct-key row limits
+also apply before insertion, and duplicate witnesses retain no new key copy.
+
+Incremental query copies and database decoding use that same remainder. Returned
+pages keep an ownership receipt through registry construction; affected paths move
+into pre-admitted coordinator inventories, and dependency sets move into the resolver.
+Hydration and source lookup indexes reserve before growth. Temporary scope and package
+reservations release on all exits, including legacy repair, without erasing completed
+caches. A refusal publishes no partial graph. No CLI/MCP shape, schema, provider,
+configuration option or user-facing limit is added; staging estimates and measured
+RSS remain distinct evidence.
+
+Permanent controls include `kotlin_statement_inputs_precede_their_value_bindings`,
+`configured_projection_admission_refuses_before_aggregate_retention`,
+`incremental_key_workspaces_admit_clones_and_query_copies_before_growth`,
+`resolution_batch_reads_admit_long_witnesses_before_decoding_or_cloning`,
+`persisted_candidate_pages_share_the_registry_transfer_allowance` and the public
+`reopened_container_calls_agree_across_cli_mcp_and_refresh` lifecycle selector.

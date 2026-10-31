@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 22;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 23;
 /// Disjoint ECMAScript lookup namespaces for explicit files and inferred modules.
 const ECMA_FILE_SCOPE: &str = "file:";
 /// Legacy extensionless and package-entry aliases never identify an explicit file.
@@ -201,6 +201,66 @@ pub struct ResolutionProjectionContext<'a> {
     rust_package: Option<(&'a str, &'a str)>,
     /// Shared parent identity for this exact manifest-listed sibling root.
     rust_root_cohort: Option<&'a str>,
+    /// Remaining operation allowance supplied by the projection owner.
+    retained_bytes_limit: Option<u64>,
+}
+
+/// One derivation's retained ownership and its first byte-admission refusal.
+struct ProjectionBudget {
+    /// Absence preserves the general library entrypoint's existing contract.
+    limit: Option<u64>,
+    /// Admitted projection payload and coexisting lookup state.
+    used: u64,
+    /// A key helper can defer propagation only until the next owning checkpoint.
+    failure: Option<(u64, u64)>,
+}
+
+impl ProjectionBudget {
+    /// Start one derivation with the caller's remaining allowance.
+    const fn new(limit: Option<u64>) -> Self {
+        Self {
+            limit,
+            used: 0,
+            failure: None,
+        }
+    }
+
+    /// Admit a new owner before insertion; retain the first refusal for helpers.
+    fn charge(&mut self, bytes: u64) -> bool {
+        if self.failure.is_some() {
+            return false;
+        }
+        let Some(limit) = self.limit else { return true };
+        let requested = self.used.saturating_add(bytes);
+        if requested > limit {
+            self.failure = Some((limit, requested));
+            return false;
+        }
+        self.used = requested;
+        true
+    }
+
+    /// Propagate byte refusal without returning a partial projection as authority.
+    fn check(&self) -> Result<(), ResolutionProjectionError> {
+        if let Some((limit, requested)) = self.failure {
+            return Err(ResolutionProjectionError::MemoryLimit { limit, requested });
+        }
+        Ok(())
+    }
+
+    /// Reserve fallible top-level payloads before allocating their owners.
+    fn reserve(&mut self, bytes: u64) -> Result<(), ResolutionProjectionError> {
+        self.charge(bytes);
+        self.check()
+    }
+
+    /// Include inline key-vector spare capacity and actual string allocation.
+    fn key(&mut self, key: &CanonicalResolutionKey) -> bool {
+        self.charge(
+            key.retained_heap_bytes()
+                .saturating_add((4 * std::mem::size_of::<CanonicalResolutionKey>()) as u64),
+        )
+    }
 }
 
 /// Provider scopes expanded once per unique import in one source graph.
@@ -208,15 +268,17 @@ type ImportScopeCache = BTreeMap<String, BTreeMap<String, Vec<String>>>;
 
 /// Bounded contract failures retained while a graph keeps valid siblings.
 struct ContractFailures {
+    /// The same per-graph allowance covers successful and rejected facts.
+    budget: ProjectionBudget,
     /// Rejected derived-key facts retained for typed adapter detail.
     failures: Vec<ResolutionProjectionFactFailure>,
     /// Number of distinct rejected derived-key facts observed.
     rejected_count: usize,
     /// Whether the source fact has already been rejected.
     source_seen: bool,
-    /// Rejected symbol ordinals, bit-packed by `Vec<bool>`.
+    /// Rejection flags for dense symbol ordinals.
     symbol_seen: Vec<bool>,
-    /// Rejected relation ordinals, bit-packed by `Vec<bool>`.
+    /// Rejection flags for dense relation ordinals.
     relation_seen: Vec<bool>,
     /// Rejected explicit export ordinals.
     export_seen: Vec<bool>,
@@ -224,15 +286,29 @@ struct ContractFailures {
 
 impl ContractFailures {
     /// Allocate closed ordinal tracking for one parser graph.
-    fn new(symbol_count: usize, relation_count: usize, export_count: usize) -> Self {
-        Self {
+    fn new(
+        symbol_count: usize,
+        relation_count: usize,
+        export_count: usize,
+        mut budget: ProjectionBudget,
+    ) -> Result<Self, ResolutionProjectionError> {
+        budget.reserve(
+            (std::mem::size_of::<Self>() as u64).saturating_add(
+                symbol_count
+                    .saturating_add(relation_count)
+                    .saturating_add(export_count)
+                    .saturating_mul(std::mem::size_of::<bool>()) as u64,
+            ),
+        )?;
+        Ok(Self {
+            budget,
             failures: Vec::new(),
             rejected_count: 0,
             source_seen: false,
             symbol_seen: vec![false; symbol_count],
             relation_seen: vec![false; relation_count],
             export_seen: vec![false; export_count],
-        }
+        })
     }
 
     /// Record the first failure for one dense parser fact.
@@ -270,6 +346,12 @@ impl ContractFailures {
         }
         self.rejected_count = self.rejected_count.saturating_add(1);
         if self.failures.len() < MAX_RESOLUTION_PROJECTION_FAILURES {
+            if !self
+                .budget
+                .charge((4 * std::mem::size_of::<ResolutionProjectionFactFailure>()) as u64)
+            {
+                return;
+            }
             self.failures
                 .push(ResolutionProjectionFactFailure { error, fact });
         }
@@ -287,6 +369,7 @@ impl<'a> ResolutionProjectionContext<'a> {
             source_semantics: None,
             rust_package: None,
             rust_root_cohort: None,
+            retained_bytes_limit: None,
         }
     }
 
@@ -310,9 +393,64 @@ impl<'a> ResolutionProjectionContext<'a> {
         self.rust_root_cohort = Some(directory);
         self
     }
+
+    /// Bound derivation by the bytes still available in the owning operation.
+    ///
+    /// Exhaustion returns [`ResolutionProjectionError::MemoryLimit`] without a
+    /// partially admitted projection. The owner supplies its existing ceiling.
+    #[must_use]
+    pub const fn with_retained_bytes_limit(mut self, limit: u64) -> Self {
+        self.retained_bytes_limit = Some(limit);
+        self
+    }
 }
 
 impl ResolutionKeyProjection {
+    /// Count owned vector capacities, canonical text, and source-proof sidecars.
+    ///
+    /// Inline projection metadata is charged by its containing map or owner.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        fn keys_bytes(keys: &Vec<CanonicalResolutionKey>) -> u64 {
+            keys.iter().fold(
+                (keys.capacity() as u64)
+                    .saturating_mul(std::mem::size_of::<CanonicalResolutionKey>() as u64),
+                |bytes, key| bytes.saturating_add(key.retained_heap_bytes()),
+            )
+        }
+        keys_bytes(&self.source)
+            .saturating_add(
+                (self.symbols.capacity() * std::mem::size_of::<SymbolResolutionKeys>()) as u64,
+            )
+            .saturating_add(
+                (self.exports.capacity() * std::mem::size_of::<ExportResolutionKeys>()) as u64,
+            )
+            .saturating_add(
+                (self.relations.capacity() * std::mem::size_of::<RelationResolutionKeys>()) as u64,
+            )
+            .saturating_add(
+                self.symbols
+                    .iter()
+                    .map(|row| keys_bytes(&row.keys))
+                    .fold(0, u64::saturating_add),
+            )
+            .saturating_add(
+                self.exports
+                    .iter()
+                    .map(|row| keys_bytes(&row.keys))
+                    .fold(0, u64::saturating_add),
+            )
+            .saturating_add(
+                self.relations
+                    .iter()
+                    .map(|row| keys_bytes(&row.keys))
+                    .fold(0, u64::saturating_add),
+            )
+            .saturating_add(self.source_calls_retained_bytes())
+            .saturating_add(self.source_spans_retained_bytes())
+            .saturating_add(self.rust_toolchain_imports_retained_bytes())
+    }
+
     /// Construct an empty projection when one parser graph has no admissible
     /// canonical identity keys. Entity and relation rows can still be staged;
     /// the graph publication layer records the rejected key provenance.
@@ -512,6 +650,13 @@ impl ResolutionProjectionFailure {
 /// Failure while deriving bounded canonical keys from parser facts.
 #[derive(Debug)]
 pub enum ResolutionProjectionError {
+    /// Retained projection growth would exceed the caller's remaining allowance.
+    MemoryLimit {
+        /// Remaining byte allowance provided by the owning operation.
+        limit: u64,
+        /// Bytes requested at the first refused ownership insertion.
+        requested: u64,
+    },
     /// Source ordinals do not belong to the supplied admitted graph.
     SourceEvidenceMismatch,
     /// An extracted or caller-supplied identity violated the graph contract.
@@ -530,6 +675,10 @@ pub enum ResolutionProjectionError {
 impl fmt::Display for ResolutionProjectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MemoryLimit { limit, requested } => write!(
+                formatter,
+                "resolution projection requires {requested} retained bytes, exceeding its {limit}-byte allowance"
+            ),
             Self::SourceEvidenceMismatch => {
                 formatter.write_str("source semantic evidence does not match the projection graph")
             }
@@ -558,7 +707,7 @@ impl Error for ResolutionProjectionError {
                 .failures
                 .first()
                 .map(|failure| &failure.error as &(dyn Error + 'static)),
-            Self::KeyLimit { .. } | Self::SourceEvidenceMismatch => None,
+            Self::MemoryLimit { .. } | Self::KeyLimit { .. } | Self::SourceEvidenceMismatch => None,
         }
     }
 }
@@ -768,8 +917,9 @@ pub fn derive_resolution_keys(
 ///
 /// # Errors
 ///
-/// Returns an error when a graph identity is invalid or one parser fact exceeds
-/// the bounded canonical-key fan-out.
+/// Returns an error when a graph identity is invalid, one parser fact exceeds
+/// the bounded canonical-key fan-out, or an explicitly supplied operation
+/// allowance is exhausted before retaining the complete projection.
 pub fn derive_resolution_keys_with_context(
     project: ProjectInstanceId,
     package: Option<&str>,
@@ -781,6 +931,17 @@ pub fn derive_resolution_keys_with_context(
         .is_some_and(|facts| !facts.matches_graph(graph))
     {
         return Err(ResolutionProjectionError::SourceEvidenceMismatch);
+    }
+    let mut budget = ProjectionBudget::new(context.retained_bytes_limit);
+    budget.reserve(std::mem::size_of::<ResolutionKeyProjection>() as u64)?;
+    if let Some(facts) = context.source_semantics {
+        budget.reserve(
+            (facts.calls().len() as u64)
+                .saturating_mul((2 * std::mem::size_of::<SourceCallFact>()) as u64)
+                .saturating_add(crate::source_semantics::call_binding_heap_bytes(
+                    facts.calls(),
+                )),
+        )?;
     }
     let source_calls = context.source_semantics.map(|facts| facts.calls().to_vec());
     let mut source_spans = BTreeMap::new();
@@ -796,12 +957,15 @@ pub fn derive_resolution_keys_with_context(
                     .map(|fact| (fact.relation, fact.source_span)),
             )
         {
-            if let Some(span) = span
-                && source_spans
-                    .insert(relation, span)
-                    .is_some_and(|previous| previous != span)
-            {
-                return Err(ResolutionProjectionError::SourceEvidenceMismatch);
+            if let Some(span) = span {
+                if let Some(previous) = source_spans.get(&relation) {
+                    if *previous != span {
+                        return Err(ResolutionProjectionError::SourceEvidenceMismatch);
+                    }
+                } else {
+                    budget.reserve(128)?;
+                    source_spans.insert(relation, span);
+                }
             }
         }
     }
@@ -809,12 +973,25 @@ pub fn derive_resolution_keys_with_context(
         .source_semantics
         .filter(|_| semantic::provider_for_graph(graph) == Some(SemanticProviderOwner::Rust))
         .map(|facts| {
-            facts
-                .imports()
-                .iter()
-                .map(|import| (import.relation, import.rust_toolchain.as_deref().cloned()))
-                .collect::<BTreeMap<_, _>>()
-        });
+            let mut modules = HashSet::new();
+            let bytes = facts.imports().iter().fold(0_u64, |bytes, import| {
+                bytes.saturating_add(128).saturating_add(
+                    import
+                        .rust_toolchain
+                        .as_deref()
+                        .map_or(0, |reference| reference.retained_heap_bytes(&mut modules)),
+                )
+            });
+            budget.reserve(bytes)?;
+            Ok::<_, ResolutionProjectionError>(
+                facts
+                    .imports()
+                    .iter()
+                    .map(|import| (import.relation, import.rust_toolchain.as_deref().cloned()))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        })
+        .transpose()?;
     let Some(provider_owner) = semantic::provider_for_graph(graph) else {
         return Ok(ResolutionKeyProjection {
             source: Vec::new(),
@@ -844,7 +1021,8 @@ pub fn derive_resolution_keys_with_context(
         context
             .source_semantics
             .map_or(0, |facts| facts.exports().len()),
-    );
+        budget,
+    )?;
     let language = GraphIdentityText::new(resolution_family)?;
     let package = package.map(GraphIdentityText::new).transpose()?;
 
@@ -864,7 +1042,6 @@ pub fn derive_resolution_keys_with_context(
             }));
     let mut source_keys = Vec::new();
     if emits_source_module_keys {
-        source_keys.reserve(source_scopes.len() + configured_source_scopes.len());
         for scope in &source_scopes {
             if let Some(key) = retain_derived_key(
                 canonical_key(
@@ -926,6 +1103,7 @@ pub fn derive_resolution_keys_with_context(
     {
         source_keys.push(key);
     }
+    contract_failures.budget.check()?;
     let source_keys = bounded_keys(source_keys, "source", 0)?;
 
     let explicit_export_names = context
@@ -982,6 +1160,7 @@ pub fn derive_resolution_keys_with_context(
         });
     let mut symbol_keys = Vec::new();
     for (symbol_index, symbol) in graph.symbols.iter().enumerate() {
+        contract_failures.budget.check()?;
         let mut keys = Vec::new();
         match symbol.kind {
             SymbolKind::Package if provider_owner == SemanticProviderOwner::Cargo => {
@@ -1072,7 +1251,7 @@ pub fn derive_resolution_keys_with_context(
                                 }
                             }
                         };
-                        keys.push(CanonicalResolutionKey::new(
+                        let key = CanonicalResolutionKey::new(
                             project,
                             ResolutionKeyDomain::Declaration,
                             &provider,
@@ -1081,7 +1260,11 @@ pub fn derive_resolution_keys_with_context(
                             scope.as_ref(),
                             Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
                             &identity,
-                        ));
+                        );
+                        if contract_failures.budget.key(&key) {
+                            keys.push(key);
+                        }
+                        contract_failures.budget.check()?;
                     }
                     let configured_scopes = configured_source_scopes.iter().map(|scope| {
                         symbol.parent.as_deref().map_or_else(
@@ -1101,7 +1284,7 @@ pub fn derive_resolution_keys_with_context(
                                 continue;
                             }
                         };
-                        keys.push(CanonicalResolutionKey::new(
+                        let key = CanonicalResolutionKey::new(
                             project,
                             ResolutionKeyDomain::Declaration,
                             &provider,
@@ -1110,7 +1293,11 @@ pub fn derive_resolution_keys_with_context(
                             Some(&scope),
                             Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
                             &identity,
-                        ));
+                        );
+                        if contract_failures.budget.key(&key) {
+                            keys.push(key);
+                        }
+                        contract_failures.budget.check()?;
                     }
                     if keys.len() > MAX_RESOLUTION_KEYS_PER_FACT {
                         keys = bounded_keys(keys, "symbol", symbol_index)?;
@@ -1121,6 +1308,9 @@ pub fn derive_resolution_keys_with_context(
         }
         let keys = bounded_keys(keys, "symbol", symbol_index)?;
         if !keys.is_empty() {
+            contract_failures
+                .budget
+                .reserve((4 * std::mem::size_of::<SymbolResolutionKeys>()) as u64)?;
             symbol_keys.push(SymbolResolutionKeys { symbol_index, keys });
         }
     }
@@ -1134,6 +1324,7 @@ pub fn derive_resolution_keys_with_context(
         .filter(|facts| facts.exports_complete())
     {
         for (export_index, export) in facts.exports().iter().enumerate() {
+            contract_failures.budget.check()?;
             if export.namespace != crate::SourceExportNamespace::Value
                 || !matches!(
                     export.binding,
@@ -1195,37 +1386,39 @@ pub fn derive_resolution_keys_with_context(
             }
             let keys = bounded_keys(keys, "export", export_index)?;
             if !keys.is_empty() {
+                contract_failures
+                    .budget
+                    .reserve((4 * std::mem::size_of::<ExportResolutionKeys>()) as u64)?;
                 export_keys.push(ExportResolutionKeys { export_index, keys });
             }
         }
     }
 
-    let mut parsed_imports = if context.source_semantics.is_some() {
-        vec![Vec::new(); graph.relations.len()]
-    } else {
-        graph
-            .relations
-            .iter()
-            .map(|relation| {
-                if relation.kind == RelationKind::Imports {
-                    semantic::parse_imports(provider_owner, &relation.target_name)
-                } else {
-                    Vec::new()
-                }
-            })
-            .collect::<Vec<_>>()
-    };
+    contract_failures.budget.reserve(
+        (graph.relations.len() as u64)
+            .saturating_mul(std::mem::size_of::<Vec<ImportReference>>() as u64),
+    )?;
+    let mut parsed_imports = vec![Vec::new(); graph.relations.len()];
     if let Some(source) = context.source_semantics {
-        for references in &mut parsed_imports {
-            references.clear();
-        }
         for import in source.imports() {
+            reserve_import_references(&import.references, &mut contract_failures.budget)?;
             parsed_imports[import.relation].clone_from(&import.references);
+        }
+    } else {
+        for (relation, references) in graph.relations.iter().zip(&mut parsed_imports) {
+            if relation.kind == RelationKind::Imports {
+                let parsed = semantic::parse_imports(provider_owner, &relation.target_name);
+                reserve_import_references(&parsed, &mut contract_failures.budget)?;
+                *references = parsed;
+            }
         }
     }
     let mut aliases: BTreeMap<&str, Vec<&ImportReference>> = BTreeMap::new();
     for references in &parsed_imports {
         for reference in references {
+            contract_failures
+                .budget
+                .reserve(128 + (4 * std::mem::size_of::<&ImportReference>()) as u64)?;
             aliases
                 .entry(reference.local())
                 .or_default()
@@ -1240,7 +1433,14 @@ pub fn derive_resolution_keys_with_context(
         graph,
         &parsed_imports,
         configured_source.as_ref(),
-    );
+        &mut contract_failures.budget,
+    )?;
+    contract_failures
+        .budget
+        .reserve(context.source_semantics.map_or(0, |facts| {
+            (facts.calls().len().saturating_mul(256) + facts.imports().len().saturating_mul(128))
+                as u64
+        }))?;
     let rust_calls = context
         .source_semantics
         .map(|facts| {
@@ -1257,37 +1457,27 @@ pub fn derive_resolution_keys_with_context(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    for reference in rust_calls.values() {
-        import_scopes
-            .entry(graph.path.clone())
-            .or_default()
-            .entry(reference.module().to_string())
-            .or_insert_with(|| {
-                semantic::import_scopes(
-                    provider_owner,
-                    &graph.path,
-                    reference,
-                    configured_source.as_ref(),
-                )
-            });
-    }
-    if let Some(facts) = context.source_semantics {
-        for call in facts.calls() {
-            if let SourceCallBinding::Qualified(reference) = &call.binding {
-                import_scopes
-                    .entry(graph.path.clone())
-                    .or_default()
-                    .entry(reference.module().to_string())
-                    .or_insert_with(|| {
-                        semantic::import_scopes(
-                            provider_owner,
-                            &graph.path,
-                            reference,
-                            configured_source.as_ref(),
-                        )
-                    });
-            }
-        }
+    for reference in rust_calls.values().chain(
+        context
+            .source_semantics
+            .into_iter()
+            .flat_map(SourceSemanticFacts::calls)
+            .filter_map(|call| {
+                if let SourceCallBinding::Qualified(reference) = &call.binding {
+                    Some(reference)
+                } else {
+                    None
+                }
+            }),
+    ) {
+        cache_import_scopes(
+            &mut import_scopes,
+            provider_owner,
+            &graph.path,
+            reference,
+            configured_source.as_ref(),
+            &mut contract_failures.budget,
+        )?;
     }
 
     let mut relation_keys = Vec::new();
@@ -1305,6 +1495,7 @@ pub fn derive_resolution_keys_with_context(
             .collect::<BTreeMap<_, _>>()
     });
     for (relation_index, relation) in graph.relations.iter().enumerate() {
+        contract_failures.budget.check()?;
         let mut keys = match relation.kind {
             RelationKind::Imports if semantic::supports_source_dependencies(provider_owner) => {
                 if provider_owner == SemanticProviderOwner::EcmaScript
@@ -1455,12 +1646,17 @@ pub fn derive_resolution_keys_with_context(
             RelationKind::Imports | RelationKind::Calls | RelationKind::DependsOn => Vec::new(),
         };
         keys = bounded_keys(keys, "relation", relation_index)?;
+        contract_failures.budget.check()?;
+        contract_failures
+            .budget
+            .reserve((4 * std::mem::size_of::<RelationResolutionKeys>()) as u64)?;
         relation_keys.push(RelationResolutionKeys {
             relation_index,
             keys,
         });
     }
 
+    contract_failures.budget.check()?;
     let projection = ResolutionKeyProjection {
         source: source_keys,
         symbols: symbol_keys,
@@ -1489,25 +1685,76 @@ fn build_import_scope_cache(
     graph: &SymbolGraph,
     parsed_imports: &[Vec<ImportReference>],
     configured_source: Option<&ConfiguredModuleSource<'_>>,
-) -> ImportScopeCache {
+    budget: &mut ProjectionBudget,
+) -> Result<ImportScopeCache, ResolutionProjectionError> {
     let mut cache = ImportScopeCache::new();
     for (relation, references) in graph.relations.iter().zip(parsed_imports) {
-        let caller_path = &relation.path;
-        let modules = cache.entry(caller_path.clone()).or_default();
         for reference in references {
-            modules
-                .entry(reference.module().to_string())
-                .or_insert_with(|| {
-                    semantic::import_scopes(
-                        provider_owner,
-                        caller_path,
-                        reference,
-                        configured_source,
-                    )
-                });
+            cache_import_scopes(
+                &mut cache,
+                provider_owner,
+                &relation.path,
+                reference,
+                configured_source,
+                budget,
+            )?;
         }
     }
+    Ok(cache)
+}
+
+/// Charge cloned import payload before retaining one relation's references.
+fn reserve_import_references(
+    references: &[ImportReference],
+    budget: &mut ProjectionBudget,
+) -> Result<(), ResolutionProjectionError> {
+    let mut modules = HashSet::new();
+    budget.reserve(
+        references.iter().fold(
+            (references.len() as u64)
+                .saturating_mul((2 * std::mem::size_of::<ImportReference>()) as u64),
+            |bytes, reference| bytes.saturating_add(reference.retained_heap_bytes(&mut modules)),
+        ),
+    )
+}
+
+/// Retain each bounded provider expansion only after admitting its cache owner.
+fn cache_import_scopes(
+    cache: &mut ImportScopeCache,
+    provider: SemanticProviderOwner,
+    caller: &str,
+    reference: &ImportReference,
+    configured: Option<&ConfiguredModuleSource<'_>>,
+    budget: &mut ProjectionBudget,
+) -> Result<(), ResolutionProjectionError> {
+    if cache
+        .get(caller)
+        .is_some_and(|modules| modules.contains_key(reference.module()))
+    {
+        return Ok(());
+    }
+    // A provider expansion has the existing per-fact fan-out bound. Only this
+    // one temporary expansion exists before its aggregate cache reservation.
+    let scopes = semantic::import_scopes(provider, caller, reference, configured);
+    let bytes = scopes
+        .iter()
+        .fold(
+            128_u64
+                .saturating_add(reference.module().len() as u64)
+                .saturating_add((scopes.capacity() * std::mem::size_of::<String>()) as u64),
+            |bytes, scope| bytes.saturating_add(scope.capacity() as u64),
+        )
+        .saturating_add(if cache.contains_key(caller) {
+            0
+        } else {
+            128_u64.saturating_add(caller.len() as u64)
+        });
+    budget.reserve(bytes)?;
     cache
+        .entry(caller.to_string())
+        .or_default()
+        .insert(reference.module().to_string(), scopes);
+    Ok(())
 }
 
 /// Borrow one pre-expanded import scope list without allocating lookup keys.
@@ -1731,7 +1978,7 @@ fn retain_derived_key(
     contract_failures: &mut ContractFailures,
 ) -> Option<CanonicalResolutionKey> {
     match result {
-        Ok(key) => Some(key),
+        Ok(key) => contract_failures.budget.key(&key).then_some(key),
         Err(error) => {
             remember_contract_failure(contract_failures, fact, error);
             None
@@ -2605,6 +2852,52 @@ mod tests {
     }
 
     #[test]
+    fn contract_rejection_flags_admit_actual_bool_vector_storage() -> Result<(), Box<dyn Error>> {
+        let counts = [19_usize, 23, 29];
+        let header = std::mem::size_of::<super::ContractFailures>() as u64;
+        let flags = (counts.iter().sum::<usize>() * std::mem::size_of::<bool>()) as u64;
+        let exact = header + flags;
+        let admitted = super::ContractFailures::new(
+            counts[0],
+            counts[1],
+            counts[2],
+            super::ProjectionBudget::new(Some(exact)),
+        )?;
+        let actual = header
+            + ([
+                admitted.symbol_seen.capacity(),
+                admitted.relation_seen.capacity(),
+                admitted.export_seen.capacity(),
+            ]
+            .iter()
+            .sum::<usize>()
+                * std::mem::size_of::<bool>()) as u64;
+        require(
+            actual <= exact && admitted.budget.used >= actual,
+            "dense rejection flags were charged as packed bits instead of owned bool bytes",
+        )?;
+        require(
+            matches!(
+                super::ContractFailures::new(
+                    counts[0],
+                    counts[1],
+                    counts[2],
+                    super::ProjectionBudget::new(Some(exact - 1))
+                ),
+                Err(ResolutionProjectionError::MemoryLimit { .. })
+            ),
+            "flag vectors were allocated past the remaining byte allowance",
+        )?;
+        super::ContractFailures::new(
+            counts[0],
+            counts[1],
+            counts[2],
+            super::ProjectionBudget::new(None),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn semantic_resolution_contract_digest_is_bounded_and_deterministic() {
         const PRE_ARROW_CONTEXT_DIGEST: &str =
             "66cab1855f1689308cdc5bb858a63e8d3ed42e825b073d62cada7347383731a7";
@@ -2615,7 +2908,7 @@ mod tests {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 22);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 23);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
@@ -3372,7 +3665,8 @@ mod tests {
             &graph,
             &parsed_imports,
             Some(&configured_source),
-        );
+            &mut super::ProjectionBudget::new(None),
+        )?;
         let modules = cache
             .get("src/page.ts")
             .ok_or_else(|| io::Error::other("source graph omitted its import-scope cache"))?;

@@ -18,14 +18,39 @@ use std::collections::BTreeMap;
 pub fn qualified_symbol_parents(
     graph: &SymbolGraph,
 ) -> Result<Vec<Option<GraphIdentityText>>, GraphContractError> {
-    qualified_symbol_parents_selected(graph, (0..graph.symbols.len()).collect())
+    qualified_symbol_parents_checked(graph, &mut |_| Ok(()))
+}
+
+/// Qualify parents while admitting vector and scope ownership before growth.
+///
+/// # Errors
+/// Returns source contract errors or the caller's resource/cancellation failure.
+/// A refusal never returns a partially qualified parent vector.
+pub fn qualified_symbol_parents_checked<E: From<GraphContractError>>(
+    graph: &SymbolGraph,
+    reserve: &mut impl FnMut(u64) -> Result<(), E>,
+) -> Result<Vec<Option<GraphIdentityText>>, E> {
+    reserve((graph.symbols.len() as u64).saturating_mul(
+        (2 * std::mem::size_of::<Option<GraphIdentityText>>() + std::mem::size_of::<usize>())
+            as u64,
+    ))?;
+    qualified_symbol_parents_selected_checked(graph, (0..graph.symbols.len()).collect(), reserve)
 }
 
 /// Derive only admitted raw ordinals, without retaining rejected scope ancestors.
 pub(crate) fn qualified_symbol_parents_selected(
     graph: &SymbolGraph,
-    mut order: Vec<usize>,
+    order: Vec<usize>,
 ) -> Result<Vec<Option<GraphIdentityText>>, GraphContractError> {
+    qualified_symbol_parents_selected_checked(graph, order, &mut |_| Ok(()))
+}
+
+/// Build one bounded scope candidate before admitting its retained owners.
+fn qualified_symbol_parents_selected_checked<E: From<GraphContractError>>(
+    graph: &SymbolGraph,
+    mut order: Vec<usize>,
+    reserve: &mut impl FnMut(u64) -> Result<(), E>,
+) -> Result<Vec<Option<GraphIdentityText>>, E> {
     let is_php = graph
         .language
         .as_deref()
@@ -68,10 +93,22 @@ pub(crate) fn qualified_symbol_parents_selected(
                 parent = Some(qualified_parent);
             }
         }
-        qualified_names[index] = Some(match parent.as_ref() {
+        let qualified = match parent.as_ref() {
             Some(parent) => qualified_symbol_identity(parent, &name)?,
             None => name,
-        });
+        };
+        reserve(
+            128_u64
+                .saturating_add((4 * std::mem::size_of::<usize>()) as u64)
+                .saturating_add((qualified.as_str().len() as u64).saturating_mul(2))
+                .saturating_add(
+                    parent
+                        .as_ref()
+                        .map_or(0, |parent| parent.as_str().len() as u64)
+                        .saturating_mul(2),
+                ),
+        )?;
+        qualified_names[index] = Some(qualified);
         parents[index] = parent;
         active_by_name
             .entry(symbol.name.as_str())

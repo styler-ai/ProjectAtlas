@@ -3,8 +3,7 @@
 use super::{
     CanonicalResolutionKey, CliError, IndexWorkControl, IndexWorkStage,
     MAX_INCREMENTAL_RESOLUTION_ITEMS, PackageIndex, PackageOwner, ProjectInstanceId,
-    RepositoryFilePath, STAGED_GRAPH_ROW_BYTES, SourceBindingCache,
-    enforce_resolution_registry_budget, resolution_key_limit_failure,
+    RepositoryFilePath, STAGED_GRAPH_ROW_BYTES, SourceBindingCache, resolution_key_limit_failure,
 };
 use projectatlas_symbols::{
     SourceCargoTargetKind, SourceCargoTargets, cargo_automatic_target_directory,
@@ -90,7 +89,7 @@ impl SourceBindingCache<'_> {
     /// Reserve a derived cache or temporary construction before inserting it.
     fn reserve_cohort_bytes(&mut self, bytes: u64) -> Result<(), CliError> {
         let next = self.retained_bytes.saturating_add(bytes);
-        enforce_resolution_registry_budget(next)?;
+        super::enforce_resolution_registry_budget_with_limit(next, self.retained_limit)?;
         self.retained_bytes = next;
         Ok(())
     }
@@ -268,52 +267,76 @@ impl PackageIndex {
         sources: &mut SourceBindingCache<'_>,
         control: &IndexWorkControl,
     ) -> Result<Self, CliError> {
-        let mut index = Self::from_graph_iter(graphs.iter().map(|graph| graph.graph()))?;
-        let mut needed = std::collections::BTreeSet::new();
-        for graph in graphs {
+        let mut package_bytes = 0_u64;
+        let mut needed_bytes = 0_u64;
+        let result = (|| -> Result<Self, CliError> {
             control.check(IndexWorkStage::SymbolParsing)?;
-            if graph
-                .graph()
-                .language
-                .as_deref()
-                .and_then(projectatlas_core::language::language_capability)
-                .and_then(|language| language.effective_semantic_provider())
-                == Some(projectatlas_core::language::SemanticProviderOwner::Rust)
-                && let Some(package) = index.package_owner(&graph.graph().path)
-            {
-                needed.insert(package.manifest.clone());
+            let mut index =
+                Self::from_graph_iter(graphs.iter().map(|graph| graph.graph()), &mut |bytes| {
+                    sources.reserve_cohort_bytes(bytes)?;
+                    package_bytes = package_bytes.saturating_add(bytes);
+                    Ok(())
+                })?;
+            let mut needed = std::collections::BTreeSet::new();
+            for graph in graphs {
+                control.check(IndexWorkStage::SymbolParsing)?;
+                if graph
+                    .graph()
+                    .language
+                    .as_deref()
+                    .and_then(projectatlas_core::language::language_capability)
+                    .and_then(|language| language.effective_semantic_provider())
+                    == Some(projectatlas_core::language::SemanticProviderOwner::Rust)
+                    && let Some(package) = index.package_owner(&graph.graph().path)
+                    && !needed.contains(&package.manifest)
+                {
+                    let bytes =
+                        STAGED_GRAPH_ROW_BYTES.saturating_add(package.manifest.len() as u64);
+                    sources.reserve_cohort_bytes(bytes)?;
+                    needed_bytes = needed_bytes.saturating_add(bytes);
+                    needed.insert(package.manifest.clone());
+                }
             }
-        }
-        for position in 0..index.packages.len() {
-            let package = &index.packages[position];
-            if !needed.contains(&package.manifest) {
-                continue;
+            for position in 0..index.packages.len() {
+                let package = &index.packages[position];
+                if !needed.contains(&package.manifest) {
+                    continue;
+                }
+                control.check(IndexWorkStage::SymbolParsing)?;
+                let fresh = graphs
+                    .iter()
+                    .find(|graph| graph.graph().path == package.manifest)
+                    .and_then(|graph| graph.semantics())
+                    .and_then(|facts| facts.cargo());
+                let captured = if fresh.is_none() {
+                    Some(sources.capture(&package.manifest, control)?)
+                } else {
+                    None
+                };
+                let Some(targets) = fresh
+                    .or_else(|| {
+                        captured
+                            .as_ref()
+                            .and_then(|source| source.semantics.cargo())
+                    })
+                    .filter(|targets| targets.complete)
+                else {
+                    continue;
+                };
+                let cohorts =
+                    sources.cargo_root_cohorts(project, package, targets, &index, control)?;
+                index.packages[position].cohorts = Some(cohorts);
             }
-            control.check(IndexWorkStage::SymbolParsing)?;
-            let fresh = graphs
-                .iter()
-                .find(|graph| graph.graph().path == package.manifest)
-                .and_then(|graph| graph.semantics())
-                .and_then(|facts| facts.cargo());
-            let captured = if fresh.is_none() {
-                Some(sources.capture(&package.manifest, control)?)
-            } else {
-                None
-            };
-            let Some(targets) = fresh
-                .or_else(|| {
-                    captured
-                        .as_ref()
-                        .and_then(|source| source.semantics.cargo())
-                })
-                .filter(|targets| targets.complete)
-            else {
-                continue;
-            };
-            let cohorts = sources.cargo_root_cohorts(project, package, targets, &index, control)?;
-            index.packages[position].cohorts = Some(cohorts);
-        }
-        Ok(index)
+            Ok(index)
+        })();
+        // The temporary selector set always drops. A failed constructor also
+        // drops its package rows; keep completed captured/cohort cache owners.
+        let kept_package_bytes = result.as_ref().map_or(0, |index| index.retained_bytes);
+        sources.retained_bytes = sources
+            .retained_bytes
+            .saturating_sub(needed_bytes)
+            .saturating_sub(package_bytes.saturating_sub(kept_package_bytes));
+        result
     }
 
     /// Source projection publishes a custom cohort only on an exact listed root.
@@ -488,8 +511,9 @@ mod tests {
         let before = sources.retained_bytes;
         let repeated = PackageIndex::from_sources(project, &references, &mut sources, &control)?;
         require(
-            sources.retained_bytes == before && sources.captured.is_empty(),
-            "cached metadata was reparsed or charged twice",
+            sources.retained_bytes == before.saturating_add(repeated.retained_bytes)
+                && sources.captured.is_empty(),
+            "repeated package owner omitted its allocation or duplicated cached metadata",
         )?;
         let repeated_index = repeated
             .package_owner("app/a.rs")
@@ -547,6 +571,24 @@ mod tests {
             sources.retained_bytes == before && sources.cargo_cohorts.is_empty(),
             "refusal retained partial cohort state",
         )?;
+        sources.retained_bytes = 0;
+        let package_envelope =
+            PackageIndex::from_graphs(std::slice::from_ref(&manifest_graph))?.retained_bytes;
+        sources.set_retained_limit(
+            package_envelope
+                .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                .saturating_add("Cargo.toml".len() as u64)
+                .saturating_add(1),
+        )?;
+        require(
+            PackageIndex::from_sources(project, &references, &mut sources, &control).is_err(),
+            "mid-construction resource limit was ignored",
+        )?;
+        require(
+            sources.retained_bytes == 0 && sources.cargo_cohorts.is_empty(),
+            "failed package construction leaked a partial reservation",
+        )?;
+        sources.set_retained_limit(super::super::super::MAX_PUBLICATION_STAGING_BYTES)?;
         let cancellation = IndexCancellation::new();
         cancellation.cancel();
         let cancelled = IndexWorkControl::new(cancellation, None);

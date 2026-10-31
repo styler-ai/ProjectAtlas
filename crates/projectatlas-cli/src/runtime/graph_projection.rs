@@ -32,7 +32,7 @@ use projectatlas_core::symbols::{
 };
 use projectatlas_db::{
     AtlasStore, IndexPublicationGuard, RepositoryAffectedSourceFootprint,
-    RepositoryResolutionCandidate,
+    RepositoryResolutionCandidate, RepositoryResolutionReadPage,
 };
 use projectatlas_fs::RootScanPolicy;
 #[cfg(test)]
@@ -463,6 +463,13 @@ fn identity_rejection_drop_paths_retained_bytes(paths: &BTreeSet<String>) -> Res
     })
 }
 
+/// Bound map/path ownership and ordinal vector spare capacity before allocation.
+fn identity_relation_indices_bytes(path: &str, count: usize) -> u64 {
+    STAGED_GRAPH_ROW_BYTES
+        .saturating_add(path.len() as u64)
+        .saturating_add((count as u64).saturating_mul((4 * std::mem::size_of::<usize>()) as u64))
+}
+
 /// Return the exact incremental identity-state total owned by one report.
 fn identity_admission_retained_bytes(report: &GraphIdentityAdmission) -> u64 {
     report.observed_fact_bytes
@@ -504,6 +511,8 @@ fn checked_identity_admission_budget(
 /// Bounded admission report shared by entity, relation, and key projection.
 #[derive(Clone, Debug, Default)]
 pub(super) struct GraphIdentityAdmission {
+    /// Operation remainder while successful keys coexist with new rejection facts.
+    retained_limit: Option<u64>,
     /// Whether the parser-output graphs have passed the shared source boundary.
     source_admitted: bool,
     /// Retained typed details, capped independently from the count.
@@ -554,6 +563,11 @@ pub(super) struct GraphIdentityAdmission {
 }
 
 impl GraphIdentityAdmission {
+    /// Owned source identity details included in symbol-stage publication accounting.
+    pub(super) const fn retained_bytes(&self) -> u64 {
+        self.observed_fact_bytes
+    }
+
     /// Record one parser fact and every failed identity field without retaining raw input.
     fn record(
         &mut self,
@@ -681,6 +695,9 @@ impl GraphIdentityAdmission {
         limit: u64,
     ) -> Result<(), CliError> {
         control.check(IndexWorkStage::SymbolParsing)?;
+        let limit = self
+            .retained_limit
+            .map_or(limit, |remaining| limit.min(remaining));
         let retained_bytes = self
             .observed_fact_bytes
             .checked_add(additional_bytes)
@@ -699,6 +716,14 @@ impl GraphIdentityAdmission {
 
     /// Adjust the cached identity-state total when a merge replaces entries.
     fn adjust_identity_bytes(&mut self, before: u64, after: u64) -> Result<(), CliError> {
+        if let Some(limit) = self.retained_limit {
+            enforce_resolution_registry_budget_with_limit(
+                self.observed_fact_bytes
+                    .saturating_add(after)
+                    .saturating_sub(before),
+                limit,
+            )?;
+        }
         if after >= before {
             self.observed_fact_bytes = self
                 .observed_fact_bytes
@@ -874,6 +899,15 @@ impl GraphIdentityAdmission {
             .observed_fact_bytes
             .checked_add(other.observed_fact_bytes)
             .ok_or_else(|| identity_fact_budget_failure(self.observed_fact_bytes))?;
+        if let Some(limit) = self.retained_limit {
+            // Incoming maps remain live while shared paths are copied into the
+            // target. Admit one additional complete incoming envelope before any
+            // clone; unique-path transfers stay below this conservative peak.
+            enforce_resolution_registry_budget_with_limit(
+                peak_retained_bytes.saturating_add(other.observed_fact_bytes),
+                limit,
+            )?;
+        }
         if peak_retained_bytes > MAX_IN_MEMORY_GRAPH_WORK_BYTES {
             return Err(identity_fact_budget_failure(peak_retained_bytes));
         }
@@ -951,15 +985,24 @@ impl GraphIdentityAdmission {
                     ));
                 }
             } else {
+                self.reserve_identity_bytes(
+                    identity_relation_indices_bytes(&path, indices.len()),
+                    control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
                 self.relation_fact_indices.insert(path, indices);
             }
         }
         control.check(IndexWorkStage::SymbolParsing)?;
-        let rejection_key_bytes = extend_bounded_identity_rejections_with_drop_paths(
+        let rejection_key_bytes = extend_bounded_identity_rejections_with_drop_paths_limit(
             &mut self.rejections,
             &mut self.rejection_keys,
             other.rejections,
             &mut self.rejection_details_dropped_by_path,
+            self.retained_limit
+                .unwrap_or(MAX_IN_MEMORY_GRAPH_WORK_BYTES)
+                .min(MAX_IN_MEMORY_GRAPH_WORK_BYTES)
+                .saturating_sub(self.observed_fact_bytes),
         )?;
         self.observed_fact_bytes = self
             .observed_fact_bytes
@@ -1066,7 +1109,11 @@ impl GraphIdentityAdmission {
     }
 
     /// Return the source-admission details owned by one publication path set.
-    fn for_paths(&self, paths: &BTreeSet<String>) -> Result<Self, CliError> {
+    /// Admit a filtered report clone while its source report remains alive.
+    fn for_paths_with_limit(&self, paths: &BTreeSet<String>, limit: u64) -> Result<Self, CliError> {
+        // The complete source report is an already-maintained conservative bound
+        // for any selection; no speculative clone precedes this admission.
+        enforce_resolution_registry_budget_with_limit(self.observed_fact_bytes, limit)?;
         let rejected_facts_by_path = self
             .rejected_facts_by_path
             .iter()
@@ -1103,10 +1150,19 @@ impl GraphIdentityAdmission {
             identity_maps_retained_bytes(&observed_facts, &rejected_facts_by_path)?
                 .checked_add(identity_rejection_keys_retained_bytes(&rejection_keys)?)
                 .and_then(|bytes| bytes.checked_add(marker_bytes))
+                .and_then(|bytes| {
+                    self.relation_fact_indices
+                        .iter()
+                        .filter(|(path, _)| paths.contains(path.as_str()))
+                        .try_fold(bytes, |bytes, (path, indices)| {
+                            bytes.checked_add(identity_relation_indices_bytes(path, indices.len()))
+                        })
+                })
                 .ok_or_else(|| {
                     CliError::InvalidInput("identity rejection bytes overflowed".to_string())
                 })?;
         Ok(Self {
+            retained_limit: None,
             rejection_keys,
             rejections,
             source_admitted: self.source_admitted,
@@ -1284,12 +1340,29 @@ fn extend_bounded_identity_rejections(
     )
 }
 
-/// Merge typed details and retain the exact paths that lost a distinct row.
+/// Retain the existing standalone detail helper; report owners use an explicit remainder.
 fn extend_bounded_identity_rejections_with_drop_paths(
     target: &mut Vec<GraphIdentityRejection>,
     target_keys: &mut BTreeSet<IdentityRejectionKey>,
     incoming: impl IntoIterator<Item = GraphIdentityRejection>,
     dropped_paths: &mut BTreeSet<String>,
+) -> Result<u64, CliError> {
+    extend_bounded_identity_rejections_with_drop_paths_limit(
+        target,
+        target_keys,
+        incoming,
+        dropped_paths,
+        u64::MAX,
+    )
+}
+
+/// Merge typed details and retain the exact paths that lost a distinct row.
+fn extend_bounded_identity_rejections_with_drop_paths_limit(
+    target: &mut Vec<GraphIdentityRejection>,
+    target_keys: &mut BTreeSet<IdentityRejectionKey>,
+    incoming: impl IntoIterator<Item = GraphIdentityRejection>,
+    dropped_paths: &mut BTreeSet<String>,
+    limit: u64,
 ) -> Result<u64, CliError> {
     let mut retained_bytes = 0_u64;
     for rejection in incoming {
@@ -1298,7 +1371,13 @@ fn extend_bounded_identity_rejections_with_drop_paths(
             continue;
         }
         if target.len() >= MAX_GRAPH_IDENTITY_REJECTIONS {
-            if dropped_paths.insert(rejection.path.as_str().to_owned()) {
+            if !dropped_paths.contains(rejection.path.as_str()) {
+                let additional = identity_count_path_retained_bytes(rejection.path.as_str())?;
+                enforce_resolution_registry_budget_with_limit(
+                    retained_bytes.saturating_add(additional),
+                    limit,
+                )?;
+                dropped_paths.insert(rejection.path.as_str().to_owned());
                 retained_bytes = retained_bytes
                     .checked_add(identity_count_path_retained_bytes(rejection.path.as_str())?)
                     .ok_or_else(|| {
@@ -1307,6 +1386,12 @@ fn extend_bounded_identity_rejections_with_drop_paths(
             }
             continue;
         }
+        enforce_resolution_registry_budget_with_limit(
+            retained_bytes.saturating_add(identity_rejection_key_retained_bytes(
+                rejection.path.as_str(),
+            )?),
+            limit,
+        )?;
         target_keys.insert(key);
         retained_bytes = retained_bytes
             .checked_add(identity_rejection_key_retained_bytes(
@@ -1582,8 +1667,20 @@ impl StagedRepositoryGraph {
     }
 }
 
-/// Stage a complete repository graph from current parser output plus safe reused graphs.
-pub(super) fn stage_full_repository_graph(
+/// Reserve existing path inventories before constructing their sets or node clones.
+/// Ten node/string envelopes cover direct/current/manifest/package/affected path
+/// sets plus temporary graph-loader inventories. Deleted direct paths are separate
+/// because they are absent from the expected node inventory. This is an inherited
+/// staging estimate, not a new source/path-size or user-facing limit.
+fn graph_path_inventory_bytes(nodes: &[Node], direct_paths: &[String]) -> u64 {
+    super::staged_node_bytes(nodes)
+        .saturating_add(super::staged_string_bytes(direct_paths))
+        .saturating_mul(10)
+}
+
+/// Stage a full graph with the ordinary publication allowance in unit fixtures.
+#[cfg(test)]
+fn stage_full_repository_graph(
     store: &AtlasStore,
     root: &Path,
     base_generation: IndexGeneration,
@@ -1592,6 +1689,35 @@ pub(super) fn stage_full_repository_graph(
     symbols: &SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<StagedRepositoryGraph, CliError> {
+    stage_full_repository_graph_with_limit(
+        store,
+        root,
+        base_generation,
+        nodes,
+        scan_policy,
+        symbols,
+        control,
+        super::MAX_PUBLICATION_STAGING_BYTES,
+    )
+}
+
+/// Stage a complete repository graph from current parser output plus safe reused graphs.
+pub(super) fn stage_full_repository_graph_with_limit(
+    store: &AtlasStore,
+    root: &Path,
+    base_generation: IndexGeneration,
+    nodes: &[Node],
+    scan_policy: &RootScanPolicy,
+    symbols: &SymbolBuildStage,
+    control: &IndexWorkControl,
+    staging_limit: u64,
+) -> Result<StagedRepositoryGraph, CliError> {
+    let inventory_bytes = graph_path_inventory_bytes(nodes, &[]);
+    enforce_resolution_registry_budget_with_limit(
+        symbols.retained_bytes.saturating_add(inventory_bytes),
+        staging_limit,
+    )?;
+    let staging_limit = staging_limit.saturating_sub(inventory_bytes);
     cleanup_abandoned_repository_graph_staging(store, root, control)?;
     let project = selected_project(store)?;
     let generation = next_generation(base_generation)?;
@@ -1600,9 +1726,15 @@ pub(super) fn stage_full_repository_graph(
         .filter(|node| node.kind == NodeKind::File)
         .map(|node| node.path.clone())
         .collect::<BTreeSet<_>>();
+    let staging_limit = staging_limit.saturating_sub(symbols.retained_bytes);
     let mut sources = SourceBindingCache::new(root, nodes, None);
+    sources.set_retained_limit(staging_limit)?;
     let loaded_graphs = complete_symbol_graphs(store, &paths, symbols, &mut sources, control)?;
-    let (graphs, mut identity_admission) = admit_symbol_graphs(loaded_graphs, control)?;
+    let (graphs, mut identity_admission) = admit_symbol_graphs_with_limit(
+        loaded_graphs,
+        control,
+        staging_limit.saturating_sub(sources.retained_bytes),
+    )?;
     let changed_paths = symbols
         .changes
         .iter()
@@ -1616,6 +1748,7 @@ pub(super) fn stage_full_repository_graph(
         .filter(|path| !changed_paths.contains(path.as_str()))
         .cloned()
         .collect::<BTreeSet<_>>();
+    identity_admission.retained_limit = Some(staging_limit.saturating_sub(sources.retained_bytes));
     hydrate_reused_identity_admission(
         store,
         project,
@@ -1637,8 +1770,30 @@ pub(super) fn stage_full_repository_graph(
             identity_admission.incomplete_reused_rejection_paths().len(),
         ));
     }
-    identity_admission.merge(symbols.identity_admission.for_paths(&paths)?, control)?;
-    let mut document_facts = complete_markdown_facts(root, nodes, &graphs, symbols, control)?;
+    identity_admission.merge(
+        symbols.identity_admission.for_paths_with_limit(
+            &paths,
+            staging_limit
+                .saturating_sub(sources.retained_bytes)
+                .saturating_sub(identity_admission.observed_fact_bytes),
+        )?,
+        control,
+    )?;
+    let mut document_facts = complete_markdown_facts(
+        root,
+        nodes,
+        &graphs,
+        symbols,
+        control,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(identity_admission.observed_fact_bytes),
+    )?;
+    identity_admission.retained_limit = Some(
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
+    );
     admit_markdown_facts(
         &mut document_facts,
         &graphs,
@@ -1648,13 +1803,19 @@ pub(super) fn stage_full_repository_graph(
     control.check(IndexWorkStage::SymbolParsing)?;
     let configured_modules =
         super::module_resolution::load_configured_module_resolution(root, nodes, control)?;
+    let staging_limit = staging_limit.saturating_sub(configured_modules.retained_bytes());
+    sources.set_retained_limit(
+        staging_limit
+            .saturating_sub(identity_admission.observed_fact_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
+    )?;
     let packages = PackageIndex::from_sources(
         project,
         &graphs.iter().collect::<Vec<_>>(),
         &mut sources,
         control,
     )?;
-    admit_resolution_key_failures(
+    admit_resolution_key_failures_with_limit(
         project,
         generation,
         &graphs,
@@ -1662,9 +1823,16 @@ pub(super) fn stage_full_repository_graph(
         &configured_modules,
         &mut identity_admission,
         control,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
     )?;
     ensure_admitted_resolution_projections(&graphs, &identity_admission.resolution_projections)?;
-    let mut entity_projection = build_entity_projection_with_config(
+    let entity_limit = staging_limit
+        .saturating_sub(sources.retained_bytes)
+        .saturating_sub(identity_admission.observed_fact_bytes)
+        .saturating_sub(document_fact_map_retained_bytes(&document_facts));
+    let mut entity_projection = build_entity_projection_with_config_limit(
         project,
         generation,
         nodes,
@@ -1674,9 +1842,16 @@ pub(super) fn stage_full_repository_graph(
         Some(&mut identity_admission.resolution_projections),
         true,
         control,
+        entity_limit,
     )?;
     debug_assert!(identity_admission.resolution_projections.is_empty());
-    let mut candidates = resolution_registry_from_exports(&entity_projection, control)?;
+    let candidate_limit = staging_limit
+        .saturating_sub(entity_projection.retained_bytes)
+        .saturating_sub(sources.retained_bytes)
+        .saturating_sub(identity_admission.observed_fact_bytes)
+        .saturating_sub(document_fact_map_retained_bytes(&document_facts));
+    let mut candidates =
+        resolution_registry_from_exports_with_limit(&entity_projection, control, candidate_limit)?;
     let (bindings, binding_bytes) = binding_resolution::resolve_source_bindings(
         store,
         project,
@@ -1690,6 +1865,9 @@ pub(super) fn stage_full_repository_graph(
         None,
         &BTreeSet::new(),
         control,
+        staging_limit
+            .saturating_sub(identity_admission.observed_fact_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
     )?;
     entity_projection.call_bindings = bindings;
     entity_projection.retained_bytes = entity_projection
@@ -1739,8 +1917,109 @@ pub(super) fn stage_full_repository_graph(
     Ok(staged)
 }
 
+/// Distinct canonical witnesses owned by one bounded incremental phase.
+struct ResolutionKeyWorkspace<'a> {
+    /// Root and affected source sample used by the existing full-refresh guidance.
+    root: &'a Path,
+    /// Current owning source paths, borrowed without another path inventory.
+    paths: &'a BTreeSet<String>,
+    /// Existing distinct-key ceiling, checked before insertion.
+    row_limit: usize,
+    /// Ordered witnesses; duplicates retain no additional key copy.
+    keys: BTreeSet<CanonicalResolutionKey>,
+    /// Tree/key/text ownership already admitted in this workspace.
+    retained_bytes: u64,
+    /// Operation remainder after all coexisting phase owners.
+    limit: u64,
+}
+
+impl<'a> ResolutionKeyWorkspace<'a> {
+    /// Start a workspace under the current operation remainder.
+    fn new(limit: u64, root: &'a Path, paths: &'a BTreeSet<String>) -> Self {
+        Self {
+            root,
+            paths,
+            row_limit: MAX_INCREMENTAL_RESOLUTION_ITEMS as usize,
+            keys: BTreeSet::new(),
+            retained_bytes: 0,
+            limit,
+        }
+    }
+
+    /// Admit a borrowed witness before cloning its canonical identity.
+    fn insert(&mut self, key: &CanonicalResolutionKey) -> Result<(), CliError> {
+        if self.keys.contains(key) {
+            return Ok(());
+        }
+        if self.keys.len() >= self.row_limit {
+            return Err(dependency_closure_limit(
+                self.root,
+                self.paths.iter().cloned(),
+                self.keys.len().saturating_add(1),
+            ));
+        }
+        let next = self
+            .retained_bytes
+            .saturating_add(resolution_workspace_key_bytes(key));
+        enforce_resolution_registry_budget_with_limit(next, self.limit)?;
+        self.keys.insert(key.clone());
+        self.retained_bytes = next;
+        Ok(())
+    }
+
+    /// Move an already decoded witness without making a second canonical string.
+    fn insert_owned(&mut self, key: CanonicalResolutionKey) -> Result<(), CliError> {
+        if self.keys.contains(&key) {
+            return Ok(());
+        }
+        if self.keys.len() >= self.row_limit {
+            return Err(dependency_closure_limit(
+                self.root,
+                self.paths.iter().cloned(),
+                self.keys.len().saturating_add(1),
+            ));
+        }
+        let next = self
+            .retained_bytes
+            .saturating_add(resolution_workspace_key_bytes(&key));
+        enforce_resolution_registry_budget_with_limit(next, self.limit)?;
+        self.keys.insert(key);
+        self.retained_bytes = next;
+        Ok(())
+    }
+
+    /// Admit the complete query copy while its ordered witness set remains live.
+    fn snapshot(&self) -> Result<(Vec<CanonicalResolutionKey>, u64), CliError> {
+        let bytes = self.keys.iter().fold(
+            (self.keys.len() as u64)
+                .saturating_mul(std::mem::size_of::<CanonicalResolutionKey>() as u64),
+            |bytes, key| bytes.saturating_add(key.canonical_identity().len() as u64),
+        );
+        enforce_resolution_registry_budget_with_limit(
+            self.retained_bytes.saturating_add(bytes),
+            self.limit,
+        )?;
+        let mut snapshot = Vec::with_capacity(self.keys.len());
+        snapshot.extend(self.keys.iter().cloned());
+        Ok((
+            snapshot,
+            self.limit
+                .saturating_sub(self.retained_bytes)
+                .saturating_sub(bytes),
+        ))
+    }
+}
+
+/// Bound each retained canonical witness, its inline key, and tree metadata.
+fn resolution_workspace_key_bytes(key: &CanonicalResolutionKey) -> u64 {
+    STAGED_GRAPH_ROW_BYTES
+        .saturating_add(std::mem::size_of::<CanonicalResolutionKey>() as u64)
+        .saturating_add(key.retained_heap_bytes())
+}
+
 /// Stage one bounded dependency-aware graph closure for an incremental publication.
-pub(super) fn stage_incremental_repository_graph(
+#[cfg(test)]
+fn stage_incremental_repository_graph(
     store: &AtlasStore,
     root: &Path,
     base_generation: IndexGeneration,
@@ -1790,7 +2069,7 @@ fn stage_incremental_repository_graph_with_test_limit(
 
 #[allow(clippy::too_many_arguments)]
 /// Stage an incremental graph with the supplied projection staging limit.
-fn stage_incremental_repository_graph_with_limit(
+pub(super) fn stage_incremental_repository_graph_with_limit(
     store: &AtlasStore,
     root: &Path,
     base_generation: IndexGeneration,
@@ -1801,12 +2080,22 @@ fn stage_incremental_repository_graph_with_limit(
     control: &IndexWorkControl,
     staging_limit: u64,
 ) -> Result<StagedRepositoryGraph, CliError> {
+    let inventory_bytes = graph_path_inventory_bytes(expected_nodes, direct_paths);
+    enforce_resolution_registry_budget_with_limit(
+        symbols.retained_bytes.saturating_add(inventory_bytes),
+        staging_limit,
+    )?;
+    let staging_limit = staging_limit
+        .saturating_sub(symbols.retained_bytes)
+        .saturating_sub(inventory_bytes);
     let project = selected_project(store)?;
     let generation = next_generation(base_generation)?;
     let configured_modules =
         super::module_resolution::load_configured_module_resolution(root, expected_nodes, control)?;
+    let staging_limit = staging_limit.saturating_sub(configured_modules.retained_bytes());
     let direct_paths = direct_paths.iter().cloned().collect::<BTreeSet<_>>();
     let mut sources = SourceBindingCache::new(root, expected_nodes, Some(&direct_paths));
+    sources.set_retained_limit(staging_limit)?;
     enforce_incremental_count(
         root,
         "direct source paths",
@@ -1836,23 +2125,40 @@ fn stage_incremental_repository_graph_with_limit(
         .collect::<BTreeSet<_>>();
     let loaded_direct_graphs =
         complete_symbol_graphs(store, &direct_graph_paths, symbols, &mut sources, control)?;
-    let (direct_graphs, mut direct_identity_admission) =
-        admit_symbol_graphs(loaded_direct_graphs, control)?;
+    let (direct_graphs, mut direct_identity_admission) = admit_symbol_graphs_with_limit(
+        loaded_direct_graphs,
+        control,
+        staging_limit.saturating_sub(sources.retained_bytes),
+    )?;
     direct_identity_admission.merge(
-        symbols.identity_admission.for_paths(&direct_graph_paths)?,
+        symbols.identity_admission.for_paths_with_limit(
+            &direct_graph_paths,
+            staging_limit
+                .saturating_sub(sources.retained_bytes)
+                .saturating_sub(direct_identity_admission.observed_fact_bytes),
+        )?,
         control,
     )?;
     let package_graphs =
         complete_symbol_graphs(store, &package_only_paths, symbols, &mut sources, control)?;
-    let (package_graphs, _package_context_admission) =
-        admit_symbol_graphs(package_graphs, control)?;
+    let (package_graphs, package_context_admission) = admit_symbol_graphs_with_limit(
+        package_graphs,
+        control,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes),
+    )?;
+    drop(package_context_admission);
+    sources.set_retained_limit(
+        staging_limit.saturating_sub(direct_identity_admission.observed_fact_bytes),
+    )?;
     let package_index_graphs = direct_graphs
         .iter()
         .chain(package_graphs.iter())
         .collect::<Vec<_>>();
     let direct_packages =
         PackageIndex::from_sources(project, &package_index_graphs, &mut sources, control)?;
-    admit_resolution_key_failures(
+    admit_resolution_key_failures_with_limit(
         project,
         generation,
         &direct_graphs,
@@ -1860,24 +2166,52 @@ fn stage_incremental_repository_graph_with_limit(
         &configured_modules,
         &mut direct_identity_admission,
         control,
+        staging_limit.saturating_sub(sources.retained_bytes),
+    )?;
+    // Direct keys remain live while affected sources and package cohorts grow.
+    let direct_key_bytes =
+        resolution_projection_map_retained_bytes(&direct_identity_admission.resolution_projections);
+    sources.set_retained_limit(
+        staging_limit
+            .saturating_sub(direct_key_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes),
     )?;
 
-    let old_exports = store.repository_export_keys_for_paths(
-        project,
-        &direct_paths.iter().cloned().collect::<Vec<_>>(),
-        MAX_INCREMENTAL_RESOLUTION_ITEMS,
-    )?;
-    if old_exports.truncated {
+    let old_exports = store
+        .repository_export_keys_for_paths_with_byte_limit(
+            project,
+            &direct_paths.iter().cloned().collect::<Vec<_>>(),
+            MAX_INCREMENTAL_RESOLUTION_ITEMS,
+            staging_limit
+                .saturating_sub(sources.retained_bytes)
+                .saturating_sub(direct_key_bytes)
+                .saturating_sub(direct_identity_admission.observed_fact_bytes),
+        )
+        .map_err(resolution_read_error)?;
+    if old_exports.page.truncated {
         return Err(dependency_closure_limit(
             root,
             direct_paths.iter().cloned(),
             usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
         ));
     }
-    let mut changed_keys = old_exports.rows.into_iter().collect::<BTreeSet<_>>();
+    let mut changed_keys = ResolutionKeyWorkspace::new(
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_key_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes),
+        root,
+        &direct_paths,
+    );
+    let changed_limit = changed_keys.limit;
+    changed_keys.limit = changed_limit.saturating_sub(old_exports.retained_bytes);
+    for key in old_exports.page.rows {
+        changed_keys.insert_owned(key)?;
+    }
+    changed_keys.limit = changed_limit;
     for path in &direct_paths {
-        changed_keys.insert(document_file_resolution_key(project, path)?);
-        changed_keys.insert(document_casefold_resolution_key(project, path)?);
+        changed_keys.insert_owned(document_file_resolution_key(project, path)?)?;
+        changed_keys.insert_owned(document_casefold_resolution_key(project, path)?)?;
     }
     for graph in &direct_graphs {
         let graph = graph.graph();
@@ -1890,44 +2224,62 @@ fn stage_incremental_repository_graph_with_limit(
                     graph.path
                 ))
             })?;
-        changed_keys.extend(projection.source_keys().iter().cloned());
+        for key in projection.source_keys() {
+            changed_keys.insert(key)?;
+        }
         for export in projection.export_keys() {
-            changed_keys.extend(export.keys().iter().cloned());
+            for key in export.keys() {
+                changed_keys.insert(key)?;
+            }
         }
         for symbol in projection.symbol_keys() {
-            changed_keys.extend(symbol.keys().iter().cloned());
+            for key in symbol.keys() {
+                changed_keys.insert(key)?;
+            }
         }
         for symbol in &graph.symbols {
             if symbol.kind == SymbolKind::Heading {
-                changed_keys.insert(document_heading_resolution_key(
+                changed_keys.insert_owned(document_heading_resolution_key(
                     project,
                     &graph.path,
                     &symbol.signature,
-                )?);
+                )?)?;
             }
         }
     }
     enforce_incremental_count(
         root,
         "old and new export keys",
-        changed_keys.len(),
+        changed_keys.keys.len(),
         &direct_paths,
     )?;
 
-    let inbound = store.repository_affected_source_paths(
-        project,
-        &changed_keys.iter().cloned().collect::<Vec<_>>(),
-        MAX_INCREMENTAL_RESOLUTION_ITEMS,
-    )?;
-    if inbound.truncated {
+    let inbound = {
+        let (request, remaining) = changed_keys.snapshot()?;
+        store
+            .repository_affected_source_paths_with_byte_limit(
+                project,
+                &request,
+                MAX_INCREMENTAL_RESOLUTION_ITEMS,
+                remaining,
+            )
+            .map_err(resolution_read_error)?
+    };
+    drop(changed_keys);
+    if inbound.page.truncated {
         return Err(dependency_closure_limit(
             root,
-            inbound.rows.iter().map(|path| path.as_str().to_string()),
+            inbound
+                .page
+                .rows
+                .iter()
+                .map(|path| path.as_str().to_string()),
             usize::try_from(MAX_INCREMENTAL_RESOLUTION_ITEMS).unwrap_or(usize::MAX) + 1,
         ));
     }
     let mut affected_paths = direct_paths;
-    affected_paths.extend(inbound.rows.into_iter().map(String::from));
+    // Returned paths move into the inventory envelope admitted at stage entry.
+    affected_paths.extend(inbound.page.rows.into_iter().map(String::from));
     affected_paths.extend(direct_identity_admission.paths().map(ToString::to_string));
     enforce_incremental_count(
         root,
@@ -1954,8 +2306,14 @@ fn stage_incremental_repository_graph_with_limit(
         &mut sources,
         control,
     )?;
-    let (newly_affected_graphs, mut affected_identity_admission) =
-        admit_symbol_graphs(loaded_affected_graphs, control)?;
+    let (newly_affected_graphs, mut affected_identity_admission) = admit_symbol_graphs_with_limit(
+        loaded_affected_graphs,
+        control,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_key_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes),
+    )?;
     hydrate_reused_identity_admission(
         store,
         project,
@@ -1985,7 +2343,7 @@ fn stage_incremental_repository_graph_with_limit(
         .chain(package_graphs.iter())
         .collect::<Vec<_>>();
     let packages = PackageIndex::from_sources(project, &admitted_graphs, &mut sources, control)?;
-    admit_resolution_key_failures(
+    admit_resolution_key_failures_with_limit(
         project,
         generation,
         &newly_affected_graphs,
@@ -1993,7 +2351,19 @@ fn stage_incremental_repository_graph_with_limit(
         &configured_modules,
         &mut affected_identity_admission,
         control,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_key_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes),
     )?;
+    direct_identity_admission.retained_limit = Some(
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_key_bytes)
+            .saturating_sub(resolution_projection_map_retained_bytes(
+                &affected_identity_admission.resolution_projections,
+            )),
+    );
     direct_identity_admission.merge(affected_identity_admission, control)?;
     enforce_incremental_projection_budget(
         root,
@@ -2011,8 +2381,27 @@ fn stage_incremental_repository_graph_with_limit(
         &affected_graphs,
         &direct_identity_admission.resolution_projections,
     )?;
-    let mut document_facts =
-        complete_markdown_facts(root, expected_nodes, &affected_graphs, symbols, control)?;
+    let mut document_facts = complete_markdown_facts(
+        root,
+        expected_nodes,
+        &affected_graphs,
+        symbols,
+        control,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes)
+            .saturating_sub(resolution_projection_map_retained_bytes(
+                &direct_identity_admission.resolution_projections,
+            )),
+    )?;
+    direct_identity_admission.retained_limit = Some(
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(resolution_projection_map_retained_bytes(
+                &direct_identity_admission.resolution_projections,
+            ))
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
+    );
     admit_markdown_facts(
         &mut document_facts,
         &affected_graphs,
@@ -2034,29 +2423,46 @@ fn stage_incremental_repository_graph_with_limit(
         Some(&mut direct_identity_admission.resolution_projections),
         false,
         control,
-        staging_limit,
+        staging_limit
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
     )?;
     debug_assert!(direct_identity_admission.resolution_projections.is_empty());
 
-    let mut dependency_keys = entity_projection
+    let dependency_limit = staging_limit
+        .saturating_sub(entity_projection.retained_bytes)
+        .saturating_sub(sources.retained_bytes)
+        .saturating_sub(direct_identity_admission.observed_fact_bytes)
+        .saturating_sub(document_fact_map_retained_bytes(&document_facts));
+    let mut dependency_keys = ResolutionKeyWorkspace::new(dependency_limit, root, &affected_paths);
+    for key in entity_projection
         .keys_by_graph
         .values()
         .flat_map(ResolutionKeyProjection::relation_keys)
-        .flat_map(|relation| relation.keys().iter().cloned())
-        .collect::<BTreeSet<_>>();
-    dependency_keys.extend(document_dependency_keys(project, &document_facts)?);
+        .flat_map(projectatlas_symbols::RelationResolutionKeys::keys)
+    {
+        dependency_keys.insert(key)?;
+    }
+    append_document_dependency_keys(project, &document_facts, &mut dependency_keys)?;
     enforce_incremental_count(
         root,
         "affected dependency keys",
-        dependency_keys.len(),
+        dependency_keys.keys.len(),
         &affected_paths,
     )?;
-    let persisted = store.repository_resolution_candidates_for_keys(
-        project,
-        &dependency_keys.iter().cloned().collect::<Vec<_>>(),
-        MAX_INCREMENTAL_RESOLUTION_ITEMS,
-    )?;
-    if persisted.truncated {
+    let persisted = {
+        let (request, remaining) = dependency_keys.snapshot()?;
+        store
+            .repository_resolution_candidates_for_keys_with_byte_limit(
+                project,
+                &request,
+                MAX_INCREMENTAL_RESOLUTION_ITEMS,
+                remaining,
+            )
+            .map_err(resolution_read_error)?
+    };
+    if persisted.page.truncated {
         return Err(dependency_closure_limit(
             root,
             affected_paths.iter().cloned(),
@@ -2066,15 +2472,17 @@ fn stage_incremental_repository_graph_with_limit(
     let mut candidates = resolution_registry_from_persisted(
         project,
         generation,
-        persisted.rows,
+        persisted,
         &affected_paths,
         control,
+        staging_limit
+            .saturating_sub(dependency_keys.retained_bytes)
+            .saturating_sub(entity_projection.retained_bytes)
+            .saturating_sub(sources.retained_bytes)
+            .saturating_sub(direct_identity_admission.observed_fact_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
     )?;
-    merge_resolution_registries(
-        &mut candidates,
-        resolution_registry_from_exports(&entity_projection, control)?,
-        control,
-    )?;
+    append_resolution_exports(&mut candidates, &entity_projection, control)?;
     let binding_graphs = direct_graphs
         .iter()
         .filter(|graph| affected_graph_paths.contains(&graph.graph().path))
@@ -2090,9 +2498,12 @@ fn stage_incremental_repository_graph_with_limit(
         &mut sources,
         &entity_projection,
         &mut candidates,
-        Some(&dependency_keys),
+        Some(dependency_keys.keys),
         &affected_paths,
         control,
+        staging_limit
+            .saturating_sub(direct_identity_admission.observed_fact_bytes)
+            .saturating_sub(document_fact_map_retained_bytes(&document_facts)),
     )?;
     entity_projection.call_bindings = bindings;
     entity_projection.retained_bytes = entity_projection
@@ -2356,6 +2767,8 @@ enum DerivedRelationTarget {
 
 /// Package names assigned by longest manifest-directory ownership.
 struct PackageIndex {
+    /// Admitted owned package-vector/string envelope, excluding shared cohorts.
+    retained_bytes: u64,
     /// Cargo packages ordered from the most-specific repository root.
     packages: Vec<PackageOwner>,
 }
@@ -2376,20 +2789,27 @@ impl PackageIndex {
     /// Build deterministic longest-prefix package ownership from manifest graphs.
     #[cfg(test)]
     fn from_graphs(graphs: &[impl Borrow<SymbolGraph>]) -> Result<Self, CliError> {
-        Self::from_graph_iter(graphs.iter().map(Borrow::borrow))
+        Self::from_graph_iter(graphs.iter().map(Borrow::borrow), &mut |_| Ok(()))
     }
 
     /// Build package names without discarding source proof at production call sites.
     fn from_graph_iter<'a>(
         graphs: impl IntoIterator<Item = &'a SymbolGraph>,
+        reserve: &mut impl FnMut(u64) -> Result<(), CliError>,
     ) -> Result<Self, CliError> {
         let mut packages = Vec::new();
+        let mut retained_bytes = 0_u64;
         for graph in graphs {
             for symbol in &graph.symbols {
                 if symbol.kind != SymbolKind::Package {
                     continue;
                 }
                 RepositoryFilePath::new(Path::new(&graph.path)).map_err(invalid_graph_contract)?;
+                let bytes = (4 * std::mem::size_of::<PackageOwner>()) as u64
+                    + (graph.path.len() as u64).saturating_mul(2)
+                    + symbol.name.len() as u64;
+                reserve(bytes)?;
+                retained_bytes = retained_bytes.saturating_add(bytes);
                 let root = graph
                     .path
                     .rsplit_once('/')
@@ -2414,7 +2834,10 @@ impl PackageIndex {
         packages.dedup_by(|left, right| {
             left.root == right.root && left.name == right.name && left.manifest == right.manifest
         });
-        Ok(Self { packages })
+        Ok(Self {
+            retained_bytes,
+            packages,
+        })
     }
 
     /// Return the most-specific Cargo package owning one repository path.
@@ -2446,6 +2869,7 @@ fn is_cargo_manifest_path(path: &str) -> bool {
 }
 
 /// Use the parser-owned canonical parent calculation for graph publication.
+#[cfg(test)]
 fn qualified_symbol_parents(
     graph: &SymbolGraph,
 ) -> Result<Vec<Option<GraphIdentityText>>, CliError> {
@@ -2495,6 +2919,7 @@ fn build_entity_projection(
 }
 
 /// Project entity/key facts with one shared configured-module snapshot.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_entity_projection_with_config(
     project: ProjectInstanceId,
@@ -2521,6 +2946,23 @@ fn build_entity_projection_with_config(
     )
 }
 
+/// Admit one export's owned key/owner copies and vector growth before cloning.
+fn reserve_entity_export(
+    owner: &projectatlas_core::graph::GraphEntityKey,
+    key: &CanonicalResolutionKey,
+    bytes: &mut u64,
+    coexisting: u64,
+    limit: u64,
+) -> Result<(), CliError> {
+    let next = bytes
+        .saturating_add((4 * std::mem::size_of::<EntityResolutionKey>()) as u64)
+        .saturating_add(owner.canonical_identity().len() as u64)
+        .saturating_add(key.canonical_identity().len() as u64);
+    enforce_resolution_registry_budget_with_limit(next.saturating_add(coexisting), limit)?;
+    *bytes = next;
+    Ok(())
+}
+
 /// Project entity/key facts with a caller-selected staging budget for proof seams.
 #[allow(clippy::too_many_arguments)]
 fn build_entity_projection_with_config_limit(
@@ -2535,6 +2977,11 @@ fn build_entity_projection_with_config_limit(
     control: &IndexWorkControl,
     staging_limit: u64,
 ) -> Result<EntityProjection, CliError> {
+    let mut admitted_map_bytes = admitted_projections
+        .as_deref()
+        .map(resolution_projection_map_retained_bytes)
+        .unwrap_or_default();
+    enforce_resolution_registry_budget_with_limit(admitted_map_bytes, staging_limit)?;
     let mut entity_by_digest = BTreeMap::new();
     let mut entity_exports = Vec::new();
     let mut entity_bytes = 0_u64;
@@ -2542,6 +2989,10 @@ fn build_entity_projection_with_config_limit(
         let entity = GraphEntity::new(project, EntitySelector::Project, generation)
             .map_err(invalid_graph_contract)?;
         entity_bytes = entity_bytes.saturating_add(entity_retained_bytes(&entity));
+        enforce_resolution_registry_budget_with_limit(
+            entity_bytes.saturating_add(admitted_map_bytes),
+            staging_limit,
+        )?;
         insert_entity(&mut entity_by_digest, entity)?;
     }
     for node in nodes {
@@ -2564,6 +3015,13 @@ fn build_entity_projection_with_config_limit(
                 document_file_resolution_key(project, &node.path)?,
                 document_casefold_resolution_key(project, &node.path)?,
             ] {
+                reserve_entity_export(
+                    entity.key(),
+                    &key,
+                    &mut entity_bytes,
+                    admitted_map_bytes,
+                    staging_limit,
+                )?;
                 entity_exports.push(
                     EntityResolutionKey::new(entity.key().clone(), key)
                         .map_err(invalid_graph_contract)?,
@@ -2571,16 +3029,17 @@ fn build_entity_projection_with_config_limit(
                 entity_bytes = entity_bytes.saturating_add(STAGED_GRAPH_ROW_BYTES);
             }
         }
+        enforce_resolution_registry_budget_with_limit(
+            entity_bytes.saturating_add(admitted_map_bytes),
+            staging_limit,
+        )?;
         insert_entity(&mut entity_by_digest, entity)?;
     }
 
     let mut owners_by_graph = BTreeMap::new();
     let mut keys_by_graph = BTreeMap::new();
     let mut retained_bytes = 0_u64;
-    let mut admitted_map_bytes = admitted_projections
-        .as_deref()
-        .map(resolution_projection_map_retained_bytes)
-        .unwrap_or_default();
+
     enforce_resolution_registry_budget_with_limit(
         admitted_map_bytes.saturating_add(entity_bytes),
         staging_limit,
@@ -2606,7 +3065,15 @@ fn build_entity_projection_with_config_limit(
             projection_removals_before_entities.push(graph.path.clone());
             resolution
         } else {
-            resolution_projection_with_config(project, packages, graph, configured_modules)?
+            resolution_projection_with_config(
+                project,
+                packages,
+                graph,
+                configured_modules,
+                staging_limit
+                    .saturating_sub(admitted_map_bytes)
+                    .saturating_sub(entity_bytes),
+            )?
         };
         let resolution_bytes = resolution_retained_bytes(&resolution);
         entity_bytes = entity_bytes.saturating_add(resolution_bytes);
@@ -2636,7 +3103,19 @@ fn build_entity_projection_with_config_limit(
             STAGED_GRAPH_ROW_BYTES
                 .saturating_mul(u64::try_from(navigable_symbol_count(graph)).unwrap_or(u64::MAX)),
         );
-        let qualified_parents = qualified_symbol_parents(graph)?;
+        let qualified_parents =
+            projectatlas_symbols::declaration_identity::qualified_symbol_parents_checked(
+                graph,
+                &mut |bytes| {
+                    let next = entity_bytes.saturating_add(bytes);
+                    enforce_resolution_registry_budget_with_limit(
+                        next.saturating_add(admitted_map_bytes),
+                        staging_limit,
+                    )?;
+                    entity_bytes = next;
+                    Ok::<_, CliError>(())
+                },
+            )?;
         for (symbol, qualified_parent) in graph.symbols.iter().zip(qualified_parents) {
             control.check(IndexWorkStage::SymbolParsing)?;
             if is_document_coverage_marker(graph, symbol) {
@@ -2689,6 +3168,10 @@ fn build_entity_projection_with_config_limit(
                     );
                     entity_bytes = entity_bytes.saturating_add(STAGED_GRAPH_ROW_BYTES);
                 }
+                enforce_resolution_registry_budget_with_limit(
+                    entity_bytes.saturating_add(admitted_map_bytes),
+                    staging_limit,
+                )?;
                 insert_entity(&mut entity_by_digest, entity)?;
             }
             symbol_digests.push(entity_digest);
@@ -2697,6 +3180,13 @@ fn build_entity_projection_with_config_limit(
             .get(&file_digest)
             .ok_or_else(|| CliError::InvalidInput("graph file owner was not staged".to_string()))?;
         for key in resolution.source_keys() {
+            reserve_entity_export(
+                file.key(),
+                key,
+                &mut entity_bytes,
+                admitted_map_bytes,
+                staging_limit,
+            )?;
             entity_exports.push(
                 EntityResolutionKey::new(file.key().clone(), key.clone())
                     .map_err(invalid_graph_contract)?,
@@ -2705,6 +3195,13 @@ fn build_entity_projection_with_config_limit(
         }
         for export in resolution.export_keys() {
             for key in export.keys() {
+                reserve_entity_export(
+                    file.key(),
+                    key,
+                    &mut entity_bytes,
+                    admitted_map_bytes,
+                    staging_limit,
+                )?;
                 entity_exports.push(
                     EntityResolutionKey::new(file.key().clone(), key.clone())
                         .map_err(invalid_graph_contract)?,
@@ -2721,6 +3218,13 @@ fn build_entity_projection_with_config_limit(
                 continue;
             };
             for key in symbol_keys.keys() {
+                reserve_entity_export(
+                    entity.key(),
+                    key,
+                    &mut entity_bytes,
+                    admitted_map_bytes,
+                    staging_limit,
+                )?;
                 entity_exports.push(
                     EntityResolutionKey::new(entity.key().clone(), key.clone())
                         .map_err(invalid_graph_contract)?,
@@ -2740,7 +3244,24 @@ fn build_entity_projection_with_config_limit(
             admitted_map_bytes.saturating_add(entity_bytes),
             staging_limit,
         )?;
-        retained_bytes = retained_bytes.saturating_add(resolution_retained_bytes(&resolution));
+        retained_bytes = retained_bytes
+            .saturating_add(resolution_projection_map_entry_retained_bytes(
+                &graph.path,
+                &resolution,
+            ))
+            .saturating_add(STAGED_GRAPH_ROW_BYTES)
+            .saturating_add(graph.path.len() as u64)
+            .saturating_add(file_digest.capacity() as u64)
+            .saturating_add(
+                (symbol_digests.capacity() * std::mem::size_of::<Option<String>>()) as u64,
+            )
+            .saturating_add(
+                symbol_digests
+                    .iter()
+                    .flatten()
+                    .map(|digest| digest.capacity() as u64)
+                    .fold(0, u64::saturating_add),
+            );
         owners_by_graph.insert(
             graph.path.clone(),
             GraphOwners {
@@ -2758,8 +3279,15 @@ fn build_entity_projection_with_config_limit(
             bytes.saturating_add(entity_retained_bytes(entity))
         })
         .saturating_add(
-            STAGED_GRAPH_ROW_BYTES
-                .saturating_mul(u64::try_from(entity_exports.len()).unwrap_or(u64::MAX)),
+            entity_exports.iter().fold(
+                (entity_exports.capacity() as u64)
+                    .saturating_mul(std::mem::size_of::<EntityResolutionKey>() as u64),
+                |bytes, export| {
+                    bytes
+                        .saturating_add(export.key().retained_heap_bytes())
+                        .saturating_add(export.entity().canonical_identity().len() as u64)
+                },
+            ),
         );
     #[cfg(test)]
     {
@@ -4246,8 +4774,9 @@ fn insert_relation(
 }
 
 /// Project-wide stable entities and their canonical resolution-key bindings.
-#[derive(Default)]
 struct ProjectResolutionRegistry {
+    /// Remaining operation bytes after all coexisting owners.
+    retained_limit: u64,
     /// Persisted candidates not already owned by the staged entity projection.
     supplemental_entities_by_digest: BTreeMap<String, GraphEntity>,
     /// Canonical keys mapped only to sorted, deduplicated entity digests.
@@ -4258,7 +4787,27 @@ struct ProjectResolutionRegistry {
     retained_bytes: u64,
 }
 
+impl Default for ProjectResolutionRegistry {
+    fn default() -> Self {
+        Self {
+            retained_limit: super::MAX_PUBLICATION_STAGING_BYTES,
+            supplemental_entities_by_digest: BTreeMap::new(),
+            candidate_digests_by_key: BTreeMap::new(),
+            forwarding_key_digests: BTreeSet::new(),
+            retained_bytes: 0,
+        }
+    }
+}
+
 impl ProjectResolutionRegistry {
+    /// Reserve a new retained owner before mutation or cloning.
+    fn reserve(&mut self, bytes: u64) -> Result<(), CliError> {
+        let next = self.retained_bytes.saturating_add(bytes);
+        enforce_resolution_registry_budget_with_limit(next, self.retained_limit)?;
+        self.retained_bytes = next;
+        Ok(())
+    }
+
     /// Insert one key-to-entity binding without cloning the entity per exported key.
     fn insert_candidate(
         &mut self,
@@ -4266,20 +4815,16 @@ impl ProjectResolutionRegistry {
         entity: &GraphEntity,
     ) -> Result<(), CliError> {
         let digest = entity.key().digest().to_string();
-        match self.supplemental_entities_by_digest.entry(digest.clone()) {
-            Entry::Occupied(entry) if entry.get() != entity => {
+        if let Some(existing) = self.supplemental_entities_by_digest.get(&digest) {
+            if existing != entity {
                 return Err(CliError::InvalidInput(
                     "graph entity digest retained conflicting selectors".to_string(),
                 ));
             }
-            Entry::Occupied(_entry) => {}
-            Entry::Vacant(entry) => {
-                self.retained_bytes = self
-                    .retained_bytes
-                    .saturating_add(entity_retained_bytes(entity))
-                    .saturating_add(digest.len() as u64);
-                entry.insert(entity.clone());
-            }
+        } else {
+            self.reserve(entity_retained_bytes(entity).saturating_add(digest.len() as u64))?;
+            self.supplemental_entities_by_digest
+                .insert(digest.clone(), entity.clone());
         }
         self.record_forwarding_key(key, entity)?;
         self.insert_candidate_binding(key, digest)
@@ -4301,43 +4846,45 @@ impl ProjectResolutionRegistry {
         key: &CanonicalResolutionKey,
         entity: &GraphEntity,
     ) -> Result<(), CliError> {
+        let digest = key.digest_bytes();
         if key.domain() == ResolutionKeyDomain::Declaration
             && matches!(entity.selector(), EntitySelector::File { .. })
-            && self.forwarding_key_digests.insert(key.digest_bytes())
+            && !self.forwarding_key_digests.contains(&digest)
         {
-            self.retained_bytes = self
-                .retained_bytes
-                .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(key.digest_bytes().len() as u64);
-            enforce_resolution_registry_budget(self.retained_bytes)?;
+            self.reserve(STAGED_GRAPH_ROW_BYTES.saturating_add(digest.len() as u64))?;
+            self.forwarding_key_digests.insert(digest);
         }
         Ok(())
     }
 
-    /// Insert one canonical-key binding for an entity owned by either registry.
+    /// Insert only new witnesses, reserving canonical text and both tree rows first.
     fn insert_candidate_binding(
         &mut self,
         key: &CanonicalResolutionKey,
         digest: String,
     ) -> Result<(), CliError> {
-        if let Some(existing) = self.candidate_digests_by_key.get_mut(key) {
-            if existing.insert(digest.clone()) {
-                self.retained_bytes = self
-                    .retained_bytes
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                    .saturating_add(digest.len() as u64);
-            }
-        } else {
-            self.retained_bytes = self
-                .retained_bytes
-                .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(key.canonical_identity().len() as u64)
-                .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(digest.len() as u64);
-            self.candidate_digests_by_key
-                .insert(key.clone(), BTreeSet::from([digest]));
+        if self
+            .candidate_digests_by_key
+            .get(key)
+            .is_some_and(|existing| existing.contains(&digest))
+        {
+            return Ok(());
         }
-        enforce_resolution_registry_budget(self.retained_bytes)?;
+        let new_key = !self.candidate_digests_by_key.contains_key(key);
+        let bytes = STAGED_GRAPH_ROW_BYTES
+            .saturating_add(digest.capacity() as u64)
+            .saturating_add(if new_key {
+                STAGED_GRAPH_ROW_BYTES
+                    .saturating_add(std::mem::size_of::<CanonicalResolutionKey>() as u64)
+                    .saturating_add(key.canonical_identity().len() as u64)
+            } else {
+                0
+            });
+        self.reserve(bytes)?;
+        self.candidate_digests_by_key
+            .entry(key.clone())
+            .or_default()
+            .insert(digest);
         Ok(())
     }
 }
@@ -4410,11 +4957,38 @@ fn entity_retained_bytes(entity: &GraphEntity) -> u64 {
 }
 
 /// Build current resolution candidates from newly staged entity exports.
+#[cfg(test)]
 fn resolution_registry_from_exports(
     projection: &EntityProjection,
     control: &IndexWorkControl,
 ) -> Result<ProjectResolutionRegistry, CliError> {
-    let mut candidates = ProjectResolutionRegistry::default();
+    resolution_registry_from_exports_with_limit(
+        projection,
+        control,
+        super::MAX_PUBLICATION_STAGING_BYTES,
+    )
+}
+
+/// Build candidates under the bytes remaining beside the current entity/cache owners.
+fn resolution_registry_from_exports_with_limit(
+    projection: &EntityProjection,
+    control: &IndexWorkControl,
+    limit: u64,
+) -> Result<ProjectResolutionRegistry, CliError> {
+    let mut candidates = ProjectResolutionRegistry {
+        retained_limit: limit,
+        ..ProjectResolutionRegistry::default()
+    };
+    append_resolution_exports(&mut candidates, projection, control)?;
+    Ok(candidates)
+}
+
+/// Extend the same registry directly, avoiding a coexisting second candidate map.
+fn append_resolution_exports(
+    candidates: &mut ProjectResolutionRegistry,
+    projection: &EntityProjection,
+    control: &IndexWorkControl,
+) -> Result<(), CliError> {
     for (index, binding) in projection.entity_exports.iter().enumerate() {
         check_graph_work(control, index)?;
         let digest = binding.entity().digest().to_string();
@@ -4423,79 +4997,65 @@ fn resolution_registry_from_exports(
         })?;
         candidates.insert_staged_candidate(binding.key(), entity)?;
     }
-    Ok(candidates)
+    Ok(())
 }
 
 /// Rebind unaffected persisted candidates to the pending graph generation.
 fn resolution_registry_from_persisted(
     project: ProjectInstanceId,
     generation: IndexGeneration,
-    candidates: Vec<RepositoryResolutionCandidate>,
+    candidates: RepositoryResolutionReadPage<RepositoryResolutionCandidate>,
     replaced_paths: &BTreeSet<String>,
     control: &IndexWorkControl,
+    limit: u64,
 ) -> Result<ProjectResolutionRegistry, CliError> {
-    let mut by_key = ProjectResolutionRegistry::default();
-    for (index, candidate) in candidates.into_iter().enumerate() {
-        check_graph_work(control, index)?;
-        if entity_owner_path(candidate.entity()).is_some_and(|path| replaced_paths.contains(path)) {
-            continue;
-        }
-        let entity = GraphEntity::new(project, candidate.entity().selector().clone(), generation)
-            .map_err(invalid_graph_contract)?;
-        by_key.insert_candidate(candidate.key(), &entity)?;
-    }
+    let mut by_key = ProjectResolutionRegistry {
+        retained_limit: limit,
+        ..ProjectResolutionRegistry::default()
+    };
+    append_persisted_resolution_candidates(
+        &mut by_key,
+        project,
+        generation,
+        candidates,
+        replaced_paths,
+        control,
+    )?;
     Ok(by_key)
 }
 
-/// Merge normalized candidate registries while retaining one entity per digest.
-fn merge_resolution_registries(
-    target: &mut ProjectResolutionRegistry,
-    source: ProjectResolutionRegistry,
+/// Admit additional persisted witnesses directly into the current bounded registry.
+fn append_persisted_resolution_candidates(
+    by_key: &mut ProjectResolutionRegistry,
+    project: ProjectInstanceId,
+    generation: IndexGeneration,
+    candidates: RepositoryResolutionReadPage<RepositoryResolutionCandidate>,
+    replaced_paths: &BTreeSet<String>,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
-    let ProjectResolutionRegistry {
-        supplemental_entities_by_digest,
-        candidate_digests_by_key,
-        forwarding_key_digests,
-        retained_bytes: _retained_bytes,
-    } = source;
-    for entity in supplemental_entities_by_digest.into_values() {
-        check_graph_work(control, target.supplemental_entities_by_digest.len())?;
-        let digest = entity.key().digest().to_string();
-        match target.supplemental_entities_by_digest.entry(digest.clone()) {
-            Entry::Occupied(entry) if entry.get() != &entity => {
-                return Err(CliError::InvalidInput(
-                    "resolution candidate entity retained conflicting selectors".to_string(),
-                ));
+    let previous_limit = by_key.retained_limit;
+    by_key.retained_limit = previous_limit.saturating_sub(candidates.retained_bytes);
+    let result = (|| -> Result<(), CliError> {
+        enforce_resolution_registry_budget_with_limit(
+            by_key.retained_bytes,
+            by_key.retained_limit,
+        )?;
+        for (index, candidate) in candidates.page.rows.into_iter().enumerate() {
+            check_graph_work(control, index)?;
+            if entity_owner_path(candidate.entity())
+                .is_some_and(|path| replaced_paths.contains(path))
+            {
+                continue;
             }
-            Entry::Occupied(_entry) => {}
-            Entry::Vacant(entry) => {
-                target.retained_bytes = target
-                    .retained_bytes
-                    .saturating_add(entity_retained_bytes(&entity))
-                    .saturating_add(digest.len() as u64);
-                entry.insert(entity);
-            }
+            let entity =
+                GraphEntity::new(project, candidate.entity().selector().clone(), generation)
+                    .map_err(invalid_graph_contract)?;
+            by_key.insert_candidate(candidate.key(), &entity)?;
         }
-    }
-    for digest in forwarding_key_digests {
-        if target.forwarding_key_digests.insert(digest) {
-            target.retained_bytes = target
-                .retained_bytes
-                .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(digest.len() as u64);
-            enforce_resolution_registry_budget(target.retained_bytes)?;
-        }
-    }
-    let mut bindings = 0_usize;
-    for (key, candidates) in candidate_digests_by_key {
-        for digest in candidates {
-            check_graph_work(control, bindings)?;
-            target.insert_candidate_binding(&key, digest)?;
-            bindings = bindings.saturating_add(1);
-        }
-    }
-    Ok(())
+        Ok(())
+    })();
+    by_key.retained_limit = previous_limit;
+    result
 }
 
 /// Observe cancellation and deadline state at bounded graph-map intervals.
@@ -6207,6 +6767,24 @@ fn relation_completeness(parser: ParserKind) -> Completeness {
     }
 }
 
+/// Reserve retained hydration scratch before extending any all-chunk collection.
+/// A single database batch remains bounded by its existing row/decoded envelope.
+fn reserve_identity_hydration_scratch(
+    report: &mut GraphIdentityAdmission,
+    scratch: &mut u64,
+    limit: u64,
+    additional: u64,
+) -> Result<(), CliError> {
+    let next = scratch.saturating_add(additional);
+    enforce_resolution_registry_budget_with_limit(
+        next.saturating_add(report.observed_fact_bytes),
+        limit,
+    )?;
+    *scratch = next;
+    report.retained_limit = Some(limit.saturating_sub(next));
+    Ok(())
+}
+
 /// Carry current-generation rejection state for graphs safely reused by a stage.
 ///
 /// A publication replaces graph and rejection rows for its selected paths.
@@ -6222,193 +6800,266 @@ fn hydrate_reused_identity_admission(
     report: &mut GraphIdentityAdmission,
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
-    if reused_paths.is_empty() {
-        return Ok(());
-    }
-    let reused_node_paths = reused_paths
-        .iter()
-        .map(|path| RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut persisted_rejections = Vec::new();
-    let mut persisted_coverage = BTreeMap::new();
-    let mut persisted_rejection_details_dropped_by_path = BTreeSet::new();
-    for paths in reused_node_paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
-        control.check(IndexWorkStage::SymbolParsing)?;
-        let rejection_rows = match store.repository_graph_identity_rejections(
-            project,
-            paths,
-            GraphLimits::MAX_ROWS,
-            Some(control),
-        ) {
-            Ok(rows) => rows,
-            Err(projectatlas_db::DbError::GraphRowShape { table, reason })
-                if table == "project_identity"
-                    && reason == "typed graph generation does not match complete publication" =>
-            {
-                // A full stage can repair an older incomplete publication, but
-                // it cannot safely carry diagnostic rows from that state.
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        persisted_rejections.extend(rejection_rows);
-        let coverage = match store.repository_graph_path_coverage(project, paths, Some(control)) {
-            Ok(coverage) => coverage,
-            Err(projectatlas_db::DbError::GraphRowShape { table, reason })
-                if table == "project_identity"
-                    && reason == "typed graph generation does not match complete publication" =>
-            {
-                return Ok(());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if coverage.truncated {
-            return Err(CliError::InvalidInput(
-                "reused graph coverage exceeded the publication row ceiling".to_string(),
-            ));
+    let previous_limit = report.retained_limit;
+    let result = (|| -> Result<(), CliError> {
+        if reused_paths.is_empty() {
+            return Ok(());
         }
-        for row in coverage.rows {
-            let CoverageScope::Path { path } = row.scope() else {
+        let phase_limit = report
+            .retained_limit
+            .unwrap_or(super::MAX_PUBLICATION_STAGING_BYTES);
+        let mut scratch_bytes = 0_u64;
+        reserve_identity_hydration_scratch(
+            report,
+            &mut scratch_bytes,
+            phase_limit,
+            reused_paths.iter().fold(0_u64, |bytes, path| {
+                bytes.saturating_add(128).saturating_add(path.len() as u64)
+            }),
+        )?;
+        let reused_node_paths = reused_paths
+            .iter()
+            .map(|path| RepositoryNodePath::new(Path::new(path)).map_err(invalid_graph_contract))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut persisted_rejections = Vec::new();
+        let mut persisted_coverage = BTreeMap::new();
+        let mut persisted_rejection_details_dropped_by_path = BTreeSet::new();
+        for paths in reused_node_paths.chunks(PERSISTED_GRAPH_PATHS_PER_CHUNK) {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            let rejection_rows = match store.repository_graph_identity_rejections(
+                project,
+                paths,
+                GraphLimits::MAX_ROWS,
+                Some(control),
+            ) {
+                Ok(rows) => rows,
+                Err(projectatlas_db::DbError::GraphRowShape { table, reason })
+                    if table == "project_identity"
+                        && reason
+                            == "typed graph generation does not match complete publication" =>
+                {
+                    // A full stage can repair an older incomplete publication, but
+                    // it cannot safely carry diagnostic rows from that state.
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let row_bytes = rejection_rows.iter().fold(
+                (rejection_rows.capacity() as u64)
+                    .saturating_mul((2 * std::mem::size_of::<GraphIdentityRejection>()) as u64),
+                |bytes, row| bytes.saturating_add(row.path.as_str().len() as u64),
+            );
+            reserve_identity_hydration_scratch(report, &mut scratch_bytes, phase_limit, row_bytes)?;
+            persisted_rejections.extend(rejection_rows);
+            let coverage = match store.repository_graph_path_coverage(project, paths, Some(control))
+            {
+                Ok(coverage) => coverage,
+                Err(projectatlas_db::DbError::GraphRowShape { table, reason })
+                    if table == "project_identity"
+                        && reason
+                            == "typed graph generation does not match complete publication" =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if coverage.truncated {
+                return Err(CliError::InvalidInput(
+                    "reused graph coverage exceeded the publication row ceiling".to_string(),
+                ));
+            }
+            for row in coverage.rows {
+                let CoverageScope::Path { path } = row.scope() else {
+                    continue;
+                };
+                if row.relation().is_none() && row.omitted() > 0 {
+                    control.check(IndexWorkStage::SymbolParsing)?;
+                    reserve_identity_hydration_scratch(
+                        report,
+                        &mut scratch_bytes,
+                        phase_limit,
+                        STAGED_GRAPH_ROW_BYTES.saturating_add(path.as_str().len() as u64),
+                    )?;
+                    persisted_coverage.insert(path.as_str().to_owned(), row.omitted());
+                }
+                if row.relation().is_none() && row.reached_limit() == Some(GraphLimitKind::Rows) {
+                    control.check(IndexWorkStage::SymbolParsing)?;
+                    reserve_identity_hydration_scratch(
+                        report,
+                        &mut scratch_bytes,
+                        phase_limit,
+                        STAGED_GRAPH_ROW_BYTES.saturating_add(path.as_str().len() as u64),
+                    )?;
+                    persisted_rejection_details_dropped_by_path.insert(path.as_str().to_owned());
+                }
+            }
+        }
+        let mut persisted_fact_counts = BTreeMap::<String, BTreeSet<IdentityFactKey>>::new();
+        for path in persisted_rejection_details_dropped_by_path {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            if report
+                .rejection_details_dropped_by_path
+                .insert(path.clone())
+            {
+                report.reserve_reused_path_bytes(
+                    &path,
+                    false,
+                    control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
+            }
+        }
+        for rejection in persisted_rejections {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            let namespace = rejection.fact_index & !((1_u64 << 56) - 1);
+            let path = rejection.path.as_str().to_owned();
+            reserve_identity_hydration_scratch(
+                report,
+                &mut scratch_bytes,
+                phase_limit,
+                STAGED_GRAPH_ROW_BYTES
+                    .saturating_mul(2)
+                    .saturating_add(path.len() as u64),
+            )?;
+            persisted_fact_counts
+                .entry(path.clone())
+                .or_default()
+                .insert(IdentityFactKey {
+                    span: IdentitySpan {
+                        start_line: rejection.span.start_line() as usize,
+                        start_column: rejection.span.start_column() as usize,
+                        end_line: rejection.span.end_line() as usize,
+                        end_column: rejection.span.end_column() as usize,
+                    },
+                    parser: parser_fact_kind(rejection.parser),
+                    owner: u8::from(rejection.field == GraphIdentityField::ResolutionKey),
+                    fact_index: rejection.fact_index,
+                });
+            // Derived relations have their own admission report during projection;
+            // hydrating them into the parser report would double-count coverage.
+            if namespace == DERIVED_RELATION_FACT_INDEX_NAMESPACE {
+                continue;
+            }
+            control.check(IndexWorkStage::SymbolParsing)?;
+            let rejection_key_bytes = extend_bounded_identity_rejections_with_drop_paths_limit(
+                &mut report.rejections,
+                &mut report.rejection_keys,
+                std::iter::once(rejection),
+                &mut report.rejection_details_dropped_by_path,
+                report
+                    .retained_limit
+                    .unwrap_or(MAX_IN_MEMORY_GRAPH_WORK_BYTES)
+                    .min(MAX_IN_MEMORY_GRAPH_WORK_BYTES)
+                    .saturating_sub(report.observed_fact_bytes),
+            )?;
+            report.reserve_identity_bytes(
+                rejection_key_bytes,
+                control,
+                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            )?;
+        }
+        for (path, facts) in persisted_fact_counts {
+            control.check(IndexWorkStage::SymbolParsing)?;
+            if !report.reused_rejection_facts.contains_key(&path) {
+                report.reserve_identity_bytes(
+                    identity_fact_set_retained_bytes(&path, &facts)?,
+                    control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
+                report.reused_rejection_facts.insert(path.clone(), facts);
+            }
+            let detail_count = u64::try_from(
+                report
+                    .reused_rejection_facts
+                    .get(&path)
+                    .map_or(0, BTreeSet::len),
+            )
+            .map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "identity rejection detail count overflowed: {error}"
+                ))
+            })?;
+            if !report.reused_rejection_detail_counts.contains_key(&path) {
+                report.reserve_reused_path_bytes(
+                    &path,
+                    false,
+                    control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
+                report
+                    .reused_rejection_detail_counts
+                    .insert(path, detail_count);
+            }
+        }
+        for (path, omitted) in persisted_coverage {
+            // Persisted path coverage is authoritative for safely reused graphs,
+            // including structural/fallback rows whose typed details were evicted
+            // by the global rejection-detail ceiling.
+            control.check(IndexWorkStage::SymbolParsing)?;
+            if !report.reused_rejection_counts.contains_key(&path) {
+                report.reserve_reused_path_bytes(
+                    &path,
+                    false,
+                    control,
+                    MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                )?;
+                report.reused_rejection_counts.insert(path, omitted);
+            }
+        }
+        reserve_identity_hydration_scratch(
+            report,
+            &mut scratch_bytes,
+            phase_limit,
+            (graphs.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES),
+        )?;
+        let graph_parsers = graphs
+            .iter()
+            .map(|graph| {
+                let graph = Borrow::<SymbolGraph>::borrow(graph);
+                (graph.path.as_str(), graph.parser)
+            })
+            .collect::<BTreeMap<_, _>>();
+        for path in reused_paths {
+            let Some(_omitted) = report.reused_rejection_counts.get(path).copied() else {
                 continue;
             };
-            if row.relation().is_none() && row.omitted() > 0 {
-                control.check(IndexWorkStage::SymbolParsing)?;
-                persisted_coverage.insert(path.as_str().to_owned(), row.omitted());
-            }
-            if row.relation().is_none() && row.reached_limit() == Some(GraphLimitKind::Rows) {
-                control.check(IndexWorkStage::SymbolParsing)?;
-                persisted_rejection_details_dropped_by_path.insert(path.as_str().to_owned());
-            }
-        }
-    }
-    let mut persisted_fact_counts = BTreeMap::<String, BTreeSet<IdentityFactKey>>::new();
-    for path in persisted_rejection_details_dropped_by_path {
-        control.check(IndexWorkStage::SymbolParsing)?;
-        if report
-            .rejection_details_dropped_by_path
-            .insert(path.clone())
-        {
-            report.reserve_reused_path_bytes(
-                &path,
-                false,
-                control,
-                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
-            )?;
-        }
-    }
-    for rejection in persisted_rejections {
-        control.check(IndexWorkStage::SymbolParsing)?;
-        let namespace = rejection.fact_index & !((1_u64 << 56) - 1);
-        let path = rejection.path.as_str().to_owned();
-        persisted_fact_counts
-            .entry(path.clone())
-            .or_default()
-            .insert(IdentityFactKey {
-                span: IdentitySpan {
-                    start_line: rejection.span.start_line() as usize,
-                    start_column: rejection.span.start_column() as usize,
-                    end_line: rejection.span.end_line() as usize,
-                    end_column: rejection.span.end_column() as usize,
-                },
-                parser: parser_fact_kind(rejection.parser),
-                owner: u8::from(rejection.field == GraphIdentityField::ResolutionKey),
-                fact_index: rejection.fact_index,
-            });
-        // Derived relations have their own admission report during projection;
-        // hydrating them into the parser report would double-count coverage.
-        if namespace == DERIVED_RELATION_FACT_INDEX_NAMESPACE {
-            continue;
-        }
-        control.check(IndexWorkStage::SymbolParsing)?;
-        let rejection_key_bytes = extend_bounded_identity_rejections_with_drop_paths(
-            &mut report.rejections,
-            &mut report.rejection_keys,
-            std::iter::once(rejection),
-            &mut report.rejection_details_dropped_by_path,
-        )?;
-        report.reserve_identity_bytes(
-            rejection_key_bytes,
-            control,
-            MAX_IN_MEMORY_GRAPH_WORK_BYTES,
-        )?;
-    }
-    for (path, facts) in persisted_fact_counts {
-        control.check(IndexWorkStage::SymbolParsing)?;
-        if !report.reused_rejection_facts.contains_key(&path) {
-            report.reserve_identity_bytes(
-                identity_fact_set_retained_bytes(&path, &facts)?,
-                control,
-                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
-            )?;
-            report.reused_rejection_facts.insert(path.clone(), facts);
-        }
-        let detail_count = u64::try_from(
-            report
-                .reused_rejection_facts
-                .get(&path)
-                .map_or(0, BTreeSet::len),
-        )
-        .map_err(|error| {
-            CliError::InvalidInput(format!(
-                "identity rejection detail count overflowed: {error}"
-            ))
-        })?;
-        if !report.reused_rejection_detail_counts.contains_key(&path) {
-            report.reserve_reused_path_bytes(
-                &path,
-                false,
-                control,
-                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
-            )?;
-            report
+            let details = report
                 .reused_rejection_detail_counts
-                .insert(path, detail_count);
-        }
-    }
-    for (path, omitted) in persisted_coverage {
-        // Persisted path coverage is authoritative for safely reused graphs,
-        // including structural/fallback rows whose typed details were evicted
-        // by the global rejection-detail ceiling.
-        control.check(IndexWorkStage::SymbolParsing)?;
-        if !report.reused_rejection_counts.contains_key(&path) {
-            report.reserve_reused_path_bytes(
-                &path,
-                false,
-                control,
-                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
-            )?;
-            report.reused_rejection_counts.insert(path, omitted);
-        }
-    }
-    let graph_parsers = graphs
-        .iter()
-        .map(|graph| {
-            let graph = Borrow::<SymbolGraph>::borrow(graph);
-            (graph.path.as_str(), graph.parser)
-        })
-        .collect::<BTreeMap<_, _>>();
-    for path in reused_paths {
-        let Some(_omitted) = report.reused_rejection_counts.get(path).copied() else {
-            continue;
-        };
-        let details = report
-            .reused_rejection_detail_counts
-            .get(path)
-            .copied()
-            .unwrap_or(0);
-        let parser = graph_parsers.get(path.as_str()).copied();
-        let baseline = parser.map_or(0, |parser| {
-            u64::from(matches!(
-                parser,
-                ParserKind::Structural | ParserKind::Fallback
-            ))
-        });
-        if details == 0 && baseline > 0 {
-            // A structural/fallback path with no retained typed identity fact
-            // still owns its coarse parser omission. Keep that provenance out
-            // of identity reconciliation so unchanged graphs retain the same
-            // covered count as a clean parse.
-            if !report.reused_parser_rejection_counts.contains_key(path) {
+                .get(path)
+                .copied()
+                .unwrap_or(0);
+            let parser = graph_parsers.get(path.as_str()).copied();
+            let baseline = parser.map_or(0, |parser| {
+                u64::from(matches!(
+                    parser,
+                    ParserKind::Structural | ParserKind::Fallback
+                ))
+            });
+            if details == 0 && baseline > 0 {
+                // A structural/fallback path with no retained typed identity fact
+                // still owns its coarse parser omission. Keep that provenance out
+                // of identity reconciliation so unchanged graphs retain the same
+                // covered count as a clean parse.
+                if !report.reused_parser_rejection_counts.contains_key(path) {
+                    report.reserve_reused_path_bytes(
+                        path,
+                        false,
+                        control,
+                        MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+                    )?;
+                    report
+                        .reused_parser_rejection_counts
+                        .insert(path.clone(), baseline);
+                }
+            }
+            // Fallback rows intentionally carry one coarse parser omission and do
+            // not re-derive identity details. Structural and exact parsers must
+            // be reparsed when a capped persisted row set cannot identify every
+            // old fact without guessing.
+            if parser != Some(ParserKind::Fallback)
+                && report.rejection_details_dropped_for(path)
+                && !report.reused_rejection_details_incomplete.contains(path)
+            {
                 report.reserve_reused_path_bytes(
                     path,
                     false,
@@ -6416,33 +7067,18 @@ fn hydrate_reused_identity_admission(
                     MAX_IN_MEMORY_GRAPH_WORK_BYTES,
                 )?;
                 report
-                    .reused_parser_rejection_counts
-                    .insert(path.clone(), baseline);
+                    .reused_rejection_details_incomplete
+                    .insert(path.clone());
             }
         }
-        // Fallback rows intentionally carry one coarse parser omission and do
-        // not re-derive identity details. Structural and exact parsers must
-        // be reparsed when a capped persisted row set cannot identify every
-        // old fact without guessing.
-        if parser != Some(ParserKind::Fallback)
-            && report.rejection_details_dropped_for(path)
-            && !report.reused_rejection_details_incomplete.contains(path)
-        {
-            report.reserve_reused_path_bytes(
-                path,
-                false,
-                control,
-                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
-            )?;
-            report
-                .reused_rejection_details_incomplete
-                .insert(path.clone());
-        }
-    }
-    let retained_bytes =
-        checked_identity_admission_budget(report, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
-    report.observed_fact_bytes = retained_bytes;
-    Ok(())
+        let retained_bytes =
+            checked_identity_admission_budget(report, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)?;
+        report.observed_fact_bytes = retained_bytes;
+        report.retained_limit = Some(phase_limit);
+        Ok(())
+    })();
+    report.retained_limit = previous_limit;
+    result
 }
 
 /// One admitted captured source, shared across repeated bounded projection requests.
@@ -6525,6 +7161,8 @@ struct SourceRecoveryWork {
 
 /// Per-operation captured source cache, limited to requested projection/context paths.
 struct SourceBindingCache<'a> {
+    /// Allowance after subtracting coexisting publication owners.
+    retained_limit: u64,
     /// Exact selected checkout.
     root: &'a Path,
     /// Captured file inventory, used to reject changed or unindexed source.
@@ -6546,6 +7184,7 @@ impl<'a> SourceBindingCache<'a> {
     fn new(root: &'a Path, nodes: &'a [Node], direct_paths: Option<&BTreeSet<String>>) -> Self {
         Self {
             root,
+            retained_limit: super::MAX_PUBLICATION_STAGING_BYTES,
             nodes: Arc::new(
                 nodes
                     .iter()
@@ -6565,6 +7204,13 @@ impl<'a> SourceBindingCache<'a> {
             work: SourceRecoveryWork::default(),
             retained_bytes: (nodes.len() as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES),
         }
+    }
+
+    /// Update a phase allowance without discarding already retained cache owners.
+    fn set_retained_limit(&mut self, limit: u64) -> Result<(), CliError> {
+        enforce_resolution_registry_budget_with_limit(self.retained_bytes, limit)?;
+        self.retained_limit = limit;
+        Ok(())
     }
 
     /// Recover only an explicitly requested source, preserving its original parser order.
@@ -6616,15 +7262,27 @@ impl<'a> SourceBindingCache<'a> {
             control,
         )?
         .into_parts();
-        let (graph, admission) =
-            admit_symbol_graph_with_semantics(Cow::Owned(graph), Some(&mut semantics), control)?;
+        let identity_limit = self
+            .retained_limit
+            .saturating_sub(self.retained_bytes)
+            .saturating_sub(source_graph_retained_bytes(&graph))
+            .saturating_sub(semantics.retained_bytes());
+        let (graph, admission) = admit_symbol_graph_with_semantics_limit(
+            Cow::Owned(graph),
+            Some(&mut semantics),
+            control,
+            identity_limit,
+        )?;
         let graph = graph.into_owned();
         let bytes = source_graph_retained_bytes(&graph)
             .saturating_add(semantics.retained_bytes())
             .saturating_add(admission.observed_fact_bytes)
             .saturating_add(STAGED_GRAPH_ROW_BYTES)
             .saturating_add(path.len() as u64);
-        enforce_resolution_registry_budget(self.retained_bytes.saturating_add(bytes))?;
+        enforce_resolution_registry_budget_with_limit(
+            self.retained_bytes.saturating_add(bytes),
+            self.retained_limit,
+        )?;
         let source = Arc::new(CapturedSourceGraph {
             graph,
             semantics,
@@ -6798,17 +7456,36 @@ fn complete_symbol_graphs<'a>(
     Ok(graphs.into_values().collect())
 }
 
-/// Admit parser graphs at one shared boundary before any strict graph object is built.
+/// Use the ordinary identity ceiling for isolated graph-admission fixtures.
+#[cfg(test)]
 fn admit_symbol_graphs<'a>(
     graphs: Vec<impl Into<SourceGraph<'a>>>,
     control: &IndexWorkControl,
 ) -> Result<(Vec<SourceGraph<'a>>, GraphIdentityAdmission), CliError> {
+    admit_symbol_graphs_with_limit(graphs, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)
+}
+
+/// Admit parser graphs at one shared boundary before any strict graph object is built.
+fn admit_symbol_graphs_with_limit<'a>(
+    graphs: Vec<impl Into<SourceGraph<'a>>>,
+    control: &IndexWorkControl,
+    limit: u64,
+) -> Result<(Vec<SourceGraph<'a>>, GraphIdentityAdmission), CliError> {
     let mut admitted = Vec::with_capacity(graphs.len());
-    let mut report = GraphIdentityAdmission::default();
+    let mut report = GraphIdentityAdmission {
+        retained_limit: Some(limit),
+        ..GraphIdentityAdmission::default()
+    };
     for (index, graph) in graphs.into_iter().enumerate() {
         check_graph_work(control, index)?;
         let (graph, graph_report) = match graph.into() {
             SourceGraph::Captured(source) => {
+                enforce_resolution_registry_budget_with_limit(
+                    report
+                        .observed_fact_bytes
+                        .saturating_add(source.admission.observed_fact_bytes),
+                    limit,
+                )?;
                 let report = source.admission.clone();
                 (SourceGraph::Captured(source), report)
             }
@@ -6833,11 +7510,21 @@ fn admit_symbol_graphs<'a>(
                 graph,
                 semantics: None,
             } => {
-                let (graph, report) = admit_symbol_graph(Cow::Borrowed(graph), control)?;
+                let (graph, report) = admit_symbol_graph_with_semantics_limit(
+                    Cow::Borrowed(graph),
+                    None,
+                    control,
+                    limit.saturating_sub(report.observed_fact_bytes),
+                )?;
                 (graph.into(), report)
             }
             SourceGraph::Persisted(graph) => {
-                let (graph, report) = admit_symbol_graph(Cow::Owned(graph), control)?;
+                let (graph, report) = admit_symbol_graph_with_semantics_limit(
+                    Cow::Owned(graph),
+                    None,
+                    control,
+                    limit.saturating_sub(report.observed_fact_bytes),
+                )?;
                 (graph.into(), report)
             }
         };
@@ -6848,6 +7535,7 @@ fn admit_symbol_graphs<'a>(
 }
 
 /// Retain valid parser facts while recording every invalid identity field.
+#[cfg(test)]
 fn admit_symbol_graph<'a>(
     graph: Cow<'a, SymbolGraph>,
     control: &IndexWorkControl,
@@ -6855,11 +7543,27 @@ fn admit_symbol_graph<'a>(
     admit_symbol_graph_with_semantics(graph, None, control)
 }
 
-/// Filter raw graph identities and source-owned ordinals through the same masks.
+/// Preserve the ordinary identity sublimit for parser-stage callers.
+#[cfg(test)]
 fn admit_symbol_graph_with_semantics<'a>(
+    graph: Cow<'a, SymbolGraph>,
+    semantics: Option<&mut SourceSemanticFacts>,
+    control: &IndexWorkControl,
+) -> Result<(Cow<'a, SymbolGraph>, GraphIdentityAdmission), CliError> {
+    admit_symbol_graph_with_semantics_limit(
+        graph,
+        semantics,
+        control,
+        MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+    )
+}
+
+/// Filter raw graph identities and source-owned ordinals through the same masks.
+fn admit_symbol_graph_with_semantics_limit<'a>(
     graph: Cow<'a, SymbolGraph>,
     semantics: Option<&mut projectatlas_symbols::SourceSemanticFacts>,
     control: &IndexWorkControl,
+    limit: u64,
 ) -> Result<(Cow<'a, SymbolGraph>, GraphIdentityAdmission), CliError> {
     if semantics
         .as_ref()
@@ -6869,7 +7573,10 @@ fn admit_symbol_graph_with_semantics<'a>(
             "source binding evidence does not match the admitted graph".to_string(),
         ));
     }
-    let mut report = GraphIdentityAdmission::default();
+    let mut report = GraphIdentityAdmission {
+        retained_limit: Some(limit),
+        ..GraphIdentityAdmission::default()
+    };
     let paired_import_relations = paired_import_relations(&graph, control)?;
     #[cfg(test)]
     {
@@ -6944,11 +7651,26 @@ fn admit_symbol_graph_with_semantics<'a>(
         return Ok((graph, report));
     }
     let mut graph = graph.into_owned();
-    let relation_fact_indices = rejected_relations
-        .iter()
-        .enumerate()
-        .filter_map(|(index, rejected)| (!rejected).then_some(index))
-        .collect::<Vec<_>>();
+    let relation_fact_indices = if rejected_relations.iter().any(|rejected| *rejected) {
+        let count = rejected_relations
+            .iter()
+            .filter(|rejected| !**rejected)
+            .count();
+        if count > 0 {
+            report.reserve_identity_bytes(
+                identity_relation_indices_bytes(&graph.path, count),
+                control,
+                MAX_IN_MEMORY_GRAPH_WORK_BYTES,
+            )?;
+        }
+        rejected_relations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rejected)| (!rejected).then_some(index))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     if let Some(semantics) = semantics {
         semantics
             .retain_graph_facts(
@@ -6987,12 +7709,25 @@ fn admit_symbol_graph_with_semantics<'a>(
     Ok((Cow::Owned(graph), report))
 }
 
-/// Sanitize parser output before any summary, persistence, or graph projection sink.
+/// Preserve the ordinary source identity sublimit for existing fixture callers.
+#[cfg(test)]
 pub(super) fn admit_symbol_build_stage(
     staged: &mut SymbolBuildStage,
     control: &IndexWorkControl,
 ) -> Result<GraphIdentityAdmission, CliError> {
-    let mut report = GraphIdentityAdmission::default();
+    admit_symbol_build_stage_with_limit(staged, control, MAX_IN_MEMORY_GRAPH_WORK_BYTES)
+}
+
+/// Sanitize parser output before any summary, persistence, or graph projection sink.
+pub(super) fn admit_symbol_build_stage_with_limit(
+    staged: &mut SymbolBuildStage,
+    control: &IndexWorkControl,
+    limit: u64,
+) -> Result<GraphIdentityAdmission, CliError> {
+    let mut report = GraphIdentityAdmission {
+        retained_limit: Some(limit),
+        ..GraphIdentityAdmission::default()
+    };
     for (index, change) in staged.changes.iter_mut().enumerate() {
         check_graph_work(control, index)?;
         let SymbolProjectionChange::Parsed(parsed) = change else {
@@ -7006,10 +7741,11 @@ pub(super) fn admit_symbol_build_stage(
             relations: Vec::new(),
         };
         let graph = std::mem::replace(&mut parsed.graph, placeholder);
-        let (admitted, graph_report) = admit_symbol_graph_with_semantics(
+        let (admitted, graph_report) = admit_symbol_graph_with_semantics_limit(
             Cow::Owned(graph),
             parsed.source_semantics.as_deref_mut(),
             control,
+            limit.saturating_sub(report.observed_fact_bytes),
         )?;
         parsed.graph = admitted.into_owned();
         if let Some(markdown) = parsed.markdown_facts.as_deref_mut() {
@@ -7072,8 +7808,9 @@ fn source_symbol_identity_error(value: &str) -> Result<(), GraphContractError> {
     projectatlas_symbols::declaration_identity::validate_source_symbol_identity(value)
 }
 
-/// Validate derived canonical keys before the entity projection requests them.
-fn admit_resolution_key_failures(
+/// Admit source projections under an injectable operation staging ceiling.
+#[allow(clippy::too_many_arguments)]
+fn admit_resolution_key_failures_with_limit(
     project: ProjectInstanceId,
     generation: IndexGeneration,
     graphs: &[SourceGraph<'_>],
@@ -7081,7 +7818,9 @@ fn admit_resolution_key_failures(
     configured_modules: &ConfiguredModuleResolution,
     report: &mut GraphIdentityAdmission,
     control: &IndexWorkControl,
+    limit: u64,
 ) -> Result<(), CliError> {
+    let mut retained = resolution_projection_map_retained_bytes(&report.resolution_projections);
     for (index, graph) in graphs.iter().enumerate() {
         let semantics = graph.semantics();
         let graph = graph.graph();
@@ -7095,7 +7834,13 @@ fn admit_resolution_key_failures(
         }
         #[cfg(test)]
         report.record_resolution_derivation(&graph.path, generation);
-        let mut context = resolution_projection_context(&graph.path, packages, configured_modules);
+        let entry_bytes = STAGED_GRAPH_ROW_BYTES.saturating_add(graph.path.len() as u64);
+        let before = retained
+            .saturating_add(report.observed_fact_bytes)
+            .saturating_add(entry_bytes);
+        enforce_resolution_registry_budget_with_limit(before, limit)?;
+        let mut context = resolution_projection_context(&graph.path, packages, configured_modules)
+            .with_retained_bytes_limit(limit.saturating_sub(before));
         if let Some(semantics) = semantics {
             context = context.with_source_semantics(semantics);
         }
@@ -7111,6 +7856,14 @@ fn admit_resolution_key_failures(
                 ));
             }
             Ok(projection) => {
+                retained = retained.saturating_add(resolution_projection_map_entry_retained_bytes(
+                    &graph.path,
+                    &projection,
+                ));
+                enforce_resolution_registry_budget_with_limit(
+                    retained.saturating_add(report.observed_fact_bytes),
+                    limit,
+                )?;
                 report
                     .resolution_projections
                     .insert(graph.path.clone(), projection);
@@ -7118,8 +7871,34 @@ fn admit_resolution_key_failures(
             Err(ResolutionProjectionError::KeyLimit { requested, .. }) => {
                 return Err(resolution_key_limit_failure(requested));
             }
+            Err(ResolutionProjectionError::MemoryLimit { requested, .. }) => {
+                return Err(resolution_projection_memory_failure(
+                    limit,
+                    before.saturating_add(requested),
+                ));
+            }
             Err(ResolutionProjectionError::Contract(failure)) => {
                 let (failures, rejected_count, projection) = (*failure).into_parts();
+                retained = retained.saturating_add(resolution_projection_map_entry_retained_bytes(
+                    &graph.path,
+                    &projection,
+                ));
+                let failure_scratch = (failures.capacity() as u64)
+                    .saturating_mul(std::mem::size_of::<
+                        projectatlas_symbols::ResolutionProjectionFactFailure,
+                    >() as u64);
+                enforce_resolution_registry_budget_with_limit(
+                    retained
+                        .saturating_add(failure_scratch)
+                        .saturating_add(report.observed_fact_bytes),
+                    limit,
+                )?;
+                let previous_limit = report.retained_limit;
+                report.retained_limit = Some(
+                    limit
+                        .saturating_sub(retained)
+                        .saturating_sub(failure_scratch),
+                );
                 for failure in &failures {
                     report.record(
                         &graph.path,
@@ -7138,6 +7917,7 @@ fn admit_resolution_key_failures(
                     rejected_count.saturating_sub(failures.len()),
                     control,
                 )?;
+                report.retained_limit = previous_limit;
                 report
                     .resolution_projections
                     .insert(graph.path.clone(), projection);
@@ -7330,6 +8110,7 @@ fn complete_markdown_facts<'a>(
     graphs: &[impl Borrow<SymbolGraph>],
     symbols: &'a SymbolBuildStage,
     control: &IndexWorkControl,
+    limit: u64,
 ) -> Result<BTreeMap<String, Cow<'a, MarkdownFacts>>, CliError> {
     let graph_paths = graphs
         .iter()
@@ -7341,6 +8122,9 @@ fn complete_markdown_facts<'a>(
         .map(|node| (node.path.as_str(), node))
         .collect::<BTreeMap<_, _>>();
     let mut facts = BTreeMap::new();
+    let mut retained =
+        (nodes.len().saturating_add(graphs.len()) as u64).saturating_mul(STAGED_GRAPH_ROW_BYTES);
+    enforce_resolution_registry_budget_with_limit(retained, limit)?;
     for change in &symbols.changes {
         let SymbolProjectionChange::Parsed(parsed) = change else {
             continue;
@@ -7348,6 +8132,10 @@ fn complete_markdown_facts<'a>(
         if graph_paths.contains(parsed.path.as_str())
             && let Some(markdown) = parsed.markdown_facts.as_ref()
         {
+            retained = retained
+                .saturating_add(STAGED_GRAPH_ROW_BYTES)
+                .saturating_add(parsed.path.len() as u64);
+            enforce_resolution_registry_budget_with_limit(retained, limit)?;
             facts.insert(parsed.path.clone(), Cow::Borrowed(markdown.as_ref()));
         }
     }
@@ -7397,10 +8185,14 @@ fn complete_markdown_facts<'a>(
         }
         let content = String::from_utf8(bytes)
             .map_err(|_source| source_changed_during_derivation(root, &graph.path))?;
-        facts.insert(
-            graph.path.clone(),
-            Cow::Owned(extract_markdown_facts_controlled(&content, control)?),
-        );
+        let extracted = extract_markdown_facts_controlled(&content, control)?;
+        retained = retained.saturating_add(document_fact_entry_retained_bytes(
+            &graph.path,
+            &extracted,
+            true,
+        ));
+        enforce_resolution_registry_budget_with_limit(retained, limit)?;
+        facts.insert(graph.path.clone(), Cow::Owned(extracted));
     }
     enforce_resolution_registry_budget(document_fact_map_retained_bytes(&facts))?;
     Ok(facts)
@@ -7409,31 +8201,36 @@ fn complete_markdown_facts<'a>(
 /// Count map ownership plus evidence owned only for persisted graphs parsed on demand.
 fn document_fact_map_retained_bytes(facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>) -> u64 {
     facts.iter().fold(0_u64, |bytes, (path, facts)| {
-        let bytes = bytes
+        bytes.saturating_add(document_fact_entry_retained_bytes(
+            path,
+            facts,
+            matches!(facts, Cow::Owned(_)),
+        ))
+    })
+}
+
+/// Account a document without cloning its extracted facts.
+fn document_fact_entry_retained_bytes(path: &str, facts: &MarkdownFacts, owned: bool) -> u64 {
+    let bytes = STAGED_GRAPH_ROW_BYTES.saturating_add(path.len() as u64);
+    if !owned {
+        return bytes;
+    }
+    let heading_bytes = facts.headings.iter().fold(0_u64, |bytes, heading| {
+        bytes
             .saturating_add(STAGED_GRAPH_ROW_BYTES)
-            .saturating_add(path.len() as u64);
-        if !matches!(facts, Cow::Owned(_)) {
-            return bytes;
-        }
-        let heading_bytes = facts.headings.iter().fold(0_u64, |bytes, heading| {
+            .saturating_add(heading.text.len() as u64)
+            .saturating_add(heading.slug.len() as u64)
+    });
+    facts
+        .link_candidates
+        .iter()
+        .fold(bytes.saturating_add(heading_bytes), |bytes, candidate| {
             bytes
                 .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                .saturating_add(heading.text.len() as u64)
-                .saturating_add(heading.slug.len() as u64)
-        });
-        facts.link_candidates.iter().fold(
-            bytes.saturating_add(heading_bytes),
-            |bytes, candidate| {
-                bytes
-                    .saturating_add(STAGED_GRAPH_ROW_BYTES)
-                    .saturating_add(candidate.selector.len() as u64)
-                    .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
-                    .saturating_add(
-                        candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64
-                    )
-            },
-        )
-    })
+                .saturating_add(candidate.selector.len() as u64)
+                .saturating_add(candidate.label.as_ref().map_or(0, String::len) as u64)
+                .saturating_add(candidate.enclosing_heading.as_ref().map_or(0, String::len) as u64)
+        })
 }
 
 /// Count document projection state that can survive the per-candidate filters.
@@ -7620,28 +8417,28 @@ fn document_resolution_key_with_language(
 }
 
 /// Return all exact path and heading keys that can affect staged document relations.
-fn document_dependency_keys(
+fn append_document_dependency_keys(
     project: ProjectInstanceId,
     facts: &BTreeMap<String, Cow<'_, MarkdownFacts>>,
-) -> Result<BTreeSet<CanonicalResolutionKey>, CliError> {
-    let mut keys = BTreeSet::new();
+    keys: &mut ResolutionKeyWorkspace<'_>,
+) -> Result<(), CliError> {
     for (document_path, facts) in facts {
         for candidate in &facts.link_candidates {
             let Ok(target) = normalize_document_target(document_path, &candidate.selector) else {
                 continue;
             };
-            keys.insert(document_file_resolution_key(project, &target.path)?);
-            keys.insert(document_casefold_resolution_key(project, &target.path)?);
+            keys.insert_owned(document_file_resolution_key(project, &target.path)?)?;
+            keys.insert_owned(document_casefold_resolution_key(project, &target.path)?)?;
             if let Some(fragment) = target.fragment {
-                keys.insert(document_heading_resolution_key(
+                keys.insert_owned(document_heading_resolution_key(
                     project,
                     &target.path,
                     &fragment,
-                )?);
+                )?)?;
             }
         }
     }
-    Ok(keys)
+    Ok(())
 }
 
 /// Derive canonical resolution keys with repository compiler configuration.
@@ -7650,8 +8447,10 @@ fn resolution_projection_with_config(
     packages: &PackageIndex,
     graph: &SymbolGraph,
     configured_modules: &ConfiguredModuleResolution,
+    limit: u64,
 ) -> Result<ResolutionKeyProjection, CliError> {
-    let context = resolution_projection_context(&graph.path, packages, configured_modules);
+    let context = resolution_projection_context(&graph.path, packages, configured_modules)
+        .with_retained_bytes_limit(limit);
     match derive_resolution_keys_with_context(
         project,
         packages.package_name(&graph.path),
@@ -7662,6 +8461,9 @@ fn resolution_projection_with_config(
             "source semantic evidence does not match the graph".to_string(),
         )),
         Ok(projection) => Ok(projection),
+        Err(ResolutionProjectionError::MemoryLimit { limit, requested }) => {
+            Err(resolution_projection_memory_failure(limit, requested))
+        }
         Err(ResolutionProjectionError::KeyLimit { requested, .. }) => {
             Err(resolution_key_limit_failure(requested))
         }
@@ -7701,6 +8503,25 @@ fn resolution_key_limit_failure(requested: usize) -> CliError {
         IndexWorkResource::RelationRows,
         u64::try_from(MAX_RESOLUTION_KEYS_PER_FACT).unwrap_or(u64::MAX),
         u64::try_from(requested).unwrap_or(u64::MAX),
+    )
+    .into()
+}
+
+/// Lift database admission refusals into the shared CLI/MCP indexing error family.
+fn resolution_read_error(error: projectatlas_db::DbError) -> CliError {
+    match error {
+        projectatlas_db::DbError::IndexWork(failure) => failure.into(),
+        other => other.into(),
+    }
+}
+
+/// Preserve a producer byte refusal at the existing indexing resource boundary.
+fn resolution_projection_memory_failure(limit: u64, requested: u64) -> CliError {
+    IndexWorkFailure::resource_limit(
+        IndexWorkStage::SymbolParsing,
+        IndexWorkResource::OutputBytes,
+        limit,
+        requested,
     )
     .into()
 }
@@ -7911,36 +8732,7 @@ impl From<GraphContractError> for CliError {
 
 /// Count conservative retained canonical resolution-key bytes.
 fn resolution_retained_bytes(projection: &ResolutionKeyProjection) -> u64 {
-    projection
-        .source_keys()
-        .iter()
-        .chain(
-            projection
-                .symbol_keys()
-                .iter()
-                .flat_map(projectatlas_symbols::SymbolResolutionKeys::keys),
-        )
-        .chain(
-            projection
-                .export_keys()
-                .iter()
-                .flat_map(projectatlas_symbols::ExportResolutionKeys::keys),
-        )
-        .chain(
-            projection
-                .relation_keys()
-                .iter()
-                .flat_map(projectatlas_symbols::RelationResolutionKeys::keys),
-        )
-        .fold(0_u64, |bytes, key| {
-            bytes
-                .saturating_add(32)
-                .saturating_add(key.canonical_identity().len() as u64)
-        })
-        .saturating_add(projection.source_calls_retained_bytes())
-        .saturating_add(projection.source_spans_retained_bytes())
-        .saturating_add(projection.rust_toolchain_imports_retained_bytes())
-        .saturating_add(projection.export_lookup_vector_bytes())
+    projection.retained_bytes()
 }
 
 /// Count one admitted projection entry while it remains in the source map.
@@ -7949,6 +8741,7 @@ fn resolution_projection_map_entry_retained_bytes(
     projection: &ResolutionKeyProjection,
 ) -> u64 {
     STAGED_GRAPH_ROW_BYTES
+        .saturating_add(std::mem::size_of::<ResolutionKeyProjection>() as u64)
         .saturating_add(path.len() as u64)
         .saturating_add(resolution_retained_bytes(projection))
 }
@@ -8736,7 +9529,7 @@ mod tests {
     }
 
     #[test]
-    fn document_coverage_marker_preserves_exact_entity_budget_and_report()
+    fn document_coverage_marker_preserves_entities_and_accounts_ordinal_metadata()
     -> Result<(), Box<dyn Error>> {
         let facts = projectatlas_symbols::DocumentFacts {
             format: projectatlas_symbols::DocumentFormat::Docx,
@@ -8788,12 +9581,33 @@ mod tests {
             None,
             false,
             &control,
-            baseline.peak_retained_bytes,
+            super::super::MAX_PUBLICATION_STAGING_BYTES,
         )?;
         require_eq(
-            &with_marker.peak_retained_bytes,
-            &baseline.peak_retained_bytes,
-            "coverage marker charged the entity staging budget",
+            &with_marker.entity_by_digest,
+            &baseline.entity_by_digest,
+            "coverage marker created an entity",
+        )?;
+        require_eq(
+            &with_marker.entity_exports,
+            &baseline.entity_exports,
+            "coverage marker created exported keys",
+        )?;
+        require(
+            with_marker.retained_bytes > baseline.retained_bytes,
+            "coverage marker's retained ordinal metadata was omitted",
+        )?;
+        build_entity_projection_with_config_limit(
+            project,
+            generation,
+            &[],
+            std::slice::from_ref(&graph),
+            &packages,
+            &ConfiguredModuleResolution::default(),
+            None,
+            false,
+            &control,
+            with_marker.peak_retained_bytes,
         )?;
         let mut stage = symbol_build_stage_for_graphs(vec![graph.clone()]);
         super::admit_symbol_build_stage(&mut stage, &control)?;
@@ -10055,8 +10869,11 @@ mod tests {
                 "incremental direct/inbound resolution derivation count",
             )?;
         }
-        let peak = incremental.peak_retained_bytes;
-        require(peak > 0, "incremental projection measured no retained peak")?;
+        let entity_peak = incremental.peak_retained_bytes;
+        require(
+            entity_peak > 0,
+            "incremental projection measured no retained peak",
+        )?;
         let expected_removals = vec![direct_path.to_string(), inbound_path.to_string()];
         require_eq(
             &incremental.projection_removals_before_entities,
@@ -10084,6 +10901,36 @@ mod tests {
         let rows = u64::try_from(incremental.entities.len())?;
         let retained_bytes = incremental.retained_bytes;
         drop(incremental);
+        // The injected ceiling now covers sources, symbols, identities, producer
+        // scratch and candidate maps as well as entities. Find the actual public
+        // stage boundary without copying its accounting formula into the test.
+        let mut refused = 0_u64;
+        let mut peak = super::super::MAX_PUBLICATION_STAGING_BYTES;
+        while peak - refused > 1 {
+            let middle = refused + (peak - refused) / 2;
+            match stage_incremental_repository_graph_with_test_limit(
+                &store,
+                &root,
+                base_generation,
+                &nodes,
+                &[direct_path.to_string()],
+                &scan_policy,
+                &symbol_build_stage_for_graphs(vec![graphs[2].clone()]),
+                &control,
+                middle,
+            ) {
+                Ok(_) => peak = middle,
+                Err(CliError::IndexWork(IndexWorkFailure::ResourceLimitExceeded {
+                    resource: IndexWorkResource::OutputBytes,
+                    ..
+                })) => refused = middle,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        require(
+            peak >= entity_peak,
+            "operation budget omitted its entity owner",
+        )?;
         let at_peak = stage_incremental_repository_graph_with_test_limit(
             &store,
             &root,
@@ -10156,9 +11003,9 @@ mod tests {
                     limit,
                     observed,
                     ..
-                })) if *limit == below_peak && *observed == peak
+                })) if *observed > *limit
             ),
-            "one byte below the measured incremental peak did not fail at the measured peak",
+            "one byte below the operation boundary did not return a typed byte refusal",
         )?;
         require(
             retained_bytes > 0,
@@ -12273,6 +13120,7 @@ mod tests {
             None,
             &BTreeSet::new(),
             &control,
+            super::super::MAX_PUBLICATION_STAGING_BYTES,
         )?;
         require(
             bindings.is_empty() && bytes == 0,
@@ -12294,6 +13142,7 @@ mod tests {
             None,
             &BTreeSet::new(),
             &canceled,
+            super::super::MAX_PUBLICATION_STAGING_BYTES,
         );
         require(
             matches!(
@@ -13833,6 +14682,419 @@ function helper() {}
                 )
             }),
             "non-PHP call matching must remain case-sensitive",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn persisted_candidate_pages_share_the_registry_transfer_allowance()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let db = root.join("atlas.db");
+        let mut store = AtlasStore::open_for_project(&db, root)?;
+        let project = store
+            .project_instance_id()?
+            .ok_or("missing transfer fixture identity")?;
+        let graph = function_graph("src/lib.rs", 1);
+        let nodes = vec![test_file_node(&graph.path, "rust")];
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(root, &ScanOptions::default(), &control)?;
+        let staged = stage_full_repository_graph(
+            &store,
+            root,
+            IndexGeneration::ZERO,
+            &nodes,
+            &policy,
+            &symbol_build_stage_for_graphs(vec![graph.clone()]),
+            &control,
+        )?;
+        publish_full_staged_graph(&mut store, &nodes, &staged, &control, "candidate-transfer")?;
+        drop(store);
+        let reader = AtlasStore::open_read_only_for_project(&db, root)?;
+        let before = reader.index_publication()?;
+        let keys = reader
+            .repository_export_keys_for_paths(project, &[graph.path], 100)?
+            .rows;
+        let read = || {
+            reader.repository_resolution_candidates_for_keys_with_byte_limit(
+                project,
+                &keys,
+                100,
+                1_024 * 1_024,
+            )
+        };
+        let first = read()?;
+        let page_bytes = first.retained_bytes;
+        require(
+            page_bytes > 0 && !first.page.rows.is_empty(),
+            "read omitted its returned owner",
+        )?;
+        let replaced = BTreeSet::new();
+        let generation = IndexGeneration::new(2);
+        let registry = super::resolution_registry_from_persisted(
+            project,
+            generation,
+            first,
+            &replaced,
+            &control,
+            u64::MAX,
+        )?;
+        let registry_bytes = registry.retained_bytes;
+        require(registry_bytes > 0, "transfer retained no lookup witnesses")?;
+        drop(registry);
+        let combined = page_bytes.saturating_add(registry_bytes);
+        let refused = super::resolution_registry_from_persisted(
+            project,
+            generation,
+            read()?,
+            &replaced,
+            &control,
+            combined - 1,
+        );
+        require(
+            matches!(
+                refused,
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ),
+            "registry ignored the simultaneously live returned page",
+        )?;
+        let mut exact = super::resolution_registry_from_persisted(
+            project,
+            generation,
+            read()?,
+            &replaced,
+            &control,
+            combined,
+        )?;
+        require_eq(
+            &exact.retained_bytes,
+            &registry_bytes,
+            "exact transfer boundary changed lookup ownership",
+        )?;
+        super::append_persisted_resolution_candidates(
+            &mut exact,
+            project,
+            generation,
+            read()?,
+            &replaced,
+            &control,
+        )?;
+        require_eq(
+            &exact.retained_bytes,
+            &registry_bytes,
+            "duplicate page charged another registry copy",
+        )?;
+        exact.retained_limit = combined - 1;
+        let failed_append = super::append_persisted_resolution_candidates(
+            &mut exact,
+            project,
+            generation,
+            read()?,
+            &replaced,
+            &control,
+        );
+        require(
+            failed_append.is_err()
+                && exact.retained_limit == combined - 1
+                && exact.retained_bytes == registry_bytes,
+            "failed read transfer erased completed cache or leaked its scoped allowance",
+        )?;
+        require_eq(
+            &reader.index_publication()?,
+            &before,
+            "read transfer changed the published generation",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_key_workspaces_admit_clones_and_query_copies_before_growth()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([22; 16])?;
+        let key = test_resolution_key(project, &"x".repeat(1_000))?;
+        let other = test_resolution_key(project, &"y".repeat(1_000))?;
+        let one_owner = super::resolution_workspace_key_bytes(&key);
+        let paths = BTreeSet::new();
+        let root = Path::new(".");
+        let mut exact = super::ResolutionKeyWorkspace::new(one_owner, root, &paths);
+        exact.insert(&key)?;
+        exact.insert(&key)?;
+        require(
+            exact.keys.len() == 1 && exact.retained_bytes == one_owner,
+            "duplicate witness retained another canonical string",
+        )?;
+        require(
+            matches!(
+                exact.insert(&other),
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ) && exact.keys.len() == 1
+                && exact.retained_bytes == one_owner,
+            "refused witness mutated the admitted prefix",
+        )?;
+        require(
+            matches!(
+                exact.snapshot(),
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ),
+            "query Vec copy ignored its coexisting set",
+        )?;
+        let mut available =
+            super::ResolutionKeyWorkspace::new(one_owner.saturating_mul(4), root, &paths);
+        available.insert(&key)?;
+        available.insert_owned(other.clone())?;
+        let mut one_row = super::ResolutionKeyWorkspace::new(u64::MAX, root, &paths);
+        one_row.row_limit = 1;
+        one_row.insert(&key)?;
+        one_row.insert_owned(key.clone())?;
+        require(
+            matches!(one_row.insert(&other), Err(CliError::RefreshRequired(_)))
+                && matches!(
+                    one_row.insert_owned(other.clone()),
+                    Err(CliError::RefreshRequired(_))
+                )
+                && one_row.keys.len() == 1
+                && one_row.retained_bytes == one_owner,
+            "distinct-key row refusal retained another owner or charged a duplicate",
+        )?;
+        let mut expected = vec![key, other];
+        expected.sort();
+        require_eq(
+            &available.snapshot()?.0,
+            &expected,
+            "admitted query copy changed exact witnesses",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn configured_projection_admission_refuses_before_aggregate_retention()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([21; 16])?;
+        let generation = IndexGeneration::new(1);
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let text = "import 'pkg';\n".repeat(16);
+        let mut extracted = Vec::new();
+        for index in 0..5 {
+            let (_, graph, facts) =
+                projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                    &format!("src/source{index}.ts"),
+                    Some("typescript"),
+                    &text,
+                    &control,
+                )?
+                .into_parts();
+            extracted.push((graph, facts));
+        }
+        let raw = extracted.iter().map(|(graph, _)| graph).collect::<Vec<_>>();
+        let packages = PackageIndex::from_graphs(&raw)?;
+        let sources = extracted
+            .iter()
+            .map(|(graph, facts)| super::SourceGraph::Staged {
+                graph,
+                semantics: Some(facts),
+            })
+            .collect::<Vec<_>>();
+        let directory = format!("{}/", "n".repeat(220)).repeat(4);
+        let configured = ConfiguredModuleResolution::new(vec![EcmaScriptModuleConfig::new(
+            "tsconfig.json",
+            EcmaScriptConfigKind::TypeScript,
+            None,
+            vec![EcmaScriptPathMapping::new(
+                "pkg",
+                (0..64)
+                    .map(|index| format!("src/target{index}/{directory}target.ts"))
+                    .collect(),
+            )?],
+        )?])?;
+        let mut report = super::GraphIdentityAdmission::default();
+        let limit = 2 * 1_024 * 1_024;
+        let result = super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &sources,
+            &packages,
+            &configured,
+            &mut report,
+            &control,
+            limit,
+        );
+        let retained =
+            super::resolution_projection_map_retained_bytes(&report.resolution_projections);
+        require(
+            matches!(
+                result,
+                Err(super::CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: projectatlas_core::IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ),
+            &format!(
+                "aggregate admission returned success with {} maps and {retained} bytes under {limit}-byte limit",
+                report.resolution_projections.len()
+            ),
+        )?;
+        require(
+            retained <= limit
+                && !report.resolution_projections.is_empty()
+                && report.resolution_projections.len() < sources.len(),
+            "admission must retain only the prefix admitted before aggregate exhaustion",
+        )?;
+        let (_, partial_graph, partial_facts) =
+            projectatlas_symbols::extract_symbol_graph_with_semantics_controlled(
+                "src/partial.js",
+                Some("javascript"),
+                &format!("export {{ work as '' }} from 'pkg';\n{text}"),
+                &control,
+            )?
+            .into_parts();
+        let partial = [super::SourceGraph::Staged {
+            graph: &partial_graph,
+            semantics: Some(&partial_facts),
+        }];
+        let mut rejected_neighbor = GraphIdentityAdmission::default();
+        super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &partial,
+            &packages,
+            &configured,
+            &mut rejected_neighbor,
+            &control,
+            limit,
+        )?;
+        require(
+            !rejected_neighbor.rejections.is_empty()
+                && rejected_neighbor.resolution_projections.len() == 1,
+            "invalid neighbor did not retain a valid partial projection and rejection facts",
+        )?;
+        let partial_bytes =
+            resolution_projection_map_retained_bytes(&rejected_neighbor.resolution_projections);
+        let partial_continuation = super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &sources,
+            &packages,
+            &configured,
+            &mut rejected_neighbor,
+            &control,
+            limit,
+        );
+        require(
+            matches!(
+                partial_continuation,
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: projectatlas_core::IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ) && resolution_projection_map_retained_bytes(
+                &rejected_neighbor.resolution_projections,
+            ) == partial_bytes,
+            "partial Contract projection escaped the aggregate allowance",
+        )?;
+        let mut split = GraphIdentityAdmission::default();
+        super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &sources[..1],
+            &packages,
+            &configured,
+            &mut split,
+            &control,
+            limit,
+        )?;
+        let first_bytes = resolution_projection_map_retained_bytes(&split.resolution_projections);
+        require(
+            first_bytes > 0,
+            "positive 64-target projection was not admitted",
+        )?;
+        let continuation = super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &sources[1..],
+            &packages,
+            &configured,
+            &mut split,
+            &control,
+            limit,
+        );
+        require(
+            matches!(
+                continuation,
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: projectatlas_core::IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ),
+            "a second admission minted a fresh allowance",
+        )?;
+        let mut nonzero_base = GraphIdentityAdmission {
+            observed_fact_bytes: limit - first_bytes / 2,
+            ..GraphIdentityAdmission::default()
+        };
+        let base_result = super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &sources[..1],
+            &packages,
+            &configured,
+            &mut nonzero_base,
+            &control,
+            limit,
+        );
+        require(
+            matches!(
+                base_result,
+                Err(CliError::IndexWork(
+                    IndexWorkFailure::ResourceLimitExceeded {
+                        resource: projectatlas_core::IndexWorkResource::OutputBytes,
+                        ..
+                    }
+                ))
+            ) && nonzero_base.resolution_projections.is_empty(),
+            "already-live identity state was omitted from producer admission",
+        )?;
+        let cancellation = IndexCancellation::new();
+        cancellation.cancel();
+        let canceled = IndexWorkControl::new(cancellation, None);
+        let before = resolution_projection_map_retained_bytes(&split.resolution_projections);
+        let canceled_result = super::admit_resolution_key_failures_with_limit(
+            project,
+            generation,
+            &sources[1..],
+            &packages,
+            &configured,
+            &mut split,
+            &canceled,
+            limit,
+        );
+        require(
+            matches!(
+                canceled_result,
+                Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+            ) && resolution_projection_map_retained_bytes(&split.resolution_projections) == before,
+            "cancellation changed the admitted prefix",
         )?;
         Ok(())
     }
