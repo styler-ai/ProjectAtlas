@@ -116,6 +116,58 @@ also resolves path-less root-sensitive tools from config, indexed DB metadata, o
 `.projectatlas/projectatlas.db` location so clients that ignore `cwd` still use the intended project
 root.
 
+Automatic project state uses a direct `.projectatlas` directory beneath the selected
+source root. Before SQLite access, ProjectAtlas checks that root's conventional
+database and WAL/SHM entries are direct regular files with a single hard link.
+Initialization and root transitions also admit generated destinations before changing
+identity or writing defaults. Existing config and nonsource bytes remain intact;
+live nonsource aliases remain read-only inputs, while dangling aliases and aliases
+encountered at creation are refused. Generated host documents are replaced atomically
+with existing permissions preserved.
+Ordinary navigation does not require valid generated host documents.
+Managed paths remain managed through resolvable parent reductions and source-root
+aliases. An unresolved parent such as `.projectatlas/missing/../projectatlas.json`
+is refused before creating the intermediate directory; a failed ownership check
+cannot silently select an external writer. Existing symlink parents retain their
+physical filesystem meaning, and custom external destinations remain supported.
+Missing managed legacy configuration is admitted before database identity repair.
+On macOS, managed case aliases follow the containing volume's case behavior,
+including Unicode case aliases. Distinct custom filenames on case-sensitive volumes
+remain supported. Unavailable case evidence for a possible managed alias causes a
+refusal before mutation; parent reductions use the destination volume's rules.
+
+Ignore edits and optional JSON map output apply the same ownership boundary to
+their exact managed documents. Changed default or legacy config and default JSON
+sidecars reject indirect entries; atomic replacement preserves outside hardlink
+targets and existing permissions. Unchanged config operations still read valid
+aliases. Gitignore initialization leaves every existing entry untouched, including
+dangling links, and reports a racing entry as existing rather than created.
+New documents use ordinary permissions under the process umask. Explicit custom
+config and map destinations retain their operator-selected behavior, including
+custom filenames directly inside `.projectatlas`; the parent directory alone does
+not make them managed. JSON output still refuses to overwrite its legacy TOON
+import through an alias.
+
+Replacement retains existing ownership and native file access controls: Linux
+POSIX/NFSv4 ACLs and SELinux/Smack file labels, macOS ordered ACLs, and Windows
+owner/group/DACL policy. A policy that cannot be preserved causes a causal refusal
+before valid output is replaced. Linux prepares changed policy and complete bytes
+on an unnamed inode; macOS isolates every existing-file replacement before native
+pathname ACL operations, using no-follow leaf ACL access.
+New outputs retain ordinary parent inheritance. The destination and staging file
+identities are rechecked before publication; uncertain staging ownership withholds
+cleanup. A private-directory cleanup error after publication explicitly reports
+that the replacement already committed. These are bounded mutation checks, not
+a lock against arbitrary concurrent filesystem changes.
+
+Canonical source-root aliases and explicit external database/configuration paths remain
+supported. A conventional-looking database filename outside the independently selected
+root remains an operator-selected binding. Before startup database discovery, explicit
+configuration supplies that root; an explicit binding without configuration uses the
+current root for admission. Per-call `project_path` and worktree selections use their
+own roots. These checks preserve ownership at the admitted operation boundaries;
+they do not lock arbitrary ancestors against concurrent filesystem replacement.
+
 One MCP server can serve the selected control checkout, its registered worktrees, and unrelated
 indexed repositories. Prefer per-call `worktree` for a registered checkout and use `main` for the
 control atlas. Use `atlas_set_project_path` to change the active process default only in a

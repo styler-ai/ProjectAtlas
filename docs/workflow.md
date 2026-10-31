@@ -277,6 +277,33 @@ Environment toggles:
 
 ## Troubleshooting
 
+### Automatic project-state ownership
+
+If a command refuses an indirect `.projectatlas` directory or a linked conventional
+database/WAL/SHM entry, restore its intended direct ownership and retry while preserving
+the existing database and authored state. Explicit external storage remains available
+through the existing `--db` and configuration selection. A blocked generated host
+destination prevents initialization or a root transition before identity changes;
+ordinary navigation can still read an otherwise valid atlas. A later unrelated I/O
+failure after a committed transition retains the existing committed-state diagnostic
+and repair guidance.
+
+Generated-file publication preserves the last valid output on failure. If the state
+directory changes while a private file is staged, the error reports that cleanup was
+withheld; the original private stage is retained rather than unlinking a pathname under
+uncertain ownership. Restore the intended directory before retrying. These failures do
+not require resetting the index or deleting approved purposes.
+
+If a changed default configuration or default JSON map sidecar is refused because
+it is indirect, restore a direct file at that managed destination before retrying.
+The helper commands preserve outside link targets and existing file permissions.
+Replacement also preserves native access ACLs and their owner/group subjects. If
+the platform cannot retain that access policy, publication refuses while keeping
+the existing output; retry with the access policy and ownership intact.
+Unchanged config edits and existing `.gitignore` entries remain no-ops, including a
+dangling `.gitignore` link. Explicit external config and custom map output selection
+remain supported through their existing options.
+
 ### Optional current map response
 
 When you need the complete current AtlasMap, request it directly:

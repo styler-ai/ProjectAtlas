@@ -752,6 +752,11 @@ pub(crate) fn init_project_with_config(
     root: &Path,
     selected_config: Option<&Path>,
 ) -> AtlasMapResult<String> {
+    let canonical_root = fs::canonicalize(root).map_err(|source| AtlasMapError::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let root = canonical_root.as_path();
     let project_dir = root.join(".projectatlas");
     let nested_config_path = project_dir.join("config.toml");
     let flat_config_path = root.join("projectatlas.toml");
@@ -767,15 +772,33 @@ pub(crate) fn init_project_with_config(
         },
         Path::to_path_buf,
     );
+    let mut state =
+        crate::project_state::ProjectStateGuard::preflight(root, None, Some(&config_path))
+            .map_err(|source| AtlasMapError::Io {
+                path: project_dir.clone(),
+                source,
+            })?;
     let default_config = if config_path.exists() {
         None
     } else {
         Some(default_config_text_for(root, &config_path)?)
     };
-    fs::create_dir_all(&project_dir).map_err(|source| AtlasMapError::Io {
-        path: project_dir.clone(),
-        source,
-    })?;
+    let mut config_document = if default_config.is_some() {
+        crate::project_state::ProjectStateGuard::preflight_document(root, &config_path).map_err(
+            |source| AtlasMapError::Io {
+                path: config_path.clone(),
+                source,
+            },
+        )?
+    } else {
+        None
+    };
+    state
+        .ensure_directory()
+        .map_err(|source| AtlasMapError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
     if let Some(default_config) = default_config {
         if let Some(parent) = config_path
             .parent()
@@ -786,19 +809,36 @@ pub(crate) fn init_project_with_config(
                 source,
             })?;
         }
-        fs::write(&config_path, default_config).map_err(|source| AtlasMapError::Io {
+        state.verify().map_err(|source| AtlasMapError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
+        // The document role owns both fixed-name admission and creation mode.
+        let written = if let Some(document) = &mut config_document {
+            document
+                .create_document(default_config.as_bytes())
+                .map(|_| ())
+        } else {
+            // This destination was explicitly selected by the operator.
+            fs::write(&config_path, default_config)
+        };
+        written.map_err(|source| AtlasMapError::Io {
             path: config_path.clone(),
             source,
         })?;
     }
     let nonsource_path = project_dir.join("projectatlas-nonsource-files.toon");
     if !nonsource_path.exists() {
-        fs::write(&nonsource_path, "nonsource_files[]:\n  # path,summary\n").map_err(|source| {
-            AtlasMapError::Io {
+        state.verify().map_err(|source| AtlasMapError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
+        state
+            .write_new(&nonsource_path, b"nonsource_files[]:\n  # path,summary\n")
+            .map_err(|source| AtlasMapError::Io {
                 path: nonsource_path.clone(),
                 source,
-            }
-        })?;
+            })?;
     }
     Ok(String::new())
 }
@@ -829,19 +869,45 @@ pub(crate) fn init_gitignore(
         load_atlas_config_for_root(project_root)?
     };
     let gitignore_path = config.root.join(".gitignore");
-    let existed = gitignore_path.exists();
-    if !existed {
-        fs::write(&gitignore_path, default_gitignore_text()).map_err(|source| {
-            AtlasMapError::Io {
+    let existed = match fs::symlink_metadata(&gitignore_path) {
+        Ok(_) => true,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(AtlasMapError::Io {
+                path: gitignore_path,
+                source,
+            });
+        }
+    };
+    let created = if existed {
+        false
+    } else {
+        let mut guard = crate::project_state::ProjectStateGuard::preflight_document(
+            &config.root,
+            &gitignore_path,
+        )
+        .map_err(|source| AtlasMapError::Io {
+            path: gitignore_path.clone(),
+            source,
+        })?
+        .ok_or_else(|| AtlasMapError::Io {
+            path: gitignore_path.clone(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gitignore has no admitted project owner",
+            ),
+        })?;
+        guard
+            .create_document(default_gitignore_text().as_bytes())
+            .map_err(|source| AtlasMapError::Io {
                 path: gitignore_path.clone(),
                 source,
-            }
-        })?;
-    }
+            })?
+    };
     Ok(GitignoreInitReport {
         gitignore_path: effective_config_path_display(&gitignore_path),
-        existed,
-        created: !existed,
+        existed: existed || !created,
+        created,
         gitignore_inherited: true,
     })
 }
@@ -860,7 +926,7 @@ pub(crate) fn add_ignore_entry(
     let changed = values.insert(normalized.clone());
     if changed {
         write_string_array(&mut document, kind, &values)?;
-        write_config_document(&path, &document)?;
+        write_config_document(&path, &document, project_root)?;
     }
     let config = load_atlas_config(Some(&path))?;
     Ok(ignore_mutation_report(
@@ -909,7 +975,7 @@ pub(crate) fn remove_ignore_entry(
         normalized_prefix
     };
     if changed {
-        write_config_document(&path, &document)?;
+        write_config_document(&path, &document, project_root)?;
     }
     let config = load_atlas_config(Some(&path))?;
     Ok(ignore_mutation_report(
@@ -1090,6 +1156,14 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
     if !config.db_path.exists() {
         return Ok(BTreeMap::new());
     }
+    let _admission = crate::project_state::ProjectStateGuard::preflight_database_path(
+        &config.db_path,
+        &config.root,
+    )
+    .map_err(|source| AtlasMapError::Io {
+        path: config.db_path.clone(),
+        source,
+    })?;
     let store = AtlasStore::open_read_only_for_project(&config.db_path, &config.root).map_err(
         |source| AtlasMapError::Database {
             path: config.db_path.clone(),
@@ -1200,7 +1274,26 @@ fn load_config_document_for_edit(path: &Path) -> AtlasMapResult<DocumentMut> {
 }
 
 /// Persist an editable TOML document to disk.
-fn write_config_document(path: &Path, document: &DocumentMut) -> AtlasMapResult<()> {
+fn write_config_document(
+    path: &Path,
+    document: &DocumentMut,
+    project_root: &Path,
+) -> AtlasMapResult<()> {
+    if let Some(mut guard) =
+        crate::project_state::ProjectStateGuard::preflight_document(project_root, path).map_err(
+            |source| AtlasMapError::Io {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?
+    {
+        return guard
+            .write_document(document.to_string().as_bytes())
+            .map_err(|source| AtlasMapError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+    }
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -2686,7 +2779,15 @@ pub(crate) fn write_json_map(content: &str, config: &AtlasMapConfig) -> AtlasMap
         }
         _ => config.map_path.with_extension("json"),
     };
-    if let Some(parent) = json_path.parent() {
+    let document_guard =
+        crate::project_state::ProjectStateGuard::preflight_document(&config.root, &json_path)
+            .map_err(|source| AtlasMapError::Io {
+                path: json_path.clone(),
+                source,
+            })?;
+    if document_guard.is_none()
+        && let Some(parent) = json_path.parent()
+    {
         fs::create_dir_all(parent).map_err(|source| AtlasMapError::Io {
             path: parent.to_path_buf(),
             source,
@@ -2727,6 +2828,35 @@ pub(crate) fn write_json_map(content: &str, config: &AtlasMapConfig) -> AtlasMap
             });
         }
     };
+    if let Some(mut guard) = document_guard {
+        if let Some(legacy) = &legacy {
+            let aliases_legacy = match same_file::Handle::from_path(&json_path) {
+                Ok(identity) => &identity == legacy,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => false,
+                Err(source) => {
+                    return Err(AtlasMapError::Io {
+                        path: json_path,
+                        source,
+                    });
+                }
+            };
+            if aliases_legacy {
+                return Err(AtlasMapError::Io {
+                    path: json_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "JSON sidecar aliases the legacy map",
+                    ),
+                });
+            }
+        }
+        return guard
+            .write_document(content.as_bytes())
+            .map_err(|source| AtlasMapError::Io {
+                path: json_path,
+                source,
+            });
+    }
     let mut output = match OpenOptions::new().write(true).open(&json_path) {
         Ok(file) => file,
         Err(source) if source.kind() == io::ErrorKind::NotFound => OpenOptions::new()
@@ -3126,6 +3256,290 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    #[test]
+    fn initialization_defaults_preserve_ordinary_creation_and_existing_modes()
+    -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        for relative in [
+            None,
+            Some(".projectatlas/config.toml"),
+            Some("projectatlas.toml"),
+        ] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let selected = relative.map(|relative| root.join(relative));
+            let control = root.join("ordinary-control");
+            fs::write(&control, b"ordinary creation control")?;
+            let mode = fs::metadata(&control)?.permissions().mode() & 0o777;
+            super::init_project_with_config(&root, selected.as_deref())?;
+            let config = selected.unwrap_or_else(|| root.join(".projectatlas/config.toml"));
+            let nonsource = root.join(".projectatlas/projectatlas-nonsource-files.toon");
+            for path in [&config, &nonsource] {
+                if fs::metadata(path)?.permissions().mode() & 0o777 != mode {
+                    return Err(io::Error::other(format!(
+                        "initialization changed ordinary creation mode for {}",
+                        path.display()
+                    ))
+                    .into());
+                }
+                fs::set_permissions(path, fs::Permissions::from_mode(0o640))?;
+            }
+            let contents = [fs::read(&config)?, fs::read(&nonsource)?];
+            super::init_project_with_config(&root, Some(&config))?;
+            for (path, bytes) in [&config, &nonsource].into_iter().zip(contents) {
+                if fs::metadata(path)?.permissions().mode() & 0o777 != 0o640
+                    || fs::read(path)? != bytes
+                {
+                    return Err(
+                        io::Error::other("reinitialization changed existing defaults").into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn initialization_preserves_custom_config_aliases_independently_of_parent()
+    -> Result<(), Box<dyn Error>> {
+        let mut failures = Vec::new();
+        for relative in [
+            "custom.toml",
+            ".projectatlas/custom.toml",
+            ".projectatlas/operator/config.toml",
+            "operator/config.toml",
+        ] {
+            for alias in [false, true] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().join("checkout");
+                let selected = root.join(relative);
+                let parent = selected
+                    .parent()
+                    .ok_or_else(|| io::Error::other("custom config has no parent"))?;
+                fs::create_dir_all(parent)?;
+                let outside = temp.path().join("selected-target.toml");
+                let target = if alias {
+                    symlink_file(&outside, &selected)?;
+                    &outside
+                } else {
+                    &selected
+                };
+                let control = target.with_file_name("ordinary-control");
+                fs::write(&control, b"ordinary creation control")?;
+                if let Err(error) = super::init_project_with_config(&root, Some(&selected)) {
+                    failures.push(format!("{relative}, alias={alias}: {error}"));
+                    continue;
+                }
+                let original = fs::read(target)?;
+                if original.is_empty()
+                    || fs::symlink_metadata(&selected)?.file_type().is_symlink() != alias
+                {
+                    return Err(io::Error::other(
+                        "custom config did not retain its selected entry",
+                    )
+                    .into());
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if fs::metadata(target)?.permissions().mode() & 0o777
+                        != fs::metadata(&control)?.permissions().mode() & 0o777
+                    {
+                        return Err(io::Error::other(
+                            "custom config lost ordinary creation permissions",
+                        )
+                        .into());
+                    }
+                }
+                let permissions = fs::metadata(target)?.permissions();
+                super::init_project_with_config(&root, Some(&selected))?;
+                if fs::read(target)? != original
+                    || fs::metadata(target)?.permissions() != permissions
+                {
+                    return Err(io::Error::other(
+                        "reinitialization changed an existing custom config",
+                    )
+                    .into());
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "custom config routing depended on its parent: {failures:?}"
+            ))
+            .into())
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn initialization_admits_explicit_managed_legacy_config_before_outputs()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("checkout");
+        fs::create_dir(&root)?;
+        let outside = temp.path().join("outside");
+        let selected = root.join("projectatlas.toml");
+        symlink_file(&outside, &selected)?;
+        let result = super::init_project_with_config(&root, Some(&selected));
+        if result.is_ok() || outside.exists() || root.join(".projectatlas").exists() {
+            return Err(io::Error::other(
+                "legacy config creation followed its alias or created other outputs before admission",
+            ).into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_map_parent_reduction_never_becomes_an_external_write() -> Result<(), Box<dyn Error>>
+    {
+        for existing_parent in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            let state = root.join(".projectatlas");
+            fs::create_dir_all(&state)?;
+            let missing = state.join("intermediate");
+            if existing_parent {
+                fs::create_dir(&missing)?;
+            }
+            let outside = temp.path().join("outside");
+            fs::write(&outside, b"outside map bytes")?;
+            let sidecar = state.join("projectatlas.json");
+            fs::hard_link(&outside, &sidecar)?;
+            let mut config = test_config(missing.join("../projectatlas.toon"));
+            config.root = root.canonicalize()?;
+            let result = write_json_map("{}", &config);
+            if result.is_ok() != existing_parent
+                || fs::read(&outside)? != b"outside map bytes"
+                || missing.exists() != existing_parent
+                || (existing_parent && fs::read(&sidecar)? != b"{}")
+            {
+                return Err(io::Error::other(format!(
+                    "default map parent admission failed, existing={existing_parent}: {result:?}",
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_document_mutations_preserve_alias_owners() -> Result<(), Box<dyn Error>> {
+        for operation in ["config", "gitignore", "map"] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            fs::create_dir(root.join(".projectatlas"))?;
+            let outside = temp.path().join("outside");
+            let leaf = match operation {
+                "config" => root.join(".projectatlas/config.toml"),
+                "gitignore" => root.join(".gitignore"),
+                _ => root.join(".projectatlas/projectatlas.json"),
+            };
+            std::os::unix::fs::symlink(&outside, &leaf)?;
+            match operation {
+                "config" => {
+                    if add_ignore_entry(None, &root, IgnoreEntryKind::PathPrefix, "generated")
+                        .is_ok()
+                    {
+                        return Err(
+                            io::Error::other("automatic config followed a dangling alias").into(),
+                        );
+                    }
+                }
+                "gitignore" => {
+                    let report = super::init_gitignore(None, &root)?;
+                    if report.created || !report.existed {
+                        return Err(io::Error::other(
+                            "existing gitignore alias was treated as absent",
+                        )
+                        .into());
+                    }
+                }
+                _ => {
+                    let mut config = test_config(root.join(".projectatlas/projectatlas.toon"));
+                    config.root = root.clone();
+                    if write_json_map("{}", &config).is_ok() {
+                        return Err(
+                            io::Error::other("automatic JSON sidecar followed an alias").into()
+                        );
+                    }
+                }
+            }
+            if outside.exists() || !fs::symlink_metadata(&leaf)?.file_type().is_symlink() {
+                return Err(io::Error::other(
+                    "refusal changed an outside target or existing alias",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_document_replacement_preserves_hardlinked_targets() -> Result<(), Box<dyn Error>> {
+        for operation in ["config", "map"] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("checkout");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            fs::create_dir(root.join(".projectatlas"))?;
+            let outside = temp.path().join("outside");
+            let original = if operation == "config" {
+                super::default_config_text()
+            } else {
+                "outside data".to_string()
+            };
+            fs::write(&outside, original.as_bytes())?;
+            let leaf = root.join(if operation == "config" {
+                ".projectatlas/config.toml"
+            } else {
+                ".projectatlas/projectatlas.json"
+            });
+            fs::hard_link(&outside, &leaf)?;
+            if operation == "config" {
+                add_ignore_entry(None, &root, IgnoreEntryKind::PathPrefix, "generated")?;
+            } else {
+                let mut config = test_config(root.join(".projectatlas/projectatlas.toon"));
+                config.root = root;
+                write_json_map("{}", &config)?;
+            }
+            if fs::read(&outside)? != original.as_bytes() || fs::read(&leaf)? == original.as_bytes()
+            {
+                return Err(io::Error::other(
+                    "document mutation changed its outside hardlink owner",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initialization_refuses_indirect_state_before_creating_outputs() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("checkout");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        std::os::unix::fs::symlink(&outside, root.join(".projectatlas"))?;
+        let result = super::init_project_with_config(&root, None);
+        if result.is_ok() || fs::read_dir(&outside)?.next().is_some() {
+            return Err(
+                io::Error::other("indirect automatic state was admitted or written").into(),
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::symlink as symlink_file;
     #[cfg(windows)]

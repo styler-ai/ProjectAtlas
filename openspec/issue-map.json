@@ -14,7 +14,8 @@
             721,
             722,
             731,
-            732
+            732,
+            741
           ]
         },
         "718": {
@@ -30,6 +31,9 @@
           "blocked_by": []
         },
         "732": {
+          "blocked_by": []
+        },
+        "741": {
           "blocked_by": []
         }
       }
@@ -921,6 +925,17 @@
       "owners": [
         {
           "issue": 732,
+          "first_task": "1.1",
+          "last_task": "3.1"
+        }
+      ]
+    },
+    "admit-generated-project-state": {
+      "contract": "checklist-v1",
+      "primary_issue": 741,
+      "owners": [
+        {
+          "issue": 741,
           "first_task": "1.1",
           "last_task": "3.1"
         }

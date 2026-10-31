@@ -1,149 +1,258 @@
 # Active context
 
-## Serial authority
+## Current primary security review and held-policy candidate
 
-Only #731 / PR #737 is active. Finish its normal merge and verify BOTH CLOSED
-before #741. No issue closed this execution; no RC published. Continue through
-v0.5.1-rc1 as a non-draft prerelease, Latest=false, independently verified. Stable
-v0.5.0 stays Latest; stable promotion/milestone closure need later user instruction.
-Exact checkout `.worktrees/issue-731`, branch `fix/static-bindings-731`.
-Public/local HEAD33f89504c64da0fa084c0283da181472ef8d26ac remains unmerged.
-Current production source6576d074b1218bc186bc82a198307fe436c06427 (DER24/SEM23).
-Local/live9/9 implementation COMPLETE after current native+hosted/security proof.
-All five acceptance outcomes independently APPROVED and checked on live issue.
-Live readback and strict OpenSpec/scoped IssueOps9/9 PASS after the latest task transition.
+Public394d91a normal push80965 TERMINAL PASS812.30s,34suites/1726pass/11ignored;
+receipt /tmp/projectatlas-741-review-feedback-native-push.json. No live push lease.
+Its SOURCE41218365025 is TERMINAL: Rust/Linux/repository/planSUCCESS; Windows and
+bothMacFAIL; verifyFAIL. ActualLinux root-label storage proof passed. Windows log
+/tmp/projectatlas-741-394-windows-job.log isolates persist5, not policy copying:
+all four native controls succeed with no source snapshot and refuse5 with retained
+snapshot, for BOTH single/hardlinked destinations. Current dirty fix retains all
+snapshot FDs through final identity/policy checks, then drops entire Windows access
+snapshot immediately before persist. No early-drop or policy-check waiver.
 
-## Current approved implementation and proof
+PRIMARY personally examined both Codex Security and Advanced Security feedback.
+New Windows P2 PRRT_kwDOQyFgJ86ySZ0R/comment4432382599 is confirmed: path reopen
+before SetSecurityInfo can mutate a substituted foreign object. Current stage
+create-new handle obtains required READ_CONTROL/WRITE_DAC and optional allowed
+ownership rights via MAXIMUM_ALLOWED; fresh creation keeps ordinary data rights.
+Setter duplicates retained stage File only. New native tests cover hardlink name
+substitution, retained/released snapshot causal controls, and inherited denial of
+unneeded WRITE_OWNER beside actual same-owner publication. No blanket restrictions.
 
-Primary writes all implementation. Exact-root read-only Luna Max review_731 approved
-areas1–5 for current24: source/spec, causal controls, actual proofs/docs and final
-readiness. Normal native push, all8 hosted and all7 security jobs are verified. Reuse this review; do not
-repeat trusted source exploration without a concrete new finding.
+Mac directory/source/stage ACL operations now take retained File descriptors and
+route through Darwin /dev/fd with exacl, without unsafe or pathname fallback.
+Current XNU resolves SETATTR to held vnode; older Ventura forwards fdesc_setattr.
+The new file/directory x symlink/real-substitution causal unit first demonstrates
+foreign path mutation, then requires only retained-inode ACL mutation. Native proof
+still required. Source-reviewed by existing independent LunaMax review_741: no
+source blocker, NATIVE publication only. Design/spec updated to match; acceptance
+remains OPEN. Old no-follow-path/residual-gap paragraphs below are superseded.
 
-Kotlin local val/var/destructured/delegated binding starts after the whole property;
-loop bindings start after the actual container expression. File/class reservation
-stays zero.13-case source matrix had11 causal failures before and all13 pass after.
-The permanent container selector adds7 actual CLI/MCP cases for input calls and
-later/body shadows, with summaries, incremental/full, identity and no-op. Lambda
-initializer proof is source-fact coverage, not new anonymous-caller query support.
+394 Mac ordinary27+privileged1 PASS, then controlled APFS baseline failed before
+publisher assertions. Current CI sets BOTH mounts -owners on and uses traversable
+/private/tmp outer fixture, adds diskutil/ancestor/nobody-traversal evidence and
+baseline child-error diagnostics. This is a setup correction pending native proof,
+not a waived inheritance assertion. All four volume formats remain required.
 
-Shared aggregate budget admits retained growth across source/configured projections,
-identity admission/hydration/merge, source/cache/package recovery, entity/parent/
-resolver indexes, key workspaces, borrowed SQLite decoding/returned page owners,
-and candidate registry transfer. Move ownership rather than clone where possible;
-reserve before distinct growth, keep live pages charged, release temporary package
-reservations on failure, restore scope allowances on every exit. Existing2GiB
-publication envelope,512MiB identity/spill sublimits and row limits are preserved.
-This is conservative staging accounting, not an exact allocation or RSS guarantee.
-DB bounded overloads preserve the old wrappers' ordinary return types.
+Current local Linux27owningPASS+1privilegedignored, CLIallfeaturesClippyPASS7.42s;
+fmt/strings/strictOpenSpec/scopedIssueOps1of5/YAML+bothchangedBashblocks PASS.
+Logs /tmp/projectatlas-741-held-policy-{unit,clippy,strings,issueops}.log.
+Normal clean push of held-policy candidate is pending; next receipt prefix
+/tmp/projectatlas-741-held-policy. No immutable current-candidate binary yet.
 
-Causal unit:5sources x16imports x64 valid ~1KiB targets retained5,603,545bytes under
-injected2MiB before; corrected owner refuses further growth with a valid admitted
-prefix. Includes real partial Contract projection beside valid imports, split
-admission, nonzero identity base and cancellation. Separate page-transfer mutant
-fails101 before exact source restoration and positivePASS. Package partial cleanup
-and Vec<bool> actual storage also have causal beforeFAIL/afterPASS controls. The
-new producer's mistaken packed-bool estimate was corrected at its owning boundary;
-all crates searched, no analogous occurrence remained.
+Exact394 RustCodeQL2068801483 completed23results; Actions2068760502 has2.
+PRIMARY statically traced all25 open alert records: every Rust SARIF thread passes
+through cfg(test)/integration fixtures; command alert is current_exe test relaunch;
+Actions checkout is event-bound github.sha for schedule/dispatch, no arbitrary SHA
+input or cache publisher. Per-alert report /tmp/projectatlas-741-394-primary-codeql-triage.json
+rendered. All17 newly reviewed AdvancedSecurity discussions got individual technical
+replies, resolutions and exact readbacks; receipts
+/tmp/projectatlas-741-394-codeql-resolution-receipts.json. Alert records are NOT
+suppressed/dismissed. Four native ACL/label security threads plus Mac filename
+review remain OPEN pending corrected published proof. New Windows reply4432429796
+and Mac descriptor followup4432429898 read back, threads keptopen. Issue741 body
+updated/readback to all-existing Mac private stages and descriptor/handle ownership.
+Only741 active; tasks1of5/allacceptanceOPEN; noRC. Fresh final-source analysis remains.
 
-Default optimized build PASS1m05s from committed6576. Immutable executable:
-~/.cache/projectatlas-benchmarks/binding-731-projection-budget-contract24-20261031/projectatlas
-SHA d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc.
-Its candidate-binding.json binds130 source/test/manifest/lock/toolchain inputs and
-actual rustc identity; all130 remain unchanged. Default features, locked build.
+## Latest review-feedback candidate (supersedes prior pending/native notes)
 
-Main serialized campaign1558 TERMINAL PASS all18 tasks. Receipt
-/tmp/projectatlas-731-projection-budget24-proof-session.json, sameprefix proof.log
-and proof-manifest.json. Five optimized CLI/MCP selectors,20native baselines
-(stable050/contracts5..23), resource23→24 compatibility, all16 normalized stored
-projections per baseline incremental/full, identity/allapproved/deadline/rollback/
-reupgrade/noop,132 timing samples,4automatic layouts/13functional phases and exact
-Cargo/host targets. Target-set upgrade checks alone do not prove unresolved-call
-presence; source and permanent CLI/MCP occurrence checks provide that proof.
+Public/local Git HEAD before this follow-up is b7d4b25ca7b845cf2a65309e41d1b6cb8ffffc18.
+Its normalpush99963 TERMINALPASS866.96s,34reported suites/1725pass/11ignored;
+4149010gone. Receipt/log /tmp/projectatlas-741-stage-policy-native-push.*.
+Selected current Git HEAD/status and the NEW review-feedback push receipt own the
+next candidate. Do NOT run the b7-hardcoded freeze helper as final-source proof.
 
-Separate79978 affected-cost TERMINAL PASS18samples/9pairs/3fixtures: configured64
-long targets with ordinary alias, Kotlin initializers, ordinary Kotlin control.
-All5configured sources retain all64 exact target witnesses. Every Kotlin caller
-has exact top-level function kind/parent. Candidate samples compare all16 tables
-through edit/full, identity/allapproved and finalnoop. All130 inputs checked before
-and after. Total150initializations/75pairs/25fixtures, three alternating pairs each.
+b7SOURCE41213259104 TERMINAL individual Rust124572523727/Linux124572523761/repo/
+planSUCCESS. BothMac andWindowsFAIL atowningblock. DetailedLinuxlog
+/tmp/projectatlas-741-b7-linux-job.log proves ignoredrootlabeltest explicitly ran
+1PASS0.02s, all6rolelabels+uid/gid65534/outside/failure/capdrop controls. This proves
+real kernel xattr STORAGE, not enforcedMACpolicy. No4Macformatproof yet.
 
-Current docs/benchmarks/static-binding-cost.{md,json} bind6576/d96 and all current
-receipts. Renderer /tmp/projectatlas-731-projection-budget24-publish-costs.py;
-renderer-repro.json proves byte-identical second render and corrected current24
-scope label. Docs/source/spec/test inventories reconcile DER24/SEM23. Final715
-derivation must exceed24 and retain SEM23; #708 combined SLOs remain mandatory.
-Local measurements: automatic51222→24 21.7375→.5931s,464612→41024KiB; explicit512
-21.3282→.5571s,457280→40980KiB. The2048 baseline is historical exploratory
-retention-only23, not an accepted release. Configured64 accepted23→24 .13434→.13669s,
-31808→30644KiB, same322dependencies. Initializer baseline does incomplete work;
-no general speedup or equivalent-work claim. Raw receipts preserve exact counters.
+MacARM124572523695 passed26owning, thenignorednativefreshfile combinedassertion
+failed. Intel124572523698sameblockfailure (terminal lognotyetdownloaded). Initial
+probe usedO_APPEND despitegrantingwritewithoutappend. Correctedcurrentprobe uses
+PythonO_WRONLY/noTRUNC/noAPPEND; directcreationwrite/appenddistinction+realstage/
+finalACL+inodecontrols retainpositiveinheritanceassertions. Native rerunrequired.
 
-Current source gates PASS453symbols+1ignored/381CLI/242DB, alltargetClippy, permanent
-Kotlin lifecycle,3inventory, strictstrings/workspace doctests/rustdoc/fmt. Details
-in /tmp/projectatlas-731-projection-budget-* logs and source-checkpoint.json.
-Navigation SHA82821d6136374241a25358d9fbdc45267662b36cfeea13bf9239131da9ef5f87
-matches support/source_contract.rs and docs/v050-cli-e2e-inventory.json.
+Windows124572523724 failed3ordinaryreplacementswithOS5: externalhardlink,
+case/customcompatibility andnativeDACL preservation. 20otherowningPASS, including
+newdestinationracecases andstagequery/share32 exclusion. Log
+/tmp/projectatlas-741-b7-windows-job.log. DO NOT guess handle-lifetime cause/drop
+sourcehandles or relaxACLs. Currentcandidate adds PublicationFailure phase+typedIO
+cause for capture/apply/rechecks/write/sync/persist; native-code-chain unit passes.
+The failinghardlinkpositive appends4nativequery-controls (retained/not × single/
+hardlinked) onERRORONLY. Ordinarysuccesschecks remain unchanged. Native code5/1336
+checks traverse the preserved cause chain. ActualWindowsrootcause remainsOPEN.
 
-## Native publication and next work
+FreshCodexSecurityP2 PRRT_kwDOQyFgJ86yR85I/comment4432194749 confirmed by PRIMARY
+inspection of publisher andexacl: optionalprivateMacstaging leavespathACLsetter in
+sharedmutableparent. Newsource isolates ALL existingMac replacements; freshcreates
+stillinheritdirectparent. AllMacACL operations useSYMLINK_ACL/no-follow leaf.
+Directorymode usesNOFOLLOW|DIRECTORY FD boundtoretainedidentity beforemutation;
+initialprivateDirpermissions0700. Newignorednative777shared/noinherit/sameUID
+fixture demonstrates unsafefollowingACLtargetmutation, nofollowaliaspreservation,
+actualprivateblockedleafswap andlegitimatewrite/outsideACL+bytes. Existingstageleaf
+regression observesactualstagepath (privateorflat), nottop-levelenumeration.
+Technicalreply4432275802 confirmed/readback; threadSTAYSOPEN untilpublishednativeproof.
+FourCodexthreadsnowOPEN (Macname,ACL,SELinux,newMacsetter). No bulkresolution.
 
-Delivery33f8950 committed; normal CLEAN nativepush60219 TERMINAL PASS832.87s,
-hooks enabled and telemetryoverrideUNSET. Public33f8950 exact readback;34Rustsuites,
-381CLI/453symbols+1ignored/242DB/54navigation228.15s, docs/security/scan/lint PASS.
-The14 existing asset advisories are exit0; zero source/purpose findings. External
-/tmp/projectatlas-731-projection-budget24-native-push-session.json +log own proof.
-No active lease. Current hostedCI41168712727(all4OS+Rust/repository/verify),
-CodeQL41168711026 TERMINAL all7languagesSUCCESS; PRstate41168711937PASS;
-follow exact jobs rather than infer from old runs. TERMINAL CI41168712727 ALL8SUCCESS:plan/Rust/repository/all4OS/verify, exacthead33. All26existing threads resolved
-and read back after replies4430496791/4430497178; fresh feedback still required.
+NewWindowsreadonlycleanup guard clearsONLYownedheldstage readonlyafteridentity
+proof, rechecksownership, retainscausallyonfailure. Nativeactualpublisheremptybytes
+control capturesstageFD, observesreadonlycopy, fails, checksheldreadonlycleared,
+dropsclone BEFOREdirectorycount, preserves source/outsideReadonly+bytes. This is a
+portablecleanupinvariant, NOT proofoldcode leakedonNTFS/FAT. SourceACLcapture onFAT
+and pre1607support are NOT established. RetainedStaging.secondaryfield generalized
+tocleanup, so metadatafailure isnotfalselyreported as ownershipchange.
 
-FinalLunaMax review APPROVED allfive outcomes after exact live9/9, all8CI/all7CodeQL,
-metadataCI41171611341/PRstate41171611630SUCCESS,26resolvedthreads and no newfeedback.
-Current native/security/baseline reconciliation is approved without alert dismissal.
-Next normal metadata-gated push of finaltask/memory state, mechanicalreadiness,
-normal737merge and BOTHCLOSED readback before741. Local/live9/9 +5/5 acceptance. No edits to production130inputs; immutable proof remains valid.
+IndependentLunaMax reviewedcurrentdelta andAPPROVED next NATIVE DIAGNOSTIC
+publication only, NOT acceptance. Residual explicitproofgap: privateDirectory ACL
+clearing remainspathname-based despitefinalleafnofollow; different realdirectory
+substitution betweencheck/setter canmutatemetadata beforedetection. Reviewitsactual
+supportedtrustboundary beforeacceptance; do notclaimidentity-atomicACLmutation or
+silentlydeclareallconcurrentdirectorycasescovered. SourceNoUniversalAncestorRace
+non-goal doesnotconstitutenativeproof. No safeFDACL API/dependency added.
 
-## Public baseline / feedback
+Currentlocal27owningPASS+1privilegedignored; all-target/all-featureCLIClippyPASS6.10s;
+fmt/strictstrings/OpenSpec/scopedIssueOpsPASS beforelastdocs/metadata updates.
+Logs /tmp/projectatlas-741-feedback-publish-{unit,clippy}.log plus
+-feedback-final-{strings,issueops}.log. EarlierClippycfgOkclosure, ignoredOnceCell
+error anddouble-borrow issues were fixed, noallow/suppression. Latestfinalgates
+mustbecheckedbeforecommit. Task1/5/allacceptanceOPEN. Only741active, noRC.
 
-Public23 sourceff50, metadata c802, immutablee963f7fac2ceacbf3ea9caf38df46895fb863d825705da5afb31798606770eec.
-Its nativepush62972 passed807.77s; hosted41153614591 all8jobsSUCCESS including real
-correctedARM+Intel+Windows+Linux; CodeQL41153611803 all7SUCCESS. These are baseline,
-not current24 acceptance. Historical receipts use root-cohorts23 prefix.
-26threads26resolved after public33f8950 corrected proof. Kotlin and aggregate
-threads have technical replies, source/proof review and normalnative verification.
-Old17Rust alerts have owner/counterevidence dispositions,244 belongs738; toolchain
-370/371 trustedGITHUB_PATH/ENV falsepositive threads resolved without dismissing
-alerts. Current-head all-alert reconciliation complete: fullPRref68 =66 already in accepted
-main baseline368 +2known toolchain leads370/371. Earlier21 was an issue-relevant
-subset;47additional main leads lie in7 entire files unchanged from3ef/c802. This
-is affected-only baseline reconciliation, not blanket false-positive classification.
-All17 reviewed Rust owners/cfg variants are exact-byte unchanged. Receipts
-projection-budget24-alert-{owner-equivalence,reconciliation}.json and raw{open,main}
-alerts preserve identities; unchanged helperhash18ebfa handles all4Python leads.
-Independent reconciliation review APPROVED. No alert dismissal.
-Old23SEM22 digest77ce9ef63aa9da217f35e41d59470395e7be08d45f167c14b2477eb29309d2ca
-is preserved; do not overwrite its receipts with current SEM23. Actual new SEM23 digest
-20fcd49d68b915412b70c76001a50c27513d0604511a06f3cf87fa637d9383ad is captured from
-the current release Rlib; receipt /tmp/projectatlas-731-current24-semantic23-digest.json.
+## Sole active owner and release authority
 
-## Navigation and parked work
+Only #741 / PR #743 is active. Normally merge it and verify BOTH CLOSED before
+resuming another issue. #731 / PR737 are CLOSED via main a5b1bebcaa79c8386b68e9c247eff73aa11e5e15.
+Public head is b7d4b25ca7b845cf2a65309e41d1b6cb8ffffc18 before the follow-up.
+Selected Git HEAD/status and the native-push receipt own the candidate identity.
+Local/live tasks remain1/5 (only1.1); all five acceptance rows OPEN. PR ready/notdraft,
+base main, milestone37, body Refs741. Restore sole Fixes741 only at final readiness.
 
-Read complete installed stable050Atlas skill after compaction and selected memory.
-Always login:false/exactroot for exec_command: old reviewer login-shell reads had
-silently selected integration and were discarded. Current731 privateDB preserved;
-MCP brief policy_drift/full/changed0 is tracked739. No orientation reset/scan or
-installer repair. Native hook scan during publication is authorized.
-Source /tmp/projectatlas-rc1-test-env.sh beforeCargo. Shared v0.5.1/target and homecache
-TMPDIR; cleanPATH lacksrg. UNSET PROJECTATLAS_NO_TELEMETRY for native suites/push;
-isolated probes/bench/CLI/MCP use it. Exactlyone (#731) percommit; sole Fixes#731
-in PRbody. StrictOpenSpec at $HOME/.npm/_npx/21a1280729add0a7/node_modules/.bin/openspec.
-Scoped gate: python3 .github/scripts/issue-checklists.py --repo styler-ai/ProjectAtlas
---root . --issue-map openspec/issue-map.json --planned-issue 731.
+Active goal: publish and independently verify v0.5.1-rc1, non-draft prerelease,
+Latest=false; stable050 stays Latest. Stable publication/milestone closure require
+later instruction. No RC exists. Keep parked739/738/708/715 checkouts/privateDBs.
+Queued Codex CI adoption follows741 normalmerge+BOTHCLOSED; inspect existing gaps
+before creating one focused issue: /tmp/projectatlas-codex-ci-followup.json.
+Dev retired and720CLOSED/not_planned, receipt /tmp/projectatlas-retire-dev.json.
 
-Parked untouched:741e1e633c plus ownedatlas_map/configdirt;7396eb0dfd watch/mapbudget;
-7388814d6d composes739;708PR728publicc65/local587ecbe combined4OSperf/upgrade closure,
-120warm1.127FAIL/focused1.031526partial and725deferred.715integration owns proposal/
-design/spec dirt, not RC. Root715 children708/718/721/722/731/732/738/739/741,
-milestone37;718/721/722/732closed. Future41/root493 accepted740/main3ef exact
-310/314/388/490/563. Previousfeedback uploadDONE. Old context saved inGit and
-/tmp/projectatlas-731-active-context-before-proof24-complete.md.
+## Current native-policy candidate
+
+Primary implemented; existing Luna Max review_741 independently found no remaining
+source/fixture blocker and approved publication for native proof, NOT acceptance.
+Current owning files project_state.rs, project_state_linux.rs, project_state_macos.rs,
+project_state_tests.rs, CI, direct already-locked rustix edge, docs and OpenSpec.
+No schema/DER/SEM change: accepted main DER24/SEM23; final715 DER must exceed every
+private contract. Cargo.lock adds only the CLI direct rustix dependency edge.
+
+Stage names are bound to held file and parent-directory identities before metadata,
+bytes, persist and cleanup. Foreign replacement disables NamedTempFile cleanup via
+RetainedStaging. Windows query-only FILE_READ_ATTRIBUTES keeps DELETE-only data
+sharing and has native read/write exclusion control; Unix identity uses lstat+FD
+metadata, preserving write-only destinations. Failed empty-probe unlink retains its
+file authority for ownership diagnosis, without retrying an uncertain unlink.
+
+Linux captures admitted inode, uid/gid/mode and six native access attributes through
+NOFOLLOW FD: POSIX/NFSv4 ACL, SELinux and Smack object/exec/mmap labels. Named empty
+probes are reused only on complete policy equality and need no setters. Otherwise
+only the owned empty probe is discarded; O_TMPFILE receives bytes/sync while unnamed
+under creator policy, then captured metadata/readback/sync before a name is linked.
+This avoids both Smack pre-open handles and SELinux write-after-SID-change denial.
+Unsupported preservation refuses causally, keeping valid output. Source inode/policy
+and absent Replace targets are rechecked immediately before publication.
+
+Mac isolates existing-target payloads if parent FILE_INHERIT ACLs or a different
+owner could broaden access. The workspace remains WRITER-owned, ACL-empty,0700 and
+identity-bound before any payload. Fresh outputs retain direct-parent inheritance.
+Cleanup is checked nonrecursive remove_dir; foreign/nonempty workspaces survive;
+postcommit cleanup errors explicitly report committed publication.
+Mac/Windows ReplacementSource retains a NOFOLLOW source FD and native ACL or
+OWNER|GROUP|DACL snapshot, verifies before apply and again before Replace. Windows
+copies from held source, retaining NULL/empty/P/AR/ordered-ACE semantics and only
+the previously proved regular-file AI normalization.
+
+## Current tests and remaining native proof
+
+PASS current26Linux owning units+1explicit privileged ignored, actual CLI/MCP writer
+4.93s, all-target/all-feature CLI Clippy7.07s, strictstrings, fmt, OpenSpec and scoped
+IssueOps1/5. Logs /tmp/projectatlas-741-native-policy-final-{unit,clippy}.log,
+-destination-snapshot-writer-e2e.log, -native-policy-{strings,issueops}.log.
+Causal destination baseline removing only final checks FAILS with overwritten
+foreign destination; restored checks pass replace/remove/mode/appear. Log
+/tmp/projectatlas-741-destination-policy-causal-before.log. Write-only0200 positive
+passes. Earlier stage-leaf causal failure/publish evidence remains
+/tmp/projectatlas-741-stage-entry-causal-before.log (not the compile-typo -before log).
+
+Native tests are implemented and EXPLICITLY selected by CI, but not yet run here:
+- Linux root test builds as runner; sudo runs only exact ignored native test binary.
+  All replacement registry roles get real security.* labels and uid/gid65534;
+  verify exact labels/mode/ownership, bytes, outsidehardlinks and failure cleanup.
+  setpriv drops SYS_ADMIN/MAC_ADMIN: equal-policy helper skips setters; actual
+  mismatched publisher must refuse EPERM without replacing source/leaking stages.
+  This is kernel xattr STORAGE proof, not an enforced SELinux/Smack exploit proof.
+- Mac nobody baseline opens ordinary0600 inherited-ACL temp, survives ACL narrowing
+  and writes through held FD. Actual stage must deny fresh read/write before copy;
+  fresh new-file inheritance stays positive. Foreign private entries and directory
+  substitution are retained. A separate UID-mismatch fixture clears parent ACLs
+  to isolate the ownership trigger, then proves protected stage/failure cleanup.
+- Windows causal replace/remove/DACL/readonly/appear callbacks require refusal,
+  unchanged current destination/native policy or retained source, and owned cleanup.
+Mac ordinary and all APFS/APFSX/HFS+/HFSX controlled-volume jobs select native ACL
+fixture. Disposable outer fixture is traversable so unrelated ancestors cannot
+mask nobody controls. Nested attach/detach alone uses sudo; root returned to runner.
+Both extracted changed CI bash blocks pass YAML parse and bash-n.
+
+Remaining: normal clean native push; source-bound fresh CLI/MCP/registered/upgrade
+proof; actual current four-platform/native security/ACL/four-format results; final
+CodeQL/threads, tasks/acceptance and normalmerge+BOTHCLOSED. No acceptance waiver.
+Final lifecycle source digest unchanged ee25e9df237172f3c2c924669ac524fe3ffab7ec84038606ec91e57f5ceb761a.
+If lifecycle changes, update BOTH docs inventory and support source-contract pins.
+
+## Published ab3a proof remains historical
+
+Normalpush14997 PASS767.64s,34suites/1722pass/10conditionalignored; receipt/log
+/tmp/projectatlas-741-acl-normalization-native-push.*. No live14997 lease.
+Immutable default binary5cee418c73d4feb46da81d6e8bd3fd1714ddfddb0731fde48504b77e5caf2ae9,
+marker /tmp/projectatlas-741-acl-normalization-debug-path.txt, binding133inputs.
+Native88514 PASS CLI/MCP3.67s,writer5.18s,registered9.54s and5stable050upgrade layouts
+6.08s; identity/ALLapprovedpurposes/config retained and bound bytes unchanged.
+These DO NOT cover this native-policy candidate. Use a NEW prefix/source binding.
+SourceCI41202161856 TERMINAL: Rust/Linux/Windows/repo/planSUCCESS; bothMacfail only
+nested controlled-volume attach PermissionDenied before volume tests; ordinaryMac
+23owning+CLI/MCP passed. No APFS/HFS controlled proof yet. Do not rerun old source.
+
+## Latest Advanced Security readback
+
+Fresh PR head ab3a has8open CodeQL alerts:372–376/380 fixture-mediated path flows,
+377/379 event-bound checkout/cache-scope findings, all staticallynotactionable;
+378 scanner-markedfixed. All7AdvancedSecurity discussion threads already resolved,
+no suppression/dismissal. Report /tmp/projectatlas-741-security-comments-20261031-triage.json
+rendered; live comments/instances/analyses receipts have same prefix. No new runtime
+security tests were run in that read-only triage. Final-source analysis still required.
+
+Creation-mode P2 and CodeQL380 resolved with exact technical replies/readback.
+StillOPEN Codex threads: Macfilename PRRT_kwDOQyFgJ86yPTKc, ACL PRRT_kwDOQyFgJ86yP6jJ,
+SELinux PRRT_kwDOQyFgJ86yQ2zn. Resolve only after published/native corrected proof.
+Linux NFSv4 native filesystem ACL proof and enforced-MAC policy proof remain absent;
+do not imply raw label storage proves either. Current host uid1000 has no
+passwordless sudo or live SELinux/Smack, so scoped hosted fixtures supply root proof.
+
+## Operating continuity
+
+Read complete installed stable050 Atlas skill/short guide, selected README/context,
+integration entry, custom Rust/applicable subskills and accepted OpenSpec after
+compaction. Exact741 Atlas brief returns known stable050 policy_drift/full changed0,
+tracked739. Preserve privateDB; no orientation reset/installer repair/full scan.
+Primary codes; existing LunaMax review_741 is read-only. All shell login:false.
+Source /tmp/projectatlas-rc1-test-env.sh before Cargo; shared integration target.
+Normal push unsets PROJECTATLAS_NO_TELEMETRY and MCP_CONTRACT_EXECUTABLE override,
+uses enabled .githooks and CLEAN candidate. No force/admin merge/hook bypass.
+While clean native push or immutable proof runs, no selected edits or competing
+build/index/benchmark; poll SAME actual session/process until terminal.
+
+Parked7396eb0dfd+dirt,7388814d6d+dirt,708publicc65dfed/local587ecbe/PR728 and715owned
+integration specs remain untouched. 708warm120sample1.127FAIL/focused1.031526partial
+retained, noSLOwaiver. Root715children/blockers708/718/721/722/731/732/738/739/741;
+closed718/721/722/731/732. Continue serial owners then715 combined installed/plugin/
+platform/security/performance/upgrades/packages/publication and independent verify.

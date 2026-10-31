@@ -4,6 +4,7 @@ mod atlas_map;
 #[cfg(feature = "derived-snapshot")]
 mod derived_snapshot_archive;
 mod mcp;
+mod project_state;
 mod runtime;
 mod structural;
 mod token_tui;
@@ -2853,6 +2854,7 @@ fn run(cli: &mut Cli) -> Result<(), CliError> {
                     let verified = report.verified;
                     if verified {
                         let root = cli.project_root()?;
+                        let _admission = runtime::preflight_managed_database(&cli.db, &root)?;
                         verify_project_database(&cli.db, &root)?;
                     }
                     print_output(cli.format, &render_root_report(&report), &report)?;
@@ -3948,6 +3950,7 @@ fn bind_project_root(
     let atlas_dir = root.join(".projectatlas");
     let db_path = atlas_dir.join("projectatlas.db");
     let config_path = init_config_path(&root, None);
+    let state_guard = runtime::preflight_generated_state(&root, &db_path, &config_path)?;
     if config_path.exists() {
         let config = load_atlas_config(Some(&config_path))?;
         let config_root = canonical_project_root(&config.root)?;
@@ -3970,6 +3973,10 @@ fn bind_project_root(
         preflight_existing_project_binding(&db_path, &root)?;
         init_project_with_config(&root, Some(&config_path))?;
     }
+    state_guard.verify().map_err(|source| CliError::Io {
+        path: atlas_dir.clone(),
+        source,
+    })?;
     let transition_result = AtlasStore::transition_project_root(&db_path, &root, transition.into())
         .map_err(runtime::project_store_error)?;
     let configuration_result: Result<(), CliError> = (|| {
@@ -4085,10 +4092,26 @@ fn write_mcp_config_file(
         nearest_project,
     )?;
     let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
-    fs::write(path, text).map_err(|source| CliError::Io {
+    let root = path.parent().and_then(Path::parent).ok_or_else(|| {
+        CliError::InvalidInput("generated host output has no project-state owner".to_string())
+    })?;
+    let mut state =
+        crate::project_state::ProjectStateGuard::preflight(root, None, Some(config_path)).map_err(
+            |source| CliError::Io {
+                path: path.to_path_buf(),
+                source,
+            },
+        )?;
+    state.ensure_directory().map_err(|source| CliError::Io {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    state
+        .write_generated(path, text.as_bytes())
+        .map_err(|source| CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// Load batch purpose review requests from a JSON file.
@@ -4146,6 +4169,7 @@ fn build_root_report_with_transition(
     config_path: Option<&Path>,
     transition: Option<&ProjectRootTransitionResult>,
 ) -> Result<RootReport, CliError> {
+    let _admission = runtime::preflight_database_discovery(db, config_path, true)?;
     let settings = build_settings_report(db, config_path, OutputFormat::Toon)?;
     let db_project_root = settings
         .index
@@ -6559,6 +6583,10 @@ mod tests {
             )
             .into());
         };
+        require_condition(
+            matches!(error, super::CliError::RootTransitionFollowup { .. }),
+            "late configuration failure lost the committed-transition error contract",
+        )?;
         let message = error.to_string();
         require_condition(
             !message.contains("repo-�")

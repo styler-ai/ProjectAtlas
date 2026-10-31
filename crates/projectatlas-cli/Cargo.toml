@@ -57,6 +57,13 @@ cli-core = [
     "dep:rmcp",
     "dep:scraper",
     "dep:same-file",
+    "dep:winapi-util",
+    "dep:whichdisk",
+    "dep:unicode-casefold",
+    "dep:xattr",
+    "dep:rustix",
+    "dep:exacl",
+    "dep:windows-permissions",
     "dep:tempfile",
     "dep:tiktoken",
     "dep:tokio",
@@ -110,6 +117,7 @@ regex = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 scraper = { workspace = true, optional = true }
 same-file = { workspace = true, optional = true }
+unicode-casefold = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -125,6 +133,19 @@ tree-sitter = { workspace = true, optional = true }
 tree-sitter-language-pack = { workspace = true, optional = true }
 yaml-rust2 = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whichdisk = { workspace = true, optional = true }
+exacl = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true, features = ["process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = { workspace = true, optional = true }
+windows-permissions = { workspace = true, optional = true }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 landlock = { workspace = true, optional = true }

@@ -4457,6 +4457,8 @@ impl ProjectAtlasMcpServer {
             return Ok(report);
         }
 
+        let state_guard =
+            crate::runtime::preflight_generated_state(&state.root, &state.db_path, config_path)?;
         preflight_existing_project_binding(&state.db_path, &state.root)?;
         let project_dir = state.root.join(PROJECTATLAS_DIR_NAME);
         let nonsource_file = project_dir.join(MCP_NONSOURCE_FILE_NAME);
@@ -4464,6 +4466,11 @@ impl ProjectAtlasMcpServer {
         let config_existed = config_path.exists();
         let nonsource_existed = nonsource_file.exists();
         init_project_with_config(&state.root, Some(config_path))?;
+
+        state_guard.verify().map_err(|source| CliError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
 
         let hydration = if options.no_scan {
             McpWorktreeHydration::Fallback(MCP_HYDRATION_NO_SCAN_REASON.to_string())
@@ -4952,6 +4959,7 @@ impl ProjectAtlasMcpServer {
         &self,
         state: &McpProjectState,
     ) -> Result<String, CliError> {
+        let _admission = crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
         let report = build_settings_report(
             &state.db_path,
             state.config_path.as_deref(),
@@ -7349,6 +7357,10 @@ impl ProjectAtlasMcpServer {
 
     /// Return whether nearest routing can safely associate one DB with a live root.
     fn nearest_indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
+        let Ok(_admission) = crate::runtime::preflight_managed_database(db_path, root.as_path())
+        else {
+            return false;
+        };
         match read_project_root_identity_read_only(db_path) {
             Ok(Some(stored_root)) => Self::nearest_existing_roots_match(&stored_root, root),
             Ok(None) => {
@@ -8389,8 +8401,12 @@ impl ProjectAtlasMcpServer {
                 return Ok(render_repository_control_report(&report));
             }
             let state = self.admin_project_root(params.project_path, params.worktree)?;
+            let _admission =
+                crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
             let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
             if params.verify.unwrap_or(false) && report.verified {
+                let _admission =
+                    crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
                 verify_project_database(&state.db_path, &state.root)?;
             }
             Self::with_selected_project_audit(
