@@ -1,5 +1,61 @@
 # Active context
 
+## Current primary security review and held-policy candidate
+
+Public394d91a normal push80965 TERMINAL PASS812.30s,34suites/1726pass/11ignored;
+receipt /tmp/projectatlas-741-review-feedback-native-push.json. No live push lease.
+Its SOURCE41218365025 is TERMINAL: Rust/Linux/repository/planSUCCESS; Windows and
+bothMacFAIL; verifyFAIL. ActualLinux root-label storage proof passed. Windows log
+/tmp/projectatlas-741-394-windows-job.log isolates persist5, not policy copying:
+all four native controls succeed with no source snapshot and refuse5 with retained
+snapshot, for BOTH single/hardlinked destinations. Current dirty fix retains all
+snapshot FDs through final identity/policy checks, then drops entire Windows access
+snapshot immediately before persist. No early-drop or policy-check waiver.
+
+PRIMARY personally examined both Codex Security and Advanced Security feedback.
+New Windows P2 PRRT_kwDOQyFgJ86ySZ0R/comment4432382599 is confirmed: path reopen
+before SetSecurityInfo can mutate a substituted foreign object. Current stage
+create-new handle obtains required READ_CONTROL/WRITE_DAC and optional allowed
+ownership rights via MAXIMUM_ALLOWED; fresh creation keeps ordinary data rights.
+Setter duplicates retained stage File only. New native tests cover hardlink name
+substitution, retained/released snapshot causal controls, and inherited denial of
+unneeded WRITE_OWNER beside actual same-owner publication. No blanket restrictions.
+
+Mac directory/source/stage ACL operations now take retained File descriptors and
+route through Darwin /dev/fd with exacl, without unsafe or pathname fallback.
+Current XNU resolves SETATTR to held vnode; older Ventura forwards fdesc_setattr.
+The new file/directory x symlink/real-substitution causal unit first demonstrates
+foreign path mutation, then requires only retained-inode ACL mutation. Native proof
+still required. Source-reviewed by existing independent LunaMax review_741: no
+source blocker, NATIVE publication only. Design/spec updated to match; acceptance
+remains OPEN. Old no-follow-path/residual-gap paragraphs below are superseded.
+
+394 Mac ordinary27+privileged1 PASS, then controlled APFS baseline failed before
+publisher assertions. Current CI sets BOTH mounts -owners on and uses traversable
+/private/tmp outer fixture, adds diskutil/ancestor/nobody-traversal evidence and
+baseline child-error diagnostics. This is a setup correction pending native proof,
+not a waived inheritance assertion. All four volume formats remain required.
+
+Current local Linux27owningPASS+1privilegedignored, CLIallfeaturesClippyPASS7.42s;
+fmt/strings/strictOpenSpec/scopedIssueOps1of5/YAML+bothchangedBashblocks PASS.
+Logs /tmp/projectatlas-741-held-policy-{unit,clippy,strings,issueops}.log.
+Normal clean push of held-policy candidate is pending; next receipt prefix
+/tmp/projectatlas-741-held-policy. No immutable current-candidate binary yet.
+
+Exact394 RustCodeQL2068801483 completed23results; Actions2068760502 has2.
+PRIMARY statically traced all25 open alert records: every Rust SARIF thread passes
+through cfg(test)/integration fixtures; command alert is current_exe test relaunch;
+Actions checkout is event-bound github.sha for schedule/dispatch, no arbitrary SHA
+input or cache publisher. Per-alert report /tmp/projectatlas-741-394-primary-codeql-triage.json
+rendered. All17 newly reviewed AdvancedSecurity discussions got individual technical
+replies, resolutions and exact readbacks; receipts
+/tmp/projectatlas-741-394-codeql-resolution-receipts.json. Alert records are NOT
+suppressed/dismissed. Four native ACL/label security threads plus Mac filename
+review remain OPEN pending corrected published proof. New Windows reply4432429796
+and Mac descriptor followup4432429898 read back, threads keptopen. Issue741 body
+updated/readback to all-existing Mac private stages and descriptor/handle ownership.
+Only741 active; tasks1of5/allacceptanceOPEN; noRC. Fresh final-source analysis remains.
+
 ## Latest review-feedback candidate (supersedes prior pending/native notes)
 
 Public/local Git HEAD before this follow-up is b7d4b25ca7b845cf2a65309e41d1b6cb8ffffc18.

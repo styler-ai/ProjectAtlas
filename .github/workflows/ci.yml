@@ -513,7 +513,7 @@ jobs:
         run: |
           set -euo pipefail
           original_tmpdir="${TMPDIR:-$RUNNER_TEMP}"
-          fixture="$(mktemp -d "$RUNNER_TEMP/projectatlas-case-modes.XXXXXX")"
+          fixture="$(mktemp -d /private/tmp/projectatlas-case-modes.XXXXXX)"
           # Native nobody ACL controls must reach this disposable mount through
           # its ancestors; otherwise an unrelated 0700 temp parent masks access.
           chmod 755 "$fixture"
@@ -545,7 +545,7 @@ jobs:
           for filesystem in APFS APFSX HFS+ HFSX; do
             image="$fixture/$filesystem.dmg"
             create_case_image "$filesystem" ProjectAtlasCase "$image"
-            hdiutil attach -nobrowse -mountpoint "$volume" "$image"
+            hdiutil attach -nobrowse -owners on -mountpoint "$volume" "$image"
             mounted=true
             mkdir -p "$volume/tmp" "$nested"
             nested_filesystem=APFSX
@@ -563,6 +563,9 @@ jobs:
             export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
             export TMPDIR="$volume/tmp"
             export PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT="$volume/tmp"
+            diskutil info "$volume"
+            ls -lde /private /private/tmp "$fixture" "$volume" "$volume/tmp"
+            sudo -n -u nobody /bin/test -x "$volume/tmp"
             export PROJECTATLAS_TEST_CASE_SENSITIVE=false
             if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
               export PROJECTATLAS_TEST_CASE_SENSITIVE=true

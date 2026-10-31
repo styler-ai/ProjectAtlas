@@ -192,7 +192,15 @@ namespace unsupported does not authorize ignoring a successfully captured ACL.
 macOS uses exacl's ordered extended-ACL representation. Verify native roundtrips.
 
 Windows uses safe handle-based windows-permissions APIs with READ_CONTROL on the
-source and appropriate WRITE_DAC/WRITE_OWNER rights on the stage. Preserve DACL
+source and appropriate WRITE_DAC/WRITE_OWNER rights on the stage. Acquire stage
+policy rights on its original create-new handle; never reopen its mutable pathname
+for SetSecurityInfo. Require READ_CONTROL and WRITE_DAC for replacements, requesting
+MAXIMUM_ALLOWED alongside required data rights so an available WRITE_OWNER can be
+retained without demanding it for unchanged owner/group. Fresh creation retains
+ordinary data rights. SetSecurityInfo's MAXIMUM_ALLOWED child-propagation limitation
+does not affect admitted regular files. Copy through a duplicated retained handle;
+native hardlink-substitution and denied-TakeOwnership controls must prove both
+outside-policy preservation and legitimate same-owner regeneration. Preserve DACL
 protection and ownership without lossy path conversion. The wrapper lacks a safe
 control getter, so use only the native DACL SDDL header for inheritance flags, not
 an application ACL parser. Avoid its NULL-DACL accessor trap; a native descriptor
@@ -215,6 +223,13 @@ bookkeeping. Keep private diagnostics for any remaining difference and native
 ordinary/protected/inherited/NULL/empty controls. The .NET fixture formatter omits
 D: for NULL descriptors; inspect its binary RawSecurityDescriptor access class
 instead of using omitted SDDL text as proof of an absent native file DACL.
+
+Native Windows six-case controls isolate the retained destination snapshot as the
+cause of MoveFileEx ERROR_ACCESS_DENIED: absent/released snapshots allow replacement,
+while a retained snapshot refuses, for both single files and outside hardlinks.
+Keep every snapshot handle through pre-copy and final destination-policy checks,
+then release the complete Windows snapshot immediately before persist. Do not
+drop it before verification or weaken the existing bounded final-check contract.
 
 The safe native wrappers require direct macOS-only exacl and Windows-only
 windows-permissions dependencies. The latter retains bitflags 1; the dependency ban
@@ -255,9 +270,13 @@ macOS inherited ACL allows can override0600. A directory can also permit entry
 replacement without an inheritable ACL, so equal ownership and absent inheritance
 do not make a pathname ACL setter safe. Every existing-target stage therefore uses
 a private same-volume staging directory, whose ACL is cleared and0700 mode verified
-before payload file creation. Native ACL reads/writes use the library's no-follow
-entry option, including workspace ACL clearing; the directory mode setter uses a
-NOFOLLOW, directory-only descriptor bound to its retained identity. Keep that directory
+before payload file creation. Native ACL reads/writes take a borrowed retained File
+and use Darwin's /dev/fd namespace through the existing safe exacl wrapper, including
+workspace hardening, source capture/rechecks and stage copying/readback. The
+descriptor stays owned and live throughout each call; no mutable project pathname
+is supplied to an ACL getter/setter. Current XNU resolves descriptor SETATTR to the
+held vnode; older Darwin fdesc_setattr forwards to that vnode. The directory mode
+setter also uses a NOFOLLOW, directory-only descriptor bound to its retained identity. Keep that directory
 owned by the writer even when the destination has a different owner. Keep genuinely new
 outputs in their original parent to preserve supported inherited grants. Retain
 private-directory identity, verify both stage parent and held file, and remove only
@@ -275,12 +294,21 @@ case demonstrates the unsafe following setter and the protected replacement, wit
 outside ACL and byte preservation. These do not promise an atomic defense against
 arbitrary concurrent ancestor substitution.
 
-The private directory's ACL clearing remains a pathname operation. Final-component
-no-follow prevents symlink redirection, while retained-identity checks detect later
-replacement; neither makes the ACL mutation identity-atomic if a different real
-directory is substituted during that operation. Preserve this explicit proof gap
-in review and assess its supported trust boundary before final acceptance rather
-than treating the symlink regression as complete concurrent-directory coverage.
+The former no-follow path option still had a real-object substitution gap, and
+Darwin's acl_set_link_np can lstat and then call the following setter. Descriptor
+routing replaces that unsafe assumption. A four-case native causal fixture replaces
+an admitted file/directory name with either a symlink or a different real object;
+the path setter mutates the foreign ACL, while descriptor reads/writes must preserve
+foreign policy and bytes and target only the retained original inode. This route
+requires native proof on both supported architectures and all four controlled volume
+formats; unsupported descriptor ACL operations refuse without a pathname fallback.
+It does not claim universal concurrent ancestor protection for publication/cleanup.
+
+Controlled macOS volumes enable ownership on both mounts and place the disposable
+outer fixture beneath traversable /private/tmp. Disk/ancestor diagnostics and a
+nobody traversal control precede access assertions. Preserve the same inherited-ACL
+baseline, protected publisher and new-file positives; do not treat a fixture setup
+failure as proof that a platform lacks the vulnerability or that the fix passed.
 
 Windows failure cleanup clears a copied readonly attribute only through the verified
 owned staging handle and rechecks its identity before automatic removal. This keeps

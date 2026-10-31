@@ -1,14 +1,27 @@
-//! Restrictive, identity-bound macOS replacement staging directories.
+//! Descriptor-bound macOS access policy and private replacement staging.
 
 use super::{ProjectStateGuard, RetainedStaging, refusal, require_directory};
 use same_file::Handle;
 use std::fs;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// Operate on an entry itself; never redirect ACL mutation through a leaf symlink.
-pub(super) const NOFOLLOW_ACL: exacl::AclOption = exacl::AclOption::SYMLINK_ACL;
+/// Read ACLs from the retained object through Darwin's descriptor namespace.
+pub(super) fn get_acl(file: &fs::File) -> io::Result<Vec<exacl::AclEntry>> {
+    exacl::getfacl(descriptor_path(file), None)
+}
+
+/// Mutate only the retained object, never its replaceable project pathname.
+pub(super) fn set_acl(file: &fs::File, entries: &[exacl::AclEntry]) -> io::Result<()> {
+    exacl::setfacl(&[descriptor_path(file)], entries, None)
+}
+
+/// Keep construction and use scoped to a live borrowed descriptor.
+fn descriptor_path(file: &fs::File) -> PathBuf {
+    PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
+}
 
 /// A non-recursively cleaned workspace, hardened before any payload file exists.
 pub(super) struct ReplacementDirectory<'a> {
@@ -21,7 +34,7 @@ pub(super) struct ReplacementDirectory<'a> {
 }
 
 impl<'a> ReplacementDirectory<'a> {
-    /// Isolate every replacement before path-based native ACL operations.
+    /// Isolate every replacement before exposing payload bytes or copied policy.
     pub(super) fn create(
         guard: &'a ProjectStateGuard,
         replacing: bool,
@@ -76,12 +89,12 @@ impl<'a> ReplacementDirectory<'a> {
                     "private staging directory creator changed",
                 ));
             }
-            exacl::setfacl(&[&directory.path], &[], Some(NOFOLLOW_ACL))?;
+            set_acl(&file, &[])?;
             // Keep the workspace owned by this writer. Destination ownership
             // belongs on the payload, never on its private traversal boundary.
             file.set_permissions(fs::Permissions::from_mode(0o700))?;
             directory.verify()?;
-            if !exacl::getfacl(&directory.path, Some(NOFOLLOW_ACL))?.is_empty()
+            if !get_acl(&file)?.is_empty()
                 || file.metadata()?.permissions().mode() & 0o777 != 0o700
                 || fs::read_dir(&directory.path)?.next().is_some()
             {

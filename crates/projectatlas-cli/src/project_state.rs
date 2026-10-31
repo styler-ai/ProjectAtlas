@@ -492,19 +492,9 @@ impl ProjectStateGuard {
             #[cfg(not(windows))]
             let mut temporary = builder.tempfile_in(staging_directory)?;
             #[cfg(windows)]
-            let mut temporary = {
-                use std::os::windows::fs::OpenOptionsExt;
-                // Deny other data handles while inherited access is being replaced.
-                // Delete sharing is required for atomic publication of our open file.
-                builder.make_in(staging_directory, |path| {
-                    fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create_new(true)
-                        .share_mode(0x0000_0004)
-                        .open(path)
-                })?
-            };
+            let mut temporary = builder.make_in(staging_directory, |path| {
+                create_windows_staging_file(path, metadata.is_some())
+            })?;
             #[cfg(target_os = "linux")]
             let content_prepared = if let Some(access) = &access {
                 let equivalent = match self
@@ -603,6 +593,12 @@ impl ProjectStateGuard {
             if let Err(source) = prepared {
                 return Err(self.staging_failure(&mut temporary, source, &staging_identity));
             }
+            // MoveFileEx replacement refuses a destination with our retained
+            // READ_CONTROL snapshot open, even with delete sharing. Keep every
+            // snapshot through the final identity/policy check, then release all
+            // of its file/identity handles before the Windows rename boundary.
+            #[cfg(windows)]
+            drop(access);
             let result = match publication {
                 FilePublication::Create => temporary.persist_noclobber(path),
                 FilePublication::Replace => temporary.persist(path),
@@ -829,7 +825,7 @@ impl ReplacementSource {
         require_regular(path, &file.metadata()?)?;
         let identity = Handle::from_file(file.try_clone()?)?;
         #[cfg(target_os = "macos")]
-        let acl = exacl::getfacl(path, Some(macos_access::NOFOLLOW_ACL))?;
+        let acl = macos_access::get_acl(&file)?;
         #[cfg(windows)]
         let security = windows_access_snapshot(&file)?;
         let source = Self {
@@ -860,7 +856,7 @@ impl ReplacementSource {
                 && held.uid() == self.metadata.uid()
                 && held.gid() == self.metadata.gid()
                 && held.mode() == self.metadata.mode()
-                && exacl::getfacl(path, Some(macos_access::NOFOLLOW_ACL))? == self.acl
+                && macos_access::get_acl(&self.file)? == self.acl
                 && Handle::from_file(self.file.try_clone()?)? == self.identity
         };
         #[cfg(windows)]
@@ -896,11 +892,7 @@ impl ReplacementSource {
                     Some(self.metadata.gid()),
                 )?;
             }
-            exacl::setfacl(
-                &[staged.path()],
-                &self.acl,
-                Some(macos_access::NOFOLLOW_ACL),
-            )?;
+            macos_access::set_acl(staged.as_file(), &self.acl)?;
         }
         #[cfg(windows)]
         preserve_windows_access(path, &self.file, staged)?;
@@ -909,7 +901,7 @@ impl ReplacementSource {
             .as_file()
             .set_permissions(self.metadata.permissions())?;
         #[cfg(target_os = "macos")]
-        if exacl::getfacl(staged.path(), Some(macos_access::NOFOLLOW_ACL))? != self.acl {
+        if macos_access::get_acl(staged.as_file())? != self.acl {
             return Err(refusal(
                 path,
                 "staged access ACL differs from the destination",
@@ -945,6 +937,27 @@ fn preserve_replacement_access(
     Ok(())
 }
 
+/// Create an exclusive data handle with policy rights bound to the original stage.
+#[cfg(windows)]
+fn create_windows_staging_file(path: &Path, replacing: bool) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_permissions::constants::AccessRights;
+    let mut rights = (AccessRights::GenericRead | AccessRights::GenericWrite).bits();
+    if replacing {
+        // Capture optional ownership rights if granted, without requiring
+        // WRITE_OWNER for ordinary same-owner replacements. The payload is a
+        // regular file, so SetSecurityInfo has no child propagation to suppress.
+        const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+        rights |= (AccessRights::ReadControl | AccessRights::WriteDac).bits() | MAXIMUM_ALLOWED;
+    }
+    // Deny competing data handles before native policy is copied; allow rename.
+    fs::OpenOptions::new()
+        .access_mode(rights)
+        .create_new(true)
+        .share_mode(0x0000_0004)
+        .open(path)
+}
+
 /// Capture owner/group/DACL through the retained file without requesting SACL privilege.
 #[cfg(windows)]
 fn windows_access_snapshot(file: &fs::File) -> io::Result<std::ffi::OsString> {
@@ -965,8 +978,7 @@ fn preserve_windows_access(
     original: &fs::File,
     staged: &tempfile::NamedTempFile,
 ) -> io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_permissions::constants::{AccessRights, SeObjectType, SecurityInformation};
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
     use windows_permissions::wrappers::{
         ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo, SetSecurityInfo,
     };
@@ -1014,18 +1026,15 @@ fn preserve_windows_access(
         } else {
             SecurityInformation::UnprotectedDacl
         };
-    let mut rights = AccessRights::ReadControl | AccessRights::WriteDac;
     if owner_changed {
         information |= SecurityInformation::Owner;
-        rights |= AccessRights::WriteOwner;
     }
     if group_changed {
         information |= SecurityInformation::Group;
-        rights |= AccessRights::WriteOwner;
     }
-    let mut destination = fs::OpenOptions::new()
-        .access_mode(rights.bits())
-        .open(staged.path())?;
+    // Duplicate only our already admitted stage handle. Reopening staged.path()
+    // could mutate a foreign object substituted after the last identity check.
+    let mut destination = staged.as_file().try_clone()?;
     SetSecurityInfo(
         &mut destination,
         SeObjectType::SE_FILE_OBJECT,

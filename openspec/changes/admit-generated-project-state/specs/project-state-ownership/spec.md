@@ -52,6 +52,12 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** macOS replacement payload creation occurs only after any private staging directory's inherited ACLs and permissions are made restrictive and verified; genuinely new outputs retain normal parent inheritance
 - **AND** unsupported policy preservation or cleanup reports a causal failure while retaining valid output and foreign entries; a post-publication cleanup error explicitly identifies the already committed publication
 
+#### Scenario: Native ACL operations retain object identity across name substitution
+- **WHEN** another local principal replaces an admitted macOS file/directory or Windows staging name before a native ACL operation
+- **THEN** ACL reads and writes remain bound to the retained original descriptor/handle and preserve the foreign object's native policy and bytes
+- **AND** metadata preservation does not reopen a mutable project pathname or fall back to a following setter; ordinary same-owner Windows regeneration does not demand unused take-ownership rights
+- **AND** Windows releases its destination snapshot only after the final identity/policy checks so the retained query handles do not prevent normal atomic replacement
+
 #### Scenario: Legacy configuration admission precedes identity repair
 - **WHEN** initialization selects a missing managed legacy configuration and a current database needs native root identity repair
 - **THEN** an unsafe legacy destination is refused before database or sidecar mutation, preserving the prior incomplete binding for a supported retry

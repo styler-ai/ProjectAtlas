@@ -1023,16 +1023,7 @@ fn generated_replacement_preserves_an_external_hard_link() -> io::Result<()> {
     let output = state.join(HOST_FILES[0]);
     fs::hard_link(&outside, &output)?;
     let guard = ProjectStateGuard::preflight(&root, None, None)?;
-    let replacement = guard.write_generated(&output, b"replacement");
-    #[cfg(windows)]
-    if let Err(source) = &replacement {
-        let controls = windows_query_handle_replacement_controls();
-        return Err(io::Error::new(
-            source.kind(),
-            format!("generated replacement: {source}; native query-handle controls={controls:?}"),
-        ));
-    }
-    replacement?;
+    guard.write_generated(&output, b"replacement")?;
     require(
         fs::read(&output)? == b"replacement",
         "generated replacement missing",
@@ -1606,6 +1597,101 @@ fn replacement_preserves_ordered_extended_acl_and_outside_owner() -> io::Result<
 
 #[cfg(target_os = "macos")]
 #[test]
+fn descriptor_acl_operations_preserve_foreign_objects_after_name_substitution() -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for directory in [false, true] {
+        for symlink in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let named = root.join("admitted-object");
+            let retained = root.join("retained-object");
+            let victim = root.join("foreign-object");
+            for path in [&named, &victim] {
+                if directory {
+                    fs::create_dir(path)?;
+                    fs::write(path.join("payload"), b"preserved directory payload")?;
+                } else {
+                    fs::write(path, b"preserved file payload")?;
+                }
+                let setup = std::process::Command::new("chmod")
+                    .args(["+a", "user:nobody deny write"])
+                    .arg(path)
+                    .output()?;
+                require(
+                    setup.status.success(),
+                    "descriptor ACL fixture setup failed",
+                )?;
+            }
+            let source_acl = exacl::getfacl(&named, None)?;
+            let foreign_acl = exacl::getfacl(&victim, None)?;
+            require(
+                !source_acl.is_empty() && !foreign_acl.is_empty(),
+                "descriptor ACL fixture has no restrictive ACL",
+            )?;
+            let held = fs::File::open(&named)?;
+            let identity = held.metadata()?;
+            require(
+                super::macos_access::get_acl(&held)? == source_acl,
+                "descriptor ACL read differs before substitution",
+            )?;
+            fs::rename(&named, &retained)?;
+            if symlink {
+                std::os::unix::fs::symlink(&victim, &named)?;
+            } else if directory {
+                fs::rename(&victim, &named)?;
+            } else {
+                fs::hard_link(&victim, &named)?;
+            }
+            let foreign = if directory && !symlink {
+                &named
+            } else {
+                &victim
+            };
+            // Reproduce the old path-ACL boundary after its identity check:
+            // the same setter now mutates a different real object or alias target.
+            exacl::setfacl(&[&named], &[], None)?;
+            require(
+                exacl::getfacl(foreign, None)?.is_empty(),
+                "path ACL control did not mutate the foreign owner",
+            )?;
+            exacl::setfacl(&[foreign], &foreign_acl, None)?;
+            require(
+                super::macos_access::get_acl(&held)? == source_acl,
+                "descriptor ACL read followed the replaced name",
+            )?;
+            super::macos_access::set_acl(&held, &[])?;
+            require(
+                super::macos_access::get_acl(&held)?.is_empty()
+                    && exacl::getfacl(&retained, None)?.is_empty()
+                    && exacl::getfacl(foreign, None)? == foreign_acl
+                    && (held.metadata()?.dev(), held.metadata()?.ino())
+                        == (identity.dev(), identity.ino()),
+                "descriptor ACL mutation escaped the retained object",
+            )?;
+            let payload = |path: &Path| {
+                if directory {
+                    path.join("payload")
+                } else {
+                    path.to_path_buf()
+                }
+            };
+            let expected = if directory {
+                b"preserved directory payload".as_slice()
+            } else {
+                b"preserved file payload".as_slice()
+            };
+            require(
+                fs::read(payload(&retained))? == expected
+                    && fs::read(payload(foreign))? == expected,
+                "descriptor ACL mutation changed source or foreign bytes",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 #[ignore = "requires passwordless fixture-only sudo as nobody; selected explicitly in macOS CI"]
 fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries()
 -> io::Result<()> {
@@ -1684,6 +1770,14 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
     let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
     guard.ensure_directory()?;
     fs::set_permissions(&guard.directory, fs::Permissions::from_mode(0o755))?;
+    let traversal = Command::new("sudo")
+        .args(["-n", "-u", "nobody", "/bin/test", "-x"])
+        .arg(&guard.directory)
+        .output()?;
+    require(
+        traversal.status.success(),
+        &format!("native ACL fixture ancestors block nobody traversal: {traversal:?}"),
+    )?;
     let output = guard.directory.join(HOST_FILES[0]);
     fs::write(&output, b"last valid output")?;
     fs::set_permissions(&output, fs::Permissions::from_mode(0o640))?;
@@ -1736,7 +1830,18 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
     })();
     drop(child.stdin.take());
     let status = child.wait_with_output()?;
-    causal?;
+    causal.map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            format!(
+                "{source}; baseline_uid={}, baseline_mode={:o}, baseline_acl_count={}, parent_acl_count={}, native_child={status:?}",
+                baseline.as_file().metadata().map_or(u32::MAX, |metadata| metadata.uid()),
+                baseline.as_file().metadata().map_or(0, |metadata| metadata.permissions().mode()),
+                exacl::getfacl(baseline.path(), None).map_or(0, |entries| entries.len()),
+                parent_acl.len(),
+            ),
+        )
+    })?;
     require(
         status.status.success() && fs::read(baseline.path())? == b"retained-fd",
         &format!("baseline held descriptor did not survive ACL narrowing: {status:?}"),
@@ -1941,20 +2046,12 @@ fn private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreig
         exacl::getfacl(&victim, None)?.is_empty() && nobody_open(&victim, true)?.status.success(),
         "following ACL setter did not reproduce the outside-owner mutation",
     )?;
-    exacl::setfacl(
-        &[&victim],
-        &victim_acl,
-        Some(super::macos_access::NOFOLLOW_ACL),
-    )?;
-    // Even a supplied alias must not redirect the safe setter to its target.
-    let _safe_alias_result = exacl::setfacl(
-        &[exposed.path()],
-        &[],
-        Some(super::macos_access::NOFOLLOW_ACL),
-    );
+    exacl::setfacl(&[&victim], &victim_acl, None)?;
+    // The held inode remains the target after its name becomes an alias.
+    super::macos_access::set_acl(exposed.as_file(), &[])?;
     require(
         exacl::getfacl(&victim, None)? == victim_acl,
-        "non-following ACL setter changed the outside owner",
+        "descriptor ACL setter changed the outside owner",
     )?;
     fs::remove_file(exposed.path())?;
     drop(exposed);
@@ -2057,14 +2154,13 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
         .map_err(io::Error::other)
 }
 
-/// Diagnose native rename independently of policy copying, with exact source-handle rights.
+/// The retained snapshot must survive checks and be released at the rename boundary.
 #[cfg(windows)]
-fn windows_query_handle_replacement_controls() -> io::Result<String> {
+#[test]
+fn source_snapshot_handles_are_released_before_windows_replacement() -> io::Result<()> {
     use std::io::Write;
-    use std::os::windows::fs::OpenOptionsExt;
-    let mut controls = Vec::new();
     for linked in [false, true] {
-        for retained in [false, true] {
+        for snapshot in ["absent", "retained", "released"] {
             let temp = tempfile::tempdir()?;
             let root = temp.path().canonicalize()?;
             let output = root.join("destination");
@@ -2072,7 +2168,7 @@ fn windows_query_handle_replacement_controls() -> io::Result<String> {
             if linked {
                 fs::hard_link(&output, root.join("outside-owner"))?;
             }
-            let query = if retained {
+            let query = if snapshot != "absent" {
                 Some(super::ReplacementSource::capture(
                     &output,
                     &fs::symlink_metadata(&output)?,
@@ -2080,28 +2176,133 @@ fn windows_query_handle_replacement_controls() -> io::Result<String> {
             } else {
                 None
             };
-            let mut stage = tempfile::Builder::new().make_in(&root, |path| {
-                fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create_new(true)
-                    .share_mode(0x0000_0004)
-                    .open(path)
-            })?;
+            let mut query = query;
+            let mut stage = tempfile::Builder::new()
+                .make_in(&root, |path| super::create_windows_staging_file(path, true))?;
             stage.write_all(b"complete replacement")?;
+            if let Some(query) = &query {
+                query.verify_destination(&output)?;
+            }
+            if snapshot == "released" {
+                drop(query.take());
+            }
             let result = stage.persist(&output);
-            controls.push(format!(
-                "linked={linked},retained={retained},native_code={:?},succeeded={}",
-                result
-                    .as_ref()
-                    .err()
-                    .and_then(|failure| failure.error.raw_os_error()),
-                result.is_ok()
-            ));
+            if snapshot == "retained" {
+                require(
+                    result
+                        .as_ref()
+                        .is_err_and(|failure| failure.error.raw_os_error() == Some(5))
+                        && fs::read(&output)? == b"previous complete output",
+                    "retained snapshot did not reproduce the native replacement refusal",
+                )?;
+            } else {
+                result.map_err(|failure| failure.error)?;
+                require(
+                    fs::read(&output)? == b"complete replacement",
+                    "releasing the verified snapshot did not allow atomic replacement",
+                )?;
+            }
+            if linked {
+                require(
+                    fs::read(root.join("outside-owner"))? == b"previous complete output",
+                    "native snapshot control changed the outside owner",
+                )?;
+            }
             drop(query);
         }
     }
-    Ok(controls.join("; "))
+    Ok(())
+}
+
+/// Native ACL updates stay on the held stage after a hardlink replaces its name.
+#[cfg(windows)]
+#[test]
+fn windows_acl_updates_do_not_reopen_a_substituted_stage_name() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let source = root.join("source");
+    let victim = root.join("outside-owner");
+    fs::write(&source, b"previous output")?;
+    fs::write(&victim, b"outside bytes")?;
+    let source_acl = windows_acl(&source, Some(true))?;
+    let victim_acl = windows_acl(&victim, None)?;
+    require(
+        source_acl != victim_acl,
+        "ACL substitution fixture has equal policies",
+    )?;
+    let snapshot = super::ReplacementSource::capture(&source, &fs::symlink_metadata(&source)?)?;
+    let mut stage = tempfile::Builder::new()
+        .make_in(&root, |path| super::create_windows_staging_file(path, true))?;
+    let stage_name = stage.path().to_path_buf();
+    let retained = root.join("retained-stage");
+    fs::rename(&stage_name, &retained)?;
+    fs::hard_link(&victim, &stage_name)?;
+    // Never let NamedTempFile remove the intentionally substituted foreign name.
+    stage.disable_cleanup(true);
+    super::preserve_windows_access(&source, &snapshot.file, &stage)?;
+    let applied = windows_acl(&retained, None)?;
+    require(
+        applied == source_acl
+            && windows_acl(&victim, None)? == victim_acl
+            && windows_acl(&stage_name, None)? == victim_acl
+            && fs::read(&victim)? == b"outside bytes"
+            && stage.as_file().metadata()?.len() == 0,
+        "stage ACL update mutated the substituted outside object",
+    )?;
+    drop(stage);
+    fs::remove_file(stage_name)?;
+    fs::remove_file(retained)?;
+    Ok(())
+}
+
+/// Copying an equal owner does not require otherwise denied WRITE_OWNER access.
+#[cfg(windows)]
+#[test]
+fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_permissions::constants::AccessRights;
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let setup = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference='Stop'; $p=$env:PROJECTATLAS_TEST_ACL_PATH; \
+            $a=Get-Acl -LiteralPath $p; \
+            $me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; \
+            $a.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($me,'TakeOwnership','ContainerInherit,ObjectInherit','None','Deny')); \
+            Set-Acl -LiteralPath $p -AclObject $a"])
+        .env("PROJECTATLAS_TEST_ACL_PATH", &guard.directory)
+        .output()?;
+    require(
+        setup.status.success(),
+        "take-ownership denial fixture failed",
+    )?;
+    let excessive = fs::OpenOptions::new()
+        .access_mode(
+            (AccessRights::GenericRead
+                | AccessRights::GenericWrite
+                | AccessRights::ReadControl
+                | AccessRights::WriteDac
+                | AccessRights::WriteOwner)
+                .bits(),
+        )
+        .create_new(true)
+        .open(guard.directory.join("unneeded-ownership-right"));
+    require(
+        excessive
+            .as_ref()
+            .is_err_and(|source| source.raw_os_error() == Some(5)),
+        "native fixture did not deny an unnecessary take-ownership request",
+    )?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    fs::write(&output, b"previous output")?;
+    let acl = windows_acl(&output, None)?;
+    guard.write_generated(&output, b"replacement")?;
+    require(
+        fs::read(&output)? == b"replacement" && windows_acl(&output, None)? == acl,
+        "same-owner regeneration required take-ownership rights or changed policy",
+    )
 }
 
 #[cfg(windows)]
