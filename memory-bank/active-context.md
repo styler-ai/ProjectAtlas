@@ -7,16 +7,17 @@ before #741. No issue closed this execution; no RC published. Continue through
 v0.5.1-rc1 as a non-draft prerelease, Latest=false, independently verified. Stable
 v0.5.0 stays Latest; stable promotion/milestone closure need later user instruction.
 Exact checkout `.worktrees/issue-731`, branch `fix/static-bindings-731`.
-Public HEAD c802a5d29efc1dbf8b874ddb6426c20bed54c1a0 remains unmerged.
+Public/local HEAD33f89504c64da0fa084c0283da181472ef8d26ac remains unmerged.
 Current production source6576d074b1218bc186bc82a198307fe436c06427 (DER24/SEM23).
-Local/live8/9:1.1+2.1–2.7 complete;3.1 and all five acceptance tasks OPEN.
-Live readback and strict OpenSpec/scoped IssueOps8/9 PASS after the latest task transition.
+Local/live9/9 implementation COMPLETE after current native+hosted/security proof.
+All five acceptance outcomes independently APPROVED and checked on live issue.
+Live readback and strict OpenSpec/scoped IssueOps9/9 PASS after the latest task transition.
 
 ## Current approved implementation and proof
 
 Primary writes all implementation. Exact-root read-only Luna Max review_731 approved
-areas1–4 for current24: source/spec, causal controls, actual proofs and docs. Final
-area5/nativepush/hosted/security approval is pending. Reuse this review; do not
+areas1–5 for current24: source/spec, causal controls, actual proofs/docs and final
+readiness. Normal native push, all8 hosted and all7 security jobs are verified. Reuse this review; do not
 repeat trusted source exploration without a concrete new finding.
 
 Kotlin local val/var/destructured/delegated binding starts after the whole property;
@@ -84,16 +85,23 @@ in /tmp/projectatlas-731-projection-budget-* logs and source-checkpoint.json.
 Navigation SHA82821d6136374241a25358d9fbdc45267662b36cfeea13bf9239131da9ef5f87
 matches support/source_contract.rs and docs/v050-cli-e2e-inventory.json.
 
-## Next required work
+## Native publication and next work
 
-Refresh live task readback and strict OpenSpec/scoped IssueOps8/9; review live issue
-final-scope prose and refreshed memory. Commit current owned docs/task/memory, keep
-130 bound inputs unchanged, then normal CLEAN native push with hooks and telemetry
-override UNSET. Prepared helper /tmp/projectatlas-731-projection-budget24-native-push.py
-must only launch once; its external receipt/log own the running lease. No concurrent
-build/index/timing or source edits during push. No native24 push has started yet.
-Then actual current hosted4OS/Rust/repository/verify, CodeQL/security/freshfeedback,
-area5/finalacceptance, normal merge and BOTH CLOSED readback before741.
+Delivery33f8950 committed; normal CLEAN nativepush60219 TERMINAL PASS832.87s,
+hooks enabled and telemetryoverrideUNSET. Public33f8950 exact readback;34Rustsuites,
+381CLI/453symbols+1ignored/242DB/54navigation228.15s, docs/security/scan/lint PASS.
+The14 existing asset advisories are exit0; zero source/purpose findings. External
+/tmp/projectatlas-731-projection-budget24-native-push-session.json +log own proof.
+No active lease. Current hostedCI41168712727(all4OS+Rust/repository/verify),
+CodeQL41168711026 TERMINAL all7languagesSUCCESS; PRstate41168711937PASS;
+follow exact jobs rather than infer from old runs. TERMINAL CI41168712727 ALL8SUCCESS:plan/Rust/repository/all4OS/verify, exacthead33. All26existing threads resolved
+and read back after replies4430496791/4430497178; fresh feedback still required.
+
+FinalLunaMax review APPROVED allfive outcomes after exact live9/9, all8CI/all7CodeQL,
+metadataCI41171611341/PRstate41171611630SUCCESS,26resolvedthreads and no newfeedback.
+Current native/security/baseline reconciliation is approved without alert dismissal.
+Next normal metadata-gated push of finaltask/memory state, mechanicalreadiness,
+normal737merge and BOTHCLOSED readback before741. Local/live9/9 +5/5 acceptance. No edits to production130inputs; immutable proof remains valid.
 
 ## Public baseline / feedback
 
@@ -101,11 +109,18 @@ Public23 sourceff50, metadata c802, immutablee963f7fac2ceacbf3ea9caf38df46895fb8
 Its nativepush62972 passed807.77s; hosted41153614591 all8jobsSUCCESS including real
 correctedARM+Intel+Windows+Linux; CodeQL41153611803 all7SUCCESS. These are baseline,
 not current24 acceptance. Historical receipts use root-cohorts23 prefix.
-26threads24resolved; Kotlin PRRT_kwDOQyFgJ86yMGKd/comment4429741442 and aggregate
-PRRT_kwDOQyFgJ86yMH47/comment4429752684 remain OPEN until public corrected proof.
+26threads26resolved after public33f8950 corrected proof. Kotlin and aggregate
+threads have technical replies, source/proof review and normalnative verification.
 Old17Rust alerts have owner/counterevidence dispositions,244 belongs738; toolchain
 370/371 trustedGITHUB_PATH/ENV falsepositive threads resolved without dismissing
-alerts. Current-head all-alert reconciliation remains. No alert dismissal.
+alerts. Current-head all-alert reconciliation complete: fullPRref68 =66 already in accepted
+main baseline368 +2known toolchain leads370/371. Earlier21 was an issue-relevant
+subset;47additional main leads lie in7 entire files unchanged from3ef/c802. This
+is affected-only baseline reconciliation, not blanket false-positive classification.
+All17 reviewed Rust owners/cfg variants are exact-byte unchanged. Receipts
+projection-budget24-alert-{owner-equivalence,reconciliation}.json and raw{open,main}
+alerts preserve identities; unchanged helperhash18ebfa handles all4Python leads.
+Independent reconciliation review APPROVED. No alert dismissal.
 Old23SEM22 digest77ce9ef63aa9da217f35e41d59470395e7be08d45f167c14b2477eb29309d2ca
 is preserved; do not overwrite its receipts with current SEM23. Actual new SEM23 digest
 20fcd49d68b915412b70c76001a50c27513d0604511a06f3cf87fa637d9383ad is captured from
