@@ -164,8 +164,27 @@ alone is insufficient. Pin unicode-casefold 0.2.0, whose Unicode 9 full non-Turk
 iterator matches the documented APFS version, and apply that expanding comparison
 only to a case-insensitive APFS volume. Preserve distinct names on sensitive volumes.
 Do not infer aliasing from two hardlink identities or apply APFS full folding to HFS+.
-The current non-APFS simple-fold path requires native HFS+/HFSX verification; do not
-claim those Unicode rules are equivalent before the controlled volume tests pass.
+Native 9377241 HFS+ proof rejects modern simple folding: long-s is distinct, while
+ZWJ/BOM aliases bypassed classification. Use a separate HFS predicate for the fixed
+ASCII product alphabet. Inspection of Apple's frozen comparison data across every
+BMP unit finds exactly sixteen zero-mapped characters and no non-ASCII mappings to
+ASCII. Unicode 3.2 canonical decomposition, with HFS exclusions, adds no alias to
+that fixed alphabet. Thus stream ASCII case conversion and skip only U+200C–200F,
+U+202A–202E, U+206A–206F and U+FEFF; reject other non-ASCII characters. Use the
+predicate in both the initial candidate filter and the case-insensitive HFS/HFSX
+decision. Case-sensitive HFSX retains binary comparison, including these characters.
+Keep APFS on its existing Unicode 9 rule. This is a comparison specialized to the
+product names, not a general HFS implementation or imported Apple routine/table.
+
+Source provenance: Apple TN1150 and HFS commit
+d1bac2f062e6e9c0dfcce302d9aacb10173d0eea, core/UCStringCompareData.h; local analysis
+verified the full table and Unicode 3.2 normalization separately. Keep the derived
+behavioral facts and source reference, without redistributing Apple implementation.
+Existing selected-root directory aliases can contain arbitrary Unicode; prove those
+with direct directory identities and their resolved parent, before comparing fixed
+managed components. Never infer managed leaf filename aliasing from file hardlinks.
+Native tests must measure root aliases and every managed role on all four formats,
+including missing names, outside hardlinks, sidecars and distinct custom controls.
 
 Owning fixtures measure each native spelling pair before checking missing-leaf
 admission, outside hardlinks, dangling namespaces and parent reductions. Permanent

@@ -1,6 +1,58 @@
+## Current #741 checkpoint: native HFS correction and new Windows security finding
+
+Public/local base is 9377241286e819e9bcaac68a0e1e781555f6dd41; current source
+changes are not published yet. The normal push and immutable 137-input CLI/MCP,
+registered-worktree and five stable-upgrade proofs for 937 passed. Its hosted
+run 41225014243 passed Rust, repository and Linux. Both Macs passed descriptor
+ACL controls, ordinary/APFS/APFSX admission and privileged compatibility; HFS+
+exposed long-s false ownership and ignored-format-character bypasses. HFSX was
+not reached. Windows passed retained-handle ACL, snapshot-release and ordinary
+compatibility controls; its sole failure was the create-new WRITE_OWNER-denial
+fixture, now corrected to measure an existing-object open.
+
+Dirty correction uses HFS's ASCII mapping and exact sixteen ignored characters,
+with pinned Apple HFS/TN1150 functional evidence (no implementation/table copied).
+Existing Unicode root aliases use direct directory identity, never leaf hardlinks.
+Unix dev/ino and Windows READ_ATTRIBUTES avoid directory-data read requirements;
+a causal execute-only-parent test failed with the earlier directory-read handles.
+Actual host producers are tested at canonical output paths alongside custom names.
+31 owning Linux tests passed, one privileged test ignored; all-target/all-feature
+Clippy passed. Independent Luna Max found no blocker; its fallback-comment cleanup
+is applied. Actual corrected macOS volume and Windows fixture proof remain required.
+
+Fresh review readback /tmp/projectatlas-741-937-fresh-review-threads.json found
+SIX open Codex threads, including NEW PRRT_kwDOQyFgJ86yTBSb: Windows SACL/integrity
+preservation. Primary confirmed the current owner/group/DACL-only snapshot omits
+that policy and is tracing privilege-safe preservation and ordinary compatibility.
+Do not resolve or accept that finding without the correction/native proof. Final
+937 CodeQL analyses: Rust 2069001152 has 23 results, Actions 2068961735 has two;
+final-source reconciliation remains required. All implementation/acceptance state
+remains 1/5 and acceptance open. Only #741 active; no merge or RC publication yet.
+
 # Active context
 
 ## Current primary security review and held-policy candidate
+
+LATEST PUBLIC/LOCAL HEAD9377241286e819e9bcaac68a0e1e781555f6dd41. Normalpush34763
+TERMINAL PASS766.52s/34suites/1726pass/11ignored,541195gone. Receipt/log
+/tmp/projectatlas-741-native-acl-native-push.*; active-session receipt completed.
+Native13082 TERMINALPASS: immutabledefaultbinary
+7f65e26b5f3afefd2d525489df83fe4f73020e10dcfc13543ff07663345de24e,137boundinputs
+INCLUDINGnativeACLmodule; marker /tmp/projectatlas-741-native-acl-debug-path.txt.
+ActualCLI/MCPadmission10.09s,writer5.23s,registered9.29s,5stable050upgrades6.13s
+ALLPASS; identity/ALLapprovedpurposes/config retained and boundbinary/inputbytes
+unchanged. No localpush/prooflease; anylaterselecteddirt ismemory-only.
+
+Current SOURCE41225014243: plan124607237870/repository124607278976SUCCESS;
+Rust124607278937,MacIntel124607278970,MacARM124607278984,Windows124607278989,
+Linux124607279008 RUNNINGatlastread. Pollactualjobsteps/native logs; doNOTassume
+ABI/safety/runtimeproof fromLinux orcompile-onlyharness. PRstate41225012521SUCCESS;
+CodeQL41225011408 pending. CurrentPRhead937 readbackverified; body needsupdate
+fromoldbfresults afteractualnativeoutcomes. FiveCodexthreadsOPEN;17AdvancedSecurity
+resolved/readback. bfCodeQL2068889522 terminal23Rustresults; noNEWreviewthreads in
+/tmp/projectatlas-741-bf-pre937-review-threads.json. Final937sourceanalysisrequired.
+Only741active; tasks1of5/allacceptanceOPEN. Native normalmerge+BOTHCLOSED required
+beforequeuedCodexCI/739/738/708/715. NoRCpublished, stable050Latestunchanged.
 
 NEWEST IMPLEMENTATION (dirty after bf): NativeMac proxy disproved on BOTHarches.
 bfMacARM124596342176/Intel124596342187 ordinary26pass/2fail/1ignored: getterempty

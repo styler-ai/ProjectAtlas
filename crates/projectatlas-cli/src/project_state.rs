@@ -1198,15 +1198,77 @@ fn direct_directory_spelling(path: &Path, directory: &Path) -> io::Result<bool> 
     let Some(name) = directory.file_name().and_then(std::ffi::OsStr::to_str) else {
         return Ok(false);
     };
+    // A selected root can have arbitrary Unicode, unlike the product names.
+    // Prove existing direct directory aliases by object identity, not by a
+    // modern Unicode fold. Never use this proof for managed file leaves.
+    if (!name.is_ascii()
+        || path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| !name.is_ascii()))
+        && same_direct_directory(path, directory)?
+    {
+        return Ok(true);
+    }
     if !fixed_name_candidate(path, name)? {
         return Ok(false);
     }
     let prefix = containing_directory(path);
-    if fs::canonicalize(prefix).is_ok_and(|resolved| Some(resolved.as_path()) == directory.parent())
-    {
+    let same_parent = match (fs::canonicalize(prefix), directory.parent()) {
+        (Ok(resolved), Some(parent)) => {
+            resolved == parent || same_direct_directory(&resolved, parent)?
+        }
+        (Err(source), _) if source.kind() == io::ErrorKind::NotFound => false,
+        (Err(source), _) => return Err(source),
+        (_, None) => false,
+    };
+    if same_parent {
         named(path, name)
     } else {
         Ok(false)
+    }
+}
+
+/// Prove only existing direct directory aliases; file hardlinks do not imply naming rules.
+fn same_direct_directory(left: &Path, right: &Path) -> io::Result<bool> {
+    let (Some(left_metadata), Some(right_metadata)) =
+        (optional_metadata(left)?, optional_metadata(right)?)
+    else {
+        return Ok(false);
+    };
+    if !left_metadata.is_dir()
+        || indirect(&left_metadata)
+        || !right_metadata.is_dir()
+        || indirect(&right_metadata)
+    {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // Directory traversal and attributes do not require directory-data read
+        // access. Do not introduce that right merely to compare identities.
+        Ok(left_metadata.dev() == right_metadata.dev()
+            && left_metadata.ino() == right_metadata.ino())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+        const DIRECTORY_NOFOLLOW: u32 = 0x0200_0000 | 0x0020_0000;
+        let identity = |path: &Path| -> io::Result<Handle> {
+            let file = fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .custom_flags(DIRECTORY_NOFOLLOW)
+                .open(path)?;
+            require_directory(path, &file.metadata()?)?;
+            Handle::from_file(file)
+        };
+        Ok(identity(left)? == identity(right)?)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(Handle::from_path(left)? == Handle::from_path(right)?)
     }
 }
 
@@ -1257,7 +1319,7 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
     // This is only a candidate filter: APFS also folds multi-scalar aliases
     // such as the fi ligature. The containing filesystem decides ownership.
     if !name.is_ascii() && expected.is_ascii() {
-        if unicode_name_matches(name, expected) {
+        if unicode_name_matches(name, expected) || hfs_managed_name_matches(name, expected) {
             return Ok(true);
         }
         let pattern = format!(r"\A{}\z", regex::escape(expected));
@@ -1268,6 +1330,26 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
             .map_err(io::Error::other);
     }
     Ok(false)
+}
+
+/// Match the fixed ASCII product alphabet under HFS's frozen comparison rules.
+///
+/// TN1150 and Apple's HFS comparison data have no non-ASCII-to-ASCII mappings;
+/// normalization adds none to this alphabet. Only these sixteen format characters
+/// are ignored. In particular long-s, soft hyphen, CGJ and Kelvin remain distinct.
+fn hfs_managed_name_matches(name: &str, expected: &str) -> bool {
+    expected.is_ascii()
+        && name
+            .chars()
+            .filter(|character| {
+                !matches!(character,
+                '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                | '\u{206a}'..='\u{206f}' | '\u{feff}')
+            })
+            .map(|character| character.to_ascii_lowercase())
+            .eq(expected
+                .chars()
+                .map(|character| character.to_ascii_lowercase()))
 }
 
 /// Compare ASCII product names using APFS's Unicode 9 full, non-Turkic fold.
@@ -1320,9 +1402,16 @@ fn named(path: &Path, expected: &str) -> io::Result<bool> {
             Some(false) if volume.fs_type().eq_ignore_ascii_case("apfs") => {
                 Ok(unicode_name_matches(name, expected))
             }
+            Some(false)
+                if ["hfs", "hfs+", "hfsx"]
+                    .iter()
+                    .any(|filesystem| volume.fs_type().eq_ignore_ascii_case(filesystem)) =>
+            {
+                Ok(hfs_managed_name_matches(name, expected))
+            }
             Some(false) => {
-                // HFS+ uses older non-expanding comparison rules; do not apply
-                // APFS's full fold to distinct names on another filesystem.
+                // Retain the non-expanding fallback for other insensitive
+                // filesystems; APFS and HFS use their dedicated rules above.
                 let pattern = format!(r"\A{}\z", regex::escape(expected));
                 regex::RegexBuilder::new(&pattern)
                     .case_insensitive(true)
