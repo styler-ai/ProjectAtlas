@@ -1,56 +1,63 @@
-## Current public #739 checkpoint — PR #745
+## Current #739 checkpoint — inventory correction before push
 
-Public source is 5560e43045d9bdb2b66a6d1043dcce48956500f0 on
-`fix/external-excludes-739`, based on main 6927ed0. PR #745 is OPEN and ready,
-milestone 37 (`v0.5.1-00`), references only #739, with no auto-merge.
-Implementation remains 2/4: 1.1 and 2.1 accepted; 2.2, 3.1 and acceptance open.
+Public PR #745 remains OPEN/ready at5560e43045d9bdb2b66a6d1043dcce48956500f0,
+base main6927ed0, milestone37, soleowner739. Implementation2/4 and acceptance0/5
+remain accurate; 2.2/3.1 require current exact-head four-platform proof/reviews.
 
-Normal push 58835 finished successfully: 1,770 passed, 0 failed, 12 existing
-ignored tests across 34 suites, plus required repository/Rust/docs/security/Atlas
-gates. `/tmp/projectatlas-739-native-push-session.json` is terminal, not live.
+Local commit74972126dbf9ceb933fd104a48b1114beb13e48e adds the approved bounded
+`External source policy and root replacement` workflow step. Exact extracted step
+55986 PASS: FS46, policy-watch10, source-observer36, and both public CLI/MCP E2Es.
+Luna review_741 approved its all-four compile matrix and five-minute bound.
+Normal push44334 TERMINALFAIL1 at19:48:30UTC: inventory expected79 workflow
+selectors but found81. The hook correctly refused before publishing. No process
+or source-mutation lease remains from that attempt. Receipt/log:
+`/tmp/projectatlas-739-platform-push-session.json`, sameprefix `.log`.
 
-Exact-source CI 41340135380: plan, repository, Rust, Windows diagnostics and Linux
-passed; Windows and both macOS jobs were still running at the last read.
-CodeQL workflow 41340131537 succeeded. Codex code and security reviews completed
-on 5560 (summary 6562604562), no Codex findings posted, bot thumbs-up. Security
-summary finding flags are null; do not turn that into a clean-scan claim.
-Latest metadata PR-state 41340706944 passed; original missing-milestone failure
-is superseded. Do not restart passing jobs for metadata.
+Primary added exactly the missing two selectors, in CI order, to
+`docs/v050-cli-e2e-inventory.json`; prior frozen/source metadata unchanged.
+Focused inventory3tests PASS (`/tmp/projectatlas-739-platform-inventory-fix.log`),
+Luna review_741 independently approved. Next normal commit/push includes this
+inventory correction and continuity memory; do not amend/bypass the failed gate.
+Earlier normal push58835 at5560 remains TERMINALPASS:1770tests,0fail,12ignored.
 
-All seven new GHAS threads (410, 404–409) were individually statically assessed
-and independently accepted by Luna Max review_731, then replied to and resolved
-with readback. Six are private nonshipping libtest fixture paths; 409 propagates
-aggregate taint to a root actually assigned from the selected plan, with document
-prefix admission before ignore classification. No source restrictions, alert
-suppression or dismissal. Evidence: `/tmp/projectatlas-739-codeql-triage-result.json`
-and `codeql-intake/normalized-seven-sarif.json`. These seven dispositions do not
-claim all 11 Rust SARIF results are clean or replace the older #741 baseline.
+Hosted source41340135380 on5560: Rust/repository/plan/diagnostics/Linux/Windows/
+macOSarm64 PASS; macOSx64 still in document-resource proof at last read. Its new
+#739 public scenarios were only compiled, not executed, hence the workflow fix.
+CodeQL41340131537 SUCCESS. Codex code/security completed at5560, no findings
+posted and botthumbsup; nullable security finding flags are not a clean-scan claim.
+Latest metadata PRstate41340706944 PASS; missing-milestone initialfailure superseded.
 
-A platform coverage gap was confirmed: existing jobs compile the two new public
-#739 scenarios but do not explicitly execute them. Primary added one bounded
-`External source policy and root replacement` step in `.github/workflows/ci.yml`,
-under the existing compile contract, including all four full-plan platforms.
-It runs FS lib, policy_watch/source_observation unit families and the exact real
-external-policy/root-replacement CLI/MCP selectors. YAML parse, diff check and
-planner self-test passed. Exact extracted step session55986 finished PASS: FS46,
-policy-watch10, source-observation36, and both exact public E2Es. Log:
-`/tmp/projectatlas-739-platform-step.log`. Luna Max review_741 approved the bounded
-step and all-four compile-matrix selection; final hosted outcomes remain required.
-No push of this workflow correction yet. Preserve source clean during push.
+All seven new GHAS threads410,404–409 individually assessed, independently accepted,
+replied/resolved with readback. Six private fixture paths, one aggregate-to-root
+false propagation guarded by actual selected-root assignment/prefix admission.
+Remaining four current Rust SARIF results were also statically triaged and app-
+rendered separately, all start at the same private test env source and end at
+ordinary metadata checks (project_state1756, sqlite_profile389/407, worktree222).
+Luna review_731 independently accepted all four. Owning files are unchanged main
+blobs, but three locations did NOT match prior741 SARIF; do not claim old baseline
+equality. All current11 have explicit dispositions, not a clean scan.
 
-Stable050 exact-root MCP refresh index-2 completed in about 42 seconds, without
-reset; subsequent selected-root brief reports available. One bounded low-scope
-`.agents/plugins` purpose row was approved by purpose_739 (one change, no conflict);
-no index or mutation lease remains.
-Current candidate artifact 9c7224c6... and all 139 source inputs remain unchanged;
-workflow proof must be rerun for the correction, while unchanged cost/upgrade/
-causal artifact evidence remains reusable only for its stated source boundary.
+Fixture qualification is recorded in both triage artifacts and corrected in all
+six public test-thread replies: normal outer harness supplies TempDir, but direct
+trusted developer invocation with the test-only env override can select other
+root/parent fixture paths and overwrite fixture files. The test source/branch is
+absent from shipped CLI/MCP. No universal TempDir confinement, source restriction,
+alert suppression or dismissal. Static artifacts:
+`/tmp/projectatlas-739-codeql-triage-result.json` and
+`/tmp/projectatlas-739-codeql-four-remaining-triage-result.json`.
 
-Next: accept and normally push the workflow correction, verify the new exact-head
-four-platform outcomes and every current review comment, complete task/acceptance
-mirrors only after proof, merge #745 normally and verify #739 closed before #738.
-Current remaining milestone issues: #739, #738, #708, #715. No RC exists yet.
-Stable050 remains Latest; stable publication requires later user authorization.
+Luna review_731 completed full implementation/spec/architecture review: no further
+material finding, existing-owner architecture N/A justified. Final acceptance is
+conditional on new exact-head hosted four-platform step and current bot feedback.
+Candidate artifact9c and139 product source inputs, causal/upgrade/cost evidence
+remain unchanged; workflow/inventory proofs rerun. Installed stable050 exact-root
+MCP refresh index-2 COMPLETE, available brief, no reset; one `.agents/plugins`
+purpose row approved. No index lease remains.
+
+Next: normally push corrected inventory, verify actual new publichead and all4
+platform execution, current reviews, strict OpenSpec/IssueOps/taskmirrors; accept
+and merge745 normally, verify739closed before738. Four RC1 issues remain739,738,
+708,715. No RC exists. Stable050 staysLatest; stable requires later authorization.
 
 # Active RC1 context — 2026-11-01
 

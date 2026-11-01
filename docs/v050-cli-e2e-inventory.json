@@ -20094,6 +20094,14 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "line": 799,
       "text": "        run: cargo test --locked -p projectatlas-cli persistent_mcp_stdin_does_not_block_repository_startup_probes --test e2e_lifecycle"
     },
