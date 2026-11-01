@@ -51,6 +51,13 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** ordinary Win32 final-dot/space aliases remain managed while literal namespace names and distinct custom directories retain their supported semantics
 - **AND** an explicit config in another project's private directory retains its requested project root; database aliases cannot silently select a different WAL/SHM cohort or discard committed state
 
+#### Scenario: Windows managed aliases share a SQLite cohort
+- **WHEN** a managed Windows database is selected through an actual DOS short name or ordinary final-dot/space alias
+- **THEN** every managed SQLite consumer uses the canonical long leaf, including identity repair before ordinary opening, and canonical/alias callers share committed purposes and identity
+- **AND** an existing proven alternate WAL, SHM or journal causes a causal refusal before SQLite without changing recovery bytes; original-spelling external checkpoint recovery remains possible
+- **AND** explicit reset can preview and remove canonical and proven alternate entries without reading SQLite, while preserving outside hardlink bytes, selected-directory checks and registered lifecycle checks
+- **AND** unrelated explicit databases and literal custom names retain their supported semantics; unknown orphan aliases after independent removal of the main entry are not claimed as discovered
+
 #### Scenario: Replacement preserves existing access controls
 - **WHEN** an admitted generated host config, managed TOML config or JSON sidecar is replaced
 - **THEN** publication preserves its existing access ACL/DACL and effective ownership, including applicable inheritance protection, and does not broaden access through the staging directory's defaults
@@ -100,6 +107,8 @@ destinations SHALL be refused without outside-owner side effects.
 - **THEN** replacement staging prevents that principal from acquiring data, delete or write-DACL capabilities before destination policy is applied, including implicit owner write-DACL rights
 - **AND** retained creator data and policy operations, ordinary replacement and owned cleanup remain supported; genuinely new outputs retain normal parent inheritance
 - **AND** later policy tightening, a final identity check or handle-based rename alone is not treated as revocation of already granted handles
+- **AND** actual protected creation policy is verified before callbacks, repair or payload; restoration uses captured source policy and a revalidated parent, and unexpected initial policy never receives generated payload
+- **AND** independent controls prove the actor's positive child creation, retained-capability failure in the former stage, actual-stage denial, share-independent data policy, outside-owner preservation and cleanup through the original handle
 
 #### Scenario: Legacy configuration admission precedes identity repair
 - **WHEN** initialization selects a missing managed legacy configuration and a current database needs native root identity repair

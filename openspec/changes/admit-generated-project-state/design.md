@@ -236,9 +236,9 @@ Cross-compilation or diagnostic job success alone is not native acceptance.
 Actual 583 raw CreateFileW controls prove ordinary final-dot/space lookup aliases
 for all six fixed components in both case modes, while the same verbatim strings
 are distinct. Normalize only the ordinary Win32 component before the existing
-candidate/native-entry comparison. Preserve literal verbatim and device namespace
-spellings and ADS syntax; separately measure device-prefix behavior before claiming
-compatibility. Do not infer naming rules from a managed file's hardlink identity.
+candidate/native-entry comparison. Preserve literal verbatim names and ADS syntax. Native 652 raw lookup proves
+that drive paths under the `\\.\` device prefix share ordinary final-dot/space
+normalization; include those spellings in all owning roles and native controls. Do not infer naming rules from a managed file's hardlink identity.
 
 Config root inference is a producer of the admission root. Reuse the same fallible
 private-directory comparison for relative `.` and absent roots, before following
@@ -248,13 +248,37 @@ directories retain their root semantics. Initialization emits `.` for a private
 config only if its implied project root is the requested root; an explicit config
 in another project's private directory must retain the requested root.
 
-The bundled Windows SQLite VFS retains a full selected filename without expanding
-DOS short names and appends sidecar suffixes to that filename. Filename equivalence
-alone therefore does not establish a common WAL/SHM cohort. Native diagnostic
-controls must measure canonical, dot/space and actual short-name writer/reader
-filenames, committed visibility and directory entries before choosing a runtime
-change. Preserve pending WAL data and explicit operator paths; never silently
-retarget an alias and ignore its existing WAL or delete state to resolve ambiguity.
+Native 652 controls establish that the locked SQLite 3.53.2 VFS normalizes ordinary
+final-dot/space names to the canonical filename, but retains actual DOS short names.
+The short writer commits to its own WAL while a canonical reader sees zero rows;
+both WAL/SHM pairs coexist. Filename equivalence alone is not cohort equivalence.
+Route every proven managed Windows database open through its canonical long leaf,
+including writable/read-only wrappers, root/settings discovery, bootstrap identity
+repair and direct configuration consumers. This fixed-name operation is constant
+in the product file family; it does not inspect rows or walk source trees. New
+concurrent managed opens always choose the same cohort, even before any WAL exists.
+Explicit unrelated/custom names and verbatim literal suffixed files keep their route.
+
+Before SQLite, query the canonical main entry's actual cAlternateFileName and refuse
+if its alternate WAL, SHM or rollback journal exists. Preserve all recovery bytes;
+explain that users must close the cohort and use an external SQLite recovery or
+checkpoint tool with its original short spelling before reopening. Never checkpoint
+one cohort through another filename, silently ignore pending commits, retarget or
+delete state. A separately removed/renamed main file leaves no authoritative short
+name to discover; arbitrary orphan aliases are outside this bounded proof. Do not
+guess aliases or enumerate a directory to imply complete orphan recovery.
+
+Explicit reset remains available for corrupt or pending state. Give it a separate
+admission role retaining the selected root/private-directory identities without
+opening SQLite or requiring valid single-link leaves. Preview canonical main and
+sidecars plus only its proven alternate recovery names. Revalidate directories
+before each owned-name unlink/staged move; removing an admitted hardlink leaves
+outside-owner bytes intact. Preserve registered reset lifecycle checks. CLI root
+selection for reset uses configuration/layout/cwd authority without metadata reads;
+MCP uses its already captured state. Require causal owning tests for shared revisions,
+legacy refusal/bytes, original-spelling checkpoint recovery, identity repair and
+crash-triplet reset, plus real configured CLI/MCP purpose visibility/refusal and
+preview/apply on both reset surfaces.
 
 ### Recognize Linux directory casefolding and preserve sealed outputs
 
@@ -425,6 +449,53 @@ inheritance. Native controls must establish creator rights, restricted-actor
 acquisition denial, positive replacement and owned cleanup before acceptance.
 An SDK-only probe validates the exact creation descriptor before selecting the
 production binding; do not infer Windows runtime behavior from cross-compilation.
+
+The production constructor belongs to the existing tempfile callback. Capture a
+combined owner/group/DACL/system descriptor through the retained source, require
+it to match the admitted snapshots, and capture/retain the exact parent directory
+and matching policy. Use canonical CreatePrivateObjectSecurityEx with the effective
+thread token (process fallback only for ERROR_NO_TOKEN), real DACL/SACL inheritance
+checks and file generic mapping. Require matching owner/group and ordered ACL policy
+before creating a name; only preview AI is ignored, plus the SDK-undefined default
+bit when SACL is absent. Final system-policy verification remains strict.
+
+Protect DACL inheritance and present SACL inheritance in the owned creation
+descriptor; never synthesize SACL presence from absence. Retain the original native
+DACL comparison image and system-policy snapshot. CreateFileW(CREATE_NEW, SECURITY_ATTRIBUTES) returns
+the one noninherited data/delete/control handle used by the publisher. Request
+WRITE_DAC only when restoring an unprotected DACL; retain optional policy rights
+with MAXIMUM_ALLOWED only for inheritance restoration or full system policy.
+Protected ordinary replacements need no unused WRITE_DAC/WRITE_OWNER. Revalidate
+the retained parent policy before creation and restoration, and restore from the
+captured opaque descriptor rather than querying fresh mutable source policy.
+Verify the actual stage's initial native owner/group, protected ACLs and complete
+system-policy image before callbacks, repair or payload. Unexpected initial policy
+refuses and cleans the empty owned stage; it is never repaired and later published.
+A fresh broader source query could otherwise transiently broaden the stage and
+leave retained capabilities even if a later source check passes again.
+
+Independent restricted-token controls must prove actual parent child-creation and
+owned cleanup, parent DELETE_CHILD/WRITE_DAC denial and protected-target mutation
+denial. The former inherited stage must permit DELETE/WRITE_DAC handles that remain
+usable after tightening and rename. The actual Rust stage callback must deny those
+opens before policy preparation; use an all-share native clone of its actual DACL
+to distinguish data-policy denial from sharing denial. Cover all six replacement
+roles, final policy/payload, outside hardlinks and original-handle failure cleanup.
+Audit/integrity/RA/SP positives must also cover protected sources without optional
+discretionary policy rights. New files keep ordinary inheritance.
+
+Different-owner-but-authorized restoration is a separate native compatibility
+question: compare the former setter under already enabled SeRestorePrivilege,
+ordinary CPE owner validation, owner-check-only avoidance and direct native creation
+with/without backup semantics in disposable diagnostics. No owner-restriction or
+privilege-avoidance flag is adopted. Do not claim the production path preserves
+that workflow until its actual creation/ownership readback and publication pass.
+
+Standard Rust file creation exposes no creation descriptor. Extend only the local
+official-SDK exception with effective-token queries, CPE/destroy/control and
+CreateFileW; wrap native owning handles exactly once and use matching allocation
+destructors. Threading is an additional feature of the already locked windows-sys,
+not a new package. Keep workspace unsafe denial and the source policy boundaries.
 
 The native Windows publisher must also preserve SACL policy: mandatory integrity,
 audit entries and other system-policy ACEs belong to the replaced object, not the
@@ -649,6 +720,11 @@ Windows failure cleanup clears a copied readonly attribute only through the veri
 owned staging handle and rechecks its identity before automatic removal. This keeps
 cleanup independent of optional POSIX-delete support, while preserving the original
 destination and outside hardlinks. Failed normalization retains the stage explicitly.
+Then mark only that original DELETE-capable handle for classic deletion with the
+canonical FILE_DISPOSITION_INFO, and disable path cleanup after success. A protected
+source policy can deny a fresh pathname DELETE despite the creator's retained right;
+never reopen the stage name or leave NamedTempFile drop to bypass that distinction.
+Changed identity or failed handle cleanup retains the stage with its original cause.
 
 ### Refuse unsupported existing Windows EFS replacement
 

@@ -5032,6 +5032,185 @@ fn automatic_state_admission_preserves_cli_mcp_navigation() -> Result<(), Box<dy
             .into());
         }
     }
+    #[cfg(windows)]
+    {
+        // Exercise real configured CLI/MCP opens, refusals and explicit recovery reset.
+        for reset_surface in ["cli", "mcp"] {
+            let cohort_root = temp.path().join(format!("cohort-{reset_surface}"));
+            fs::create_dir(&cohort_root)?;
+            fs::write(cohort_root.join("file.rs"), "pub fn cohort() {}\n")?;
+            let initialized = command(&executable, &cohort_root).arg("init").output()?;
+            if !initialized.status.success() {
+                return Err(
+                    io::Error::other(format!("cohort init failed: {initialized:?}")).into(),
+                );
+            }
+            let database = cohort_root.join(".projectatlas/projectatlas.db");
+            let config = cohort_root.join(".projectatlas/config.toml");
+            let alias = StdCommand::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_DB_PATH).ShortPath"])
+                .env("PROJECTATLAS_TEST_DB_PATH", &database).output()?;
+            if !alias.status.success() {
+                return Err(io::Error::other(format!(
+                    "cohort short-name fixture failed: {alias:?}"
+                ))
+                .into());
+            }
+            let short = PathBuf::from(String::from_utf8(alias.stdout)?.trim());
+            if short.file_name() == database.file_name() {
+                // Some native volumes disable DOS aliases; the Windows owning test
+                // separately requires an actual alias in the hosted campaign.
+                continue;
+            }
+            let (mut cohort_session, _) = McpContractSession::spawn_configured(
+                &executable,
+                &cohort_root,
+                &short,
+                Some(&config),
+                &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+            )?;
+            let cohort_result = (|| -> Result<(), Box<dyn Error>> {
+                let set = command(&executable, &cohort_root)
+                    .arg("--config")
+                    .arg(&config)
+                    .arg("--db")
+                    .arg(&short)
+                    .args(["purpose", "set", "file.rs", "alias CLI purpose"])
+                    .output()?;
+                let summary =
+                    cohort_session.call_tool("atlas_file_summary", &json!({"file":"file.rs"}))?;
+                if !set.status.success() || !summary.contains("alias CLI purpose") {
+                    return Err(io::Error::other(format!(
+                        "alias CLI/MCP did not share committed purpose: {set:?} {summary}"
+                    ))
+                    .into());
+                }
+                cohort_session.call_tool(
+                    "atlas_purpose_set",
+                    &json!({"path":"file.rs", "purpose":"alias MCP purpose"}),
+                )?;
+                let summary = command(&executable, &cohort_root)
+                    .args(["summary", "file.rs"])
+                    .output()?;
+                if !summary.status.success()
+                    || !String::from_utf8_lossy(&summary.stdout).contains("alias MCP purpose")
+                {
+                    return Err(io::Error::other(format!(
+                        "canonical CLI missed alias MCP purpose: {summary:?}"
+                    ))
+                    .into());
+                }
+                let short_wal = sqlite_sidecar_path(&short, "-wal");
+                let short_shm = sqlite_sidecar_path(&short, "-shm");
+                if short_wal.exists() || short_shm.exists() {
+                    return Err(io::Error::other(
+                        "real managed interfaces created an alternate cohort",
+                    )
+                    .into());
+                }
+                // Finish canonical handles before modeling a predecessor's pending WAL.
+                let checkpoint = Connection::open(&database)?;
+                checkpoint.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+                drop(checkpoint);
+                let legacy = Connection::open(&short)?;
+                legacy.execute_batch("PRAGMA wal_autocheckpoint=0; UPDATE purposes SET purpose='pending legacy purpose';")?;
+                let main_before = fs::read(&database)?;
+                let wal_before = fs::read(&short_wal)?;
+                let shm_before = fs::read(&short_shm)?;
+                for selected in [&database, &short] {
+                    for args in [
+                        vec!["overview"],
+                        vec!["settings"],
+                        vec!["root", "show"],
+                        vec!["init", "--no-scan"],
+                    ] {
+                        let refused = command(&executable, &cohort_root)
+                            .arg("--config")
+                            .arg(&config)
+                            .arg("--db")
+                            .arg(selected)
+                            .args(&args)
+                            .output()?;
+                        if refused.status.success()
+                            || !String::from_utf8_lossy(&refused.stderr)
+                                .contains("alternate 8.3 SQLite recovery cohort")
+                        {
+                            return Err(io::Error::other(format!(
+                                "CLI {args:?} did not preserve pending cohort: {refused:?}"
+                            ))
+                            .into());
+                        }
+                    }
+                }
+                for tool in ["atlas_overview", "atlas_settings"] {
+                    let refused = cohort_session
+                        .request("tools/call", &json!({"name":tool,"arguments":{}}))?;
+                    if !refused
+                        .to_string()
+                        .contains("alternate 8.3 SQLite recovery cohort")
+                    {
+                        return Err(io::Error::other(format!(
+                            "MCP {tool} did not preserve pending cohort: {refused}"
+                        ))
+                        .into());
+                    }
+                }
+                let preview = command(&executable, &cohort_root)
+                    .arg("--config")
+                    .arg(&config)
+                    .arg("--db")
+                    .arg(&short)
+                    .arg("reset-index")
+                    .output()?;
+                let mcp_preview =
+                    cohort_session.call_tool("atlas_reset_index", &json!({"dry_run":true}))?;
+                let wal_name = short_wal
+                    .file_name()
+                    .ok_or_else(|| io::Error::other("short WAL lacks name"))?
+                    .to_string_lossy();
+                if !preview.status.success()
+                    || !String::from_utf8_lossy(&preview.stdout).contains(wal_name.as_ref())
+                    || !mcp_preview.contains(wal_name.as_ref())
+                    || fs::read(&database)? != main_before
+                    || fs::read(&short_wal)? != wal_before
+                    || fs::read(&short_shm)? != shm_before
+                {
+                    return Err(io::Error::other(format!("reset preview or refusal changed/omitted recovery state: {preview:?} {mcp_preview}")).into());
+                }
+                // Restore this exact owned triplet only after its last SQLite handle
+                // closes. Apply is explicit and touches only disposable fixture state.
+                drop(legacy);
+                fs::write(&database, &main_before)?;
+                fs::write(&short_wal, &wal_before)?;
+                fs::write(&short_shm, &shm_before)?;
+                if reset_surface == "cli" {
+                    let applied = command(&executable, &cohort_root)
+                        .arg("--config")
+                        .arg(&config)
+                        .arg("--db")
+                        .arg(&short)
+                        .args(["reset-index", "--apply"])
+                        .output()?;
+                    if !applied.status.success() {
+                        return Err(io::Error::other(format!(
+                            "CLI recovery reset failed: {applied:?}"
+                        ))
+                        .into());
+                    }
+                } else {
+                    cohort_session.call_tool("atlas_reset_index", &json!({"apply":true}))?;
+                }
+                if database.exists() || short_wal.exists() || short_shm.exists() {
+                    return Err(io::Error::other(format!(
+                        "{reset_surface} reset stranded a recovery cohort"
+                    ))
+                    .into());
+                }
+                Ok(())
+            })();
+            complete_mcp_test_after_shutdown(cohort_result, || cohort_session.shutdown())?;
+        }
+    }
     let state = root.join(ATLAS_DIR_NAME);
     let database = state.join("projectatlas.db");
     let purpose = command(&executable, &root)

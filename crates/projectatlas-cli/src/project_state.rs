@@ -90,6 +90,8 @@ fn publication_failure(action: &'static str, source: io::Error) -> io::Error {
 enum StateAdmission {
     /// Inspect only the managed directory and SQLite database/sidecars.
     Database,
+    /// Inventory/unlink owned database entries without opening SQLite.
+    Reset,
     /// Also admit bootstrap and generated-host destinations.
     Generated,
     /// Mutate only one exact managed document, independently of other outputs.
@@ -176,6 +178,18 @@ impl ProjectStateGuard {
         Self::admit(&root, Some(database), None, StateAdmission::Database).map(Some)
     }
 
+    /// Admit explicit reset without reading SQLite or refusing recoverable cohorts.
+    pub(crate) fn preflight_database_reset_path(
+        database: &Path,
+        selected_root: &Path,
+    ) -> io::Result<Option<Self>> {
+        let root = fs::canonicalize(selected_root)?;
+        if !owned_named_path(database, &root.join(STATE_DIRECTORY), DATABASE_FILE)? {
+            return Ok(None);
+        }
+        Self::admit(&root, Some(database), None, StateAdmission::Reset).map(Some)
+    }
+
     /// Admit one fixed document while preserving custom/external operator paths.
     pub(crate) fn preflight_document(root: &Path, path: &Path) -> io::Result<Option<Self>> {
         let root = fs::canonicalize(root)?;
@@ -218,7 +232,9 @@ impl ProjectStateGuard {
         let root_identity = Handle::from_path(root)?;
         let directory = match admission {
             StateAdmission::Document(document) => document.directory(root),
-            StateAdmission::Database | StateAdmission::Generated => root.join(STATE_DIRECTORY),
+            StateAdmission::Database | StateAdmission::Generated | StateAdmission::Reset => {
+                root.join(STATE_DIRECTORY)
+            }
         };
         let directory_identity = match optional_metadata(&directory)? {
             Some(metadata) => {
@@ -229,11 +245,17 @@ impl ProjectStateGuard {
         };
         let automatic_database = match database {
             Some(path) if owned_named_path(path, &directory, DATABASE_FILE)? => {
+                #[cfg(windows)]
+                {
+                    Some(directory.join(DATABASE_FILE))
+                }
+                #[cfg(not(windows))]
                 Some(path.to_path_buf())
             }
             _ => None,
         };
         let automatic_document = match admission {
+            StateAdmission::Reset => None,
             StateAdmission::Document(_) => config.map(Path::to_path_buf),
             StateAdmission::Database | StateAdmission::Generated => match config {
                 Some(path)
@@ -258,9 +280,39 @@ impl ProjectStateGuard {
         Ok(guard)
     }
 
+    /// Return the admitted SQLite spelling; Windows managed aliases share one cohort.
+    pub(crate) fn sqlite_path(&self) -> Option<&Path> {
+        self.automatic_database.as_deref()
+    }
+
+    /// Enumerate only proven alternate recovery entries for an explicit reset.
+    pub(crate) fn alternate_reset_paths(&self) -> io::Result<Vec<PathBuf>> {
+        self.verify_directories()?;
+        #[cfg(windows)]
+        if let Some(database) = &self.automatic_database
+            && let Some(short) = windows_filesystem::alternate_name(database)?
+        {
+            let alternate = self.directory.join(short);
+            return Ok(["-wal", "-shm", "-journal"]
+                .into_iter()
+                .map(|suffix| {
+                    let mut name = alternate.as_os_str().to_os_string();
+                    name.push(suffix);
+                    PathBuf::from(name)
+                })
+                .collect());
+        }
+        Ok(Vec::new())
+    }
+
     /// Recheck the admitted objects and every automatic host/database output.
     pub(crate) fn verify(&self) -> io::Result<()> {
         self.verify_directories()?;
+        // Reset only unlinks/moves selected entries. Preserve recovery of corrupt
+        // databases and leaf aliases without following them through SQLite.
+        if matches!(self.admission, StateAdmission::Reset) {
+            return Ok(());
+        }
         if matches!(self.admission, StateAdmission::Generated) {
             for name in HOST_FILES {
                 require_regular_or_absent(&self.directory.join(name))?;
@@ -309,6 +361,21 @@ impl ProjectStateGuard {
                     }
                 }
             }
+            #[cfg(windows)]
+            if let Some(short) = windows_filesystem::alternate_name(database)? {
+                let alternate = self.directory.join(short);
+                for suffix in ["-wal", "-shm", "-journal"] {
+                    let mut name = alternate.as_os_str().to_os_string();
+                    name.push(suffix);
+                    let path = PathBuf::from(name);
+                    if optional_metadata(&path)?.is_some() {
+                        return Err(refusal(
+                            &path,
+                            "alternate 8.3 SQLite recovery cohort exists; close its users and use external SQLite recovery/checkpoint tooling with that original short spelling before reopening through ProjectAtlas; no cohort is retargeted or removed",
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -340,7 +407,10 @@ impl ProjectStateGuard {
 
     /// Create only the admitted direct state directory and retain its object.
     pub(crate) fn ensure_directory(&mut self) -> io::Result<()> {
-        if matches!(self.admission, StateAdmission::Database) {
+        if matches!(
+            self.admission,
+            StateAdmission::Database | StateAdmission::Reset
+        ) {
             return Err(refusal(
                 &self.directory,
                 "database admission cannot create generated state",
@@ -489,6 +559,18 @@ impl ProjectStateGuard {
         let staging_directory = self.directory.as_path();
         let result = (|| {
             let staging_identity = Handle::from_path(staging_directory)?;
+            #[cfg(windows)]
+            let creation = access
+                .as_ref()
+                .map(|access| {
+                    windows_security::ReplacementCreation::capture(
+                        &access.file,
+                        staging_directory,
+                        &staging_identity,
+                        &access.security,
+                    )
+                })
+                .transpose()?;
             #[cfg(target_os = "macos")]
             if let Some(private) = &private {
                 private.verify()?;
@@ -510,13 +592,7 @@ impl ProjectStateGuard {
             let mut temporary = builder.tempfile_in(staging_directory)?;
             #[cfg(windows)]
             let mut temporary = builder.make_in(staging_directory, |path| {
-                create_windows_staging_file(
-                    path,
-                    metadata.is_some(),
-                    access
-                        .as_ref()
-                        .is_some_and(|access| access.security.system.needs_system_access()),
-                )
+                create_windows_staging_file(path, creation.as_ref())
             })?;
             #[cfg(target_os = "linux")]
             let content_prepared = if let Some(access) = &access {
@@ -555,6 +631,10 @@ impl ProjectStateGuard {
             let content_prepared = false;
             let prepared = (|| {
                 self.verify_staging_file(&temporary, &staging_identity)?;
+                #[cfg(windows)]
+                if let Some(creation) = &creation {
+                    creation.verify_initial(temporary.as_file())?;
+                }
                 stage_check(&temporary)?;
                 self.verify_staging_file(&temporary, &staging_identity)?;
                 #[cfg(any(target_os = "macos", windows))]
@@ -562,7 +642,17 @@ impl ProjectStateGuard {
                     access.verify_destination(path).map_err(|source| {
                         publication_failure("recheck destination before policy copy", source)
                     })?;
-                    access.apply(path, &temporary).map_err(|source| {
+                    #[cfg(target_os = "macos")]
+                    let prepared = access.apply(path, &temporary);
+                    #[cfg(windows)]
+                    let prepared = access.apply(
+                        path,
+                        &temporary,
+                        creation.as_ref().ok_or_else(|| {
+                            io::Error::other("replacement creation policy is absent")
+                        })?,
+                    );
+                    prepared.map_err(|source| {
                         publication_failure("prepare staged native access policy", source)
                     })?;
                 }
@@ -811,6 +901,8 @@ impl ProjectStateGuard {
                 temporary.as_file().set_permissions(permissions)?;
                 self.verify_staging_file(temporary, directory_identity)?;
             }
+            windows_filesystem::discard(temporary.as_file())?;
+            temporary.disable_cleanup(true);
             Ok(())
         });
         match cleanup {
@@ -950,6 +1042,7 @@ impl ReplacementSource {
     }
 
     /// Preserve the captured file policy before payload I/O and verify native readback.
+    #[cfg(target_os = "macos")]
     fn apply(&self, path: &Path, staged: &tempfile::NamedTempFile) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -964,11 +1057,6 @@ impl ReplacementSource {
             }
             macos_access::set_acl(staged.as_file(), &self.acl)?;
         }
-        #[cfg(windows)]
-        {
-            self.security.system.apply(staged.as_file())?;
-            preserve_windows_access(path, &self.file, staged)?;
-        }
         // Ownership changes can clear mode bits. Restore mode after ownership/ACL.
         staged
             .as_file()
@@ -981,6 +1069,22 @@ impl ReplacementSource {
             ));
         }
         Ok(())
+    }
+
+    /// Apply only the captured creation policy, never a fresh mutable source policy.
+    #[cfg(windows)]
+    fn apply(
+        &self,
+        path: &Path,
+        staged: &tempfile::NamedTempFile,
+        creation: &windows_security::ReplacementCreation,
+    ) -> io::Result<()> {
+        creation.verify_parent()?;
+        self.security.system.apply(staged.as_file())?;
+        preserve_windows_descriptor(path, &creation.descriptor, &creation.dacl_image, staged)?;
+        staged
+            .as_file()
+            .set_permissions(self.metadata.permissions())
     }
 }
 
@@ -1028,23 +1132,15 @@ fn require_windows_unencrypted(file: &fs::File, path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn create_windows_staging_file(
     path: &Path,
-    replacing: bool,
-    system_access: bool,
+    creation: Option<&windows_security::ReplacementCreation>,
 ) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_permissions::constants::AccessRights;
-    let mut rights =
+    if let Some(creation) = creation {
+        return creation.create(path);
+    }
+    let rights =
         (AccessRights::GenericRead | AccessRights::GenericWrite | AccessRights::Delete).bits();
-    if replacing {
-        // Capture optional ownership rights if granted, without requiring
-        // WRITE_OWNER for ordinary same-owner replacements. The payload is a
-        // regular file, so SetSecurityInfo has no child propagation to suppress.
-        const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
-        rights |= (AccessRights::ReadControl | AccessRights::WriteDac).bits() | MAXIMUM_ALLOWED;
-    }
-    if system_access {
-        rights |= AccessRights::AccessSystemSecurity.bits();
-    }
     // Deny competing data handles before native policy is copied; allow rename.
     fs::OpenOptions::new()
         // Rust validates creation flags independently of the custom access mask.
@@ -1085,10 +1181,32 @@ fn windows_access_snapshot(
 }
 
 /// Copy the destination DACL and inheritance policy using native file handles.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn preserve_windows_access(
     path: &Path,
     original: &fs::File,
+    staged: &tempfile::NamedTempFile,
+) -> io::Result<()> {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{
+        ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo,
+    };
+    let information =
+        SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
+    let descriptor = GetSecurityInfo(original, SeObjectType::SE_FILE_OBJECT, information)?;
+    let dacl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+        &descriptor,
+        SecurityInformation::Dacl,
+    )?;
+    preserve_windows_descriptor(path, &descriptor, &dacl, staged)
+}
+
+/// Preserve the original opaque descriptor after protected initial creation.
+#[cfg(windows)]
+fn preserve_windows_descriptor(
+    path: &Path,
+    access: &windows_permissions::SecurityDescriptor,
+    sddl: &std::ffi::OsStr,
     staged: &tempfile::NamedTempFile,
 ) -> io::Result<()> {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
@@ -1101,14 +1219,16 @@ fn preserve_windows_access(
     const PROTECTED_FLAG: char = 'P';
     let information =
         SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
-    let access = GetSecurityInfo(original, SeObjectType::SE_FILE_OBJECT, information)?;
     let current = GetSecurityInfo(staged.as_file(), SeObjectType::SE_FILE_OBJECT, information)?;
     let owner_changed = access.owner() != current.owner();
     let group_changed = access.group() != current.group();
     // This safe wrapper exposes no control-bit getter. Read only the native
     // DACL SDDL header, never ACE text or a lossy filesystem path conversion.
-    let sddl =
-        ConvertSecurityDescriptorToStringSecurityDescriptor(&access, SecurityInformation::Dacl)?;
+    let current_dacl =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(&current, SecurityInformation::Dacl)?;
+    if !owner_changed && !group_changed && windows_file_dacl_matches(sddl, &current_dacl)? {
+        return Ok(());
+    }
     let header = sddl
         .to_str()
         .ok_or_else(|| refusal(path, "native DACL header is not text"))?;
@@ -1166,8 +1286,8 @@ fn preserve_windows_access(
         ConvertSecurityDescriptorToStringSecurityDescriptor(&applied, SecurityInformation::Dacl)?;
     let owner_matches = applied.owner() == access.owner();
     let group_matches = applied.group() == access.group();
-    if !owner_matches || !group_matches || !windows_file_dacl_matches(&sddl, &applied_sddl)? {
-        let difference = windows_dacl_difference(&sddl, &applied_sddl)?;
+    if !owner_matches || !group_matches || !windows_file_dacl_matches(sddl, &applied_sddl)? {
+        let difference = windows_dacl_difference(sddl, &applied_sddl)?;
         return Err(refusal(
             path,
             &format!(
@@ -1478,11 +1598,10 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
 /// Keep ordinary Win32 leaf normalization out of literal native namespaces.
 #[cfg(windows)]
 fn windows_lookup_name<'a>(path: &Path, name: &'a str) -> &'a str {
-    use std::path::Prefix;
     let literal = matches!(
         path.components().next(),
         Some(Component::Prefix(prefix))
-            if prefix.kind().is_verbatim() || matches!(prefix.kind(), Prefix::DeviceNS(_))
+            if prefix.kind().is_verbatim()
     );
     if literal || name.contains(':') {
         name

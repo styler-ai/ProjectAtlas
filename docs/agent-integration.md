@@ -137,6 +137,17 @@ directories retain distinct custom names. Potential fixed-name aliases on an
 unrecognized comparison model report ownership uncertainty before writes. This
 does not claim support for every Linux driver or mount-specific comparison mode.
 
+On Windows, proven managed database aliases open the canonical long filename so
+DOS short names share one SQLite WAL/SHM cohort. Existing recovery sidecars under
+the main entry's actual short name cause a refusal before SQLite. Close their users
+and use external SQLite recovery/checkpoint tooling with that original spelling;
+ProjectAtlas does not retarget or discard pending commits. Explicit `reset-index`
+and `atlas_reset_index` can preview and remove canonical and proven short-name
+recovery entries without opening a corrupt database. Reset discards the selected
+index and its authored data; preview before applying. Separately removed main files
+provide no authoritative short alias, so unknown orphan cohorts need operator
+recovery. Custom/external databases and literal custom filenames remain supported.
+
 On macOS, managed case aliases follow the containing volume's case behavior,
 including Unicode case aliases. Distinct custom filenames on case-sensitive volumes
 remain supported. Unavailable case evidence for a possible managed alias causes a

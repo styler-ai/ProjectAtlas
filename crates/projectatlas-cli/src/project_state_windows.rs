@@ -76,6 +76,16 @@ pub(super) fn case_sensitive(directory: &Path) -> io::Result<bool> {
 /// Resolve one long/short namespace entry, including a reparse entry itself.
 /// No file identity or target-following path is used as a filename oracle.
 pub(super) fn entry_name(path: &Path) -> io::Result<Option<std::ffi::OsString>> {
+    entry_names(path).map(|entry| entry.map(|(name, _)| name))
+}
+
+/// Return the actual DOS alias of one direct entry without inventing its spelling.
+pub(super) fn alternate_name(path: &Path) -> io::Result<Option<std::ffi::OsString>> {
+    entry_names(path).map(|entry| entry.and_then(|(_, name)| (!name.is_empty()).then_some(name)))
+}
+
+/// Capture both native entry names in one literal bounded lookup.
+fn entry_names(path: &Path) -> io::Result<Option<(std::ffi::OsString, std::ffi::OsString)>> {
     use std::os::windows::ffi::OsStringExt;
     let name = native_path(path)?;
     // Callers admit only a conservative literal DOS component. Never allow a
@@ -119,9 +129,44 @@ pub(super) fn entry_name(path: &Path) -> io::Result<Option<std::ffi::OsString>> 
             "native entry name lacks a terminator",
         )
     })?;
-    Ok(Some(std::ffi::OsString::from_wide(
-        &data.cFileName[..length],
+    let alternate_length = data
+        .cAlternateFileName
+        .iter()
+        .position(|c| *c == 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native alternate name lacks a terminator",
+            )
+        })?;
+    Ok(Some((
+        std::ffi::OsString::from_wide(&data.cFileName[..length]),
+        std::ffi::OsString::from_wide(&data.cAlternateFileName[..alternate_length]),
     )))
+}
+
+/// Delete only the verified owned stage through its original DELETE-capable handle.
+///
+/// # Errors
+/// Returns a native refusal; no following pathname deletion is attempted.
+pub(super) fn discard(file: &File) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_DISPOSITION_INFO, FileDispositionInfo};
+    let information = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>()).map_err(io::Error::other)?;
+    // SAFETY: this initialized SDK record stays live for the synchronous call,
+    // which operates only on the caller's retained original file handle.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&raw const information).cast(),
+            size,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Rename the held file, preserving the caller's replacement/no-clobber contract.

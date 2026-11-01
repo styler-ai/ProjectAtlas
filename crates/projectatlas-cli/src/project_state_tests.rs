@@ -2678,6 +2678,23 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
         .map_err(io::Error::other)
 }
 
+/// Set only a fixture's DACL before the publisher captures its native policy.
+#[cfg(windows)]
+fn windows_discretionary_policy(path: &Path, policy: &str) -> io::Result<()> {
+    let script = windows_fixture_script(
+        "[SystemPolicyFixture]::DiscretionaryPolicy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_DACL)",
+    )?;
+    let result = windows_powershell_fixture(&script, |command| {
+        command
+            .env("PROJECTATLAS_TEST_ACL_PATH", path)
+            .env("PROJECTATLAS_TEST_DACL", policy);
+    })?;
+    require(
+        result.status.success(),
+        &format!("native discretionary policy setup failed: {result:?}"),
+    )
+}
+
 /// Native fixture setup/oracle and privilege changes confined to child processes.
 #[cfg(windows)]
 const WINDOWS_SYSTEM_POLICY_FIXTURE: &str = r#"
@@ -2720,11 +2737,14 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll", EntryPoint="GetSecurityInfo")] static extern uint GetSecurityDescriptorOnly(IntPtr handle, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
   [DllImport("ntdll.dll")] static extern int NtQueryObject(IntPtr handle, uint information, out ObjectBasicInformation result, uint length, out uint returned);
   public static void Enable(bool enabled) {
+    EnablePrivilege("SeSecurityPrivilege",enabled);
+  }
+  static void EnablePrivilege(string name,bool enabled) {
     IntPtr token;
     if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
     try {
       Luid id;
-      if (!LookupPrivilegeValue(null, "SeSecurityPrivilege", out id)) throw new Win32Exception();
+      if (!LookupPrivilegeValue(null, name, out id)) throw new Win32Exception();
       Privilege state=new Privilege { Count=1, Id=id, Attributes=enabled ? 2u : 0u };
       if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
       int error=Marshal.GetLastWin32Error();
@@ -3096,6 +3116,192 @@ public static class SystemPolicyFixture {
       if (complete != IntPtr.Zero) LocalFree(complete);
     }
   }
+  [StructLayout(LayoutKind.Sequential)] struct SidAndAttributes { public IntPtr Sid; public uint Attributes; }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disabledCount, IntPtr disabled, uint deletedCount, IntPtr deleted, uint restrictedCount, [In] SidAndAttributes[] restricted, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool ImpersonateLoggedOnUser(IntPtr token);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool RevertToSelf();
+  // Everyone must grant the second restricted-SID check, independently of the
+  // normal administrator/owner check. No privilege or process token is changed.
+  sealed class RestrictedActor : IDisposable {
+    IntPtr token=IntPtr.Zero;
+    public RestrictedActor() {
+      IntPtr original=IntPtr.Zero,buffer=IntPtr.Zero;
+      try {
+        if (!OpenProcessToken(GetCurrentProcess(),0xeu,out original)) throw new Win32Exception();
+        var sid=new System.Security.Principal.SecurityIdentifier("S-1-1-0");
+        byte[] bytes=new byte[sid.BinaryLength];sid.GetBinaryForm(bytes,0);
+        buffer=Marshal.AllocHGlobal(bytes.Length);Marshal.Copy(bytes,0,buffer,bytes.Length);
+        var restricted=new SidAndAttributes[] { new SidAndAttributes { Sid=buffer, Attributes=0 } };
+        if (!CreateRestrictedToken(original,1u,0,IntPtr.Zero,0,IntPtr.Zero,1,restricted,out token)) throw new Win32Exception();
+      } finally { if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);if (original != IntPtr.Zero) CloseHandle(original); }
+    }
+    public T Run<T>(Func<T> operation) {
+      if (!ImpersonateLoggedOnUser(token)) throw new Win32Exception();
+      try { return operation(); }
+      finally { if (!RevertToSelf()) throw new Win32Exception(); }
+    }
+    public Tuple<IntPtr,int> Open(string path,uint rights) {
+      return Run(() => {
+        SecurityAttributes attributes=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+        IntPtr file=CreateFile(path,rights,7,ref attributes,3,0x02200080,IntPtr.Zero);
+        return Tuple.Create(file,file == new IntPtr(-1) ? Marshal.GetLastWin32Error() : 0);
+      });
+    }
+    public Tuple<IntPtr,int> Create(string path) {
+      return Run(() => {
+        SecurityAttributes attributes=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+        IntPtr file=CreateFile(path,0x10002u,7,ref attributes,1,0x00200080,IntPtr.Zero);
+        return Tuple.Create(file,file == new IntPtr(-1) ? Marshal.GetLastWin32Error() : 0);
+      });
+    }
+    public void Denied(string path,uint rights) {
+      var opened=Open(path,rights);
+      if (opened.Item1 != new IntPtr(-1)) { CloseHandle(opened.Item1);throw new Exception("Restricted actor acquired forbidden rights="+rights.ToString("x")+" path="+path); }
+      if (opened.Item2 != 5) throw new Win32Exception(opened.Item2,"Actor control did not establish DACL denial, rights="+rights.ToString("x"));
+    }
+    public IntPtr Allowed(string path,uint rights) {
+      var opened=Open(path,rights);
+      if (opened.Item1 == new IntPtr(-1)) throw new Win32Exception(opened.Item2,"Restricted actor positive open failed, rights="+rights.ToString("x"));
+      return opened.Item1;
+    }
+    public void Dispose() { if (token != IntPtr.Zero) { CloseHandle(token);token=IntPtr.Zero; } }
+  }
+  static void ActorPremises(RestrictedActor actor,string parent,string target) {
+    IntPtr directory=actor.Allowed(parent,2u);CloseHandle(directory); // FILE_ADD_FILE
+    string path=System.IO.Path.Combine(parent,"actor-create-control-"+Guid.NewGuid());
+    var created=actor.Create(path);
+    if (created.Item1 == new IntPtr(-1)) throw new Win32Exception(created.Item2,"Restricted actor could not create an owned child");
+    try {
+      if (!actor.Run(() => { FileDisposition disposition=new FileDisposition { Delete=1 };return SetFileInformationByHandle(created.Item1,4,ref disposition,1); })) throw new Exception("Restricted actor could not clean its owned create control");
+    } finally { CloseHandle(created.Item1); }
+    if (System.IO.File.Exists(path)) throw new Exception("Restricted actor create control leaked a child");
+    actor.Denied(parent,0x40u); // FILE_DELETE_CHILD
+    actor.Denied(parent,0x40000u); // WRITE_DAC, including implicit owner rights
+    foreach (uint rights in new uint[] { 2u,0x10000u,0x40000u }) actor.Denied(target,rights);
+  }
+  public static string ActorSetup(string parent,string target) {
+    DiscretionaryPolicy(target,"D:P(D;;0x00050000;;;OW)(A;;FA;;;BA)(A;;FR;;;WD)");
+    DiscretionaryPolicy(parent,"D:P(D;;0x00040000;;;OW)(A;OICI;FA;;;BA)(A;;0x001200a3;;;WD)(A;OIIO;0x00050002;;;WD)");
+    using (var actor=new RestrictedActor()) { ActorPremises(actor,parent,target); }
+    return "restricted actor parent/target premises PASS";
+  }
+  public static string ActorStageProbe(string parent,string target,string stage) {
+    using (var actor=new RestrictedActor()) {
+      ActorPremises(actor,parent,target);
+      actor.Denied(stage,0x10000u);actor.Denied(stage,0x40000u);
+      // The actual publisher intentionally denies competing data opens by sharing.
+      // A source-policy clone with all-share independently proves its DACL denial.
+      IntPtr descriptor=FileDescriptor(stage,7u),raw=new IntPtr(-1);
+      string control=stage+"-data-control";
+      try {
+        SecurityAttributes attributes=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)),Descriptor=descriptor,Inherit=false };
+        raw=CreateFile(control,0xc0030000u,7,ref attributes,1,0x00200080,IntPtr.Zero);
+        if (raw == new IntPtr(-1)) throw new Win32Exception();
+        actor.Denied(control,2u);
+      } finally {
+        if (raw != new IntPtr(-1)) {
+          FileDisposition disposition=new FileDisposition { Delete=1 };
+          if (!SetFileInformationByHandle(raw,4,ref disposition,1)) throw new Win32Exception();
+          CloseHandle(raw);
+        }
+        LocalFree(descriptor);
+      }
+    }
+    return "actual stage actor DELETE/WRITE_DAC and share-independent data denial PASS";
+  }
+  public static string ActorInheritedBaseline(string parent,string target) {
+    string stage=System.IO.Path.Combine(parent,"inherited-actor-"+Guid.NewGuid()),published=stage+"-published",dataControl=stage+"-data";
+    IntPtr raw=new IntPtr(-1),data=new IntPtr(-1),deletion=new IntPtr(-1),policy=new IntPtr(-1),descriptor=IntPtr.Zero;
+    try {
+      using (var actor=new RestrictedActor()) {
+        ActorPremises(actor,parent,target);
+        SecurityAttributes ordinary=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+        raw=CreateFile(stage,0xc2070000u,4,ref ordinary,1,0x00200080,IntPtr.Zero);
+        if (raw == new IntPtr(-1)) throw new Win32Exception();
+        deletion=actor.Allowed(stage,0x10000u);policy=actor.Allowed(stage,0x40000u);
+        data=CreateFile(dataControl,0xc0030000u,7,ref ordinary,1,0x00200080,IntPtr.Zero);
+        if (data == new IntPtr(-1)) throw new Win32Exception();
+        IntPtr writer=actor.Allowed(dataControl,2u);CloseHandle(writer);
+        descriptor=FileDescriptor(target,7u);
+        bool present,defaulted;IntPtr dacl;
+        if (!GetSecurityDescriptorDacl(descriptor,out present,out dacl,out defaulted) || !present || dacl == IntPtr.Zero) throw new Exception("Actor source DACL missing");
+        uint status=SetSecurityInfo(raw,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+        if (status != 0) throw new Win32Exception((int)status);
+        actor.Denied(stage,0x10000u);actor.Denied(stage,0x40000u);
+        if (!MoveFileEx(stage,published,0)) throw new Win32Exception();
+        status=actor.Run(() => SetSecurityInfo(policy,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero));
+        if (status != 0) throw new Win32Exception((int)status,"Previously acquired WRITE_DAC did not survive tightening/publication");
+        bool removed=actor.Run(() => {
+          FileDisposition disposition=new FileDisposition { Delete=1 };
+          return SetFileInformationByHandle(deletion,4,ref disposition,1);
+        });
+        if (!removed) throw new Win32Exception(0,"Previously acquired DELETE did not survive tightening/publication");
+      }
+    } finally {
+      if (policy != new IntPtr(-1)) CloseHandle(policy);
+      if (deletion != new IntPtr(-1)) CloseHandle(deletion);
+      foreach (IntPtr file in new IntPtr[] { raw,data }) if (file != new IntPtr(-1)) {
+        FileDisposition disposition=new FileDisposition { Delete=1 };
+        SetFileInformationByHandle(file,4,ref disposition,1);CloseHandle(file);
+      }
+      if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+    }
+    if (System.IO.File.Exists(stage) || System.IO.File.Exists(published) || System.IO.File.Exists(dataControl)) throw new Exception("Actor baseline leaked an owned file");
+    return "former stage actor acquisition persists after tightening and publication PASS";
+  }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorOwner(IntPtr descriptor,out IntPtr owner,out bool defaulted);
+  public static string ForeignOwnerControl(string root) {
+    System.IO.Directory.CreateDirectory(root);
+    string source=System.IO.Path.Combine(root,"foreign-owner-source");
+    IntPtr ownerDescriptor=IntPtr.Zero,sourceDescriptor=IntPtr.Zero,parentDescriptor=IntPtr.Zero,token=IntPtr.Zero;
+    var results=new System.Collections.Generic.List<string>();
+    EnablePrivilege("SeRestorePrivilege",true);
+    try {
+      System.IO.File.WriteAllText(source,"foreign owner original");
+      DiscretionaryPolicy(source,"D:P(A;;FA;;;BA)");
+      uint length;IntPtr owner;bool defaulted;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:SY",1,out ownerDescriptor,out length) || !GetSecurityDescriptorOwner(ownerDescriptor,out owner,out defaulted)) throw new Win32Exception();
+      uint status=SetNamedSecurityInfo(source,1,1u,owner,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+      if (status != 0) throw new Win32Exception((int)status,"Authorized foreign-owner fixture setup failed");
+      sourceDescriptor=FileDescriptor(source,7u);parentDescriptor=NamedDescriptor(root,7u);
+      if (!OpenProcessToken(GetCurrentProcess(),0xau,out token)) throw new Win32Exception();
+      GenericMapping mapping=new GenericMapping { Read=0x120089u,Write=0x120116u,Execute=0x1200a0u,All=0x1f01ffu };
+      foreach (uint flags in new uint[] { 3u,19u }) {
+        IntPtr preview=IntPtr.Zero;
+        try {
+          bool success=CreatePrivateObjectSecurityEx(parentDescriptor,sourceDescriptor,out preview,IntPtr.Zero,false,flags,token,ref mapping);
+          results.Add("owner-preview-flags="+flags+";status="+(success ? 0 : Marshal.GetLastWin32Error())+(success ? ";image="+DescriptorImage(preview,7u,false) : ""));
+        } finally { if (preview != IntPtr.Zero) DestroyPrivateObjectSecurity(ref preview); }
+      }
+      foreach (bool supplied in new bool[] { false,true }) foreach (bool backup in new bool[] { false,true }) {
+        string stage=System.IO.Path.Combine(root,"foreign-owner-stage-"+supplied+"-"+backup);
+        SecurityAttributes attributes=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)),Descriptor=supplied ? sourceDescriptor : IntPtr.Zero,Inherit=false };
+        IntPtr held=CreateFile(stage,0xc20f0000u,7,ref attributes,1,0x00200080u | (backup ? 0x02000000u : 0u),IntPtr.Zero);
+        if (held == new IntPtr(-1)) { results.Add("owner-create="+supplied+";backup="+backup+";error="+Marshal.GetLastWin32Error());continue; }
+        try {
+          if (!supplied) {
+            bool present;IntPtr dacl;
+            if (!GetSecurityDescriptorDacl(sourceDescriptor,out present,out dacl,out defaulted) || !GetSecurityDescriptorOwner(sourceDescriptor,out owner,out defaulted)) throw new Win32Exception();
+            status=SetSecurityInfo(held,1,0x80000005u,owner,IntPtr.Zero,dacl,IntPtr.Zero);
+            if (status != 0) throw new Win32Exception((int)status,"Former authorized ownership setter failed");
+          }
+          IntPtr observed=HeldDescriptor(held,7u);
+          try { results.Add("owner-create="+supplied+";backup="+backup+";exact="+(DescriptorImage(observed,7u,false)==DescriptorImage(sourceDescriptor,7u,false))); }
+          finally { LocalFree(observed); }
+        } finally {
+          FileDisposition disposition=new FileDisposition { Delete=1 };
+          if (!SetFileInformationByHandle(held,4,ref disposition,1)) Console.WriteLine("Foreign owner control cleanup failed="+Marshal.GetLastWin32Error());
+          CloseHandle(held);
+        }
+      }
+      return String.Join("\n",results);
+    } finally {
+      if (token != IntPtr.Zero) CloseHandle(token);
+      foreach (IntPtr descriptor in new IntPtr[] { ownerDescriptor,sourceDescriptor,parentDescriptor }) if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      EnablePrivilege("SeRestorePrivilege",false);
+      System.IO.Directory.Delete(root,true);
+    }
+  }
   public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy) {
     return SourceDescriptorControl(root,protectedSource,widerParent,movedSource,systemAccess,systemPolicy,"");
   }
@@ -3115,6 +3321,7 @@ public static class SystemPolicyFixture {
       System.IO.File.WriteAllText(source,"previous destination");
       // Set the fixture SACL while the setup handle still has its initial
       // owner rights; a later restrictive DACL must not mask constructor proof.
+      DiscretionaryPolicy(source,"D:P(A;;FA;;;OW)");
       if (!String.IsNullOrEmpty(systemPolicy)) Policy(source,systemPolicy,24);
       DiscretionaryPolicy(source,String.IsNullOrEmpty(sourceDacl) ? (protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)") : sourceDacl);
       if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
@@ -3411,6 +3618,112 @@ fn windows_namespace_fixture(path: &Path, mode: &str, sensitive: bool) -> io::Re
         .to_owned())
 }
 
+/// Run one independent restricted-actor control in its owned child process.
+#[cfg(windows)]
+fn windows_actor_fixture(
+    parent: &Path,
+    target: &Path,
+    stage: &Path,
+    script: &str,
+) -> io::Result<String> {
+    let script = windows_fixture_script(script)?;
+    let result = windows_powershell_fixture(&script, |command| {
+        command
+            .env("PROJECTATLAS_TEST_ACTOR_PARENT", parent)
+            .env("PROJECTATLAS_TEST_ACTOR_TARGET", target)
+            .env("PROJECTATLAS_TEST_ACTOR_STAGE", stage);
+    })?;
+    require(
+        result.status.success(),
+        &format!("restricted actor fixture failed: {result:?}"),
+    )?;
+    String::from_utf8(result.stdout).map_err(io::Error::other)
+}
+
+/// The actual protected constructor prevents capabilities that tightening cannot revoke.
+#[cfg(windows)]
+#[test]
+fn windows_replacement_creation_denies_inherited_actor_capabilities() -> io::Result<()> {
+    const SETUP: &str = "[SystemPolicyFixture]::ActorSetup($env:PROJECTATLAS_TEST_ACTOR_PARENT,$env:PROJECTATLAS_TEST_ACTOR_TARGET)";
+    const BASELINE: &str = "[SystemPolicyFixture]::ActorInheritedBaseline($env:PROJECTATLAS_TEST_ACTOR_PARENT,$env:PROJECTATLAS_TEST_ACTOR_TARGET)";
+    const PROBE: &str = "[SystemPolicyFixture]::ActorStageProbe($env:PROJECTATLAS_TEST_ACTOR_PARENT,$env:PROJECTATLAS_TEST_ACTOR_TARGET,$env:PROJECTATLAS_TEST_ACTOR_STAGE)";
+    for (private, name, host) in replacement_targets() {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let parent = if private {
+            root.join(STATE_DIRECTORY)
+        } else {
+            root.clone()
+        };
+        fs::create_dir_all(&parent)?;
+        let target = parent.join(name);
+        let outside = root.join("actor-outside-owner");
+        fs::write(&target, b"protected previous output")?;
+        fs::hard_link(&target, &outside)?;
+        windows_actor_fixture(&parent, &target, &target, SETUP)?;
+        let expected = windows_acl(&target, None)?;
+        require(
+            windows_actor_fixture(&parent, &target, &target, BASELINE)?
+                .contains("publication PASS"),
+            "former inherited stage did not reproduce retained actor capabilities",
+        )?;
+        let guard = if host {
+            ProjectStateGuard::preflight(&root, None, None)?
+        } else {
+            ProjectStateGuard::preflight_document(&root, &target)?
+                .ok_or_else(|| io::Error::other("actor target was external"))?
+        };
+        let entries = fs::read_dir(&parent)?.count();
+        let observed = std::cell::Cell::new(false);
+        guard.publish_with_stage_check(
+            &target,
+            b"protected published output",
+            FilePublication::Replace,
+            |stage| {
+                let proof = windows_actor_fixture(&parent, &target, stage.path(), PROBE)?;
+                require(
+                    proof.contains("data denial PASS"),
+                    "actual stage did not deny actor capabilities",
+                )?;
+                observed.set(true);
+                Ok(())
+            },
+            || Ok(()),
+        )?;
+        require(
+            observed.get()
+                && fs::read(&target)? == b"protected published output"
+                && fs::read(&outside)? == b"protected previous output"
+                && windows_acl(&target, None)? == expected
+                && windows_acl(&outside, None)? == expected
+                && !same_file::is_same_file(&target, &outside)?
+                && fs::read_dir(&parent)?.count() == entries,
+            "protected creation lost payload, policy, outside owner or cleanup",
+        )?;
+        let failed = guard.publish_with_stage_check(
+            &target,
+            b"unpublished payload",
+            FilePublication::Replace,
+            |stage| {
+                windows_actor_fixture(&parent, &target, stage.path(), PROBE)?;
+                Ok(())
+            },
+            || Err(io::Error::other("injected actor publication failure")),
+        );
+        require(
+            failed.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains("injected actor publication failure")
+            }) && fs::read(&target)? == b"protected published output"
+                && fs::read(&outside)? == b"protected previous output"
+                && fs::read_dir(&parent)?.count() == entries,
+            &format!("protected stage failed original-handle cleanup: {failed:?}"),
+        )?;
+    }
+    Ok(())
+}
+
 /// Directory-specific case and actual DOS aliases share the fixed-name owner.
 #[cfg(windows)]
 #[test]
@@ -3477,32 +3790,36 @@ fn windows_native_namespace_aliases_preserve_distinct_custom_entries() -> io::Re
                         temp.path().to_path_buf()
                     };
                     let normal = normal_parent.join(format!("{expected}{suffix}"));
-                    require(
-                        normal.try_exists()?,
-                        "ordinary Win32 suffix did not alias the existing fixture entry",
-                    )?;
-                    let outside = root.join("normal-alias-outside-owner");
-                    let before = fs::read(&target)?;
-                    fs::hard_link(&target, &outside)?;
-                    if database {
+                    let mut device = std::ffi::OsString::from(r"\\.\");
+                    device.push(normal.as_os_str());
+                    for normal in [normal, std::path::PathBuf::from(device)] {
                         require(
-                            admit(&normal).is_err(),
-                            "normal database suffix bypassed hardlink admission",
+                            normal.try_exists()?,
+                            "ordinary Win32 suffix did not alias the existing fixture entry",
                         )?;
-                    } else {
-                        let mut admitted = admit(&normal)?.ok_or_else(|| {
-                            io::Error::other("normal fixed-name suffix was external")
-                        })?;
-                        if expected != super::GITIGNORE_FILE {
-                            admitted.write_document(b"normal alias publication")?;
+                        let outside = root.join("normal-alias-outside-owner");
+                        let before = fs::read(&target)?;
+                        fs::hard_link(&target, &outside)?;
+                        if database {
                             require(
-                                fs::read(&outside)? == before
-                                    && fs::read(&target)? == b"normal alias publication",
-                                "normal suffix publication changed the outside owner",
+                                admit(&normal).is_err(),
+                                "normal database suffix bypassed hardlink admission",
                             )?;
+                        } else {
+                            let mut admitted = admit(&normal)?.ok_or_else(|| {
+                                io::Error::other("normal fixed-name suffix was external")
+                            })?;
+                            if expected != super::GITIGNORE_FILE {
+                                admitted.write_document(b"normal alias publication")?;
+                                require(
+                                    fs::read(&outside)? == before
+                                        && fs::read(&target)? == b"normal alias publication",
+                                    "normal suffix publication changed the outside owner",
+                                )?;
+                            }
                         }
+                        fs::remove_file(outside)?;
                     }
-                    fs::remove_file(outside)?;
                     // The same suffix in an extended path is a literal custom
                     // entry, even when its inode also backs the managed name.
                     let literal = parent.join(format!("{expected}{suffix}"));
@@ -4116,7 +4433,7 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
         fs::write(&control, b"original control")?;
         let previous = windows_system_policy(&control, Some("S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)"))?;
         let mut stage = tempfile::Builder::new().make_in(&guard.directory, |path| {
-            super::create_windows_staging_file(path, true, false)
+            windows_policy_test_file(path, false)
         })?;
         {
             let source = fs::File::open(&control)?;
@@ -4337,6 +4654,38 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             }
         }
     }
+    if complete {
+        for dacl in ["D:P(A;;0x0013019f;;;OW)", "D:P(D;;WD;;;OW)(A;;FA;;;OW)"] {
+            for policy in [
+                "S:P(AU;SAFA;FW;;;WD)",
+                "S:P(ML;;NW;;;HI)",
+                r#"S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))"#,
+                "S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)",
+            ] {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().canonicalize()?;
+                let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+                guard.ensure_directory()?;
+                let output = guard.directory.join(HOST_FILES[0]);
+                let outside = root.join("restricted-policy-outside-owner");
+                fs::write(&output, b"restricted policy original")?;
+                windows_system_policy(&output, Some(policy))?;
+                windows_discretionary_policy(&output, dacl)?;
+                fs::hard_link(&output, &outside)?;
+                let expected = windows_native_system_policy(&output, 0x1f8)?;
+                let expected_dacl = windows_acl(&output, None)?;
+                guard.write_generated(&output, b"restricted policy replacement")?;
+                require(
+                    fs::read(&output)? == b"restricted policy replacement"
+                        && fs::read(&outside)? == b"restricted policy original"
+                        && windows_native_system_policy(&output, 0x1f8)? == expected
+                        && windows_native_system_policy(&outside, 0x1f8)? == expected
+                        && windows_acl(&output, None)? == expected_dacl,
+                    "available system-policy preservation required unused discretionary rights",
+                )?;
+            }
+        }
+    }
     windows_system_policy_failure_controls(complete)?;
     Ok(())
 }
@@ -4428,7 +4777,7 @@ fn windows_system_policy_failure_controls(complete: bool) -> io::Result<()> {
     fs::write(&victim, b"foreign complete bytes")?;
     let victim_policy = windows_system_policy(&victim, Some(ORIGINAL))?;
     let staged = tempfile::Builder::new().make_in(&guard.directory, |path| {
-        super::create_windows_staging_file(path, true, true)
+        windows_policy_test_file(path, true)
     })?;
     let retained = guard.directory.join("retained-system-policy-stage");
     fs::rename(staged.path(), &retained)?;
@@ -4495,9 +4844,8 @@ fn source_snapshot_handles_are_released_before_windows_replacement() -> io::Resu
                 )?)
             };
             let mut query = query;
-            let mut stage = tempfile::Builder::new().make_in(&root, |path| {
-                super::create_windows_staging_file(path, true, false)
-            })?;
+            let mut stage = tempfile::Builder::new()
+                .make_in(&root, |path| windows_policy_test_file(path, false))?;
             stage.write_all(b"complete replacement")?;
             if let Some(query) = &query {
                 query.verify_destination(&output)?;
@@ -4533,6 +4881,94 @@ fn source_snapshot_handles_are_released_before_windows_replacement() -> io::Resu
     Ok(())
 }
 
+/// Create an inherited-policy control for isolated setter/handle experiments.
+#[cfg(windows)]
+fn windows_policy_test_file(path: &Path, complete: bool) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let rights = 0xc207_0000 | if complete { 0x0100_0000 } else { 0 };
+    fs::File::options()
+        .write(true)
+        .create_new(true)
+        .access_mode(rights)
+        .share_mode(4)
+        .open(path)
+}
+
+/// A same-directory policy change cannot bypass the retained inheritance proof.
+#[cfg(windows)]
+#[test]
+fn windows_parent_policy_change_refuses_before_restoration() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let target = guard.directory.join(HOST_FILES[0]);
+    let outside = root.join("parent-policy-outside-owner");
+    fs::write(&target, b"protected source")?;
+    windows_acl(&target, Some(true))?;
+    fs::hard_link(&target, &outside)?;
+    let entries = fs::read_dir(&guard.directory)?.count();
+    let result = guard.publish_with_stage_check(
+        &target,
+        b"unpublished payload",
+        FilePublication::Replace,
+        |_| windows_discretionary_policy(&guard.directory, "D:P(A;;FA;;;OW)(A;;FR;;;WD)"),
+        || Ok(()),
+    );
+    require(
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("parent policy changed"))
+            && fs::read(&target)? == b"protected source"
+            && fs::read(&outside)? == b"protected source"
+            && same_file::is_same_file(&target, &outside)?
+            && fs::read_dir(&guard.directory)?.count() == entries,
+        &format!(
+            "parent policy change bypassed creation-policy restoration or cleanup: {result:?}"
+        ),
+    )
+}
+
+/// Preparing a stage uses admitted policy even if a later source query is broader.
+#[cfg(windows)]
+#[test]
+fn windows_stage_policy_uses_the_captured_descriptor() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let source = root.join("source");
+    fs::write(&source, b"admitted source")?;
+    let expected = windows_acl(&source, Some(true))?;
+    let captured = super::ReplacementSource::capture(&source, &fs::symlink_metadata(&source)?)?;
+    let identity = same_file::Handle::from_path(&root)?;
+    let creation = super::windows_security::ReplacementCreation::capture(
+        &captured.file,
+        &root,
+        &identity,
+        &captured.security,
+    )?;
+    let stage = tempfile::Builder::new().make_in(&root, |path| {
+        super::create_windows_staging_file(path, Some(&creation))
+    })?;
+    windows_discretionary_policy(&source, "D:P(A;;FA;;;WD)")?;
+    let changed = windows_acl(&source, None)?;
+    require(
+        changed != expected && captured.verify_destination(&source).is_err(),
+        "source policy change was not detected",
+    )?;
+    let former =
+        tempfile::Builder::new().make_in(&root, |path| windows_policy_test_file(path, false))?;
+    super::preserve_windows_access(&source, &captured.file, &former)?;
+    require(
+        windows_acl(former.path(), None)? == changed,
+        "fresh source policy did not reproduce broader stage preparation",
+    )?;
+    captured.apply(&source, &stage, &creation)?;
+    require(
+        windows_acl(stage.path(), None)? == expected && windows_acl(&source, None)? == changed,
+        "stage preparation followed a fresh mutable source policy",
+    )
+}
+
 /// Native ACL updates stay on the held stage after a hardlink replaces its name.
 #[cfg(windows)]
 #[test]
@@ -4550,9 +4986,8 @@ fn windows_acl_updates_do_not_reopen_a_substituted_stage_name() -> io::Result<()
         "ACL substitution fixture has equal policies",
     )?;
     let snapshot = super::ReplacementSource::capture(&source, &fs::symlink_metadata(&source)?)?;
-    let mut stage = tempfile::Builder::new().make_in(&root, |path| {
-        super::create_windows_staging_file(path, true, false)
-    })?;
+    let mut stage =
+        tempfile::Builder::new().make_in(&root, |path| windows_policy_test_file(path, false))?;
     let stage_name = stage.path().to_path_buf();
     let retained = root.join("retained-stage");
     fs::rename(&stage_name, &retained)?;

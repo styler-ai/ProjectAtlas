@@ -1,7 +1,8 @@
-//! Retained-handle Windows system-policy snapshots without privilege changes.
+//! Retained Windows file policy and protected replacement creation.
 //!
-//! The canonical safe ACL wrapper omits the control getter and panics on NULL
-//! SACLs. Canonical SDK getters and empty-ACL initialization use this local exception.
+//! The safe ACL wrapper lacks control/NULL-SACL helpers; standard file creation
+//! cannot supply a security descriptor. This local SDK exception also previews
+//! inheritance with the effective token and creates a protected, noninherited handle.
 #![allow(unsafe_code)]
 
 use std::ffi::{OsStr, OsString};
@@ -332,6 +333,378 @@ impl SystemPolicy {
     }
 }
 
+/// SDK-owned inheritance preview, released by its matching native allocator.
+struct InheritedDescriptor(windows_sys::Win32::Security::PSECURITY_DESCRIPTOR);
+
+impl InheritedDescriptor {
+    /// Borrow the canonical opaque descriptor while its native allocation lives.
+    fn descriptor(&self) -> &SecurityDescriptor {
+        // SAFETY: successful CreatePrivateObjectSecurityEx returned this non-null
+        // native descriptor; the wrapper is an opaque view of the same SDK type.
+        unsafe { &*self.0.cast::<SecurityDescriptor>() }
+    }
+}
+
+impl Drop for InheritedDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: this unique allocation came from CreatePrivateObjectSecurityEx;
+        // it is never transferred or freed with LocalFree.
+        unsafe { windows_sys::Win32::Security::DestroyPrivateObjectSecurity(&raw mut self.0) };
+    }
+}
+
+/// Open the effective caller token without changing impersonation or privileges.
+fn effective_token() -> io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_NO_TOKEN;
+    use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    };
+    let mut token = std::ptr::null_mut();
+    let rights = TOKEN_QUERY | TOKEN_DUPLICATE;
+    // SAFETY: pseudo thread/process handles remain borrowed; the only returned
+    // owning handle is written to this live output and wrapped exactly once.
+    if unsafe { OpenThreadToken(GetCurrentThread(), rights, 1, &raw mut token) } == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_NO_TOKEN as i32) {
+            return Err(error);
+        }
+        // SAFETY: no thread token exists; query the current process token only.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), rights, &raw mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    // SAFETY: the successful token API transfers one valid owning handle.
+    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(token) })
+}
+
+/// Compare native SACL headers while ignoring only preview auto-inheritance.
+fn inheritance_system_image(value: &OsStr) -> io::Result<String> {
+    let text = value.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "native SACL image is not text")
+    })?;
+    let split = text.find('(').unwrap_or(text.len());
+    Ok(format!(
+        "{}{}",
+        text[..split].replace("AI", ""),
+        &text[split..]
+    ))
+}
+
+/// Ignore preview AI and the SDK-undefined default bit only when SACL is absent.
+fn inheritance_system_control(control: u16) -> u16 {
+    let control = control & SACL_CONTROL & !0x0800;
+    if control & SACL_PRESENT == 0 {
+        control & !SACL_DEFAULTED
+    } else {
+        control
+    }
+}
+
+/// Bind a combined descriptor to the already admitted native policy snapshot.
+fn snapshot_system_image(
+    descriptor: &SecurityDescriptor,
+    expected: &super::WindowsAccessSnapshot,
+) -> io::Result<OsString> {
+    let complete = expected.system.needs_system_access();
+    let discretionary =
+        SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
+    let system = if complete {
+        system_information()
+    } else {
+        SecurityInformation::Label
+    };
+    let image = ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, system)?;
+    require_complete_sacl_image(descriptor, &image)?;
+    if ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, discretionary)?
+        != expected.discretionary
+        || admitted_control(descriptor_control(descriptor)?, complete)? != expected.system.control
+        || image != expected.system.sddl
+    {
+        return Err(io::Error::other(
+            "native policy changed before replacement creation",
+        ));
+    }
+    Ok(image)
+}
+
+/// Captured source policy and exact parent used to create a replacement safely.
+pub(super) struct ReplacementCreation {
+    /// Source descriptor with DACL inheritance blocked at initial creation.
+    pub(super) descriptor: LocalBox<SecurityDescriptor>,
+    /// Original DACL header/order, before adding initial inheritance protection.
+    pub(super) dacl_image: OsString,
+    /// Retained publication parent; no following security setter is used.
+    parent: File,
+    /// Parent policy that admitted inheritance restoration.
+    parent_policy: super::WindowsAccessSnapshot,
+    /// Whether full system-policy rights are already available.
+    complete: bool,
+    /// Whether restoring the original unprotected DACL needs `WRITE_DAC`.
+    restore_inheritance: bool,
+}
+
+impl ReplacementCreation {
+    /// Preview native inheritance and protect the initial source policy.
+    ///
+    /// # Errors
+    /// Refuses changed, incomplete or differing source/parent policy before staging.
+    pub(super) fn capture(
+        source: &File,
+        directory: &std::path::Path,
+        directory_identity: &same_file::Handle,
+        expected: &super::WindowsAccessSnapshot,
+    ) -> io::Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Security::{
+            CreatePrivateObjectSecurityEx, GENERIC_MAPPING, SE_DACL_PROTECTED, SE_SACL_PROTECTED,
+            SEF_DACL_AUTO_INHERIT, SEF_SACL_AUTO_INHERIT, SetSecurityDescriptorControl,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        };
+        let complete = expected.system.needs_system_access();
+        let rights = 0x0002_0080 | if complete { 0x0100_0000 } else { 0 };
+        let parent = File::options()
+            .access_mode(rights)
+            .share_mode(7)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(directory)?;
+        if !parent.metadata()?.is_dir()
+            || same_file::Handle::from_file(parent.try_clone()?)? != *directory_identity
+        {
+            return Err(io::Error::other("replacement creation parent changed"));
+        }
+        let parent_policy = super::windows_access_snapshot(&parent, complete)?;
+        let discretionary =
+            SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
+        let system = if complete {
+            system_information()
+        } else {
+            SecurityInformation::Label
+        };
+        let information = discretionary | system;
+        let mut descriptor = GetSecurityInfo(source, SeObjectType::SE_FILE_OBJECT, information)?;
+        let source_system = snapshot_system_image(&descriptor, expected)?;
+        let parent_descriptor =
+            GetSecurityInfo(&parent, SeObjectType::SE_FILE_OBJECT, information)?;
+        snapshot_system_image(&parent_descriptor, &parent_policy)?;
+        let token = effective_token()?;
+        let mapping = GENERIC_MAPPING {
+            GenericRead: FILE_GENERIC_READ,
+            GenericWrite: FILE_GENERIC_WRITE,
+            GenericExecute: FILE_GENERIC_EXECUTE,
+            GenericAll: FILE_ALL_ACCESS,
+        };
+        let mut predicted = std::ptr::null_mut();
+        // SAFETY: both SDK descriptors and the effective token stay owned and live;
+        // this creates a non-container preview with real inheritance/owner checks.
+        if unsafe {
+            CreatePrivateObjectSecurityEx(
+                std::ptr::from_ref::<SecurityDescriptor>(&parent_descriptor)
+                    .cast_mut()
+                    .cast(),
+                std::ptr::from_ref::<SecurityDescriptor>(&descriptor)
+                    .cast_mut()
+                    .cast(),
+                &raw mut predicted,
+                std::ptr::null(),
+                0,
+                SEF_DACL_AUTO_INHERIT | SEF_SACL_AUTO_INHERIT,
+                token.as_raw_handle(),
+                &raw const mapping,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if predicted.is_null() {
+            return Err(io::Error::other(
+                "native inheritance preview returned no descriptor",
+            ));
+        }
+        let preview = InheritedDescriptor(predicted);
+        let preview = preview.descriptor();
+        let dacl_image = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &descriptor,
+            SecurityInformation::Dacl,
+        )?;
+        let preview_dacl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            preview,
+            SecurityInformation::Dacl,
+        )?;
+        let preview_system = ConvertSecurityDescriptorToStringSecurityDescriptor(preview, system)?;
+        require_complete_sacl_image(preview, &preview_system)?;
+        if descriptor.owner() != preview.owner()
+            || descriptor.group() != preview.group()
+            || !super::windows_file_dacl_matches(&dacl_image, &preview_dacl)?
+            || inheritance_system_control(descriptor_control(&descriptor)?)
+                != inheritance_system_control(descriptor_control(preview)?)
+            || inheritance_system_image(&source_system)?
+                != inheritance_system_image(&preview_system)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "replacement creation would inherit different native policy",
+            ));
+        }
+        let source_control = descriptor_control(&descriptor)?;
+        let restore_inheritance = source_control & SE_DACL_PROTECTED == 0;
+        let protection = SE_DACL_PROTECTED
+            | if source_control & SACL_PRESENT != 0 {
+                SE_SACL_PROTECTED
+            } else {
+                0
+            };
+        // SAFETY: only inheritance protection on our uniquely owned descriptor
+        // changes. Never synthesize a present SACL from absence. Original policy
+        // is retained separately for restoration through the original handle.
+        if unsafe {
+            SetSecurityDescriptorControl(
+                std::ptr::from_mut::<SecurityDescriptor>(&mut descriptor).cast(),
+                protection,
+                protection,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            descriptor,
+            dacl_image,
+            parent,
+            parent_policy,
+            complete,
+            restore_inheritance,
+        })
+    }
+
+    /// Revalidate the retained parent's complete admitted policy before restoration.
+    ///
+    /// # Errors
+    /// Refuses policy changes or unavailable native evidence.
+    pub(super) fn verify_parent(&self) -> io::Result<()> {
+        if super::windows_access_snapshot(&self.parent, self.complete)? != self.parent_policy {
+            return Err(io::Error::other(
+                "replacement parent policy changed before restoration",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check actual creation policy before callbacks, repair or payload I/O.
+    ///
+    /// # Errors
+    /// Refuses unexpected owner/group, ACL entries, controls or incomplete images.
+    pub(super) fn verify_initial(&self, file: &File) -> io::Result<()> {
+        let discretionary =
+            SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
+        let system = if self.complete {
+            system_information()
+        } else {
+            SecurityInformation::Label
+        };
+        let observed = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, discretionary | system)?;
+        let original_dacl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &self.descriptor,
+            SecurityInformation::Dacl,
+        )?;
+        let observed_dacl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &observed,
+            SecurityInformation::Dacl,
+        )?;
+        let original_system =
+            ConvertSecurityDescriptorToStringSecurityDescriptor(&self.descriptor, system)?;
+        let observed_system =
+            ConvertSecurityDescriptorToStringSecurityDescriptor(&observed, system)?;
+        require_complete_sacl_image(&self.descriptor, &original_system)?;
+        require_complete_sacl_image(&observed, &observed_system)?;
+        admitted_control(descriptor_control(&observed)?, self.complete)?;
+        if observed.owner() != self.descriptor.owner()
+            || observed.group() != self.descriptor.group()
+            || !super::windows_file_dacl_matches(&original_dacl, &observed_dacl)?
+            || inheritance_system_control(descriptor_control(&self.descriptor)?)
+                != inheritance_system_control(descriptor_control(&observed)?)
+            || inheritance_system_image(&original_system)?
+                != inheritance_system_image(&observed_system)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "initial replacement stage differs from its protected creation policy",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Create one new file with its protected policy and original owning handle.
+    ///
+    /// # Errors
+    /// Returns native creation errors without opening an existing object.
+    pub(super) fn create(&self, path: &std::path::Path) -> io::Result<File> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_permissions::constants::AccessRights;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE,
+        };
+        self.verify_parent()?;
+        let mut name: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if !path.is_absolute() || name.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "replacement stage requires an absolute NUL-free path",
+            ));
+        }
+        name.push(0);
+        let mut rights = (AccessRights::GenericRead
+            | AccessRights::GenericWrite
+            | AccessRights::Delete
+            | AccessRights::ReadControl)
+            .bits();
+        if self.restore_inheritance {
+            rights |= AccessRights::WriteDac.bits();
+        }
+        if self.restore_inheritance || self.complete {
+            rights |= 0x0200_0000; // MAXIMUM_ALLOWED retains optional policy rights.
+        }
+        if self.complete {
+            rights |= AccessRights::AccessSystemSecurity.bits();
+        }
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                .map_err(io::Error::other)?,
+            lpSecurityDescriptor: std::ptr::from_ref::<SecurityDescriptor>(&self.descriptor)
+                .cast_mut()
+                .cast(),
+            bInheritHandle: 0,
+        };
+        // SAFETY: all buffers/descriptors stay live for this synchronous call;
+        // CREATE_NEW never opens an existing object and the handle is noninherited.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                rights,
+                FILE_SHARE_DELETE,
+                &raw const attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the successful create transfers its sole owning handle.
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +775,14 @@ mod tests {
     /// Defaulted controls are refused even when the caller has full SACL rights.
     #[test]
     fn defaulted_or_hidden_system_policy_is_never_admitted_as_absent() -> io::Result<()> {
+        if inheritance_system_control(SACL_DEFAULTED | 0x0800) != 0
+            || inheritance_system_control(SACL_PRESENT | SACL_DEFAULTED)
+                != SACL_PRESENT | SACL_DEFAULTED
+        {
+            return Err(io::Error::other(
+                "inheritance preview changed meaningful defaulted SACL state",
+            ));
+        }
         let defaulted = admitted_control(0x8010 | SACL_DEFAULTED, true);
         if !defaulted.is_err_and(|source| source.kind() == io::ErrorKind::Unsupported) {
             return Err(io::Error::other("defaulted SACL was admitted"));

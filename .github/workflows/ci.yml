@@ -494,6 +494,7 @@ jobs:
           native_policy_status=0
           if [ "$RUNNER_OS" = Windows ]; then
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture || native_policy_status=$?
+            cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::windows_managed_database_aliases_preserve_wal_recovery_and_reset -- --exact --nocapture || native_policy_status=$?
           fi
           cargo test --locked -p projectatlas-cli --bin projectatlas project_state:: || native_policy_status=$?
           cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::relative_config_roots_follow_native_private_directory_names -- --exact || native_policy_status=$?
@@ -1351,6 +1352,13 @@ jobs:
               }
               # These controls distinguish safe refusal from a creator-rights
               # regression; the former positive matrix used OwnerRights-Full only.
+              try {
+                $value = [SystemPolicyFixture]::ForeignOwnerControl((Join-Path $directory 'authorized-foreign-owner'))
+                $results += @{ case='authorized-foreign-owner'; root=$root.name; value=$value }
+              } catch {
+                $results += @{ case='authorized-foreign-owner'; root=$root.name; error=$_.Exception.ToString() }
+              }
+              $results[-1] | ConvertTo-Json -Depth 4 -Compress
               $sourceDacls = @(
                 @{ name='owner-full'; dacl='D:P(A;;FA;;;OW)' },
                 @{ name='owner-without-write-dac'; dacl='D:P(A;;0x0013019f;;;OW)' },

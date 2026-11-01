@@ -1156,7 +1156,7 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
     if !config.db_path.exists() {
         return Ok(BTreeMap::new());
     }
-    let _admission = crate::project_state::ProjectStateGuard::preflight_database_path(
+    let admission = crate::project_state::ProjectStateGuard::preflight_database_path(
         &config.db_path,
         &config.root,
     )
@@ -1164,12 +1164,14 @@ fn load_db_purpose_records(config: &AtlasMapConfig) -> AtlasMapResult<BTreeMap<S
         path: config.db_path.clone(),
         source,
     })?;
-    let store = AtlasStore::open_read_only_for_project(&config.db_path, &config.root).map_err(
-        |source| AtlasMapError::Database {
-            path: config.db_path.clone(),
-            message: source.to_string(),
-        },
-    )?;
+    let database = crate::runtime::admitted_database_path(&config.db_path, admission.as_ref());
+    let store =
+        AtlasStore::open_read_only_for_project(database, &config.root).map_err(|source| {
+            AtlasMapError::Database {
+                path: config.db_path.clone(),
+                message: source.to_string(),
+            }
+        })?;
     let nodes = store
         .load_nodes()
         .map_err(|source| AtlasMapError::Database {
