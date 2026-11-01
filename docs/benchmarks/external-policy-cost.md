@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 349,824 bytes (0.50%) to the optimized
+The derivation-25 policy repair adds 349,568 bytes (0.50%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -68,11 +68,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 291.5 → 289.1 | 49.5 → 50.2 | 30,544 → 29,748 | 19,212 → 19,188 |
-| Large config | 296.2 → 299.1 | 49.4 → 54.3 | 29,900 → 32,372 | 18,988 → 22,320 |
-| 10,000 rules | 377.4 → 381.5 | 72.4 → 99.1 | 42,040 → 40,756 | 30,252 → 32,008 |
+| Ordinary | 308.3 → 307.8 | 48.9 → 49.6 | 31,860 → 30,920 | 20,452 → 20,408 |
+| Large config | 306.6 → 314.0 | 49.7 → 53.1 | 31,080 → 33,236 | 20,472 → 23,700 |
+| 10,000 rules | 381.3 → 389.2 | 71.5 → 96.2 | 43,688 → 41,936 | 31,812 → 33,088 |
 
-The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 25 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in

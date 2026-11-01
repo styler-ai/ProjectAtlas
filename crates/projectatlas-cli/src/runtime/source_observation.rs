@@ -1911,18 +1911,27 @@ mod tests {
             fs::write(spelling.join(leaf), content)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let event = entry
-                    .receiver
-                    .lock()
-                    .map_err(|_poisoned| std::io::Error::other("observer receiver lock poisoned"))?
-                    .recv_timeout(Duration::from_millis(100));
-                if let Ok(event) = event
+                // The callback takes this same fence before sending. Release it
+                // before waiting so native ingress can make progress.
+                let event = {
+                    entry
+                        .receiver
+                        .lock()
+                        .map_err(|_poisoned| {
+                            std::io::Error::other("observer receiver lock poisoned")
+                        })?
+                        .try_recv()
+                };
+                if matches!(event, Err(TryRecvError::Disconnected)) {
+                    return Err(std::io::Error::other("native observer disconnected").into());
+                }
+                if let Ok(event) = &event
                     && event.paths.iter().any(|path| path == &canonical_source)
                 {
                     let changes = observer_event_changes(
                         &entry.binding,
                         &projectatlas_fs::ScanOptions::default(),
-                        &event,
+                        event,
                     );
                     require(
                         changes.paths.contains(&canonical_source),
@@ -1935,6 +1944,9 @@ mod tests {
                         "selected-root source edit did not reach its canonical native registration",
                     )
                     .into());
+                }
+                if matches!(event, Err(TryRecvError::Empty)) {
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
         }

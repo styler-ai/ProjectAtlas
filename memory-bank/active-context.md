@@ -1,3 +1,41 @@
+## Current #739 checkpoint — receiver fence correction
+
+Prior normal push96803 TERMINAL0, PR745 head16338ba verified. Native34suites:
+1778PASS/0FAIL/12ignored. Hosted source41362359349 stillRUNNING; CodeQL41362357386
+Rustpending, sixotherlanguagesPASS. #731/#741 CLOSED; #739/#738/#708/#715 OPEN.
+Keep ONE issue atatime; no acceptance/closure yet. Stable050 MCP refresh index-4
+TERMINALCOMPLETE after correct typedpolicy_drift; privateDB preserved.
+
+Primary found and independentLuna741 confirmed TEST-ONLY callback starvationrisk:
+newnativealias testheld receiver mutex during recv_timeout100ms while callback
+needs samefence beforetry_send. Fixed shortscopedtry_recv/disconnecterror/sleep10ms
+outsidefence, same5sdeadline/distinctleaf/nativeclassifier assertion. No observed
+platformfailure claimed. Existing waits audited: controlledfencetest waits on a
+separateprelockarrival channel; acceptance waits on separatecompletion channel.
+No analogous same-receiver wait remains in sourceobserver; CLIbatch rawreceiver
+has no sharedmutex. Primarycodes; Luna741 approvedactualdiff. Correct binobserver
+38PASS2.02s; first libselector matched0 and is NOTproof. CLIalltarget/allfeature
+Clippy/strings/fmtPASS. Logs /tmp/projectatlas-739-native-receiver-fence-*.log.
+
+Freshdefaultlockedreleasebuild84232TERMINAL0,41.36s. Source139manifest
+914972bc8d9e55a15c2dea8b072fe0dd5da7aa763b6f5ea4f41f20b2a617a577,
+CLI48a4cb9f82e0d25fd004cebd9fe5e5061b0829f02700abc40dfe9f00757f1129,
+69806528bytes, ~/.cache/projectatlas-benchmarks/external-policy-739-receiver-fence-release.
+CLI differsfrom7eaa despite onlytestRustdelta; do NOTclaimbyteidenticalCLI/reuseold
+CLImeasurements. NewactualreleaseRlibs helper68663byteidentical, so ONLY18FSsamples
+reused. Freshproof45451TERMINAL0: upgrade4PASS/CLI18samplesPASS;92364TERMINAL0:
+optimizedexternal1PASS1.34s/rootreplacement1PASS8.09s. Allnowbound48a4.
+Docs refreshed: binary+349568/+0.503287%,ordinaryinit308.3→307.8ms/noop48.9→49.6ms,
+10krulesnoop71.5→96.2ms(+24.7ms,rounded25). No #708SLOwaiver/generalspeedup.
+Luna731 finds task2.1source/localproof ready, require scopedcurrentnativeWin/Mac
+selection/observer proof beforechecking. 2.2/3.1/allacceptance remainOPEN.
+
+Next: complete narrowdocsreview/cheapgates, normalcommit(#739)/push(withhooks),
+verify exacthead native4platform/codeQL/Codexreviews, inspectallnewfindings, sync
+implementationandacceptance onlywhenearned, normalmerge745 andnative739CLOSED
+before738. No stablepublication or milestoneclosure. Earliercheckpoint below
+retains detailedscope andhistoricalevidence; thisheader supersedesoldcurrentleases.
+
 # Active RC1 checkpoint — 2026-11-02
 
 Goal: normally merge and verify closure ONE issue before next:739→738→708→715,
