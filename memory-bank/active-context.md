@@ -1,3 +1,57 @@
+## Current public #739 checkpoint — PR #745
+
+Public source is 5560e43045d9bdb2b66a6d1043dcce48956500f0 on
+`fix/external-excludes-739`, based on main 6927ed0. PR #745 is OPEN and ready,
+milestone 37 (`v0.5.1-00`), references only #739, with no auto-merge.
+Implementation remains 2/4: 1.1 and 2.1 accepted; 2.2, 3.1 and acceptance open.
+
+Normal push 58835 finished successfully: 1,770 passed, 0 failed, 12 existing
+ignored tests across 34 suites, plus required repository/Rust/docs/security/Atlas
+gates. `/tmp/projectatlas-739-native-push-session.json` is terminal, not live.
+
+Exact-source CI 41340135380: plan, repository, Rust, Windows diagnostics and Linux
+passed; Windows and both macOS jobs were still running at the last read.
+CodeQL workflow 41340131537 succeeded. Codex code and security reviews completed
+on 5560 (summary 6562604562), no Codex findings posted, bot thumbs-up. Security
+summary finding flags are null; do not turn that into a clean-scan claim.
+Latest metadata PR-state 41340706944 passed; original missing-milestone failure
+is superseded. Do not restart passing jobs for metadata.
+
+All seven new GHAS threads (410, 404–409) were individually statically assessed
+and independently accepted by Luna Max review_731, then replied to and resolved
+with readback. Six are private nonshipping libtest fixture paths; 409 propagates
+aggregate taint to a root actually assigned from the selected plan, with document
+prefix admission before ignore classification. No source restrictions, alert
+suppression or dismissal. Evidence: `/tmp/projectatlas-739-codeql-triage-result.json`
+and `codeql-intake/normalized-seven-sarif.json`. These seven dispositions do not
+claim all 11 Rust SARIF results are clean or replace the older #741 baseline.
+
+A platform coverage gap was confirmed: existing jobs compile the two new public
+#739 scenarios but do not explicitly execute them. Primary added one bounded
+`External source policy and root replacement` step in `.github/workflows/ci.yml`,
+under the existing compile contract, including all four full-plan platforms.
+It runs FS lib, policy_watch/source_observation unit families and the exact real
+external-policy/root-replacement CLI/MCP selectors. YAML parse, diff check and
+planner self-test passed. Exact extracted step session55986 finished PASS: FS46,
+policy-watch10, source-observation36, and both exact public E2Es. Log:
+`/tmp/projectatlas-739-platform-step.log`. Luna Max review_741 approved the bounded
+step and all-four compile-matrix selection; final hosted outcomes remain required.
+No push of this workflow correction yet. Preserve source clean during push.
+
+Stable050 exact-root MCP refresh index-2 completed in about 42 seconds, without
+reset; subsequent selected-root brief reports available. One bounded low-scope
+`.agents/plugins` purpose row was approved by purpose_739 (one change, no conflict);
+no index or mutation lease remains.
+Current candidate artifact 9c7224c6... and all 139 source inputs remain unchanged;
+workflow proof must be rerun for the correction, while unchanged cost/upgrade/
+causal artifact evidence remains reusable only for its stated source boundary.
+
+Next: accept and normally push the workflow correction, verify the new exact-head
+four-platform outcomes and every current review comment, complete task/acceptance
+mirrors only after proof, merge #745 normally and verify #739 closed before #738.
+Current remaining milestone issues: #739, #738, #708, #715. No RC exists yet.
+Stable050 remains Latest; stable publication requires later user authorization.
+
 # Active RC1 context — 2026-11-01
 
 ## Goal and ownership
@@ -16,9 +70,8 @@ Base aaef42a0e431c3549ecdacca9c64459c07197384 merges accepted main 6927ed0.
 Use git HEAD for the subsequent normal checkpoint; do not infer it from this base.
 Earlier root-watch checkpoint 832cdd5 and original backup pointer
 `/tmp/projectatlas-739-pre-main-snapshot-path.txt` preserve prior work.
-Current source/spec/docs/memory changes are primary-owned and ready to commit.
-Publication freshness and fixture-cycle fixes below are included, not deferred.
-No #739 PR yet. No build, index, benchmark or mutation process remains live.
+Source/spec/docs through publication freshness are committed in 5560; public PR #745
+is open. The header above owns the current workflow correction and process state.
 
 OpenSpec `reconcile-external-git-excludes`, schema spec-driven, owns #739.
 Implementation tasks 1.1 and 2.1 are checked locally and remotely (2/4); both 2.1
@@ -123,15 +176,10 @@ three trials. Ordinary targeted overhead rises; 10k-rule targeted work falls fro
 
 ## Next authorized steps
 
-Finish cheap gate readback, commit intended files normally, push this branch with
-normal hooks, and create a draft PR to main. Expected push log is
-`/tmp/projectatlas-739-native-push.log`; record actual returned session/PID externally
-and in integration memory after start. Completed47956: upgrades+CLIcost PASS;
-completed42582: currentoptimizedpublicE2Es PASS. Do not infer a live process from a planned
-path, receipt or old header. Keep source clean during the normal push gate.
-Complete whole-issue Luna Max review, native/hosted four-platform proof and every
-current bot/security/review finding, then finish 2.2/3.1 and acceptance, normally
-merge and verify native issue closure before #738. No force/admin/bypass flow.
+Finish the current workflow proof and review, then push normally with hooks.
+Complete whole-issue Luna Max review, exact-head four-platform proof and all current
+bot/security/review feedback. Finish 2.2/3.1 and acceptance only after proof, normally
+merge #745 and verify native issue closure before #738. No force/admin/bypass flow.
 
 Installed stable Atlas0.5.0 direct runtime and exact-root MCP work. Same private
 DB was refreshed incrementally twice without reset; last completed task index-1

@@ -1202,6 +1202,18 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli --test e2e_navigation map_response_preserves_legacy_file_and_separates_format_from_json_sidecar -- --exact
 
+      - name: External source policy and root replacement
+        if: contains(matrix.contracts, 'compile')
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p projectatlas-fs --lib --all-features
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::policy_watch::tests::
+          cargo test --locked -p projectatlas-cli --bin projectatlas --all-features runtime::source_observation::tests::
+          cargo test --locked -p projectatlas-cli --test e2e_navigation external_git_exclusions_agree_across_cli_mcp_and_refresh -- --exact --nocapture
+          cargo test --locked -p projectatlas-cli --test e2e_navigation source_root_replacement_preserves_cli_mcp_external_bindings -- --exact --nocapture
+
       - name: Native source-observer teardown and MCP identity
         if: contains(matrix.contracts, 'mcp')
         timeout-minutes: 5
