@@ -98,7 +98,8 @@ system policy through retained handles when full rights are already available;
 otherwise prove source and stage have no SACL or refuse replacement before bytes.
 No global privilege enablement or blanket elevation requirement is introduced.
 Full policy capture selects the current SDK system-policy classes explicitly
-through the retained handle for query, serialization and assignment. Ordinary
+through the retained handle for complete query and serialization; assign only the
+native supported view after exact agreement with the complete capture. Ordinary
 partial queries must not silently omit resource attributes, scoped policy, process
 trust labels or access filters. Native proof remains required for supported classes.
 

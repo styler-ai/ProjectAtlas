@@ -412,13 +412,26 @@ enable privileges process-wide or require them for ordinary no-SACL regeneration
 
 With full access, use the canonical retained query with the named SDK selectors
 SACL, LABEL, ATTRIBUTE, SCOPE, PROCESS_TRUST_LABEL and ACCESS_FILTER (0x1f8).
-Use the same selector set for native serialization and assignment. The locked
+Use that complete selector set for native serialization. The locked
 safe wrapper predates the latter two flags; bridge only those named current SDK
-constants with its documented bitflags constructor. All three wrappers forward
+constants with its documented bitflags constructor. The canonical wrappers forward
 these bits unchanged. No privilege change or file-data read is introduced.
 Native evidence rejected BACKUP here: all 144 full-rights retained calls returned
 ACCESS_DENIED despite the documented READ_CONTROL/ACCESS_SYSTEM_SECURITY rights.
-Do not use BACKUP as a setter or SDDL conversion flag. Native same-handle controls
+Do not use BACKUP as a setter or SDDL conversion flag. Native same-handle evidence
+also rejects the 0x1f8 setter: all ten nonempty audit/label/RA/SP/mixed
+controls return ACCESS_DENIED while 0x78 succeeds with exact native readback.
+This proves the query and setter contracts differ, not which extra flag caused
+failure. Assign only SACL/LABEL/ATTRIBUTE/SCOPE (0x78). At each complete capture,
+query both 0x1f8 and 0x78 through the same retained handle, validate both canonical
+images against native ACE counts, and require identical relevant controls,
+presence/null-versus-allocated state, ACE count and ordered image. Retain the 0x78
+descriptor only after agreement. Otherwise refuse before staging; repeat this
+proof for stage capture/readback. Do not silently drop a queried but unsettable
+class or request extra privileges to make an unsupported selector succeed.
+TL/FL setup returned INVALID_PARAMETER87; this is an unresolved native fixture
+proof gap, not evidence of absence, unreachability or preserved compatibility.
+Native same-handle controls
 compare 0x18, 0x78, 0x1f8 and BACKUP variants against independently installed classes;
 fixture/setup refusals are proof gaps, not successful preservation.
 Without full access, use a LABEL-only query's
@@ -441,7 +454,8 @@ accessor, and verify ordered entries and control state before payload writes.
 Retain strict SACL AI comparison until native evidence proves a safe normalization;
 the earlier DACL normalization does not establish SACL behavior. Recheck source
 system policy alongside owner/group/DACL immediately before replacement.
-Serialize and assign system policy with all six named selectors above. In particular,
+Serialize complete system policy with all six query selectors above; assign only
+the empirically supported four-selector view after exact native agreement. In particular,
 SACL-only serialization omits mandatory-label ACEs even when the descriptor holds
 them; complete comparison requires SACL plus LABEL. Native controls must distinguish
 identical audit/control policy with high versus medium integrity labels, repair a

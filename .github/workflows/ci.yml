@@ -1306,6 +1306,28 @@ jobs:
                 }
                 $results[-1] | ConvertTo-Json -Depth 4 -Compress
               }
+              # These controls distinguish safe refusal from a creator-rights
+              # regression; the former positive matrix used OwnerRights-Full only.
+              $sourceDacls = @(
+                @{ name='owner-full'; dacl='D:P(A;;FA;;;OW)' },
+                @{ name='owner-without-write-dac'; dacl='D:P(A;;0x0013019f;;;OW)' },
+                @{ name='owner-denied-write-dac'; dacl='D:P(D;;WD;;;OW)(A;;FA;;;OW)' },
+                @{ name='owner-denied-modification-admin-grant'; dacl='D:P(D;;0x00050002;;;OW)(A;;FA;;;BA)(A;;FR;;;OW)' }
+              )
+              foreach ($systemAccess in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($systemAccess)
+                foreach ($source in $sourceDacls) {
+                  $path = Join-Path $directory ('source-rights-' + [guid]::NewGuid())
+                  $policy = if ($systemAccess) { 'S:P(AU;SAFA;FW;;;WD)' } else { '' }
+                  try {
+                    $value = [SystemPolicyFixture]::SourceDescriptorControl($path, $true, $true, $false, $systemAccess, $policy, $source.dacl)
+                    $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; security_privilege=$systemAccess; value=$value }
+                  } catch {
+                    $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; security_privilege=$systemAccess; error=$_.Exception.ToString() }
+                  }
+                  $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                }
+              }
               foreach ($systemAccess in @($false, $true)) {
                 [SystemPolicyFixture]::Enable($systemAccess)
                 $policies = if ($systemAccess) {

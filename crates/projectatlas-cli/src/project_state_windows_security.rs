@@ -30,12 +30,17 @@ const SACL_DEFAULTED: u16 = 0x0020;
 /// Inheritance protection for the system ACL.
 const SACL_PROTECTED: u16 = 0x2000;
 
-/// Select every supported system-policy class for serialization and assignment.
-fn system_information() -> SecurityInformation {
-    let known = SecurityInformation::Sacl
+/// Select the system-policy classes supported by native file assignment.
+fn assignment_information() -> SecurityInformation {
+    SecurityInformation::Sacl
         | SecurityInformation::Label
         | SecurityInformation::Attribute
-        | SecurityInformation::Scope;
+        | SecurityInformation::Scope
+}
+
+/// Query every current SDK class, including classes not supported by assignment.
+fn system_information() -> SecurityInformation {
+    let known = assignment_information();
     // SAFETY: these are named SECURITY_INFORMATION flags from the current SDK.
     // bitflags 1 permits bits unknown to its older definition, and all three
     // canonical query/format/set wrappers forward these bits unchanged. Never
@@ -174,6 +179,29 @@ fn require_complete_sacl_image(descriptor: &SecurityDescriptor, image: &OsStr) -
     Ok(())
 }
 
+/// Admit assignment only when its native query retains the complete policy.
+fn transferable_sacl_image(
+    complete: &SecurityDescriptor,
+    represented: &SecurityDescriptor,
+    complete_image: &OsStr,
+) -> io::Result<OsString> {
+    let represented_image =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(represented, system_information())?;
+    require_complete_sacl_image(represented, &represented_image)?;
+    if descriptor_control(complete)? & SACL_CONTROL
+        != descriptor_control(represented)? & SACL_CONTROL
+        || descriptor_sacl(complete)?.is_some() != descriptor_sacl(represented)?.is_some()
+        || sacl_entry_count(complete)? != sacl_entry_count(represented)?
+        || complete_image != represented_image
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows system policy is not represented by native assignment selectors",
+        ));
+    }
+    Ok(represented_image)
+}
+
 /// Native system ACL and its control state, retained independently of its name.
 pub(super) struct SystemPolicy {
     /// SDK-owned opaque descriptor; ordered ACEs are never decoded by `ProjectAtlas`.
@@ -207,11 +235,11 @@ impl SystemPolicy {
         } else {
             SecurityInformation::Label
         };
-        let descriptor = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, query)?;
+        let mut descriptor = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, query)?;
         // A LABEL query retains the original presence/control bits but filters
         // audit ACEs. Never infer absence from that filtered ACE list or SDDL.
         let control = admitted_control(descriptor_control(&descriptor)?, complete)?;
-        let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+        let mut sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
             &descriptor,
             if complete {
                 system_information()
@@ -220,6 +248,15 @@ impl SystemPolicy {
             },
         )?;
         require_complete_sacl_image(&descriptor, &sddl)?;
+        if complete {
+            // Query and setter masks have different native contracts. Never
+            // silently discard a class omitted by the assignable query, and
+            // never request unsupported setter classes for ordinary policy.
+            let represented =
+                GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, assignment_information())?;
+            sddl = transferable_sacl_image(&descriptor, &represented, &sddl)?;
+            descriptor = represented;
+        }
         Ok(Self {
             descriptor,
             sddl,
@@ -275,7 +312,7 @@ impl SystemPolicy {
                 None
             };
         let sacl = sacl.or_else(|| empty.as_ref().map(EmptySacl::as_acl));
-        let information = system_information()
+        let information = assignment_information()
             | if self.control & SACL_PROTECTED != 0 {
                 SecurityInformation::ProtectedSacl
             } else {
@@ -298,6 +335,34 @@ impl SystemPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A query subset must not admit assignment after omitting native policy.
+    #[test]
+    fn assignment_requires_the_same_complete_native_system_policy() -> io::Result<()> {
+        let full = ConvertStringSecurityDescriptorToSecurityDescriptor(OsStr::new(
+            "S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)",
+        ))?;
+        let image =
+            ConvertSecurityDescriptorToStringSecurityDescriptor(&full, system_information())?;
+        require_complete_sacl_image(&full, &image)?;
+        let equivalent = ConvertStringSecurityDescriptorToSecurityDescriptor(&image)?;
+        if transferable_sacl_image(&full, &equivalent, &image)? != image {
+            return Err(io::Error::other(
+                "equivalent native policy was not transferable",
+            ));
+        }
+        let filtered = ConvertStringSecurityDescriptorToSecurityDescriptor(OsStr::new(
+            "S:P(AU;SAFA;FW;;;WD)",
+        ))?;
+        if !transferable_sacl_image(&full, &filtered, &image)
+            .is_err_and(|source| source.kind() == io::ErrorKind::Unsupported)
+        {
+            return Err(io::Error::other(
+                "a filtered query admitted partial assignment",
+            ));
+        }
+        Ok(())
+    }
 
     /// The safe wrapper recognizes the SDK-owned zero-entry ACL representation.
     #[test]

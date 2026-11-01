@@ -2739,7 +2739,7 @@ public static class SystemPolicyFixture {
     uint length, revision; ushort control;
     try {
       if (!String.IsNullOrEmpty(replacement)) {
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(replacement, 1, out descriptor, out length)) throw new Win32Exception();
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(replacement, 1, out descriptor, out length)) throw new Win32Exception(Marshal.GetLastWin32Error(),"parse system-policy fixture SDDL");
         bool present, defaulted; IntPtr sacl;
         if (!GetSecurityDescriptorSacl(descriptor, out present, out sacl, out defaulted)) throw new Win32Exception();
         if (!GetSecurityDescriptorControl(descriptor, out control, out revision)) throw new Win32Exception();
@@ -2758,7 +2758,7 @@ public static class SystemPolicyFixture {
         if (replacement.Contains("(TL;")) flags |= 0x80u;
         if (replacement.Contains("(FL;")) flags |= 0x100u;
         uint error=SetNamedSecurityInfo(path, 1, flags, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
-        if (error != 0) throw new Win32Exception((int)error);
+        if (error != 0) throw new Win32Exception((int)error,"set system-policy fixture flags="+flags.ToString("x"));
         LocalFree(descriptor); descriptor=IntPtr.Zero;
       }
       IntPtr owner, group, dacl, system;
@@ -2773,7 +2773,7 @@ public static class SystemPolicyFixture {
       } else {
         result=GetNamedSecurityInfo(path, 1, query, out owner, out group, out dacl, out system, out descriptor);
       }
-      if (result != 0) throw new Win32Exception((int)result);
+      if (result != 0) throw new Win32Exception((int)result,"query system-policy fixture mask="+query.ToString("x"));
       if (!GetSecurityDescriptorControl(descriptor, out control, out revision)) throw new Win32Exception();
       if (revision != 1) throw new Exception("Unexpected descriptor revision");
       bool exists, wasDefaulted; IntPtr acl;
@@ -2785,7 +2785,7 @@ public static class SystemPolicyFixture {
         if (!GetAclInformation(acl, out size, (uint)Marshal.SizeOf(typeof(AclSize)), 2)) throw new Win32Exception();
         count=size.Count;
       }
-      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, query, out text, out length)) throw new Win32Exception();
+      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, query, out text, out length)) throw new Win32Exception(Marshal.GetLastWin32Error(),"serialize system-policy fixture mask="+query.ToString("x"));
       return (control & 0x2a30).ToString("x") + "|" + kind + "|" + count + "|" + Marshal.PtrToStringUni(text);
     } finally {
       if (text != IntPtr.Zero) LocalFree(text);
@@ -2851,6 +2851,13 @@ public static class SystemPolicyFixture {
     if (result == 0 || result >= output.Capacity) throw new Win32Exception();
     return output.ToString();
   }
+  static string NativeLookupControl(string path) {
+    SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+    IntPtr file=CreateFile(path,0x80u,7,ref security,3,0x02200000,IntPtr.Zero);
+    if (file == new IntPtr(-1)) return "open-error="+Marshal.GetLastWin32Error();
+    if (!CloseHandle(file)) throw new Win32Exception();
+    return "open=ok";
+  }
   public static string CaseBehaviorControl(string root, bool sensitive) {
     System.IO.Directory.CreateDirectory(root);
     var rows=new System.Collections.Generic.List<string>();
@@ -2863,11 +2870,12 @@ public static class SystemPolicyFixture {
         bool directory=expected == ".projectatlas";
         string original=System.IO.Path.Combine(root,expected);
         if (directory) System.IO.Directory.CreateDirectory(original); else System.IO.File.WriteAllText(original,"native alias fixture");
-        var variants=new System.Collections.Generic.List<string> { expected.ToUpperInvariant(), expected.Replace("i","\u0131"), expected.Replace("s","\u017f") };
+        var variants=new System.Collections.Generic.List<string> { expected.ToUpperInvariant(), expected.Replace("i","\u0131"), expected.Replace("s","\u017f"), expected+".", expected+" " };
         try {
           string shortName=System.IO.Path.GetFileName(ExpandedName(original,true));
           rows.Add("short|"+expected+"|"+shortName+"|"+(shortName != expected));
           variants.Add(shortName);
+          variants.Add(shortName.ToLowerInvariant());
         } catch (Win32Exception error) {
           rows.Add("short-query-error|"+expected+"|"+error.NativeErrorCode);
         }
@@ -2876,7 +2884,15 @@ public static class SystemPolicyFixture {
           if (variant == expected) continue;
           string candidate=System.IO.Path.Combine(root,variant);
           bool exists=directory ? System.IO.Directory.Exists(candidate) : System.IO.File.Exists(candidate);
-          rows.Add(expected+"|"+variant+"|"+exists+"|"+(exists ? System.IO.Path.GetFileName(ExpandedName(candidate,false)) : "absent"));
+          string expanded="absent";
+          if (exists) {
+            try { expanded=System.IO.Path.GetFileName(ExpandedName(candidate,false)); }
+            catch (Win32Exception error) { expanded="long-query-error="+error.NativeErrorCode; }
+          }
+          rows.Add(expected+"|"+variant+"|"+exists+"|"+expanded);
+          string verbatim=candidate.StartsWith(@"\\?\",StringComparison.Ordinal) ? candidate
+            : candidate.StartsWith(@"\\",StringComparison.Ordinal) ? @"\\?\UNC\"+candidate.Substring(2) : @"\\?\"+candidate;
+          rows.Add("native|"+expected+"|"+variant+"|win32="+NativeLookupControl(candidate)+"|verbatim="+NativeLookupControl(verbatim));
         }
       }
       return String.Join("\n",rows);
@@ -3079,6 +3095,9 @@ public static class SystemPolicyFixture {
     }
   }
   public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy) {
+    return SourceDescriptorControl(root,protectedSource,widerParent,movedSource,systemAccess,systemPolicy,"");
+  }
+  public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy, string sourceDacl) {
     string preparation=System.IO.Path.Combine(root,"preparation"), parent=System.IO.Path.Combine(root,"publication");
     System.IO.Directory.CreateDirectory(preparation); System.IO.Directory.CreateDirectory(parent);
     string source=System.IO.Path.Combine(movedSource ? preparation : parent,"source"), destination=System.IO.Path.Combine(parent,"output"), stage=System.IO.Path.Combine(parent,"stage");
@@ -3089,7 +3108,7 @@ public static class SystemPolicyFixture {
       DiscretionaryPolicy(preparation,"D:P(A;;FA;;;OW)");
       DiscretionaryPolicy(parent,"D:P(A;;FA;;;OW)"+(widerParent ? "(A;OIIO;0x00050000;;;WD)" : ""));
       System.IO.File.WriteAllText(source,"previous destination");
-      DiscretionaryPolicy(source,protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)");
+      DiscretionaryPolicy(source,String.IsNullOrEmpty(sourceDacl) ? (protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)") : sourceDacl);
       if (!String.IsNullOrEmpty(systemPolicy)) Policy(source,systemPolicy,24);
       if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
       uint information=7u | (systemAccess ? 0x1f8u : 16u);
@@ -3150,7 +3169,7 @@ public static class SystemPolicyFixture {
             acl=empty;
           }
           phase="restore exact system inheritance through original handle";
-          uint result=SetSecurityInfo(raw,1,0x1f8u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
+          uint result=SetSecurityInfo(raw,1,0x78u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
           if (result != 0) throw new Win32Exception((int)result);
         } finally { if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty); }
       }
@@ -3541,11 +3560,11 @@ fn windows_native_namespace_aliases_preserve_distinct_custom_entries() -> io::Re
                     != sensitive,
                 "missing private directory ignored inherited comparison mode",
             )?;
-            let reduced = root
-                .join("missing")
-                .join("..")
-                .join(STATE_DIRECTORY)
-                .join(CONFIG_FILE.to_ascii_uppercase());
+            let uppercase_config = CONFIG_FILE.to_ascii_uppercase();
+            let reduced = unreduced_path(
+                &root,
+                &["missing", "..", STATE_DIRECTORY, &uppercase_config],
+            )?;
             require(
                 ProjectStateGuard::preflight_document(&root, &reduced).is_err() != sensitive
                     && !root.join("missing").exists(),
