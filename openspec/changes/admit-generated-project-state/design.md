@@ -453,18 +453,26 @@ acquisition denial, positive replacement and owned cleanup before acceptance.
 An SDK-only probe validates the exact creation descriptor before selecting the
 production binding; do not infer Windows runtime behavior from cross-compilation.
 
-The production constructor belongs to the existing tempfile callback. Capture a
-combined owner/group/DACL/system descriptor through the retained source, require
-it to match the admitted snapshots, and capture/retain the exact parent directory
-and matching policy. Use canonical CreatePrivateObjectSecurityEx with the effective
+The production constructor belongs to the existing tempfile callback. Revalidate
+the admitted split owner/group/DACL and system-policy snapshots through the retained
+source, and capture/retain the exact parent directory and matching split policy.
+Assemble those cached native images with the SDK SDDL codec, restore their native
+inheritance controls with SetSecurityDescriptorControl, and require exact component
+and control readback. Do not assume a combined query has the same discretionary
+image as the established split queries. Cache native discretionary controls too;
+refuse defaulted owner/group/DACL metadata omitted by SDDL before creation instead
+of silently discarding it. Native creation/requery controls must establish which
+defaulted bits physical files retain, with ordinary positive workflows unchanged.
+Use canonical CreatePrivateObjectSecurityEx with the effective
 thread token (process fallback only for ERROR_NO_TOKEN), real DACL/SACL inheritance
 checks and file generic mapping. Require matching owner/group and ordered ACL policy
 before creating a name; only preview AI is ignored. Normalize the SDK-ignored
 DEFAULTED bit consistently only when SACL_PRESENT is clear, across separate,
 combined and assignment-view queries. Present defaulted policy still refuses and
-all meaningful final system-policy controls remain strict. Combined-snapshot
-mismatch diagnostics identify source/parent, query mode, control values and match
-booleans without exposing native ACEs or principals.
+all meaningful final system-policy controls remain strict. Snapshot mismatch
+diagnostics identify source/parent, query mode, control values and owner/group/DACL
+match booleans without exposing native ACEs or principals. A focused native probe
+compares split and combined queries without changing policy.
 
 Protect DACL inheritance and present SACL inheritance in the owned creation
 descriptor; never synthesize SACL presence from absence. Retain the original native
@@ -484,7 +492,11 @@ leave retained capabilities even if a later source check passes again.
 Independent restricted-token controls must prove actual parent child-creation and
 owned cleanup, parent DELETE_CHILD/WRITE_DAC denial and protected-target mutation
 denial. The former inherited stage must permit DELETE/WRITE_DAC handles that remain
-usable after tightening and rename. The actual Rust stage callback must deny those
+usable after tightening and rename. Prove actual distinct ACL mutations through
+both the product-equivalent Win32 WRITE_DAC/READ_CONTROL handle and the native
+WRITE_DAC-only setter; a failed convenience setter does not prove revocation.
+Prove deletion through the retained DELETE handle and fresh mutation denial too.
+The native-only setter is confined to the independent fixture. The actual Rust stage callback must deny those
 opens before policy preparation; use an all-share native clone of its actual DACL
 to distinguish data-policy denial from sharing denial. Cover all six replacement
 roles, final policy/payload, outside hardlinks and original-handle failure cleanup.

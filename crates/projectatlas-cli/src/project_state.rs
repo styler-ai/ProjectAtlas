@@ -1157,6 +1157,8 @@ fn create_windows_staging_file(
 struct WindowsAccessSnapshot {
     /// Native owner/group/DACL comparison image.
     discretionary: std::ffi::OsString,
+    /// DACL presence, defaulting and inheritance controls from that same query.
+    discretionary_control: u16,
     /// Opaque system policy and native controls.
     system: windows_security::SystemPolicy,
 }
@@ -1176,6 +1178,7 @@ fn windows_access_snapshot(
     let access = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, information)?;
     Ok(WindowsAccessSnapshot {
         discretionary: ConvertSecurityDescriptorToStringSecurityDescriptor(&access, information)?,
+        discretionary_control: windows_security::discretionary_control(&access)?,
         system: windows_security::SystemPolicy::capture(file, complete_system_access)?,
     })
 }

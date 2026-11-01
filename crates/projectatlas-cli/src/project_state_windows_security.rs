@@ -30,6 +30,10 @@ const SACL_PRESENT: u16 = 0x0010;
 const SACL_DEFAULTED: u16 = 0x0020;
 /// Inheritance protection for the system ACL.
 const SACL_PROTECTED: u16 = 0x2000;
+/// DACL presence/defaulting and its three native inheritance controls.
+const DACL_CONTROL: u16 = 0x150f;
+/// Native inheritance controls writable without replacing any ACL entries.
+const INHERITANCE_CONTROL: u16 = 0x3f00;
 
 /// Select the system-policy classes supported by native file assignment.
 fn assignment_information() -> SecurityInformation {
@@ -104,6 +108,34 @@ fn descriptor_control(descriptor: &SecurityDescriptor) -> io::Result<u16> {
         ));
     }
     Ok(control)
+}
+
+/// Capture meaningful DACL controls without conflating other descriptor fields.
+pub(super) fn discretionary_control(descriptor: &SecurityDescriptor) -> io::Result<u16> {
+    let raw = descriptor_control(descriptor)?;
+    if raw & !(DACL_CONTROL | SACL_CONTROL | 0x8000) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("unsupported Windows descriptor controls: {raw:04x}"),
+        ));
+    }
+    let control = raw & DACL_CONTROL;
+    Ok(if control & 0x0004 == 0 {
+        control & !0x0008
+    } else {
+        control
+    })
+}
+
+/// SDDL omits defaulted owner/group/DACL metadata; never silently discard it.
+fn require_representable_discretionary_control(control: u16) -> io::Result<()> {
+    if control & 0x000b != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "defaulted Windows owner/group/DACL metadata cannot be preserved by replacement creation",
+        ));
+    }
+    Ok(())
 }
 
 /// Admit only complete supported policy or a proven absent partial snapshot.
@@ -435,6 +467,28 @@ fn inheritance_system_control(control: u16) -> u16 {
     }
 }
 
+/// Compare each discretionary component without exposing principals or ACEs.
+fn discretionary_components_match(
+    descriptor: &SecurityDescriptor,
+    expected_image: &OsStr,
+) -> io::Result<[bool; 3]> {
+    let expected = ConvertStringSecurityDescriptorToSecurityDescriptor(expected_image)?;
+    let mut matches = [false; 3];
+    for (index, information) in [
+        SecurityInformation::Owner,
+        SecurityInformation::Group,
+        SecurityInformation::Dacl,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        matches[index] =
+            ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, information)?
+                == ConvertSecurityDescriptorToStringSecurityDescriptor(&expected, information)?;
+    }
+    Ok(matches)
+}
+
 /// Bind a combined descriptor to the already admitted native policy snapshot.
 fn snapshot_system_image(
     descriptor: &SecurityDescriptor,
@@ -454,18 +508,53 @@ fn snapshot_system_image(
     let actual_discretionary =
         ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, discretionary)?;
     let actual_control = admitted_control(descriptor_control(descriptor)?, complete)?;
+    let actual_discretionary_control = discretionary_control(descriptor)?;
     if actual_discretionary != expected.discretionary
+        || actual_discretionary_control != expected.discretionary_control
         || actual_control != expected.system.control
         || image != expected.system.sddl
     {
+        let [owner_matches, group_matches, dacl_matches] =
+            discretionary_components_match(descriptor, &expected.discretionary)?;
         return Err(io::Error::other(format!(
-            "native policy changed before replacement creation: role={role}, complete={complete}, discretionary_matches={}, expected_system_control={:04x}, observed_system_control={actual_control:04x}, system_image_matches={}",
+            "native policy changed before replacement creation: role={role}, complete={complete}, discretionary_matches={}, owner_matches={owner_matches}, group_matches={group_matches}, dacl_matches={dacl_matches}, expected_dacl_control={:04x}, observed_dacl_control={actual_discretionary_control:04x}, expected_system_control={:04x}, observed_system_control={actual_control:04x}, system_image_matches={}",
             actual_discretionary == expected.discretionary,
+            expected.discretionary_control,
             expected.system.control,
             image == expected.system.sddl,
         )));
     }
     Ok(image)
+}
+
+/// Assemble the already admitted native components using the SDK codec.
+///
+/// The source/parent split queries are revalidated by the caller. Exact component
+/// and control readback below refuses any loss in this owned representation.
+fn snapshot_descriptor(
+    expected: &super::WindowsAccessSnapshot,
+    role: &str,
+) -> io::Result<LocalBox<SecurityDescriptor>> {
+    require_representable_discretionary_control(expected.discretionary_control)?;
+    let mut encoded = expected.discretionary.clone();
+    encoded.push(&expected.system.sddl);
+    let mut descriptor = ConvertStringSecurityDescriptorToSecurityDescriptor(&encoded)?;
+    let inherited =
+        (expected.discretionary_control | expected.system.control) & INHERITANCE_CONTROL;
+    // SAFETY: the converter returned this writable SDK-owned descriptor. Only
+    // canonical inheritance bits are set; no pointer, ACE or owner is replaced.
+    if unsafe {
+        windows_sys::Win32::Security::SetSecurityDescriptorControl(
+            std::ptr::from_mut::<SecurityDescriptor>(&mut descriptor).cast(),
+            INHERITANCE_CONTROL,
+            inherited,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    snapshot_system_image(&descriptor, expected, role)?;
+    Ok(descriptor)
 }
 
 /// Captured source policy and exact parent used to create a replacement safely.
@@ -517,20 +606,25 @@ impl ReplacementCreation {
         {
             return Err(io::Error::other("replacement creation parent changed"));
         }
+        if &super::windows_access_snapshot(source, complete)? != expected {
+            return Err(io::Error::other(
+                "source policy changed before replacement creation",
+            ));
+        }
         let parent_policy = super::windows_access_snapshot(&parent, complete)?;
-        let discretionary =
-            SecurityInformation::Owner | SecurityInformation::Group | SecurityInformation::Dacl;
         let system = if complete {
             system_information()
         } else {
             SecurityInformation::Label
         };
-        let information = discretionary | system;
-        let mut descriptor = GetSecurityInfo(source, SeObjectType::SE_FILE_OBJECT, information)?;
-        let source_system = snapshot_system_image(&descriptor, expected, "source")?;
-        let parent_descriptor =
-            GetSecurityInfo(&parent, SeObjectType::SE_FILE_OBJECT, information)?;
-        snapshot_system_image(&parent_descriptor, &parent_policy, "parent")?;
+        let mut descriptor = snapshot_descriptor(expected, "source")?;
+        let source_system = expected.system.sddl.clone();
+        let parent_descriptor = snapshot_descriptor(&parent_policy, "parent")?;
+        if super::windows_access_snapshot(&parent, complete)? != parent_policy {
+            return Err(io::Error::other(
+                "parent policy changed before replacement creation",
+            ));
+        }
         let token = effective_token()?;
         let mapping = GENERIC_MAPPING {
             GenericRead: FILE_GENERIC_READ,
@@ -646,7 +740,8 @@ impl ReplacementCreation {
         } else {
             SecurityInformation::Label
         };
-        let observed = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, discretionary | system)?;
+        let observed = GetSecurityInfo(file, SeObjectType::SE_FILE_OBJECT, discretionary)?;
+        let observed_system = SystemPolicy::capture(file, self.complete)?;
         let original_dacl = ConvertSecurityDescriptorToStringSecurityDescriptor(
             &self.descriptor,
             SecurityInformation::Dacl,
@@ -657,18 +752,16 @@ impl ReplacementCreation {
         )?;
         let original_system =
             ConvertSecurityDescriptorToStringSecurityDescriptor(&self.descriptor, system)?;
-        let observed_system =
-            ConvertSecurityDescriptorToStringSecurityDescriptor(&observed, system)?;
         require_complete_sacl_image(&self.descriptor, &original_system)?;
-        require_complete_sacl_image(&observed, &observed_system)?;
-        admitted_control(descriptor_control(&observed)?, self.complete)?;
         if observed.owner() != self.descriptor.owner()
             || observed.group() != self.descriptor.group()
             || !super::windows_file_dacl_matches(&original_dacl, &observed_dacl)?
+            || discretionary_control(&self.descriptor)? & !0x0400
+                != discretionary_control(&observed)? & !0x0400
             || inheritance_system_control(descriptor_control(&self.descriptor)?)
-                != inheritance_system_control(descriptor_control(&observed)?)
+                != inheritance_system_control(observed_system.control)
             || inheritance_system_image(&original_system)?
-                != inheritance_system_image(&observed_system)?
+                != inheritance_system_image(&observed_system.sddl)?
         {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -747,6 +840,77 @@ impl ReplacementCreation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nonserialized defaulted metadata is refused before native stage creation.
+    #[test]
+    fn snapshot_assembly_refuses_defaulted_discretionary_metadata() -> io::Result<()> {
+        for control in [0x0001, 0x0002, 0x000c, 0x150f] {
+            if !require_representable_discretionary_control(control)
+                .is_err_and(|error| error.kind() == io::ErrorKind::Unsupported)
+            {
+                return Err(io::Error::other(
+                    "defaulted metadata was silently discarded",
+                ));
+            }
+        }
+        for control in [0, 0x0004, 0x0404, 0x1504] {
+            require_representable_discretionary_control(control)?;
+        }
+        Ok(())
+    }
+
+    /// Split snapshots retain every native component and control through assembly.
+    #[test]
+    fn snapshot_descriptor_preserves_native_components_and_query_diagnostics() -> io::Result<()> {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let output = root.join("component-snapshot");
+        std::fs::write(&output, b"component policy")?;
+        for path in [&root, &output] {
+            let file = File::options()
+                .access_mode(0x0002_0080)
+                .share_mode(7)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)?;
+            let snapshot = super::super::windows_access_snapshot(&file, false)?;
+            let combined = GetSecurityInfo(
+                &file,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Owner
+                    | SecurityInformation::Group
+                    | SecurityInformation::Dacl
+                    | SecurityInformation::Label,
+            )?;
+            writeln!(
+                io::stderr().lock(),
+                "native split/mixed query directory={} owner/group/dacl={:?} split_dacl_control={:04x} mixed_dacl_control={:04x}",
+                path == &root,
+                discretionary_components_match(&combined, &snapshot.discretionary)?,
+                snapshot.discretionary_control,
+                discretionary_control(&combined)?
+            )?;
+            let assembled = snapshot_descriptor(&snapshot, "component-test")?;
+            if discretionary_components_match(&assembled, &snapshot.discretionary)? != [true; 3]
+                || discretionary_control(&assembled)? != snapshot.discretionary_control
+            {
+                return Err(io::Error::other(
+                    "snapshot assembly changed an admitted native component",
+                ));
+            }
+            snapshot_system_image(&assembled, &snapshot, "component-test")?;
+            if super::super::windows_access_snapshot(&file, false)? != snapshot {
+                return Err(io::Error::other(
+                    "query diagnostics changed the retained native policy",
+                ));
+            }
+        }
+        Ok(())
+    }
 
     /// A query subset must not admit assignment after omitting native policy.
     #[test]

@@ -1,4 +1,84 @@
+# Active context — #741 only
+
+## Current split-descriptor candidate: dirty, no execution lease
+
+Public/local HEAD fbb520c79c31d71bb67f86ef09ce2f42b8e2e834. Its local normal
+push and immutable 144-input CLI/MCP/registered/upgrade proof passed, but native
+Windows FAILED (32 passed, 15 failed, 1 ignored): combined source/parent query
+mismatches before stage creation. System images match; discretionary image differs.
+Managed Windows SQLite cohort/recovery/reset owning test now PASS. Rust, repository,
+Linux and macOS ARM whole jobs PASS; Intel remains running. No native acceptance.
+
+Current dirty repair uses fresh split source/parent revalidation plus SDK assembly
+of cached native images and inheritance controls, with strict component/control
+readback and split initial-stage queries. Native discretionary controls are cached;
+unknown/defaulted unrepresentable metadata refuses before staging. Native fixture
+observes physical-file defaulted flags for eight inputs on both runner roots;
+if those persist, acceptance blocks pending preservation. No claim of native PASS.
+Actor baseline now requires real distinct ACL mutations with the product-equivalent
+Win32 handle and native WRITE_DAC-only handle after tighten+rename, fresh denials,
+retained DELETE, and cleanup. Foreign-owner fixture private-method invocation fixed.
+Stale-source causal constructor refusal added. No production privilege toggles or
+new product SDK API. GNU owning module/tests Clippy, CLI all-target/all-feature
+Clippy and Linux ownership tests (32 PASS, 2 ignored) PASS. Both Luna Max reviewers approve next native publication only; no source blockers.
+Neither review establishes native acceptance. Full Win32 and NT actor mutations
+remain required native controls. Source changes stop after normal commit through
+normal push and immutable proof completion. Fresh prefix: split-descriptor.
+Docs/spec/live issue reconciled; fmt, strict OpenSpec, scoped IssueOps (1/5) and
+strict-strings PASS. Normal push/native proof next. Fbb CodeQL reconciled: 27 Rust exact normalized
+source/flows against8a7e; 4 Actions stable keys, 2 exact/2 whole-step images exact
+to reviewedbee7. No added/removed/suppressed alerts. Atlas exact-root brief and
+reviewer next report policy_drift; preserved private DB, no reset/reinstall.
+
+Fresh Codex CODE review on fbb completed with no major issues (6556756274).
+Security summary marks fbb completed, retaining historical findings; no new final
+standalone receipt seen. Three thread-aware unresolved threads still need native
+proof/disposition. All task acceptance remains open, implementation 1/5. Only #731
+closed Oct31; none since. User asks why741 is slow: explained repeated Windows ACL
+corrections and oversized fix/test loops; keep only741 until normal merge and BOTH
+issue741/PR743 verified closed, then739/738/708/715. No RC1 published. Stable050 Latest.
+
+Earlier checkpoints below are historical where inconsistent.
+
+## Code review works after user weekly reset
+
+Fresh Codex CODEreview COMPLETED10:30:55UTC onfbb520c79c, no majorissues;
+comment6556756274 https://github.com/styler-ai/ProjectAtlas/pull/743#issuecomment-6556756274.
+Securityreview6556737562 acknowledgedeyes but completedresultPENDING. Code request
+6556737332. No newusage-limiterror. PRbodyrewritten/currenthead/readbackexact;
+normal+immutablePASS, allnativecurrentgatesstillrequired. Three oldthreadsremainOPEN.
+Earlier quota-failed/no-completed-code-review notes historical/superseded.
+
 # Active context
+
+## Current public fbb520c: local normal+immutable PASS; fresh native/bot review running
+
+Public/localfbb520c79c31d71bb67f86ef09ce2f42b8e2e834. Normal20489/PID3901875
+TERMINALPASS784.0956s,34suites1733PASS12ignored. Immutable50715TERMINALPASS144inputs,
+Linuxbinary378cab62fb25fac0cf58087f7f75125a61f379d1bceb59f0f2fa6b1569980c6e (same
+Linuxbinaryasbee; newimplementationcfgWindows). Prefix/tmp/projectatlas-741-native-controls.
+ActualCLI/MCPadmission9.138s/writer5.227s/registered9.236s/5upgrades7.381sPASS,
+allboundinputs/binary/identity/config/approvedpurposes unchangedduringproof. NOLEASE.
+
+SOURCE41297492677 live. Plan124821418476/repository124821458963/SDK124821458997
+PASS; Rust124821458942, Win124821459113, Linux124821459099, MacARM124821459063,
+MacIntel124821458969 running. Watcher54370 terminal-logs only. WinatPHPstep5
+10:30:10UTC; owningstep6notstarted. SDK482rows fbb5 JSON sameforeignownerprobesPASS
+CPE3/all4native cases; notactualpublisheracceptance. Need currentWindowsconstructor
+comparisonfields/actor/DBpreview+CLI/MCP/mixed18+owner6 actualtests; no suchPASSyet.
+Oldbee MacARM/Linux/Rust/repositoryPASS; Intelcancelednormallybysupersedingpush,
+no wholeIntelclaim. OldbeeWinfailnotwaived.
+
+Userresetweeklylimit andrequestedreviewavailabilitycheck. Latestbotrequests on
+fbb publicHEAD: codecomment6556737332/security6556737562, posted10:29:00/01UTC;
+BOTH acknowledgedeyes10:29:16UTC (reactions457976642/643). No newquotaerror at
+10:30:24readback; completionNOTyetconfirmed. Preserve normalreviewandsecurity
+reviews plusindependentLunaMaxrequirements. Liveissue/PR743 remainOPEN,3threads
+OPEN, task1of5/allacceptanceOPEN. Userchallengedprogress; confirmedonly731closed
+2026-10-31T06:29:20Z/PR737merged, NONEsince. Keep741ONLY untilnormalmerge+BOTH
+CLOSED before739/738/708/715; RC1notpublished. Focusconfirmedblockers andcomplete
+loop, do notlaunchunrelatedwork. No newpermissionneeded.
+Earlier DIRTY/LIVEheaders below historical/superseded where inconsistent.
 
 ## Native bee Windows FAIL; native-controls candidate DIRTY, no lease
 

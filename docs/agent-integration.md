@@ -188,7 +188,9 @@ serialization and assignment select those classes explicitly. A codec that omits
 native entries is refused before staging. The Windows binaries use the Rust
 target's Windows 10 / Server 2016 or newer baseline.
 ProjectAtlas does not enable privileges globally. Defaulted system ACLs whose
-control state cannot be reproduced are refused as unsupported.
+control state cannot be reproduced are refused as unsupported. Replacement also
+refuses defaulted owner/group/DACL metadata that the native codec cannot reproduce;
+ordinary file policy is verified through native creation and readback controls.
 New outputs retain ordinary parent inheritance. The destination and staging file
 identities are rechecked before publication; uncertain staging ownership withholds
 cleanup. A private-directory cleanup error after publication explicitly reports

@@ -2736,9 +2736,13 @@ public static class SystemPolicyFixture {
   [DllImport("kernel32.dll", EntryPoint="DeleteFileW", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] static extern bool DeleteFile(string path);
   [DllImport("advapi32.dll", EntryPoint="GetSecurityInfo")] static extern uint GetSecurityDescriptorOnly(IntPtr handle, uint kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
   [DllImport("ntdll.dll")] static extern int NtQueryObject(IntPtr handle, uint information, out ObjectBasicInformation result, uint length, out uint returned);
+  // Microsoft documents NtSetSecurityObject as the user-mode form of the
+  // retained-handle DACL setter. Fixture-only: no product path calls this API.
+  [DllImport("ntdll.dll")] static extern int NtSetSecurityObject(IntPtr handle,uint information,IntPtr descriptor);
   public static void Enable(bool enabled) {
     EnablePrivilege("SeSecurityPrivilege",enabled);
   }
+  public static void EnableRestore() { EnablePrivilege("SeRestorePrivilege",true); }
   static void EnablePrivilege(string name,bool enabled) {
     IntPtr token;
     if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
@@ -3183,7 +3187,7 @@ public static class SystemPolicyFixture {
     DiscretionaryPolicy(target,"D:P(D;;0x00050000;;;OW)(A;;FA;;;BA)(A;;FR;;;WD)");
     // Synchronous CreateFile reopens also request SYNCHRONIZE. Its omission
     // would deny the baseline before any policy tightening is exercised.
-    DiscretionaryPolicy(parent,"D:P(D;;0x00040000;;;OW)(A;OICI;FA;;;BA)(A;;0x001200a3;;;WD)(A;OIIO;0x00150082;;;WD)");
+    DiscretionaryPolicy(parent,"D:P(D;;0x00040000;;;OW)(A;OICI;FA;;;BA)(A;;0x001200a3;;;WD)(A;OIIO;0x00170082;;;WD)");
     using (var actor=new RestrictedActor()) { ActorPremises(actor,parent,target); }
     return "restricted actor parent/target premises PASS";
   }
@@ -3213,7 +3217,7 @@ public static class SystemPolicyFixture {
   }
   public static string ActorInheritedBaseline(string parent,string target) {
     string stage=System.IO.Path.Combine(parent,"inherited-actor-"+Guid.NewGuid()),published=stage+"-published",dataControl=stage+"-data";
-    IntPtr raw=new IntPtr(-1),data=new IntPtr(-1),deletion=new IntPtr(-1),policy=new IntPtr(-1),descriptor=IntPtr.Zero;
+    IntPtr raw=new IntPtr(-1),data=new IntPtr(-1),deletion=new IntPtr(-1),policy=new IntPtr(-1),queryPolicy=new IntPtr(-1),descriptor=IntPtr.Zero,changed=IntPtr.Zero;
     try {
       using (var actor=new RestrictedActor()) {
         ActorPremises(actor,parent,target);
@@ -3223,7 +3227,13 @@ public static class SystemPolicyFixture {
         IntPtr inherited=FileDescriptor(stage,4u);
         try { Console.WriteLine("actor baseline inherited DACL="+DescriptorImage(inherited,4u,false)); }
         finally { LocalFree(inherited); }
-        deletion=actor.Allowed(stage,0x10000u);policy=actor.Allowed(stage,0x40000u);
+        deletion=actor.Allowed(stage,0x10080u);policy=actor.Allowed(stage,0x40000u);queryPolicy=actor.Allowed(stage,0x60080u);
+        foreach (IntPtr retained in new IntPtr[] { policy,queryPolicy,deletion }) {
+          ObjectBasicInformation basic;uint returned;uint size=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
+          int queryStatus=NtQueryObject(retained,0,out basic,size,out returned);
+          if (queryStatus < 0 || returned != size) throw new Exception("Actor retained-rights query failed="+queryStatus.ToString("x"));
+          Console.WriteLine("actor retained granted="+basic.GrantedAccess.ToString("x"));
+        }
         data=CreateFile(dataControl,0xc0030000u,7,ref ordinary,1,0x00200080,IntPtr.Zero);
         if (data == new IntPtr(-1)) throw new Win32Exception();
         IntPtr writer=actor.Allowed(dataControl,2u);CloseHandle(writer);
@@ -3231,30 +3241,88 @@ public static class SystemPolicyFixture {
         bool present,defaulted;IntPtr dacl;
         if (!GetSecurityDescriptorDacl(descriptor,out present,out dacl,out defaulted) || !present || dacl == IntPtr.Zero) throw new Exception("Actor source DACL missing");
         uint status=SetSecurityInfo(raw,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
-        if (status != 0) throw new Win32Exception((int)status);
+        if (status != 0) throw new Win32Exception((int)status,"Creator failed source-policy tightening");
         actor.Denied(stage,0x10000u);actor.Denied(stage,0x40000u);
         if (!MoveFileEx(stage,published,0)) throw new Win32Exception();
         status=actor.Run(() => SetSecurityInfo(policy,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero));
-        if (status != 0) throw new Win32Exception((int)status,"Previously acquired WRITE_DAC did not survive tightening/publication");
-        bool removed=actor.Run(() => {
+        Console.WriteLine("actor retained WRITE_DAC-only Win32 setter status="+status);
+        uint length;
+        // Change the actual ACL while keeping the actor's fresh mutation opens
+        // denied. Metadata access is already allowed on the protected target.
+        string queryChange="D:P(D;;0x00050000;;;OW)(A;;FA;;;BA)(A;;FR;;;WD)(A;;0x80;;;LS)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(queryChange,1,out changed,out length) || !GetSecurityDescriptorDacl(changed,out present,out dacl,out defaulted)) throw new Win32Exception();
+        status=actor.Run(() => SetSecurityInfo(queryPolicy,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero));
+        Console.WriteLine("actor retained WRITE_DAC+query Win32 setter status="+status);
+        if (status != 0) throw new Win32Exception((int)status,"Retained product-equivalent Win32 setter failed, access=60080");
+        IntPtr win32Observed=FileDescriptor(published,4u);
+        try {
+          if (DescriptorImage(win32Observed,4u,false,true) != DescriptorImage(changed,4u,false,true) || DescriptorImage(win32Observed,4u,false,true) == DescriptorImage(descriptor,4u,false,true)) throw new Exception("Retained Win32 setter did not change the actual ACL");
+        } finally { LocalFree(win32Observed); }
+        LocalFree(changed);changed=IntPtr.Zero;
+        string kernelChange="D:P(D;;0x00050000;;;OW)(A;;FA;;;BA)(A;;FR;;;WD)(A;;0x80;;;AN)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(kernelChange,1,out changed,out length)) throw new Win32Exception();
+        int native=actor.Run(() => NtSetSecurityObject(policy,4u,changed));
+        Console.WriteLine("actor retained WRITE_DAC NtSetSecurityObject status="+native.ToString("x"));
+        if (native < 0) throw new Exception("Previously acquired WRITE_DAC native setter failed="+native.ToString("x"));
+        IntPtr observed=FileDescriptor(published,4u);
+        try {
+          if (DescriptorImage(observed,4u,false,true) != DescriptorImage(changed,4u,false,true) || DescriptorImage(observed,4u,false,true) == DescriptorImage(descriptor,4u,false,true)) throw new Exception("Retained WRITE_DAC did not change the actual published ACL");
+        } finally { LocalFree(observed); }
+        actor.Denied(published,0x10000u);actor.Denied(published,0x40000u);
+        var removed=actor.Run(() => {
           FileDisposition disposition=new FileDisposition { Delete=1 };
-          return SetFileInformationByHandle(deletion,4,ref disposition,1);
+          bool success=SetFileInformationByHandle(deletion,4,ref disposition,1);
+          return Tuple.Create(success,success ? 0 : Marshal.GetLastWin32Error());
         });
-        if (!removed) throw new Win32Exception(0,"Previously acquired DELETE did not survive tightening/publication");
+        if (!removed.Item1) throw new Win32Exception(removed.Item2,"Previously acquired DELETE did not survive tightening/publication");
       }
     } finally {
-      if (policy != new IntPtr(-1)) CloseHandle(policy);
-      if (deletion != new IntPtr(-1)) CloseHandle(deletion);
+      foreach (IntPtr retained in new IntPtr[] { policy,queryPolicy,deletion }) if (retained != new IntPtr(-1)) CloseHandle(retained);
       foreach (IntPtr file in new IntPtr[] { raw,data }) if (file != new IntPtr(-1)) {
         FileDisposition disposition=new FileDisposition { Delete=1 };
         SetFileInformationByHandle(file,4,ref disposition,1);CloseHandle(file);
       }
       if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      if (changed != IntPtr.Zero) LocalFree(changed);
     }
     if (System.IO.File.Exists(stage) || System.IO.File.Exists(published) || System.IO.File.Exists(dataControl)) throw new Exception("Actor baseline leaked an owned file");
     return "former stage actor acquisition persists after tightening and publication PASS";
   }
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorOwner(IntPtr descriptor,out IntPtr owner,out bool defaulted);
+  public static string DefaultedFileControl(string root) {
+    string seed=System.IO.Path.Combine(root,"defaulted-seed");
+    IntPtr source=IntPtr.Zero;
+    var rows=new System.Collections.Generic.List<string>();
+    try {
+      System.IO.File.WriteAllText(seed,"defaulted metadata fixture");
+      source=FileDescriptor(seed,7u);
+      byte[] original=new byte[GetSecurityDescriptorLength(source)];Marshal.Copy(source,original,0,original.Length);
+      var initial=new System.Security.AccessControl.RawSecurityDescriptor(original,0);
+      foreach (ushort defaults in new ushort[] { 0,1,2,3,8,9,10,11 }) {
+        var flags=(initial.ControlFlags & ~(System.Security.AccessControl.ControlFlags)0xbu) | (System.Security.AccessControl.ControlFlags)defaults;
+        var policy=new System.Security.AccessControl.RawSecurityDescriptor(flags,initial.Owner,initial.Group,initial.SystemAcl,initial.DiscretionaryAcl);
+        byte[] bytes=new byte[policy.BinaryLength];policy.GetBinaryForm(bytes,0);
+        IntPtr input=Marshal.AllocHGlobal(bytes.Length),held=new IntPtr(-1),observed=IntPtr.Zero;
+        try {
+          Marshal.Copy(bytes,0,input,bytes.Length);
+          ushort inputControl,stored;uint revision;
+          if (!GetSecurityDescriptorControl(input,out inputControl,out revision) || (inputControl & 0xbu) != defaults) throw new Exception("Defaulted fixture input was not encoded");
+          SecurityAttributes attributes=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)),Descriptor=input,Inherit=false };
+          held=CreateFile(System.IO.Path.Combine(root,"defaulted-"+defaults),0xc0030000u,7,ref attributes,1,0x00200080u,IntPtr.Zero);
+          if (held == new IntPtr(-1)) throw new Win32Exception();
+          observed=HeldDescriptor(held,7u);
+          if (!GetSecurityDescriptorControl(observed,out stored,out revision)) throw new Win32Exception();
+          rows.Add("requested-default="+defaults.ToString("x")+";stored-default="+(stored & 0xbu).ToString("x"));
+          if ((stored & 0xbu) != 0) throw new Exception("Physical file exposes defaulted metadata requiring preservation: "+stored.ToString("x"));
+        } finally {
+          if (observed != IntPtr.Zero) LocalFree(observed);
+          if (held != new IntPtr(-1)) { FileDisposition disposition=new FileDisposition { Delete=1 };SetFileInformationByHandle(held,4,ref disposition,1);CloseHandle(held); }
+          Marshal.FreeHGlobal(input);
+        }
+      }
+      return String.Join("\n",rows);
+    } finally { if (source != IntPtr.Zero) LocalFree(source);System.IO.File.Delete(seed); }
+  }
   public static void ForeignOwner(string path) {
     DiscretionaryPolicy(path,"D:P(A;;FA;;;BA)");
     IntPtr descriptor=IntPtr.Zero;
@@ -3736,6 +3804,39 @@ fn windows_replacement_creation_denies_inherited_actor_capabilities() -> io::Res
     Ok(())
 }
 
+/// Native creation-default metadata must not become an untested file limitation.
+#[cfg(windows)]
+#[test]
+fn windows_file_snapshots_observe_defaulted_creation_metadata() -> io::Result<()> {
+    use std::io::Write;
+    let script = windows_fixture_script(
+        "[SystemPolicyFixture]::DefaultedFileControl($env:PROJECTATLAS_TEST_ACL_PATH)",
+    )?;
+    let mut volumes = vec![std::env::temp_dir()];
+    if let Some(runner) = std::env::var_os("RUNNER_TEMP") {
+        let runner = std::path::PathBuf::from(runner);
+        if !volumes.contains(&runner) {
+            volumes.push(runner);
+        }
+    }
+    for volume in volumes {
+        let temp = tempfile::tempdir_in(volume)?;
+        let result = windows_powershell_fixture(&script, |command| {
+            command.env("PROJECTATLAS_TEST_ACL_PATH", temp.path());
+        })?;
+        require(
+            result.status.success(),
+            &format!("native defaulted-metadata observation failed: {result:?}"),
+        )?;
+        io::stderr().lock().write_all(&result.stdout)?;
+        require(
+            std::fs::read_dir(temp.path())?.next().is_none(),
+            "defaulted fixture leaked owned files",
+        )?;
+    }
+    Ok(())
+}
+
 /// An already authorized caller preserves a different owner's policy and cleanup.
 #[cfg(windows)]
 #[test]
@@ -3744,7 +3845,7 @@ fn windows_authorized_foreign_owner_replacement_preserves_policy() -> io::Result
     if std::env::var(MODE).as_deref() != Ok("authorized-owner") {
         let executable = std::env::current_exe()?;
         let script = windows_fixture_script(
-            "[SystemPolicyFixture]::Enable($false); [SystemPolicyFixture]::EnablePrivilege('SeRestorePrivilege',$true); & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_authorized_foreign_owner_replacement_preserves_policy --nocapture; exit $LASTEXITCODE",
+            "[SystemPolicyFixture]::Enable($false); [SystemPolicyFixture]::EnableRestore(); & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_authorized_foreign_owner_replacement_preserves_policy --nocapture; exit $LASTEXITCODE",
         )?;
         let child = windows_powershell_fixture(&script, |command| {
             command
@@ -3757,7 +3858,7 @@ fn windows_authorized_foreign_owner_replacement_preserves_policy() -> io::Result
         );
     }
     let setup = windows_fixture_script(
-        "[SystemPolicyFixture]::EnablePrivilege('SeRestorePrivilege',$true); [SystemPolicyFixture]::ForeignOwner($env:PROJECTATLAS_TEST_ACL_PATH)",
+        "[SystemPolicyFixture]::EnableRestore(); [SystemPolicyFixture]::ForeignOwner($env:PROJECTATLAS_TEST_ACL_PATH)",
     )?;
     for (private, name, host) in replacement_targets() {
         let temp = tempfile::tempdir()?;
@@ -5114,6 +5215,20 @@ fn windows_stage_policy_uses_the_captured_descriptor() -> io::Result<()> {
         "fresh source policy did not reproduce broader stage preparation",
     )?;
     captured.apply(&source, &stage, &creation)?;
+    let stale_creation = super::windows_security::ReplacementCreation::capture(
+        &captured.file,
+        &root,
+        &identity,
+        &captured.security,
+    );
+    require(
+        stale_creation.as_ref().is_err_and(|error| {
+            error
+                .to_string()
+                .contains("source policy changed before replacement creation")
+        }),
+        "snapshot assembly accepted a changed retained source",
+    )?;
     require(
         windows_acl(stage.path(), None)? == expected && windows_acl(&source, None)? == changed,
         "stage preparation followed a fresh mutable source policy",
