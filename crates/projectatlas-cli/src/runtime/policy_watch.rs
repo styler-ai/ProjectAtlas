@@ -2,11 +2,15 @@
 
 use super::{CliError, IndexWorkControl, IndexWorkStage};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Bound native symlink expansion before installing policy watch aliases.
 const MAX_POLICY_SYMLINKS: usize = 64;
@@ -392,6 +396,8 @@ pub(super) struct PolicyWatchSelection {
     root: Arc<PathBuf>,
     /// Immutable selection pointer; this lock is released before callback queue publication.
     inputs: Arc<Mutex<Arc<PolicyWatchInputs>>>,
+    /// Structural native events require rebuilding recursive source coverage before reuse.
+    recursive_rebind_required: Arc<AtomicBool>,
 }
 
 impl PolicyWatchSelection {
@@ -400,6 +406,7 @@ impl PolicyWatchSelection {
         Self {
             root: Arc::new(root),
             inputs: Arc::new(Mutex::new(Arc::new(PolicyWatchInputs::default()))),
+            recursive_rebind_required: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -432,6 +439,98 @@ impl PolicyWatchSelection {
         // The snapshot guard is dropped before any receiver lock is acquired.
         self.snapshot()
             .map_or(true, |inputs| inputs.may_affect(&self.root, event))
+    }
+
+    /// Retain structural coverage uncertainty independently of queue draining.
+    /// This callback path performs no filesystem I/O and does not classify source bytes.
+    pub(super) fn observe(&self, event: &Event) -> bool {
+        if !self.may_affect(event) {
+            return false;
+        }
+        let root_depth = self.root.components().count();
+        let structural = matches!(
+            event.kind,
+            notify::EventKind::Any
+                | notify::EventKind::Other
+                | notify::EventKind::Create(
+                    notify::event::CreateKind::Any | notify::event::CreateKind::Folder
+                )
+                | notify::EventKind::Remove(
+                    notify::event::RemoveKind::Any | notify::event::RemoveKind::Folder
+                )
+                | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+        );
+        if event.need_rescan()
+            || event.paths.is_empty()
+            || event.paths.iter().any(|path| {
+                let path = if path.is_absolute() {
+                    Cow::Borrowed(path.as_path())
+                } else {
+                    Cow::Owned(self.root.join(path))
+                };
+                // Native aliases can differ in Windows prefix/case spelling.
+                // A deeper normal child cannot name this root or an ancestor;
+                // its source/runtime classification remains with the drain owner.
+                self.root.starts_with(&path)
+                    || structural && path.components().count() <= root_depth
+                    || structural
+                        && path
+                            .components()
+                            .any(|component| matches!(component, std::path::Component::ParentDir))
+            })
+        {
+            self.require_recursive_rebind();
+        }
+        true
+    }
+
+    /// Preserve unknown native coverage until the cold owner successfully re-registers it.
+    pub(super) fn require_recursive_rebind(&self) {
+        self.recursive_rebind_required
+            .store(true, Ordering::Release);
+    }
+
+    /// A structural event must not certify a warm witness before recursive resynchronization.
+    pub(super) fn recursive_rebind_pending(&self) -> bool {
+        self.recursive_rebind_required.load(Ordering::Acquire)
+    }
+
+    /// Re-register only after structural uncertainty, never on ordinary file data edits.
+    /// Sampling follows this gap under the caller's original cooperative budget.
+    pub(super) fn rebind_recursive_if_required(
+        &self,
+        watcher: &mut RecommendedWatcher,
+        control: &IndexWorkControl,
+    ) -> Result<(), CliError> {
+        if !self.recursive_rebind_required.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let result = (|| {
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            if let Err(error) = watcher.unwatch(&self.root)
+                && !matches!(error.kind, notify::ErrorKind::WatchNotFound)
+            {
+                return Err(CliError::Watcher(format!(
+                    "cannot retire recursive source observation for {}: {error}",
+                    self.root.display()
+                )));
+            }
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            watcher
+                .watch(&self.root, RecursiveMode::Recursive)
+                .map_err(|error| {
+                    CliError::Watcher(format!(
+                        "cannot restore recursive source observation for {}: {error}",
+                        self.root.display()
+                    ))
+                })?;
+            control.check(IndexWorkStage::RepositoryTraversal)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.require_recursive_rebind();
+        }
+        result
     }
 }
 
@@ -779,6 +878,81 @@ mod tests {
         require(
             discoveries == MAX_POLICY_WATCH_ATTEMPTS + 1,
             "unstable selection exceeded its native work bound",
+        )
+    }
+
+    #[test]
+    fn recursive_rebind_preserves_runtime_filtering_and_original_work_control()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let selection = PolicyWatchSelection::new(root.clone());
+        for event in [
+            Event::new(notify::EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(root.join("source.rs")),
+            Event::new(notify::EventKind::Create(CreateKind::File))
+                .add_path(root.join("source.rs")),
+            Event::new(notify::EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )))
+            .add_path(
+                root.parent()
+                    .ok_or_else(|| std::io::Error::other("fixture parent missing"))?
+                    .join("状态.db"),
+            ),
+            Event::new(notify::EventKind::Create(CreateKind::Folder))
+                .add_path(root.join(".projectatlas/staging")),
+            Event::new(notify::EventKind::Modify(ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )))
+            .add_path(root.join(".projectatlas/staging")),
+        ] {
+            require(
+                selection.observe(&event),
+                "source child disappeared from normal classification",
+            )?;
+            require(
+                !selection.recursive_rebind_pending(),
+                "ordinary source/runtime children rebuilt recursive coverage before classification",
+            )?;
+        }
+        let mut watcher = notify::recommended_watcher(|_event| {})?;
+        watcher.watch(&root, RecursiveMode::Recursive)?;
+        let renamed = Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            notify::event::RenameMode::From,
+        )))
+        .add_path(root.clone());
+        require(
+            selection.observe(&renamed) && selection.recursive_rebind_pending(),
+            "source root replacement was not retained",
+        )?;
+        let cancelled = super::super::standalone_index_work_control();
+        cancelled.cancel();
+        require(
+            matches!(
+                selection.rebind_recursive_if_required(&mut watcher, &cancelled),
+                Err(CliError::IndexWork(_))
+            ),
+            "recursive recovery ignored caller cancellation",
+        )?;
+        require(
+            selection.recursive_rebind_pending(),
+            "failed root recovery lost its retry state",
+        )?;
+        selection.rebind_recursive_if_required(
+            &mut watcher,
+            &super::super::standalone_index_work_control(),
+        )?;
+        require(
+            !selection.recursive_rebind_pending(),
+            "successful root recovery retained stale uncertainty",
+        )?;
+        require(
+            selection.observe(&Event::new(notify::EventKind::Create(CreateKind::File)))
+                && selection.recursive_rebind_pending(),
+            "an unknown source location was acknowledged as current",
         )
     }
 

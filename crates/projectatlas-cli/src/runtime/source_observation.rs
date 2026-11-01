@@ -534,14 +534,20 @@ impl SourceObservationEntry {
             watcher,
             directories,
         } = &mut *coverage;
-        if let Err(error) = PolicyWatchInputs::install_selected(
-            &self.binding.root,
-            self.binding.config.as_deref(),
-            &self.policy_selection,
-            watcher,
-            directories,
-            control,
-        ) {
+        let update = self
+            .policy_selection
+            .rebind_recursive_if_required(watcher, control)
+            .and_then(|()| {
+                PolicyWatchInputs::install_selected(
+                    &self.binding.root,
+                    self.binding.config.as_deref(),
+                    &self.policy_selection,
+                    watcher,
+                    directories,
+                    control,
+                )
+            });
+        if let Err(error) = update {
             self.continuity_lost.store(true, Ordering::Release);
             self.invalidate();
             return Err(error);
@@ -674,7 +680,9 @@ impl SourceObservationEntry {
         {
             self.continuity_lost.store(true, Ordering::Release);
         }
-        if self.continuity_lost.load(Ordering::Acquire) {
+        if self.continuity_lost.load(Ordering::Acquire)
+            || self.policy_selection.recursive_rebind_pending()
+        {
             self.invalidate();
             return Ok(true);
         }
@@ -722,6 +730,9 @@ impl SourceObservationEntry {
         }
         let changed = changes.requires_full_scan || !changes.paths.is_empty();
         if changed {
+            if changes.requires_full_scan {
+                self.policy_selection.require_recursive_rebind();
+            }
             // Preserve consumed changes for an exact verification already in flight.
             self.continuity_lost.store(true, Ordering::Release);
             self.invalidate();
@@ -1565,9 +1576,12 @@ fn selected_watcher_callback(
     let mut publish = watcher_callback(sender, receiver, ingress_sequence, continuity_lost);
     move |result| {
         if let Ok(event) = &result
-            && !selection.may_affect(event)
+            && !selection.observe(event)
         {
             return;
+        }
+        if result.is_err() {
+            selection.require_recursive_rebind();
         }
         publish(result);
     }
@@ -1920,6 +1934,51 @@ mod tests {
         require(
             !database.exists(),
             "external watch registration implicitly initialized an index",
+        )
+    }
+
+    #[test]
+    fn native_observer_rebinds_a_replaced_source_root_with_external_database()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        fs::create_dir(&root)?;
+        let database = temp.path().join("external-atlas.db");
+        let entry = SourceObservationEntry::start(SourceBinding::new(&database, &root, None)?)?;
+        fs::rename(&root, temp.path().join("retired-root"))?;
+        fs::create_dir(&root)?;
+        await_native_policy_change(&entry)?;
+        entry.clear_before_exact_verification(&test_control())?;
+        let source = root.join("source.rs");
+        fs::write(&source, "pub fn replacement_source() {}\n")?;
+        // Require this exact new-root child, not a late rename/create event
+        // from the old root or its external parent registration.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = false;
+        while Instant::now() < deadline && !observed {
+            {
+                let receiver = entry.receiver.lock().map_err(|poisoned| {
+                    std::io::Error::other(format!("native event receiver unavailable: {poisoned}"))
+                })?;
+                observed = receiver.try_iter().any(|event| {
+                    !matches!(event.kind, EventKind::Access(_))
+                        && event
+                            .paths
+                            .iter()
+                            .any(|path| same_native_path(path, &source))
+                });
+            }
+            if !observed {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        require(
+            observed,
+            "replacement source-root child did not reach native ingress",
+        )?;
+        require(
+            !database.exists(),
+            "root observation initialized an external database",
         )
     }
 

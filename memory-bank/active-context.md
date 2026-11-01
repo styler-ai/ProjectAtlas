@@ -1,4 +1,84 @@
+## Current #739 selected; preserve root-watch delta and consume accepted main
+
+#741CLOSED/PR743MERGED at6927ed0ca64788db6947b4d43eafce29aac5ed61 afterall9nativeCI
+jobs/requiredchecks/reviews. Its reviewedandmergedtreesidentical; no further741work.
+Primary nowONLY739, exactrootissue-739 branchfix/external-excludes-739. Existing6eb0dfd
+plus4dirtysourcefiles(rootwatchrebind+graphbudgetpreallocation) preserved toexternal
+snapshot /tmp/projectatlas-739-pre-main-snapshot-path.txt beforecheckpoint. Committing
+that domain delta BEFOREmainmerge; old localproofsrecordedbelow arebaselineonly,
+rootdeltaindependentreview+actualrawCLIrootreplacementproof stillpending. Do not
+claimnewmaincorrectness fromoldproofs. Tasks1of4/allacceptanceopen. NoPRyet.
+NO localexecutionlease; allhistorical731/739sessionclaimsbelow areterminal/obsolete.
+
+Installed050 exactrootMCPbriefreturneddependency_closure_limit/fullchanged10001 for
+4source+memorychanges; safeclosurelimitrefusal is not yet establishedasbug. Preserve
+privateDB/config/purposes; refreshsameindex AFTERmainintegration. No reset/reinit.
+Mainintegrationneeds accepted731 DER24/SEM23+741managed-stateadmission. Reconcilefinal
+DERstrictlynewerthanALLprivatecandidates, preserveacceptedSEM; do notpublishstale12.
+Acceptedreconcile-external-git-excludes fullspec/liveissue reread; directconfiglimits,
+canonicalgix-config+ignorematching, boundedwatch/queue/cancellation andDBkeysetprobe
+remaincontract. Preserveexplicitoperatorcapabilities. SharedDocprefixguard#738must
+protectbothprojectionandnewprobe whencombined; investigateowningboundarybefore
+claiming739complete. Latest741No localbuild/indexprooflease remains.
+
+IntegrationglobalIssueOps foundpreexisting#7082.3livechecked/mainunchecked; preserve
+private708work andrecordforitsowner, don'tunchecktohideprogress. Current739scoped
+mirror remains1of4. QueuedCodexCIhandoff after741 closure isworkflowgapreviewonly:
+syntheticmergecandidate verification/focusedaffectedPR+fullRCproof, notparallelissue
+implementation. See/tmp/projectatlas-codex-ci-followup.json. Goalcontinues739->738->
+708->715->RC1non-draftLatestfalseindependentlyverified; stablepublication/milestone
+closeoutrequireslaterinstruction. Olderheadersbelow historicalwhereinconsistent.
+
 # Active context
+
+## Current root-watch delta and cross-lane lease (2026-10-29)
+
+Committed6eb0dfd now has uncommitted runtime.rs, graph_projection.rs, policy_watch.rs,
+source_observation.rs and memory changes. Preserve them. Confirmed native same-path
+sourceROOT replacement with externalDB left recursivewatch on oldinode; causal
+native test failed before and passes after event-retained conditional rootrebind.
+No unconditional warm-read rewatch. Atomic hint survivesqueuedrain; nativecallbacks
+performnoI/O, normal source/runtime/UnicodeexternalDB events remainfiltered. Same
+caller budget/errorpropagation retained; restorehint onfailure. Pure9policywatch+
+35observertests PASS. CLIunits372PASS, realpolicyCLI/MCP/linked/6FIFO E2E PASS,
+3inventory+affectedalltargetClippy+strictstringsPASS. Receipt/logs
+/tmp/projectatlas-739-root-replacement-{negative,positive}.log and
+/tmp/projectatlas-739-current-cli-unit-tests.log. Graphprobe map budget preflight
+moved BEFORE allocation withoutchangingestimate/limit. Whole-rootdelta Luna review
+and actualrawCLI root-replacement proof stillpending. No live739build remains.
+
+Primary nowowns731 sharedtarget lease92247 fornewgeneratorreviewreproduction;
+no739build/index/benchmark concurrently.731public6639b0bd/nativepush51404 terminal
+PASS/current4platform+Rust+verify/pr-statePASS. Final731DER/SEM mayadvance12for
+newgeneratorrepair; final739/738combinedDER mustexceedFINAL731/allprivate andretain
+FINAL731SEM. Do not publish proposedstandalone12 asfinalwithoutreconciliation.
+Root715/RC1milestone37 exactchildrenANDblockers708/718/721/722/731/732/738/739
+freshlyconfirmed, allcorrectparents/milestones; noopenclosedmilestone member.
+NoRC exists, Latest050unchanged. Older entries below are superseded.
+
+## Current source checkpoint and live execution lease
+
+739 source checkpoint6eb0dfd is committed; later739dirt is memory-only. Alllatest
+source checks passed: FS46,DB242,CLIunit370, realCLI/MCP/linked/policy-only/6FIFO E2E,
+Clippy,3inventory,strictstrings,fullworkspaceRustdoc/doctests. Lunaapprovedcurrent
+slice. Fivecausalnegatives failasrequired, source byte-restored, positivesPASS.
+Stable050 exact739affectedrefreshPASS18parsed677unchanged; noDBreset.
+
+731 accepted-main merge6639b0bd3829b122bed2e163e2c9801e2ee8252f resolves memory/map
+conflicts whilepreserving own731owner+RC1child andacceptedfuture490/493graph.
+NOproductioncode/dependency/workflow/toolchainchange frompublic3c9. StrictOpenSpec
+andplannedIssueOps9/9/8PASS. Publicremote remains3c9 until normalpush completes;
+3.1/acceptance remainopen. NativepushLIVE51404 on exactclean6639, sourceproof d0b,
+log /tmp/projectatlas-731-accepted-main-native-push.log, externalreceipt
+/tmp/projectatlas-731-accepted-main-native-push-session.json. Sharedtargetowner731;
+DO NOT compile/run siblingCLI E2Es or benchmarks until terminal. Resumehandle,
+do not restart from observation timeout. No permissionpending/noRCpublished.
+
+After terminal, inspectgates/upload/currenthostedchecks andresolvefeedback; normal
+737merge/closure onlyaftercurrentreadiness. Then consumeaccepted731+740in739,
+combine738prefixguard into shareduncachedinspector/newfreshnessprobe, finalcontract
+strictlynewerthanallprivate/SEM11; nativeupgrades/optimizedcost/wholeissue/full
+native/hosted/installed/releaseproofstillpending. Olderprocessnotes superseded.
 
 ## Verified implementation checkpoint ready to commit
 

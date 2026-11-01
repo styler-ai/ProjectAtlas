@@ -3362,6 +3362,13 @@ impl<'a> DocumentResolutionIndex<'a> {
             path: root.to_path_buf(),
             source,
         })?;
+        // Admit the existing inventory estimate before allocating either lookup map.
+        let retained_bytes = nodes.iter().fold(0_u64, |bytes, node| {
+            bytes
+                .saturating_add(STAGED_GRAPH_ROW_BYTES.saturating_mul(2))
+                .saturating_add(node.path.len() as u64)
+        });
+        enforce_resolution_registry_budget(retained_bytes)?;
         let kinds_by_path = nodes
             .iter()
             .map(|node| (node.path.as_str(), node.kind))
@@ -3373,12 +3380,6 @@ impl<'a> DocumentResolutionIndex<'a> {
                 .or_insert(0_u32);
             *count = count.saturating_add(1);
         }
-        let retained_bytes = nodes.iter().fold(0_u64, |bytes, node| {
-            bytes
-                .saturating_add(STAGED_GRAPH_ROW_BYTES.saturating_mul(2))
-                .saturating_add(node.path.len() as u64)
-        });
-        enforce_resolution_registry_budget(retained_bytes)?;
         Ok(Self {
             root: root.to_path_buf(),
             canonical_root,

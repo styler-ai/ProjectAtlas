@@ -7921,9 +7921,12 @@ pub(crate) fn run_notify_watch_loop(
     let mut watcher = RecommendedWatcher::new(
         move |result: notify::Result<Event>| {
             if let Ok(event) = &result
-                && !callback_selection.may_affect(event)
+                && !callback_selection.observe(event)
             {
                 return;
+            }
+            if result.is_err() {
+                callback_selection.require_recursive_rebind();
             }
             match sender.try_send(result) {
                 Ok(()) => {}
@@ -7956,7 +7959,7 @@ pub(crate) fn run_notify_watch_loop(
         refresh_index_controlled(store, &current_plan, symbol_options, &control)?;
     cycles += 1;
     while max_cycles == 0 || cycles < max_cycles {
-        let changes = wait_for_index_event_with_continuity(
+        let mut changes = wait_for_index_event_with_continuity(
             &receiver,
             &watch_root,
             debounce,
@@ -7964,9 +7967,11 @@ pub(crate) fn run_notify_watch_loop(
             &continuity_lost,
             &policy_inputs,
         )?;
+        changes.requires_full_scan |= policy_selection.recursive_rebind_pending();
         if changes.has_changes() {
             let control = index_work_control(symbol_options);
             current_plan = plan.reload_controlled(&control)?;
+            policy_selection.rebind_recursive_if_required(&mut watcher, &control)?;
             policy_inputs = policy_watch::PolicyWatchInputs::install_selected(
                 &watch_root,
                 current_plan.selected_config_path.as_deref(),
