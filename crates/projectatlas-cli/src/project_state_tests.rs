@@ -2893,6 +2893,8 @@ public static class SystemPolicyFixture {
           string verbatim=candidate.StartsWith(@"\\?\",StringComparison.Ordinal) ? candidate
             : candidate.StartsWith(@"\\",StringComparison.Ordinal) ? @"\\?\UNC\"+candidate.Substring(2) : @"\\?\"+candidate;
           rows.Add("native|"+expected+"|"+variant+"|win32="+NativeLookupControl(candidate)+"|verbatim="+NativeLookupControl(verbatim));
+          if (candidate.Length > 2 && candidate[1] == ':')
+            rows.Add("device|"+expected+"|"+variant+"|"+NativeLookupControl(@"\\.\"+candidate));
         }
       }
       return String.Join("\n",rows);
@@ -3098,6 +3100,9 @@ public static class SystemPolicyFixture {
     return SourceDescriptorControl(root,protectedSource,widerParent,movedSource,systemAccess,systemPolicy,"");
   }
   public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy, string sourceDacl) {
+    return SourceDescriptorControl(root,protectedSource,widerParent,movedSource,systemAccess,systemPolicy,sourceDacl,true,0x78u);
+  }
+  public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy, string sourceDacl, bool maximumAllowed, uint systemInformation) {
     string preparation=System.IO.Path.Combine(root,"preparation"), parent=System.IO.Path.Combine(root,"publication");
     System.IO.Directory.CreateDirectory(preparation); System.IO.Directory.CreateDirectory(parent);
     string source=System.IO.Path.Combine(movedSource ? preparation : parent,"source"), destination=System.IO.Path.Combine(parent,"output"), stage=System.IO.Path.Combine(parent,"stage");
@@ -3108,8 +3113,10 @@ public static class SystemPolicyFixture {
       DiscretionaryPolicy(preparation,"D:P(A;;FA;;;OW)");
       DiscretionaryPolicy(parent,"D:P(A;;FA;;;OW)"+(widerParent ? "(A;OIIO;0x00050000;;;WD)" : ""));
       System.IO.File.WriteAllText(source,"previous destination");
-      DiscretionaryPolicy(source,String.IsNullOrEmpty(sourceDacl) ? (protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)") : sourceDacl);
+      // Set the fixture SACL while the setup handle still has its initial
+      // owner rights; a later restrictive DACL must not mask constructor proof.
       if (!String.IsNullOrEmpty(systemPolicy)) Policy(source,systemPolicy,24);
+      DiscretionaryPolicy(source,String.IsNullOrEmpty(sourceDacl) ? (protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)") : sourceDacl);
       if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
       uint information=7u | (systemAccess ? 0x1f8u : 16u);
       sourceDescriptor=FileDescriptor(destination,information);
@@ -3137,13 +3144,32 @@ public static class SystemPolicyFixture {
       if (!SetSecurityDescriptorControl(sourceDescriptor,0x1000,0x1000)) throw new Win32Exception();
       SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=sourceDescriptor, Inherit=false };
       phase="create original data/security/delete handle";
-      raw=CreateFile(stage,0xc2070000u | (systemAccess ? 0x01000000u : 0u),4,ref security,1,0x00200080,IntPtr.Zero);
+      if (!maximumAllowed && systemInformation == 8u) {
+        foreach (uint requested in new uint[] { 0x40000u,0x80000u,0x10000u,2u,0x20000u,0xc0070000u,0xc00f0000u }) {
+          string probe=stage+"-exact-"+requested;
+          IntPtr held=CreateFile(probe,requested | (systemAccess ? 0x01000000u : 0u),4,ref security,1,0x00200080,IntPtr.Zero);
+          if (held == new IntPtr(-1)) { observations+=";exact-mask="+requested.ToString("x")+":error="+Marshal.GetLastWin32Error();continue; }
+          try {
+            ObjectBasicInformation rights;uint resultSize;
+            uint nativeSize=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
+            if (NtQueryObject(held,0,out rights,nativeSize,out resultSize) < 0 || resultSize != nativeSize) throw new Exception("Exact creator granted-access query failed");
+            observations+=";exact-mask="+requested.ToString("x")+":granted="+rights.GrantedAccess.ToString("x");
+          } finally { CloseHandle(held);System.IO.File.Delete(probe); }
+        }
+      }
+      uint desired=0xc0030000u | (!protectedSource ? 0x40000u : 0u)
+        | (maximumAllowed ? 0x02000000u : 0u)
+        | (systemAccess ? 0x01000000u : 0u)
+        | (!maximumAllowed && systemAccess && (systemInformation & 0x10) != 0 ? 0x80000u : 0u);
+      observations+=";requested="+desired.ToString("x")+";system-set="+systemInformation.ToString("x");
+      raw=CreateFile(stage,desired,4,ref security,1,0x00200080,IntPtr.Zero);
       if (raw == new IntPtr(-1)) throw new Win32Exception();
       ObjectBasicInformation basic; uint returned;
       uint size=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
       if (NtQueryObject(raw,0,out basic,size,out returned) < 0 || returned != size) throw new Exception("Creator granted-access query failed");
       observations+=";granted="+basic.GrantedAccess.ToString("x");
-      if ((basic.GrantedAccess & 0x00070003u) != 0x00070003u) throw new Exception("Creator lacks required data/security/delete rights");
+      uint required=0x00030003u | (!protectedSource ? 0x40000u : 0u);
+      if ((basic.GrantedAccess & required) != required) throw new Exception("Creator lacks actually required data/security/delete rights");
       stageDescriptor=HeldDescriptor(raw,information);
       ushort initialControl; uint initialRevision;
       if (!GetSecurityDescriptorControl(stageDescriptor,out initialControl,out initialRevision) || initialRevision != 1) throw new Win32Exception();
@@ -3169,7 +3195,7 @@ public static class SystemPolicyFixture {
             acl=empty;
           }
           phase="restore exact system inheritance through original handle";
-          uint result=SetSecurityInfo(raw,1,0x78u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
+          uint result=SetSecurityInfo(raw,1,systemInformation | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
           if (result != 0) throw new Win32Exception((int)result);
         } finally { if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty); }
       }
@@ -3444,6 +3470,49 @@ fn windows_native_namespace_aliases_preserve_distinct_custom_entries() -> io::Re
                     )?;
                     fs::remove_file(&upper)?;
                 }
+                for suffix in [".", " "] {
+                    let normal_parent = if private {
+                        temp.path().join(STATE_DIRECTORY)
+                    } else {
+                        temp.path().to_path_buf()
+                    };
+                    let normal = normal_parent.join(format!("{expected}{suffix}"));
+                    require(
+                        normal.try_exists()?,
+                        "ordinary Win32 suffix did not alias the existing fixture entry",
+                    )?;
+                    let outside = root.join("normal-alias-outside-owner");
+                    let before = fs::read(&target)?;
+                    fs::hard_link(&target, &outside)?;
+                    if database {
+                        require(
+                            admit(&normal).is_err(),
+                            "normal database suffix bypassed hardlink admission",
+                        )?;
+                    } else {
+                        let mut admitted = admit(&normal)?.ok_or_else(|| {
+                            io::Error::other("normal fixed-name suffix was external")
+                        })?;
+                        if expected != super::GITIGNORE_FILE {
+                            admitted.write_document(b"normal alias publication")?;
+                            require(
+                                fs::read(&outside)? == before
+                                    && fs::read(&target)? == b"normal alias publication",
+                                "normal suffix publication changed the outside owner",
+                            )?;
+                        }
+                    }
+                    fs::remove_file(outside)?;
+                    // The same suffix in an extended path is a literal custom
+                    // entry, even when its inode also backs the managed name.
+                    let literal = parent.join(format!("{expected}{suffix}"));
+                    fs::hard_link(&target, &literal)?;
+                    require(
+                        admit(&literal)?.is_none(),
+                        "verbatim literal suffix became managed",
+                    )?;
+                    fs::remove_file(literal)?;
+                }
                 let short = std::path::PathBuf::from(windows_namespace_fixture(
                     &target,
                     "short-name",
@@ -3529,6 +3598,17 @@ fn windows_native_namespace_aliases_preserve_distinct_custom_entries() -> io::Re
             )?);
             let database = directory.join(DATABASE_FILE);
             fs::write(&database, b"managed database")?;
+            for suffix in [".", " "] {
+                let alias = temp
+                    .path()
+                    .join(format!("{STATE_DIRECTORY}{suffix}"))
+                    .join(DATABASE_FILE);
+                require(
+                    ProjectStateGuard::preflight_database_path(&alias, &root)?.is_some(),
+                    "normal private-directory suffix bypassed database ownership",
+                )?;
+            }
+
             require(
                 ProjectStateGuard::preflight_database_path(
                     &short_directory.join(DATABASE_FILE),
@@ -3538,6 +3618,22 @@ fn windows_native_namespace_aliases_preserve_distinct_custom_entries() -> io::Re
                 "private directory short alias bypassed ownership",
             )?;
             fs::remove_file(database)?;
+            let outside_directory = root.join("outside-state-owner");
+            fs::rename(&directory, &outside_directory)?;
+            std::os::windows::fs::symlink_dir(&outside_directory, &directory)?;
+            for suffix in [".", " "] {
+                let alias = temp
+                    .path()
+                    .join(format!("{STATE_DIRECTORY}{suffix}"))
+                    .join(DATABASE_FILE);
+                require(
+                    ProjectStateGuard::preflight_database_path(&alias, &root).is_err(),
+                    "normal private-directory suffix followed an indirect state owner",
+                )?;
+            }
+            fs::remove_dir(&directory)?;
+            fs::rename(&outside_directory, &directory)?;
+
             if sensitive {
                 let upper_directory = root.join(STATE_DIRECTORY.to_ascii_uppercase());
                 fs::create_dir(&upper_directory)?;

@@ -1347,6 +1347,21 @@ fn direct_directory_spelling(path: &Path, directory: &Path) -> io::Result<bool> 
     }
 }
 
+/// Recognize the private directory before interpreting a relative config root.
+///
+/// # Errors
+/// Returns native ownership/comparison errors for a possible directory alias.
+pub(crate) fn state_directory_spelling(path: &Path) -> io::Result<bool> {
+    if path.file_name().is_some_and(|name| name == STATE_DIRECTORY) {
+        return Ok(true);
+    }
+    if !fixed_name_candidate(path, STATE_DIRECTORY)? {
+        return Ok(false);
+    }
+    let parent = resolve_existing_parent_prefix(containing_directory(path))?;
+    direct_directory_spelling(path, &parent.join(STATE_DIRECTORY))
+}
+
 /// Prove only existing direct directory aliases; file hardlinks do not imply naming rules.
 fn same_direct_directory(left: &Path, right: &Path) -> io::Result<bool> {
     let (Some(left_metadata), Some(right_metadata)) =
@@ -1431,6 +1446,8 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
     let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
         return Ok(false);
     };
+    #[cfg(windows)]
+    let name = windows_lookup_name(path, name);
     if name.eq_ignore_ascii_case(expected) {
         return Ok(true);
     }
@@ -1456,6 +1473,22 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
             .map_err(io::Error::other);
     }
     Ok(false)
+}
+
+/// Keep ordinary Win32 leaf normalization out of literal native namespaces.
+#[cfg(windows)]
+fn windows_lookup_name<'a>(path: &Path, name: &'a str) -> &'a str {
+    use std::path::Prefix;
+    let literal = matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if prefix.kind().is_verbatim() || matches!(prefix.kind(), Prefix::DeviceNS(_))
+    );
+    if literal || name.contains(':') {
+        name
+    } else {
+        name.trim_end_matches(['.', ' '])
+    }
 }
 
 /// Match the fixed ASCII product alphabet under HFS's frozen comparison rules.
@@ -1495,6 +1528,8 @@ fn named(path: &Path, expected: &str) -> io::Result<bool> {
     let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
         return Ok(false);
     };
+    #[cfg(windows)]
+    let name = windows_lookup_name(path, name);
     if name == expected {
         return Ok(true);
     }

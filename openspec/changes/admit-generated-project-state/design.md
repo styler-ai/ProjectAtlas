@@ -233,6 +233,29 @@ preserve a distinct lowercase managed config when a sensitive uppercase custom
 config is selected, and preserve managed/outside-owner behavior for actual aliases.
 Cross-compilation or diagnostic job success alone is not native acceptance.
 
+Actual 583 raw CreateFileW controls prove ordinary final-dot/space lookup aliases
+for all six fixed components in both case modes, while the same verbatim strings
+are distinct. Normalize only the ordinary Win32 component before the existing
+candidate/native-entry comparison. Preserve literal verbatim and device namespace
+spellings and ADS syntax; separately measure device-prefix behavior before claiming
+compatibility. Do not infer naming rules from a managed file's hardlink identity.
+
+Config root inference is a producer of the admission root. Reuse the same fallible
+private-directory comparison for relative `.` and absent roots, before following
+the selected directory spelling. Prove real CLI/configured-MCP changes through
+directory aliases preserve outside hardlinks, while distinct sensitive custom
+directories retain their root semantics. Initialization emits `.` for a private
+config only if its implied project root is the requested root; an explicit config
+in another project's private directory must retain the requested root.
+
+The bundled Windows SQLite VFS retains a full selected filename without expanding
+DOS short names and appends sidecar suffixes to that filename. Filename equivalence
+alone therefore does not establish a common WAL/SHM cohort. Native diagnostic
+controls must measure canonical, dot/space and actual short-name writer/reader
+filenames, committed visibility and directory entries before choosing a runtime
+change. Preserve pending WAL data and explicit operator paths; never silently
+retarget an alias and ignore its existing WAL or delete state to resolve ambiguity.
+
 ### Recognize Linux directory casefolding and preserve sealed outputs
 
 The Linux platform is not uniformly case-sensitive. Keep exact spellings fast;
@@ -678,6 +701,16 @@ for output admission because source parsing/resolution facts are unchanged; reev
 only if implementation changes a derived-data contract.
 
 ## Risks / Trade-offs
+
+Controlled macOS fixture teardown must establish image/device/mount ownership
+before its first detach, verify successful detach, and revalidate complete ownership
+and unmounted state before every bounded non-force busy-device retry. Changed or
+uncertain state latches failure and retains the fixture; EXIT cleanup must not retry
+an already failed teardown. Causal models cover false-success and foreign ownership
+alongside normal/partial-unmount and transient/permanent-busy controls. Real hosted
+native completion remains necessary. Hosted Rust checks retain all gates with
+limited debug information to avoid independent executable-fixture copies exhausting
+disk; this does not change optimization, assertions or test selection.
 
 - An early blanket guard can break explicit external paths -> distinguish ownership
   roles and prove positive CLI/MCP external DB/config and selected-root aliases.

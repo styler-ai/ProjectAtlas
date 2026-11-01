@@ -45,6 +45,12 @@ destinations SHALL be refused without outside-owner side effects.
 - **THEN** ownership follows the actual containing directory's native naming mode, including correctly resolved missing parents and inherited case flags
 - **AND** distinct selected custom entries on sensitive directories do not redirect writes into lowercase managed entries; insensitive aliases remain protected, exact names remain usable, and uncertain native queries refuse before side effects
 
+#### Scenario: Native aliases remain owned before root inference
+- **WHEN** a selected config inside a native alias of the private directory contains a relative or absent project root
+- **THEN** root inference uses the same native directory naming rules as admission before writes, and managed replacements preserve outside hardlinks
+- **AND** ordinary Win32 final-dot/space aliases remain managed while literal namespace names and distinct custom directories retain their supported semantics
+- **AND** an explicit config in another project's private directory retains its requested project root; database aliases cannot silently select a different WAL/SHM cohort or discard committed state
+
 #### Scenario: Replacement preserves existing access controls
 - **WHEN** an admitted generated host config, managed TOML config or JSON sidecar is replaced
 - **THEN** publication preserves its existing access ACL/DACL and effective ownership, including applicable inheritance protection, and does not broaden access through the staging directory's defaults

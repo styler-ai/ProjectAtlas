@@ -5888,6 +5888,125 @@ with open(sys.argv[1], 'rb') as source:
                 }
             }
 
+            #[cfg(windows)]
+            if !mcp {
+                // Observe the actual bundled Windows VFS before deciding how
+                // managed aliases and existing WAL cohorts may be admitted.
+                for spelling in ["canonical", "trailing-dot", "trailing-space", "short"] {
+                    let directory = root.join(format!("sqlite-alias-{spelling}"));
+                    fs::create_dir(&directory)?;
+                    let outcome = (|| -> Result<(), Box<dyn Error>> {
+                        let base = directory.join("projectatlas.db");
+                        let initial = Connection::open(&base)?;
+                        initial.execute_batch(
+                            "PRAGMA journal_mode=WAL; CREATE TABLE alias_probe(value INTEGER);",
+                        )?;
+                        drop(initial);
+                        let selected = match spelling {
+                            "trailing-dot" => base.with_file_name("projectatlas.db."),
+                            "trailing-space" => base.with_file_name("projectatlas.db "),
+                            "short" => {
+                                let output = StdCommand::new(windows_powershell_executable()?)
+                                .args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_ACL_PATH).ShortPath"])
+                                .env("PROJECTATLAS_TEST_ACL_PATH", &base).output()?;
+                                if !output.status.success() {
+                                    return Err(io::Error::other(format!(
+                                        "native SQLite short-name setup failed: {output:?}"
+                                    ))
+                                    .into());
+                                }
+                                PathBuf::from(String::from_utf8(output.stdout)?.trim())
+                            }
+                            _ => base.clone(),
+                        };
+                        let actual_short_alias =
+                            spelling == "short" && selected.file_name() != base.file_name();
+                        if spelling == "short" && !actual_short_alias {
+                            writeln!(
+                                std::io::stderr().lock(),
+                                "native Windows SQLite alias unavailable {}",
+                                json!({"spelling":spelling,"selected":selected,"actual_short_alias":false})
+                            )?;
+                            return Ok(());
+                        }
+                        let writer = Connection::open(&selected)?;
+                        let reported = writer
+                            .path()
+                            .ok_or_else(|| io::Error::other("native SQLite filename is absent"))?
+                            .to_owned();
+                        writeln!(
+                            std::io::stderr().lock(),
+                            "native Windows SQLite alias opened {}",
+                            json!({"spelling":spelling,"selected":selected,"sqlite_filename":reported,"actual_short_alias":actual_short_alias})
+                        )?;
+                        writer.execute_batch(
+                            "PRAGMA wal_autocheckpoint=0; INSERT INTO alias_probe VALUES(1);",
+                        )?;
+                        let own_rows: i64 =
+                            writer.query_row("SELECT count(*) FROM alias_probe", [], |row| {
+                                row.get(0)
+                            })?;
+                        let canonical =
+                            Connection::open_with_flags(&base, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                        let observed: Result<i64, _> =
+                            canonical.query_row("SELECT count(*) FROM alias_probe", [], |row| {
+                                row.get(0)
+                            });
+                        let canonical_rows = match observed {
+                            Ok(rows) => json!({"rows":rows}),
+                            Err(error) => json!({"error":error.to_string()}),
+                        };
+                        let entries = fs::read_dir(&directory)?
+                            .map(|entry| {
+                                entry.map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        writeln!(
+                            std::io::stderr().lock(),
+                            "native Windows SQLite alias cohort {}",
+                            json!({"spelling":spelling,"selected":selected,"sqlite_filename":reported,"actual_short_alias":actual_short_alias,"writer_rows":own_rows,"canonical":canonical_rows,"entries":entries})
+                        )?;
+                        if own_rows != 1
+                            || (spelling == "canonical"
+                                && canonical_rows.get("rows").and_then(Value::as_i64) != Some(1))
+                        {
+                            return Err(io::Error::other(
+                                "native SQLite cohort baseline lost committed rows",
+                            )
+                            .into());
+                        }
+                        drop(canonical);
+                        drop(writer);
+                        let recovered = Connection::open(&base)?;
+                        if recovered.query_row("SELECT count(*) FROM alias_probe", [], |row| {
+                            row.get::<_, i64>(0)
+                        })? != 1
+                        {
+                            return Err(io::Error::other(
+                                "native alias fixture did not checkpoint its committed row",
+                            )
+                            .into());
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = outcome {
+                        let entries = fs::read_dir(&directory)?
+                            .map(|entry| {
+                                entry.map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        writeln!(
+                            std::io::stderr().lock(),
+                            "native Windows SQLite alias failure {}",
+                            json!({"spelling":spelling,"error":error.to_string(),"entries":entries})
+                        )?;
+                        if spelling == "canonical" {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+
             // A volume alias is managed; a separate case-sensitive name keeps
             // its intentional custom writer, even when both names share an inode.
             #[cfg(windows)]
@@ -5949,11 +6068,100 @@ with open(sys.argv[1], 'rb') as source:
                     fs::write(&config, &original_config)?;
                 }
             }
+            // Startup root inference must recognize the same directory namespace
+            // as write admission, including a relative root stored in the config.
+            let directory_spellings =
+                [".PROJECTATLAS", ".projectatlas\u{200d}"].map(|spelling| root.join(spelling));
+            #[cfg(windows)]
+            let directory_spellings = {
+                let mut directories = directory_spellings.to_vec();
+                directories
+                    .extend([".projectatlas.", ".projectatlas "].map(|name| root.join(name)));
+                let output = StdCommand::new(windows_powershell_executable()?)
+                    .args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:PROJECTATLAS_TEST_ACL_PATH).ShortPath"])
+                    .env("PROJECTATLAS_TEST_ACL_PATH", root.join(ATLAS_DIR_NAME)).output()?;
+                if !output.status.success() {
+                    return Err(io::Error::other(format!(
+                        "relative config short-directory setup failed: {output:?}"
+                    ))
+                    .into());
+                }
+                let short = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+                if short.file_name() != Some(std::ffi::OsStr::new(ATLAS_DIR_NAME)) {
+                    directories.push(short);
+                }
+                directories
+            };
+            for directory in directory_spellings {
+                let selected = directory.join("config.toml");
+                if !selected.try_exists()? {
+                    continue;
+                }
+                let mut relative = document.clone();
+                relative["project"]["root"] = toml::Value::String(".".to_owned());
+                let before = toml::to_string(&relative)?;
+                let outside = root.with_extension("relative-config-owner");
+                fs::write(&outside, &before)?;
+                fs::remove_file(&config)?;
+                fs::hard_link(&outside, &config)?;
+                let (mut configured, _) = McpContractSession::spawn_configured(
+                    &executable,
+                    &root,
+                    &root.join(DATABASE_PATH),
+                    Some(&selected),
+                    &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+                )?;
+                let checked = (|| -> Result<(), Box<dyn Error>> {
+                    let selected = selected
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("relative config path is not UTF-8"))?;
+                    invoke(
+                        &executable,
+                        &root,
+                        mcp.then_some(&mut configured),
+                        &[
+                            "--config",
+                            selected,
+                            "ignore",
+                            "add",
+                            "--kind",
+                            "path-prefix",
+                            "relative-generated",
+                        ],
+                        "atlas_ignore_add",
+                        &json!({"kind":"path-prefix","value":"relative-generated"}),
+                        false,
+                    )?;
+                    if fs::read_to_string(&outside)? != before
+                        || !fs::read_to_string(&config)?.contains("relative-generated")
+                        || same_file::is_same_file(&outside, &config)?
+                    {
+                        return Err(io::Error::other(
+                            "relative-root directory alias bypassed managed config publication",
+                        )
+                        .into());
+                    }
+                    Ok(())
+                })();
+                complete_mcp_test_after_shutdown(checked, || configured.shutdown())?;
+                fs::remove_file(&config)?;
+                fs::write(&config, &original_config)?;
+            }
+            #[cfg(not(windows))]
             let config_names = [
                 "CONFIG.TOML",
                 "conﬁg.toml",
                 "confıg.toml",
                 "config\u{200d}.toml",
+            ];
+            #[cfg(windows)]
+            let config_names = [
+                "CONFIG.TOML",
+                "conﬁg.toml",
+                "confıg.toml",
+                "config\u{200d}.toml",
+                "config.toml.",
+                "config.toml ",
             ];
             for config_name in config_names {
                 let upper_config = config.with_file_name(config_name);

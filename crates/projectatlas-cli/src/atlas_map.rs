@@ -1410,14 +1410,21 @@ fn normalize_config(
     cwd: &Path,
 ) -> AtlasMapResult<AtlasMapConfig> {
     let project = raw.project.unwrap_or_default();
+    let private_config = if project
+        .root
+        .as_deref()
+        .is_none_or(|root| root.trim() == ".")
+    {
+        config_path_is_projectatlas(config_path)?
+    } else {
+        false
+    };
     let root = match project.root {
-        Some(root) if root.trim() == "." && config_path_is_projectatlas(config_path) => {
+        Some(root) if root.trim() == "." && private_config => {
             project_root_for_projectatlas_config(config_path, cwd)
         }
         Some(root) => absolutize(base_dir, &root),
-        None if config_path_is_projectatlas(config_path) => {
-            project_root_for_projectatlas_config(config_path, cwd)
-        }
+        None if private_config => project_root_for_projectatlas_config(config_path, cwd),
         None => cwd.to_path_buf(),
     };
     let root = root.canonicalize().map_err(|source| AtlasMapError::Io {
@@ -1493,11 +1500,14 @@ fn normalize_config(
 }
 
 /// Return whether the config path is inside `.projectatlas`.
-fn config_path_is_projectatlas(config_path: Option<&Path>) -> bool {
-    config_path
-        .and_then(Path::parent)
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == ".projectatlas")
+fn config_path_is_projectatlas(config_path: Option<&Path>) -> AtlasMapResult<bool> {
+    let Some(parent) = config_path.and_then(Path::parent) else {
+        return Ok(false);
+    };
+    crate::project_state::state_directory_spelling(parent).map_err(|source| AtlasMapError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })
 }
 
 /// Return the project root implied by `.projectatlas/config.toml`.
@@ -3083,8 +3093,15 @@ fn default_config_text_for(root: &Path, config_path: &Path) -> AtlasMapResult<St
 
 /// Return the `[project].root` value that keeps an explicit init config bound to `root`.
 fn default_config_root_value(root: &Path, config_path: &Path) -> AtlasMapResult<String> {
-    if config_path_is_projectatlas(Some(config_path)) {
-        return Ok(".".to_string());
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if config_path_is_projectatlas(Some(config_path))? {
+        let implied = project_root_for_projectatlas_config(Some(config_path), &canonical_root);
+        if implied
+            .canonicalize()
+            .is_ok_and(|implied| implied == canonical_root)
+        {
+            return Ok(".".to_string());
+        }
     }
     let Some(parent) = config_path.parent() else {
         return Ok(".".to_string());
@@ -4229,6 +4246,85 @@ root = "."
                 return Err(std::io::Error::other(format!(
                     "default config root mismatch for {config_path:?}: expected {expected_root}, got {actual_root}"
                 ))
+                .into());
+            }
+        }
+        // A conventional basename in another project does not select its root.
+        let external = tempfile::tempdir()?;
+        let external_config = external.path().join(".projectatlas/config.toml");
+        std::fs::create_dir_all(
+            external_config
+                .parent()
+                .ok_or_else(|| std::io::Error::other("external config fixture has no parent"))?,
+        )?;
+        let text = super::default_config_text_for(root, &external_config)?;
+        if load_atlas_config_from_text(&external_config, &text)?.root != root.canonicalize()? {
+            return Err(
+                io::Error::other("external private config changed the selected root").into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relative_config_roots_follow_native_private_directory_names() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        fs::create_dir(root.join(".projectatlas"))?;
+        #[cfg(not(windows))]
+        let names = [".PROJECTATLAS", ".projectatlas\u{200d}"];
+        #[cfg(windows)]
+        let names = [
+            ".PROJECTATLAS",
+            ".projectatlas\u{200d}",
+            ".projectatlas.",
+            ".projectatlas ",
+        ];
+        for name in names {
+            let directory = root.join(name);
+            let aliases = directory.try_exists()?;
+            if !aliases {
+                fs::create_dir(&directory)?;
+            }
+            let config = directory.join("config.toml");
+            let actual = load_atlas_config_from_text(&config, "[project]\nroot = \".\"\n")?;
+            if actual.root != if aliases { root } else { &directory }.canonicalize()? {
+                return Err(io::Error::other(format!(
+                    "relative config root ignored native directory spelling: {name}"
+                ))
+                .into());
+            }
+            if aliases {
+                let absent = load_atlas_config_from_text(&config, "[project]\n")?;
+                if absent.root != root.canonicalize()?
+                    || default_config_root_value(root, &config)? != "."
+                {
+                    return Err(io::Error::other(
+                        "private config root inference disagreed with creation",
+                    )
+                    .into());
+                }
+            }
+        }
+        #[cfg(windows)]
+        for name in [".projectatlas.", ".projectatlas "] {
+            // canonicalize supplies a verbatim prefix, making these actual
+            // distinct directory entries rather than ordinary Win32 aliases.
+            let literal = root.canonicalize()?.join(name);
+            fs::create_dir(&literal)?;
+            let config = literal.join("config.toml");
+            let actual = load_atlas_config_from_text(&config, "[project]\nroot = \".\"\n")?;
+            if actual.root != literal.canonicalize()? {
+                return Err(io::Error::other(
+                    "literal private-looking directory changed config root semantics",
+                )
+                .into());
+            }
+            let text = super::default_config_text_for(root, &config)?;
+            if load_atlas_config_from_text(&config, &text)?.root != root.canonicalize()? {
+                return Err(io::Error::other(
+                    "literal custom config initialization lost the requested root",
+                )
                 .into());
             }
         }

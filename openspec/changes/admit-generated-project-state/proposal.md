@@ -34,6 +34,10 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   directories, including missing-parent inheritance and private-directory variants;
   investigate actual Unicode/short-name aliases without using file identity as
   proof that distinct hardlinks are the same namespace entry.
+- Apply native naming rules before config root inference too. Cover ordinary
+  Win32 trailing-dot/space spellings while preserving literal namespaces, and
+  establish which database filename SQLite uses for its WAL/SHM cohort before
+  admitting aliases; retain existing committed state and explicit-path workflows.
 - Trace analogous producer/write/admission paths and prove positive compatibility,
   causal failures and real installed CLI/MCP behavior on supported platforms.
 - Preserve existing access-control lists when replacing an admitted generated host

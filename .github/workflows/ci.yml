@@ -261,6 +261,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    # Full debug type information exhausts hosted disk during independent runtime
+    # copies. Keep limited debug information and every check/test, without changing optimization.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 1
+      CARGO_PROFILE_TEST_DEBUG: 1
     steps:
       - name: Checkout exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -491,6 +496,8 @@ jobs:
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture || native_policy_status=$?
           fi
           cargo test --locked -p projectatlas-cli --bin projectatlas project_state:: || native_policy_status=$?
+          cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::relative_config_roots_follow_native_private_directory_names -- --exact || native_policy_status=$?
+          cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::default_init_config_root_points_from_subdir_back_to_repo -- --exact || native_policy_status=$?
           if [ "$native_policy_status" -ne 0 ]; then
             exit "$native_policy_status"
           fi
@@ -641,8 +648,9 @@ jobs:
           matching = [item for item in images if os.path.realpath(item.get("image-path", "")) == owner["path"]]
           if len(matching) > 1:
               raise SystemExit("fixture image attachment is ambiguous")
+          reported_mounts = [os.path.realpath(entity["mount-point"]) for item in images for entity in item.get("system-entities", []) if entity.get("mount-point")]
           if not matching:
-              if any(os.path.ismount(path) for path in mounts):
+              if any(os.path.ismount(path) or path in reported_mounts for path in mounts):
                   raise SystemExit("fixture mount persists without its image mapping")
               print("detached")
           else:
@@ -650,7 +658,10 @@ jobs:
               observed = [item["dev-entry"] for item in entities if "dev-entry" in item]
               if set(observed) != set(devices):
                   raise SystemExit("fixture image device mapping changed")
-              if any(item.get("mount-point") for item in entities) or any(os.path.ismount(path) for path in mounts):
+              owned_mounts = [os.path.realpath(item["mount-point"]) for item in entities if item.get("mount-point")]
+              if owned_mounts or any(os.path.ismount(path) for path in mounts):
+                  if owner["mountpoint"] not in owned_mounts or reported_mounts.count(owner["mountpoint"]) != 1:
+                      raise SystemExit("fixture mount ownership changed")
                   print("mounted")
               else:
                   print("unmounted:" + whole[0])
@@ -658,37 +669,68 @@ jobs:
           }
           detach_native_volume() {
             local target="$1" elevated="$2" image_path="$3" receipt="$4"
-            local state="unknown" device="" attempt
-            if [ "$elevated" = true ]; then
-              if sudo -n hdiutil detach "$target"; then return 0; fi
-            else
-              if hdiutil detach "$target"; then return 0; fi
+            local state="unknown" device="" attempt admitted=false
+            if state="$(native_volume_state "$image_path" "$receipt")"; then
+              case "$state" in
+                detached) return 0 ;;
+                mounted|unmounted:*) admitted=true ;;
+              esac
+            fi
+            # The first mountpoint operation needs the same ownership proof as
+            # recovery. Successful exit alone does not prove the image detached.
+            if [ "$admitted" = true ] && [ "$state" = mounted ]; then
+              if [ "$elevated" = true ]; then
+                if sudo -n hdiutil detach "$target"; then
+                  if state="$(native_volume_state "$image_path" "$receipt")"; then
+                    if [ "$state" = detached ]; then return 0; fi
+                  else admitted=false; fi
+                fi
+              else
+                if hdiutil detach "$target"; then
+                  if state="$(native_volume_state "$image_path" "$receipt")"; then
+                    if [ "$state" = detached ]; then return 0; fi
+                  else admitted=false; fi
+                fi
+              fi
             fi
             # A non-force detach can unmount successfully and then find the image's
             # device busy. Recover only that proven partial completion, never a live mount.
-            for attempt in 1 2 3; do
-              if ! state="$(native_volume_state "$image_path" "$receipt")"; then break; fi
-              if [ "$state" = detached ]; then
-                echo "Owned image detached after its volume unmounted: $image_path"
-                return 0
-              fi
-              case "$state" in
-                unmounted:*) device="${state#unmounted:}" ;;
-                *) break ;;
-              esac
-              if [ "$attempt" -lt 3 ]; then sleep 1; fi
-            done
-            if [ "$state" = "unmounted:$device" ] && [ -n "$device" ]; then
-              echo "Finishing owned unmounted image detach through verified device: $device"
-              if [ "$elevated" = true ]; then
-                if sudo -n hdiutil detach "$device"; then
-                  if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+            if [ "$admitted" = true ]; then
+              for attempt in 1 2 3; do
+                if ! state="$(native_volume_state "$image_path" "$receipt")"; then break; fi
+                if [ "$state" = detached ]; then
+                  echo "Owned image detached after its volume unmounted: $image_path"
+                  return 0
                 fi
-              else
-                if hdiutil detach "$device"; then
-                  if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                case "$state" in
+                  unmounted:*) device="${state#unmounted:}" ;;
+                  *) break ;;
+                esac
+                if [ "$attempt" -lt 3 ]; then sleep 1; fi
+              done
+            fi
+            if [ "$admitted" = true ] && [ "$state" = "unmounted:$device" ] && [ -n "$device" ]; then
+              # Openers can outlive the unmount. Revalidate ownership and the
+              # unmounted state before EVERY bounded, non-force eject attempt.
+              for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                if ! state="$(native_volume_state "$image_path" "$receipt")"; then break; fi
+                if [ "$state" = detached ]; then return 0; fi
+                case "$state" in
+                  unmounted:*) device="${state#unmounted:}" ;;
+                  *) break ;;
+                esac
+                echo "Finishing owned unmounted image detach through verified device: $device (attempt $attempt/10)"
+                if [ "$elevated" = true ]; then
+                  if sudo -n hdiutil detach "$device"; then
+                    if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                  fi
+                else
+                  if hdiutil detach "$device"; then
+                    if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                  fi
                 fi
-              fi
+                if [ "$attempt" -lt 10 ]; then sleep 2; fi
+              done
             fi
             detach_failed=true
             diskutil info "${device:-$target}" || true
@@ -753,6 +795,7 @@ jobs:
               export PROJECTATLAS_TEST_CASE_SENSITIVE=true
             fi
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
+            cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::relative_config_roots_follow_native_private_directory_names -- --exact
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
@@ -1266,7 +1309,7 @@ jobs:
                 'S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))',
                 'S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)',
                 'S:P(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)',
-                'S:P(TL;;GR;;;S-1-19-0-0)',
+                'S:P(TL;;GR;;;S-1-19-512-4096)',
                 'S:P(FL;;GR;;;WD;(@User.PublicationClaim == "alpha"))'
               )
               foreach ($policy in $maskPolicies) {
@@ -1317,15 +1360,20 @@ jobs:
               foreach ($systemAccess in @($false, $true)) {
                 [SystemPolicyFixture]::Enable($systemAccess)
                 foreach ($source in $sourceDacls) {
-                  $path = Join-Path $directory ('source-rights-' + [guid]::NewGuid())
-                  $policy = if ($systemAccess) { 'S:P(AU;SAFA;FW;;;WD)' } else { '' }
-                  try {
-                    $value = [SystemPolicyFixture]::SourceDescriptorControl($path, $true, $true, $false, $systemAccess, $policy, $source.dacl)
-                    $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; security_privilege=$systemAccess; value=$value }
-                  } catch {
-                    $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; security_privilege=$systemAccess; error=$_.Exception.ToString() }
+                  foreach ($maximumAllowed in @($false, $true)) {
+                    $assignments = if ($systemAccess) { @(8, 120) } else { @(8) }
+                    foreach ($assignment in $assignments) {
+                      $path = Join-Path $directory ('source-rights-' + [guid]::NewGuid())
+                      $policy = if ($systemAccess) { 'S:P(AU;SAFA;FW;;;WD)' } else { '' }
+                      try {
+                        $value = [SystemPolicyFixture]::SourceDescriptorControl($path, $true, $true, $false, $systemAccess, $policy, $source.dacl, $maximumAllowed, $assignment)
+                        $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; maximum_allowed=$maximumAllowed; system_assignment=$assignment; security_privilege=$systemAccess; value=$value }
+                      } catch {
+                        $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; maximum_allowed=$maximumAllowed; system_assignment=$assignment; security_privilege=$systemAccess; error=$_.Exception.ToString() }
+                      }
+                      $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                    }
                   }
-                  $results[-1] | ConvertTo-Json -Depth 4 -Compress
                 }
               }
               foreach ($systemAccess in @($false, $true)) {
