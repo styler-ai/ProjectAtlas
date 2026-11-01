@@ -39,8 +39,9 @@ use projectatlas_core::health::{
 use projectatlas_core::language::{
     ACCEPTED_LANGUAGE_CAPABILITY_SET_VERSION, ContentClassification, ContentSelection,
     LANGUAGE_CAPABILITY_REGISTRY_VERSION, LanguageRegistryReport, SymbolParserOwner,
-    accepted_language_capability_digest, content_classification, language_capability,
-    language_registry_digest, language_registry_report,
+    accepted_language_capability_digest, content_classification, detect_language_for_path,
+    language_capability, language_registry_digest, language_registry_report,
+    normalized_language_extension,
 };
 #[cfg(all(test, feature = "optional-parser-supervisor"))]
 use projectatlas_core::optional_parser_pack::OPTIONAL_PARSER_PACK_PROJECTATLAS_VERSION;
@@ -93,9 +94,9 @@ use projectatlas_service::{
 };
 use projectatlas_symbols::{
     DocumentExtractionError, DocumentLimit, MAX_DOCUMENT_COMPRESSED_BYTES, MarkdownFacts,
-    document_format_for_path, extract_document_symbol_facts_controlled,
+    SourceSemanticFacts, document_format_for_path, extract_document_symbol_facts_controlled,
     extract_document_text_controlled, extract_markdown_facts_controlled,
-    extract_symbol_graph_with_source_controlled, semantic_resolution_contract_digest,
+    extract_symbol_graph_with_semantics_controlled, semantic_resolution_contract_digest,
 };
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
@@ -267,7 +268,7 @@ const NORMAL_READ_REFRESH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum current source bytes one navigation read may allocate and inspect.
 const MAX_INDEXED_NAVIGATION_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Explicit version of the built-in derived-index projection contract.
-const INDEX_DERIVATION_CONTRACT_VERSION: &str = "4";
+const INDEX_DERIVATION_CONTRACT_VERSION: &str = "24";
 
 /// Closed state returned when an index-backed read cannot proceed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2594,6 +2595,44 @@ pub(crate) fn load_scan_import_config(
     Ok(None)
 }
 
+/// Admit automatic database files before any SQLite access.
+///
+/// SQLite read-only opens can initialize SHM, so admission precedes every open.
+pub(crate) fn preflight_managed_database(
+    path: &Path,
+    root: &Path,
+) -> Result<Option<crate::project_state::ProjectStateGuard>, CliError> {
+    crate::project_state::ProjectStateGuard::preflight_database_path(path, root).map_err(|source| {
+        CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// Use the admitted SQLite cohort while preserving unrelated explicit bindings.
+pub(crate) fn admitted_database_path<'a>(
+    path: &'a Path,
+    admission: Option<&'a crate::project_state::ProjectStateGuard>,
+) -> &'a Path {
+    admission
+        .and_then(crate::project_state::ProjectStateGuard::sqlite_path)
+        .unwrap_or(path)
+}
+
+/// Admit reset's namespace without opening a possibly corrupt database.
+pub(crate) fn preflight_managed_reset(
+    path: &Path,
+    root: &Path,
+) -> Result<Option<crate::project_state::ProjectStateGuard>, CliError> {
+    crate::project_state::ProjectStateGuard::preflight_database_reset_path(path, root).map_err(
+        |source| CliError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+    )
+}
+
 /// Open or create a durable index bound to one selected project root.
 pub(crate) fn open_atlas_store_for_project(
     path: &Path,
@@ -2607,6 +2646,8 @@ pub(crate) fn open_existing_atlas_store_for_project(
     path: &Path,
     root: &Path,
 ) -> Result<AtlasStore, CliError> {
+    let admission = preflight_managed_database(path, root)?;
+    let path = admitted_database_path(path, admission.as_ref());
     AtlasStore::open_existing_for_project(path, root).map_err(|source| {
         if matches!(source, projectatlas_db::DbError::InitializationRequired) {
             index_init_required(root, path)
@@ -2625,6 +2666,8 @@ fn open_atlas_store_for_project_with_location_validator<F>(
 where
     F: FnOnce(&Path) -> projectatlas_db::DbResult<()>,
 {
+    let admission = preflight_managed_database(path, root)?;
+    let path = admitted_database_path(path, admission.as_ref());
     validate_location(path).map_err(project_store_error)?;
     ensure_parent_dir(path)?;
     AtlasStore::open_for_project(path, root).map_err(project_store_error)
@@ -2635,6 +2678,8 @@ pub(crate) fn open_atlas_store_read_only_for_project(
     path: &Path,
     root: &Path,
 ) -> Result<AtlasStore, CliError> {
+    let admission = preflight_managed_database(path, root)?;
+    let path = admitted_database_path(path, admission.as_ref());
     AtlasStore::open_read_only_for_project(path, root).map_err(|source| {
         if matches!(source, projectatlas_db::DbError::InitializationRequired) {
             index_init_required(root, path)
@@ -2688,7 +2733,22 @@ pub(crate) fn init_config_path(root: &Path, explicit: Option<&Path>) -> PathBuf 
     nested_config
 }
 
+/// Admit automatic initialization outputs before any database mutation.
+pub(crate) fn preflight_generated_state(
+    root: &Path,
+    db_path: &Path,
+    config_path: &Path,
+) -> Result<crate::project_state::ProjectStateGuard, CliError> {
+    crate::project_state::ProjectStateGuard::preflight(root, Some(db_path), Some(config_path))
+        .map_err(|source| CliError::Io {
+            path: root.join(".projectatlas"),
+            source,
+        })
+}
+
 /// Run the one-call first-run init bootstrap.
+///
+/// Automatic destinations are admitted before legacy identity repair can write.
 pub(crate) fn run_init_bootstrap(
     root: &Path,
     db_path: &Path,
@@ -2696,13 +2756,15 @@ pub(crate) fn run_init_bootstrap(
     options: &InitBootstrapOptions,
 ) -> Result<InitSetupReport, CliError> {
     let root = canonical_source_project_root(root)?;
+    let config_file = init_config_path(&root, config_path);
+    let state_guard = preflight_generated_state(&root, db_path, &config_file)?;
+    let db_path = state_guard.sqlite_path().unwrap_or(db_path);
     if db_path.is_file() {
         AtlasStore::repair_missing_project_root_identity(db_path, &root)
             .map_err(project_store_error)?;
     }
     preflight_existing_project_binding(db_path, &root)?;
     let project_dir = root.join(".projectatlas");
-    let config_file = init_config_path(&root, config_path);
     let nonsource_file = project_dir.join("projectatlas-nonsource-files.toon");
     let project_dir_existed = project_dir.exists();
     let config_existed = config_file.exists();
@@ -2710,6 +2772,10 @@ pub(crate) fn run_init_bootstrap(
     let db_existed = db_path.exists();
 
     init_project_with_config(&root, Some(&config_file))?;
+    state_guard.verify().map_err(|source| CliError::Io {
+        path: root.join(".projectatlas"),
+        source,
+    })?;
     let mut store = open_atlas_store_for_project(db_path, &root)?;
 
     let mut ok = true;
@@ -2789,6 +2855,8 @@ pub(crate) fn preflight_existing_project_binding(
     db_path: &Path,
     root: &Path,
 ) -> Result<(), CliError> {
+    let admission = preflight_managed_database(db_path, root)?;
+    let db_path = admitted_database_path(db_path, admission.as_ref());
     preflight_project_binding_read_only(db_path, root).map_err(project_store_error)
 }
 
@@ -2885,7 +2953,10 @@ pub(crate) fn config_root_mismatch_error(
 /// Legacy metadata is a display-only recovery hint. The database-owned
 /// candidate reader rejects projections without native authority before this
 /// function constructs a path or probes any candidate configuration location.
-fn legacy_project_root_candidate(db: &Path) -> Result<Option<PathBuf>, CliError> {
+fn legacy_project_root_candidate(
+    db: &Path,
+    _admission: Option<&crate::project_state::ProjectStateGuard>,
+) -> Result<Option<PathBuf>, CliError> {
     if !db.exists() {
         return Ok(None);
     }
@@ -2902,7 +2973,50 @@ pub(crate) fn default_mcp_project_root(
     db: &Path,
     config_path: Option<&Path>,
 ) -> Result<PathBuf, CliError> {
-    let legacy_root = legacy_project_root_candidate(db)?;
+    resolve_database_project_root(db, config_path, true)
+}
+
+/// Admit root discovery using selection available before SQLite metadata reads.
+///
+/// Explicit startup storage outside a known selected namespace is an isolated
+/// operator binding. Its basename alone does not grant automatic ownership.
+pub(crate) fn preflight_database_discovery(
+    db: &Path,
+    config_path: Option<&Path>,
+    isolated_binding: bool,
+) -> Result<Option<crate::project_state::ProjectStateGuard>, CliError> {
+    let root = selected_database_admission_root(db, config_path, isolated_binding)?;
+    preflight_managed_database(db, &root)
+}
+
+/// Select known authority from configuration/layout/cwd without SQLite metadata.
+pub(crate) fn selected_database_admission_root(
+    db: &Path,
+    config_path: Option<&Path>,
+    isolated_binding: bool,
+) -> Result<PathBuf, CliError> {
+    let root = if let Some(config_path) = config_path {
+        load_atlas_config(Some(config_path))?.root
+    } else if !isolated_binding && let Some(root) = project_root_from_db_path(db) {
+        root
+    } else {
+        std::env::current_dir().map_err(|source| CliError::Io {
+            path: PathBuf::from("."),
+            source,
+        })?
+    };
+    Ok(root)
+}
+
+/// Resolve metadata only after the implicit or explicit binding has been admitted.
+fn resolve_database_project_root(
+    db: &Path,
+    config_path: Option<&Path>,
+    isolated_binding: bool,
+) -> Result<PathBuf, CliError> {
+    let admission = preflight_database_discovery(db, config_path, isolated_binding)?;
+    let db = admitted_database_path(db, admission.as_ref());
+    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(config_path) = config_path {
         let config = load_atlas_config(Some(config_path))?;
         let config_root = canonical_source_project_root(&config.root)?;
@@ -2949,7 +3063,7 @@ pub(crate) fn default_cli_project_root(
     {
         return canonical_source_project_root(&project_root);
     }
-    default_mcp_project_root(db, config_path)
+    resolve_database_project_root(db, config_path, database_path_is_explicit)
 }
 
 /// Resolve a CLI repository-root argument, using indexed state for the default `.`.
@@ -3094,7 +3208,7 @@ fn stage_full_index_publication_from_source(
             ))
             .saturating_add(staged_purpose_bytes(purpose_import.as_ref()));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let symbols = stage_symbols_for_nodes_with_limits(
+    let mut symbols = stage_symbols_for_nodes_with_limits(
         store,
         &plan.root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -3110,7 +3224,7 @@ fn stage_full_index_publication_from_source(
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_limit(
         store,
         &plan.root,
         base_generation,
@@ -3118,7 +3232,9 @@ fn stage_full_index_publication_from_source(
         &scan_policy,
         &symbols,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
         &nodes,
@@ -3608,7 +3724,7 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
     )?;
     let scan_policy = RootScanPolicy::discover(&plan.root, &plan.scan_options, control)
         .map_err(|source| source_inspection_error(&plan.root, source))?;
-    let graph = graph_projection::stage_full_repository_graph(
+    let graph = graph_projection::stage_full_repository_graph_with_limit(
         store,
         &plan.root,
         base_generation,
@@ -3616,7 +3732,9 @@ pub(crate) fn run_symbol_build_pipeline_controlled(
         &scan_policy,
         &staged,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    graph.account_source_recovery(&mut staged.report)?;
     enforce_publication_staging_budget(
         retained_before_symbols
             .saturating_add(staged.retained_bytes)
@@ -5496,6 +5614,8 @@ pub(crate) fn build_settings_report(
     config_path: Option<&Path>,
     format: OutputFormat,
 ) -> Result<SettingsReport, CliError> {
+    let admission = preflight_database_discovery(db, config_path, true)?;
+    let db = admitted_database_path(db, admission.as_ref());
     let absolute_db = absolute_path(db)?;
     let resolved_config = resolved_mcp_config_path(&absolute_db, config_path)?;
     let config = if let Some(config_path) = resolved_config.as_deref() {
@@ -5692,8 +5812,10 @@ pub(crate) fn reset_index_files(
     apply: bool,
     dry_run: bool,
     include_mcp_config: bool,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
 ) -> Result<ResetIndexReport, CliError> {
-    let targets = reset_index_targets(db, include_mcp_config)?;
+    let db = admitted_database_path(db, admission);
+    let targets = reset_index_targets(db, include_mcp_config, admission)?;
     let files = targets
         .iter()
         .map(|path| path_status(path))
@@ -5702,6 +5824,7 @@ pub(crate) fn reset_index_files(
     let mut removed = 0;
     if should_apply {
         for target in &targets {
+            verify_reset_admission(db, admission)?;
             if target.is_file() {
                 fs::remove_file(target).map_err(|source| CliError::Io {
                     path: target.clone(),
@@ -5723,9 +5846,14 @@ pub(crate) fn reset_index_files(
 pub(crate) fn reset_index_files_with_revalidation(
     db: &Path,
     include_mcp_config: bool,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
     mut revalidate: impl FnMut() -> Result<(), CliError>,
 ) -> Result<ResetIndexReport, CliError> {
-    let targets = reset_index_targets(db, include_mcp_config)?;
+    // A replaced registration must retain its lifecycle error before even
+    // enumerating the newly selected namespace or its recovery files.
+    revalidate()?;
+    let db = admitted_database_path(db, admission);
+    let targets = reset_index_targets(db, include_mcp_config, admission)?;
     let files = targets
         .iter()
         .map(|path| path_status(path))
@@ -5754,6 +5882,11 @@ pub(crate) fn reset_index_files_with_revalidation(
         .keep();
     let mut staged = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
+        if let Err(error) = revalidate().and_then(|()| verify_reset_admission(db, admission)) {
+            return Err(recover_staged_reset_files(
+                db, admission, &recovery, &staged, error,
+            ));
+        }
         if !target.is_file() {
             continue;
         }
@@ -5763,17 +5896,24 @@ pub(crate) fn reset_index_files_with_revalidation(
                 path: target.clone(),
                 source,
             });
-            return Err(restore_staged_reset_files(&recovery, &staged, operation));
+            return Err(recover_staged_reset_files(
+                db, admission, &recovery, &staged, operation,
+            ));
         }
         staged.push((target.clone(), recovery_file));
     }
 
-    if let Err(error) = revalidate() {
-        return Err(restore_staged_reset_files(&recovery, &staged, error));
+    if let Err(error) = revalidate().and_then(|()| verify_reset_admission(db, admission)) {
+        return Err(recover_staged_reset_files(
+            db, admission, &recovery, &staged, error,
+        ));
     }
 
     let removed = staged.len();
     for (_, recovery_file) in &staged {
+        verify_reset_admission(db, admission).map_err(|error| {
+            retained_reset_recovery(&recovery, &error, "owning namespace changed during cleanup")
+        })?;
         if let Err(source) = fs::remove_file(recovery_file) {
             return Err(CliError::Io {
                 path: recovery,
@@ -5793,8 +5933,36 @@ pub(crate) fn reset_index_files_with_revalidation(
     })
 }
 
+/// Restore only through the retained reset namespace; otherwise retain its files.
+fn recover_staged_reset_files(
+    db: &Path,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
+    recovery: &Path,
+    staged: &[(PathBuf, PathBuf)],
+    operation: CliError,
+) -> CliError {
+    if let Err(error) = verify_reset_admission(db, admission) {
+        return retained_reset_recovery(recovery, &operation, &error.to_string());
+    }
+    restore_staged_reset_files(db, admission, recovery, staged, operation)
+}
+
+/// Report retained reset artifacts without resolving a changed directory again.
+fn retained_reset_recovery(recovery: &Path, operation: &CliError, cause: &str) -> CliError {
+    CliError::Io {
+        path: recovery.to_path_buf(),
+        source: io::Error::other(format!(
+            "{operation}; staged reset recovery retained because its owning namespace could not be verified: {cause}; the reported recovery path is its original location and may have moved with that directory"
+        )),
+    }
+}
+
 /// Return the fixed file inventory owned by one index reset.
-fn reset_index_targets(db: &Path, include_mcp_config: bool) -> Result<Vec<PathBuf>, CliError> {
+fn reset_index_targets(
+    db: &Path,
+    include_mcp_config: bool,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
+) -> Result<Vec<PathBuf>, CliError> {
     let absolute_db = absolute_path(db)?;
     let mut targets = vec![
         absolute_db.clone(),
@@ -5802,12 +5970,36 @@ fn reset_index_targets(db: &Path, include_mcp_config: bool) -> Result<Vec<PathBu
         db_sidecar_path(&absolute_db, "shm"),
         db_sidecar_path(&absolute_db, "journal"),
     ];
+    if let Some(admission) = admission {
+        targets.extend(
+            admission
+                .alternate_reset_paths()
+                .map_err(|source| CliError::Io {
+                    path: absolute_db.clone(),
+                    source,
+                })?,
+        );
+    }
     if include_mcp_config {
         targets.push(mcp_config_path_for_db(&absolute_db));
     }
     targets.sort();
     targets.dedup();
     Ok(targets)
+}
+
+/// Recheck only reset's retained namespace before unlinking or staging an entry.
+fn verify_reset_admission(
+    db: &Path,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
+) -> Result<(), CliError> {
+    if let Some(admission) = admission {
+        admission.verify().map_err(|source| CliError::Io {
+            path: db.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 /// Move one existing reset target without overwriting another path.
@@ -5824,11 +6016,16 @@ fn move_reset_file_noclobber(source: &Path, destination: &Path) -> io::Result<()
 
 /// Restore staged reset files without overwriting a replacement lifecycle.
 fn restore_staged_reset_files(
+    db: &Path,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
     recovery: &Path,
     staged: &[(PathBuf, PathBuf)],
     operation: CliError,
 ) -> CliError {
     for (target, recovery_file) in staged.iter().rev() {
+        if let Err(error) = verify_reset_admission(db, admission) {
+            return retained_reset_recovery(recovery, &operation, &error.to_string());
+        }
         if let Err(source) = move_reset_file_noclobber(recovery_file, target) {
             let kind = source.kind();
             return CliError::Io {
@@ -5850,7 +6047,9 @@ pub(crate) fn resolved_mcp_config_path(
     db: &Path,
     config: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
-    let legacy_root = legacy_project_root_candidate(db)?;
+    let admission = preflight_database_discovery(db, config, true)?;
+    let db = admitted_database_path(db, admission.as_ref());
+    let legacy_root = legacy_project_root_candidate(db, admission.as_ref())?;
     if let Some(path) = config {
         return Ok(Some(absolute_path(path)?));
     }
@@ -6263,6 +6462,8 @@ pub(crate) struct SymbolParseSuccess {
     graph: SymbolGraph,
     /// Bounded Markdown headings and explicit document candidates from the same parse.
     markdown_facts: Option<Box<MarkdownFacts>>,
+    /// Source-owned lexical/import occurrences from the same captured parse.
+    source_semantics: Option<Box<SourceSemanticFacts>>,
     /// File-level parser kept independent from fact-level parser provenance.
     source_parser: ParserKind,
     /// Observed one-line source summary.
@@ -6678,7 +6879,14 @@ fn stage_symbols_for_nodes_with_limits(
         retained_bytes: output_bytes,
         identity_admission: graph_projection::GraphIdentityAdmission::default(),
     };
-    staged.identity_admission = graph_projection::admit_symbol_build_stage(&mut staged, control)?;
+    staged.identity_admission = graph_projection::admit_symbol_build_stage_with_limit(
+        &mut staged,
+        control,
+        limits.output_bytes.saturating_sub(output_bytes),
+    )?;
+    staged.retained_bytes = staged
+        .retained_bytes
+        .saturating_add(staged.identity_admission.retained_bytes());
     Ok(staged)
 }
 
@@ -6712,7 +6920,14 @@ fn apply_symbol_build_stage(
     control: &IndexWorkControl,
 ) -> Result<(), CliError> {
     if !staged.identity_admission.source_admitted() {
-        staged.identity_admission = graph_projection::admit_symbol_build_stage(staged, control)?;
+        staged.identity_admission = graph_projection::admit_symbol_build_stage_with_limit(
+            staged,
+            control,
+            MAX_PUBLICATION_STAGING_BYTES.saturating_sub(staged.retained_bytes),
+        )?;
+        staged.retained_bytes = staged
+            .retained_bytes
+            .saturating_add(staged.identity_admission.retained_bytes());
     }
     for change in &staged.changes {
         control.check(IndexWorkStage::Publication)?;
@@ -6807,6 +7022,9 @@ fn symbol_parse_output_bytes(parsed: &SymbolParseSuccess) -> u64 {
                 + relation.target_name.len() as u64
                 + relation.context.len() as u64,
         );
+    }
+    if let Some(facts) = &parsed.source_semantics {
+        bytes = bytes.saturating_add(facts.retained_bytes());
     }
     if let Some(facts) = &parsed.markdown_facts {
         for heading in &facts.headings {
@@ -6968,6 +7186,7 @@ fn parse_document_symbol_job(
         path: job.path.clone(),
         graph,
         markdown_facts: None,
+        source_semantics: None,
         source_parser: ParserKind::Structural,
         summary,
         summary_is_structural: false,
@@ -7058,7 +7277,7 @@ fn parse_admitted_symbol_job(
             stage: IndexWorkStage::SymbolParsing,
         });
     }
-    let (observed_source_parser, graph, markdown_facts) = if job
+    let (observed_source_parser, graph, markdown_facts, source_semantics) = if job
         .language
         .as_deref()
         .and_then(language_capability)
@@ -7069,18 +7288,18 @@ fn parse_admitted_symbol_job(
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
         let graph = facts.symbol_graph(&job.path, job.language.as_deref());
-        (graph.parser, graph, Some(Box::new(facts)))
+        (graph.parser, graph, Some(Box::new(facts)), None)
     } else {
-        let (parser, graph) = match extract_symbol_graph_with_source_controlled(
+        let (parser, graph, semantics) = match extract_symbol_graph_with_semantics_controlled(
             &job.path,
             job.language.as_deref(),
             content,
             control,
         ) {
-            Ok(graph) => graph,
+            Ok(extraction) => extraction.into_parts(),
             Err(failure) => return SymbolParseOutcome::IndexWork(failure),
         };
-        (parser, graph, None)
+        (parser, graph, None, Some(Box::new(semantics)))
     };
     let source_parser = source_parser.unwrap_or(observed_source_parser);
     let structural_summary = if let Some(facts) = &markdown_facts {
@@ -7106,6 +7325,7 @@ fn parse_admitted_symbol_job(
         path: job.path.clone(),
         graph,
         markdown_facts,
+        source_semantics,
         source_parser,
         summary,
         summary_is_structural,
@@ -7577,19 +7797,26 @@ fn summary_between<'a>(summary: &'a str, start: &str, end: &str) -> Option<&'a s
 /// Return whether a language should be parsed for symbols.
 pub(crate) fn is_symbol_candidate(path: &str, language: Option<&str>) -> bool {
     let Some(language) = language else {
-        return path.ends_with("Cargo.toml")
+        let embedded_host = normalized_language_extension(Path::new(path))
+            .and_then(|extension| detect_language_for_path(path, Some(&extension)))
+            .and_then(|language| language_capability(&language))
+            .is_some_and(|capability| capability.embedded_language.is_some());
+        return embedded_host
+            || path.ends_with("Cargo.toml")
             || path.ends_with("Cargo.lock")
             || Path::new(path)
                 .extension()
                 .and_then(|extension| extension.to_str())
                 .is_some_and(|extension| {
-                    ["vue", "ps1", "psm1", "psd1"]
+                    ["ps1", "psm1", "psd1"]
                         .iter()
                         .any(|expected| extension.eq_ignore_ascii_case(expected))
                 });
     };
-    language_capability(language)
-        .is_none_or(|capability| capability.symbol_parser != SymbolParserOwner::Unavailable)
+    language_capability(language).is_none_or(|capability| {
+        capability.symbol_parser != SymbolParserOwner::Unavailable
+            || capability.embedded_language.is_some()
+    })
 }
 
 /// Apply the project-selected optional-language boundary to symbol work admission.
@@ -8715,7 +8942,7 @@ fn refresh_index_for_changes_from_source_controlled(
             &content_classifications,
         ));
     let symbol_limits = symbol_limits_with_remaining_staging_bytes(retained_before_symbols)?;
-    let symbols = stage_symbols_for_nodes_with_limits(
+    let mut symbols = stage_symbols_for_nodes_with_limits(
         store,
         root,
         #[cfg(feature = "optional-parser-supervisor")]
@@ -8729,7 +8956,7 @@ fn refresh_index_for_changes_from_source_controlled(
         control,
         symbol_limits,
     )?;
-    let graph = graph_projection::stage_incremental_repository_graph(
+    let graph = graph_projection::stage_incremental_repository_graph_with_limit(
         store,
         root,
         base_generation,
@@ -8738,7 +8965,9 @@ fn refresh_index_for_changes_from_source_controlled(
         &scan_policy,
         &symbols,
         control,
+        MAX_PUBLICATION_STAGING_BYTES.saturating_sub(retained_before_symbols),
     )?;
+    graph.account_source_recovery(&mut symbols.report)?;
     let structural_summaries = stage_structural_summaries_for_nodes_controlled(
         store,
         &nodes,
@@ -9560,6 +9789,377 @@ mod tests {
     use std::fmt::Debug;
     use std::process::Command as StdCommand;
 
+    #[test]
+    fn guarded_reset_restores_owned_files_or_retains_them_on_namespace_change()
+    -> Result<(), Box<dyn Error>> {
+        for replace_namespace in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = root.join(".projectatlas");
+            fs::create_dir(&directory)?;
+            let database = directory.join("projectatlas.db");
+            let wal = db_sidecar_path(&database, "wal");
+            fs::write(&database, b"original main")?;
+            fs::write(&wal, b"original WAL")?;
+            let retained = root.join("captured-state");
+            let admission = preflight_managed_reset(&database, &root)?;
+            let mut injected = false;
+            let result =
+                reset_index_files_with_revalidation(&database, false, admission.as_ref(), || {
+                    if injected || database.exists() {
+                        return Ok(());
+                    }
+                    injected = true;
+                    if !replace_namespace {
+                        return Err(CliError::InvalidInput(
+                            "injected reset lifecycle failure".to_owned(),
+                        ));
+                    }
+                    fs::rename(&directory, &retained)
+                        .and_then(|()| fs::create_dir(&directory))
+                        .and_then(|()| fs::write(&database, b"foreign main"))
+                        .and_then(|()| fs::write(&wal, b"foreign WAL"))
+                        .map_err(|source| CliError::Io {
+                            path: directory.clone(),
+                            source,
+                        })
+                });
+            let error = result
+                .err()
+                .ok_or_else(|| io::Error::other("injected reset failure was ignored"))?;
+            if replace_namespace {
+                if !error.to_string().contains("staged reset recovery retained") {
+                    return Err(io::Error::other(format!(
+                        "namespace failure did not report retention: {error}"
+                    ))
+                    .into());
+                }
+                require_eq(
+                    &fs::read(&database)?,
+                    &b"foreign main".to_vec(),
+                    "reset recovery modified replacement main",
+                )?;
+                require_eq(
+                    &fs::read(&wal)?,
+                    &b"foreign WAL".to_vec(),
+                    "reset recovery modified replacement WAL",
+                )?;
+                require_eq(
+                    &fs::read(retained.join("projectatlas.db-wal"))?,
+                    &b"original WAL".to_vec(),
+                    "reset lost unstaged WAL",
+                )?;
+                let recoveries = fs::read_dir(&retained)?.collect::<Result<Vec<_>, _>>()?;
+                let recovery = recoveries
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("reset-recovery-")
+                    })
+                    .ok_or_else(|| io::Error::other("reset did not retain its staged main"))?;
+                let staged_files = fs::read_dir(recovery.path())?.collect::<Result<Vec<_>, _>>()?;
+                require_eq(
+                    &staged_files.len(),
+                    &1,
+                    "reset retained unexpected staged files",
+                )?;
+                require_eq(
+                    &fs::read(staged_files[0].path())?,
+                    &b"original main".to_vec(),
+                    "reset lost staged main",
+                )?;
+            } else {
+                if !error
+                    .to_string()
+                    .contains("injected reset lifecycle failure")
+                {
+                    return Err(
+                        io::Error::other(format!("reset lost lifecycle failure: {error}")).into(),
+                    );
+                }
+                require_eq(
+                    &fs::read(&database)?,
+                    &b"original main".to_vec(),
+                    "reset did not restore owned main",
+                )?;
+                require_eq(
+                    &fs::read(&wal)?,
+                    &b"original WAL".to_vec(),
+                    "reset modified unstaged WAL",
+                )?;
+                if fs::read_dir(&directory)?.count() != 2 {
+                    return Err(io::Error::other("restored reset left recovery artifacts").into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Managed Windows spellings share one cohort; legacy recovery remains explicit.
+    #[cfg(windows)]
+    #[test]
+    fn windows_managed_database_aliases_preserve_wal_recovery_and_reset()
+    -> Result<(), Box<dyn Error>> {
+        let short_path = |path: &Path| -> Result<PathBuf, Box<dyn Error>> {
+            let output = StdCommand::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_DB_PATH).ShortPath"])
+                .env("PROJECTATLAS_TEST_DB_PATH", path).output()?;
+            if !output.status.success() {
+                return Err(
+                    io::Error::other(format!("short database fixture failed: {output:?}")).into(),
+                );
+            }
+            Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
+        };
+        let mut actual_aliases = 0;
+        for sensitive in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = root.join(".projectatlas");
+            fs::create_dir(&directory)?;
+            let configured = StdCommand::new("fsutil.exe")
+                .current_dir(&directory)
+                .args([
+                    "file",
+                    "setCaseSensitiveInfo",
+                    ".",
+                    if sensitive { "enable" } else { "disable" },
+                ])
+                .output()?;
+            if !configured.status.success() {
+                return Err(io::Error::other(format!(
+                    "database case fixture failed: {configured:?}"
+                ))
+                .into());
+            }
+            let database = directory.join("projectatlas.db");
+            let normal_database = temp.path().join(".projectatlas/projectatlas.db");
+            let config = directory.join("config.toml");
+            fs::write(&config, "[project]\nroot = \".\"\n")?;
+            // Admission must check SQLite's canonical sidecars, not db.-wal/db -wal.
+            fs::write(&database, b"admission-only main")?;
+            let wal = db_sidecar_path(&database, "wal");
+            fs::write(&wal, b"outside WAL owner")?;
+            let outside_wal = root.join("admission-outside-wal");
+            fs::hard_link(&wal, &outside_wal)?;
+            for suffix in [".", " "] {
+                let selected = normal_database.with_file_name(format!("projectatlas.db{suffix}"));
+                if preflight_managed_database(&selected, &root).is_ok() {
+                    return Err(
+                        io::Error::other("normal suffix bypassed canonical WAL ownership").into(),
+                    );
+                }
+            }
+            fs::remove_file(&wal)?;
+            fs::remove_file(&outside_wal)?;
+            fs::remove_file(&database)?;
+            let mut canonical = open_atlas_store_for_project(&database, &root)?;
+            canonical.upsert_scan_nodes(&[projectatlas_core::Node {
+                path: "file.rs".to_owned(),
+                kind: projectatlas_core::NodeKind::File,
+                parent_path: None,
+                extension: Some(".rs".to_owned()),
+                language: Some("rust".to_owned()),
+                size_bytes: Some(1),
+                mtime_ns: None,
+                content_hash: None,
+            }])?;
+            canonical.set_purpose(
+                "file.rs",
+                "canonical purpose",
+                projectatlas_core::PurposeSource::Agent,
+            )?;
+            let identity = canonical.project_instance_id()?;
+            let short = short_path(&normal_database)?;
+            if short.file_name() == normal_database.file_name() {
+                drop(canonical);
+                continue;
+            }
+            actual_aliases += 1;
+            let selected = open_existing_atlas_store_for_project(&short, &root)?;
+            require_eq(
+                &selected.authored_purpose_revision()?,
+                &1,
+                "alias did not see canonical committed state",
+            )?;
+            selected.set_purpose(
+                "file.rs",
+                "shared alias purpose",
+                projectatlas_core::PurposeSource::Agent,
+            )?;
+            require_eq(
+                &canonical.authored_purpose_revision()?,
+                &2,
+                "new managed opens formed separate WAL cohorts",
+            )?;
+            drop(selected);
+            drop(canonical);
+            let short_wal = db_sidecar_path(&short, "wal");
+            let short_shm = db_sidecar_path(&short, "shm");
+            if short_wal.exists() || short_shm.exists() {
+                return Err(io::Error::other("managed alias created short sidecars").into());
+            }
+
+            // A predecessor/operator cohort contains committed state not yet in main.
+            let legacy = rusqlite::Connection::open(&short)?;
+            legacy.execute_batch("PRAGMA wal_autocheckpoint=0; BEGIN IMMEDIATE; UPDATE metadata SET value='9' WHERE key='purpose.authored_revision'; UPDATE purposes SET purpose='pending legacy purpose'; COMMIT;")?;
+            let main_before = fs::read(&database)?;
+            let wal_before = fs::read(&short_wal)?;
+            let shm_before = fs::read(&short_shm)?;
+            for path in [&database, &short] {
+                if open_atlas_store_for_project(path, &root).is_ok()
+                    || open_existing_atlas_store_for_project(path, &root).is_ok()
+                    || open_atlas_store_read_only_for_project(path, &root).is_ok()
+                    || preflight_existing_project_binding(path, &root).is_ok()
+                    || build_settings_report(path, Some(&config), OutputFormat::Json).is_ok()
+                    || crate::build_root_report(path, Some(&config)).is_ok()
+                    || run_init_bootstrap(
+                        &root,
+                        path,
+                        Some(&config),
+                        &InitBootstrapOptions {
+                            no_scan: true,
+                            force_rescan: false,
+                            text_index_max_bytes: None,
+                        },
+                    )
+                    .is_ok()
+                {
+                    return Err(io::Error::other(
+                        "pending short cohort was silently opened or retargeted",
+                    )
+                    .into());
+                }
+            }
+            require_eq(
+                &fs::read(&database)?,
+                &main_before,
+                "refusal changed the main database",
+            )?;
+            require_eq(
+                &fs::read(&short_wal)?,
+                &wal_before,
+                "refusal changed committed short WAL",
+            )?;
+            require_eq(
+                &fs::read(&short_shm)?,
+                &shm_before,
+                "refusal changed short SHM",
+            )?;
+            // This models the error's external-tool recovery, using the original spelling.
+            legacy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            drop(legacy);
+            let recovered = open_existing_atlas_store_for_project(&short, &root)?;
+            require_eq(
+                &recovered.authored_purpose_revision()?,
+                &9,
+                "checkpointed authored state was lost",
+            )?;
+            require_eq(
+                &recovered.project_instance_id()?,
+                &identity,
+                "cohort recovery changed project identity",
+            )?;
+            drop(recovered);
+
+            // Restore an owned consistent triplet to model crash-pending state with no live handles.
+            let legacy = rusqlite::Connection::open(&short)?;
+            legacy.execute_batch("PRAGMA wal_autocheckpoint=0; UPDATE metadata SET value='10' WHERE key='purpose.authored_revision';")?;
+            let crash_main = fs::read(&database)?;
+            let crash_wal = fs::read(&short_wal)?;
+            let crash_shm = fs::read(&short_shm)?;
+            drop(legacy);
+            fs::write(&database, &crash_main)?;
+            fs::write(&short_wal, &crash_wal)?;
+            fs::write(&short_shm, &crash_shm)?;
+            let outside_main = root.join("reset-outside-main");
+            fs::hard_link(&database, &outside_main)?;
+            let outside_wal = root.join("reset-outside-wal");
+            fs::hard_link(&short_wal, &outside_wal)?;
+            let admission = preflight_managed_reset(&short, &root)?;
+            let preview = reset_index_files(&short, false, true, false, admission.as_ref())?;
+            let alternate_leaf = short
+                .file_name()
+                .ok_or_else(|| io::Error::other("short database has no leaf"))?;
+            let canonical_parent_wal = db_sidecar_path(&directory.join(alternate_leaf), "wal");
+            if !preview
+                .files
+                .iter()
+                .any(|file| file.path == lossless_native_path_display(&canonical_parent_wal))
+                || !same_file::is_same_file(&canonical_parent_wal, &short_wal)?
+            {
+                return Err(io::Error::other(
+                    "reset preview omitted proven alternate recovery state",
+                )
+                .into());
+            }
+            require_eq(
+                &fs::read(&short_wal)?,
+                &crash_wal,
+                "reset preview changed pending state",
+            )?;
+            reset_index_files(&short, true, false, false, admission.as_ref())?;
+            if database.exists() || short_wal.exists() || short_shm.exists() {
+                return Err(
+                    io::Error::other("explicit reset left a database cohort behind").into(),
+                );
+            }
+            require_eq(
+                &fs::read(&outside_main)?,
+                &crash_main,
+                "reset modified the outside main hardlink",
+            )?;
+            require_eq(
+                &fs::read(&outside_wal)?,
+                &crash_wal,
+                "reset modified the outside WAL hardlink",
+            )?;
+            drop(admission);
+
+            // Identity repair must not create a short cohort ahead of the shared opener.
+            let fresh = open_atlas_store_for_project(&database, &root)?;
+            let identity = fresh.project_instance_id()?;
+            drop(fresh);
+            let repair = rusqlite::Connection::open(&database)?;
+            repair.execute("DELETE FROM project_root_identity", [])?;
+            drop(repair);
+            let short = short_path(&normal_database)?;
+            let observer = rusqlite::Connection::open(&database)?;
+            let _: i64 =
+                observer.query_row("SELECT count(*) FROM project_root_identity", [], |row| {
+                    row.get(0)
+                })?;
+            run_init_bootstrap(
+                &root,
+                &short,
+                Some(&config),
+                &InitBootstrapOptions {
+                    no_scan: true,
+                    force_rescan: false,
+                    text_index_max_bytes: None,
+                },
+            )?;
+            if db_sidecar_path(&short, "wal").exists() || db_sidecar_path(&short, "shm").exists() {
+                return Err(io::Error::other("identity repair created a short-name cohort").into());
+            }
+            require_eq(
+                &open_existing_atlas_store_for_project(&short, &root)?.project_instance_id()?,
+                &identity,
+                "alias identity repair changed the instance",
+            )?;
+            drop(observer);
+        }
+        if actual_aliases == 0 && std::env::var_os("CI").is_some() {
+            return Err(io::Error::other(
+                "native Windows proof did not exercise a real 8.3 DB alias",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     fn run_git_fixture(command: &mut StdCommand) -> Result<(), Box<dyn Error>> {
         let output = command.output()?;
         if !output.status.success() {
@@ -9704,6 +10304,90 @@ mod tests {
             &reopened.project_root_identity()?,
             &persisted_identity,
             "current binding after wrong-root init",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn init_admits_legacy_config_before_repairing_missing_root_identity()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("legacy-admission-root");
+        let database = temp.path().join("legacy-admission.db");
+        let outside = temp.path().join("missing-legacy-target.toml");
+        fs::create_dir(&root)?;
+        let original_identity = {
+            let store = AtlasStore::open_for_project(&database, &root)?;
+            store.project_instance_id()?
+        };
+        let connection = rusqlite::Connection::open(&database)?;
+        connection.execute("DELETE FROM project_root_identity", [])?;
+        drop(connection);
+        let config = root.join("projectatlas.toml");
+        if !create_document_target_symlink(&outside, &config)? {
+            return Ok(());
+        }
+        let database_before = fs::read(&database)?;
+        let sidecars_before = ["wal", "shm", "journal"]
+            .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok());
+        let result = run_init_bootstrap(
+            &root,
+            &database,
+            Some(&config),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        );
+        require_eq(
+            &result.is_err(),
+            &true,
+            "dangling managed legacy config was admitted",
+        )?;
+        require_eq(
+            &(fs::read(&database)? == database_before),
+            &true,
+            "config refusal happened after database identity repair",
+        )?;
+        require_eq(
+            &["wal", "shm", "journal"]
+                .map(|suffix| fs::read(db_sidecar_path(&database, suffix)).ok()),
+            &sidecars_before,
+            "config refusal changed SQLite sidecars",
+        )?;
+        require_eq(
+            &(!outside.exists() && !root.join(".projectatlas").exists()),
+            &true,
+            "config refusal created generated state",
+        )?;
+        fs::remove_file(&config)?;
+        let retry = run_init_bootstrap(
+            &root,
+            &database,
+            Some(&config),
+            &InitBootstrapOptions {
+                no_scan: true,
+                force_rescan: false,
+                text_index_max_bytes: None,
+            },
+        )?;
+        let reopened = AtlasStore::open_for_project(&database, &root)?;
+        require_eq(
+            &(retry.ok && config.is_file()),
+            &true,
+            "restored legacy config could not initialize",
+        )?;
+        require_eq(
+            &reopened.project_instance_id()?,
+            &original_identity,
+            "supported retry changed the project identity",
+        )?;
+        require_eq(
+            &reopened.project_root_identity()?.is_some(),
+            &true,
+            "supported retry did not repair the native root identity",
         )?;
         Ok(())
     }
@@ -10853,6 +11537,35 @@ mod tests {
             "case-sensitive sibling durable state",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn registered_embedded_hosts_admit_native_symbol_work() {
+        for capability in projectatlas_core::language::language_documentation_rows()
+            .iter()
+            .filter(|capability| capability.embedded_language.is_some())
+        {
+            assert!(
+                is_symbol_candidate("selected.host", Some(capability.id)),
+                "{}",
+                capability.id
+            );
+        }
+        for path in [
+            "page.html",
+            "page.htm",
+            "page.HTML",
+            "View.vue",
+            "View.svelte",
+        ] {
+            assert!(is_symbol_candidate(path, None), "{path}");
+            assert!(
+                !is_symbol_candidate(path, Some("toon")),
+                "explicit language overrides host extension"
+            );
+        }
+        assert!(!is_symbol_candidate("page.css", Some("css")));
+        assert!(!is_symbol_candidate("page.xml", Some("xml")));
     }
 
     #[test]
@@ -12705,6 +13418,44 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
     fn projection_contract_revisions_force_full_projection_refresh() -> Result<(), Box<dyn Error>> {
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
+        const PRE_BINDING_OWNERSHIP_DIGEST: &str =
+            "70149049f404b00bd7d956adabda377be3509080bea68a8978eac3501fee0929";
+        const PRE_OCCURRENCE_PROJECTION_DIGEST: &str =
+            "8e0d5f3a34d88507e9d3c64857949a299bdbf516a1eca06adf0cbcd7ca7962a4";
+        const STABLE_050_SEMANTIC_DIGEST: &str =
+            "deba1bcef2b03869c211b5ba91036bb87e7cdd9c9ebb565ed447d6aea78ca535";
+        const PRE_GENERATOR_DECLARATION_DIGEST: &str =
+            "4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d";
+        const PRE_SOURCE_CONTEXT_DIGEST: &str =
+            "784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424";
+        const PRE_CARGO_COHORT_DIGEST: &str =
+            "77ce9ef63aa9da217f35e41d59470395e7be08d45f167c14b2477eb29309d2ca";
+        const PRE_GO_CLAUSE_DIGEST: &str =
+            "e0bc8aa6d30d159c0e1eae3b80773fb0f4031398608b01e1bba31b6b8d6cbd04";
+        const PRE_COMPREHENSION_ORDER_DIGEST: &str =
+            "9d16d41a80b1115f4d0706d7046f1be092fd2bd4a2abc41ba5d78749970d0eb6";
+        const PRE_QUALIFIED_OWNER_DIGEST: &str =
+            "d662ae01fce4a173b5b0e520a7cf0465d7b7184528b914afa24b9145c3efe8ed";
+        const PRE_IDENTITY_NEIGHBOR_DIGEST: &str =
+            "79d37888e9dff0e1ac37dfce6970a34b3ee8058b32dc0f973338153a20ac523b";
+        const PRE_ACCESSOR_PARAMETER_DIGEST: &str =
+            "4c7a58829b2910e38015f4576ad26e458a8192363e3024d732467db2355abac4";
+        const PRE_MEMBER_OWNERSHIP_DIGEST: &str =
+            "5627189a6bc0d67d2483073582b55ba3d9ea04c55ef3177462ce584361c7c355";
+        const PRE_INSTANCE_FIELD_DIGEST: &str =
+            "1b695fb9372249524c55c19c6969478f8a10b0414471de4eb8e467249c4baaf1";
+        const PRE_REOPENED_CONTAINER_DIGEST: &str =
+            "6a6912198f2cc054d76072375eb328f285f5c232710a6dc2d698169b3e7ef65a";
+        const PRE_ARROW_CONTEXT_DIGEST: &str =
+            "66cab1855f1689308cdc5bb858a63e8d3ed42e825b073d62cada7347383731a7";
+        const PRE_FUNCTION_ENVIRONMENT_DIGEST: &str =
+            "a1d3ff14480c0efd0dc36ab9abe78ea6ac9423b62ef2ce52b36996436e06b421";
+        const PRE_RECOVERY_ADMISSION_DIGEST: &str =
+            "7ebce4c0ac31d1a9bb12313ae7777133d6f7c3c712ec3a147a244b2cc0edf7de";
+        const PRE_VAR_RESERVATION_DIGEST: &str =
+            "a5fd0cc0717afd6c733563637f6f24ba86f08ec447422edc319f26d480f24267";
+        const PRE_DIRECTIVE_BINDING_DIGEST: &str =
+            "4f50804d1e3b708c7081f654b39287fbca88adaeb4dfbbbb60fb5c708404e626";
         let temp = tempfile::tempdir()?;
         let atlas_dir = temp.path().join(".projectatlas");
         fs::create_dir_all(&atlas_dir)?;
@@ -12738,8 +13489,160 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             text_index_options(plan.config.as_ref(), None),
             #[cfg(feature = "optional-parser-supervisor")]
             &plan.optional_parser_selection,
-            "2",
-            &semantic_resolution_contract_digest(),
+            "23",
+            PRE_CARGO_COHORT_DIGEST,
+        );
+        let cargo_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "22",
+            PRE_CARGO_COHORT_DIGEST,
+        );
+        let go_clause_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "21",
+            PRE_GO_CLAUSE_DIGEST,
+        );
+        let comprehension_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "20",
+            PRE_COMPREHENSION_ORDER_DIGEST,
+        );
+        let qualified_owner_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "19",
+            PRE_QUALIFIED_OWNER_DIGEST,
+        );
+        let identity_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "18",
+            PRE_IDENTITY_NEIGHBOR_DIGEST,
+        );
+        let accessor_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "17",
+            PRE_ACCESSOR_PARAMETER_DIGEST,
+        );
+        let member_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "16",
+            PRE_MEMBER_OWNERSHIP_DIGEST,
+        );
+        let instance_field_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "15",
+            PRE_INSTANCE_FIELD_DIGEST,
+        );
+        let container_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "14",
+            PRE_REOPENED_CONTAINER_DIGEST,
+        );
+        let arrow_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "13",
+            PRE_ARROW_CONTEXT_DIGEST,
+        );
+        let source_context_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "12",
+            PRE_SOURCE_CONTEXT_DIGEST,
+        );
+        let generator_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "11",
+            PRE_GENERATOR_DECLARATION_DIGEST,
+        );
+        let function_environment_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "10",
+            PRE_FUNCTION_ENVIRONMENT_DIGEST,
+        );
+        let recovery_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "9",
+            PRE_RECOVERY_ADMISSION_DIGEST,
+        );
+        let var_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "8",
+            PRE_VAR_RESERVATION_DIGEST,
+        );
+        let directive_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "7",
+            PRE_DIRECTIVE_BINDING_DIGEST,
+        );
+        let deferred_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "6",
+            PRE_OCCURRENCE_PROJECTION_DIGEST,
+        );
+        let occurrence_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "5",
+            PRE_OCCURRENCE_PROJECTION_DIGEST,
+        );
+        let binding_projection_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "4",
+            PRE_BINDING_OWNERSHIP_DIGEST,
         );
         let prior_semantic_fingerprint = index_derivation_fingerprint_for_contract(
             &plan.scan_options,
@@ -12749,8 +13652,45 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             INDEX_DERIVATION_CONTRACT_VERSION,
             PRE_MODULE_CALLBACK_DIGEST,
         );
+        let binding_semantic_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            INDEX_DERIVATION_CONTRACT_VERSION,
+            PRE_BINDING_OWNERSHIP_DIGEST,
+        );
+        let stable_fingerprint = index_derivation_fingerprint_for_contract(
+            &plan.scan_options,
+            text_index_options(plan.config.as_ref(), None),
+            #[cfg(feature = "optional-parser-supervisor")]
+            &plan.optional_parser_selection,
+            "3",
+            STABLE_050_SEMANTIC_DIGEST,
+        );
         if prior_projection_fingerprint == current_fingerprint
+            || cargo_projection_fingerprint == current_fingerprint
+            || go_clause_projection_fingerprint == current_fingerprint
+            || comprehension_projection_fingerprint == current_fingerprint
+            || qualified_owner_projection_fingerprint == current_fingerprint
+            || identity_projection_fingerprint == current_fingerprint
+            || accessor_projection_fingerprint == current_fingerprint
+            || member_projection_fingerprint == current_fingerprint
+            || instance_field_projection_fingerprint == current_fingerprint
+            || container_projection_fingerprint == current_fingerprint
+            || arrow_projection_fingerprint == current_fingerprint
+            || source_context_projection_fingerprint == current_fingerprint
+            || generator_projection_fingerprint == current_fingerprint
+            || function_environment_projection_fingerprint == current_fingerprint
+            || recovery_projection_fingerprint == current_fingerprint
+            || var_projection_fingerprint == current_fingerprint
+            || directive_projection_fingerprint == current_fingerprint
+            || deferred_projection_fingerprint == current_fingerprint
+            || occurrence_projection_fingerprint == current_fingerprint
+            || binding_projection_fingerprint == current_fingerprint
             || prior_semantic_fingerprint == current_fingerprint
+            || binding_semantic_fingerprint == current_fingerprint
+            || stable_fingerprint == current_fingerprint
         {
             return Err(io::Error::other(
                 "projection or semantic contract revision did not change the derivation fingerprint",
@@ -12758,13 +13698,19 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             .into());
         }
 
-        let current_generation = store
-            .index_publication()?
-            .ok_or_else(|| io::Error::other("current publication missing"))?
-            .generation;
-        store
-            .begin_index_publication_from(&prior_projection_fingerprint, current_generation)?
-            .complete()?;
+        let prior_control = standalone_index_work_control();
+        let mut prior_batch = stage_full_index_publication(
+            &store,
+            &plan,
+            &symbol_options,
+            true,
+            false,
+            &prior_control,
+        )?;
+        // Seed a preceding contract through the full native owner so raw and
+        // canonical graph generations remain consistent with its publication.
+        prior_batch.contract_fingerprint = prior_projection_fingerprint;
+        publish_index_batch(&mut store, prior_batch, &prior_control)?;
         if publication_contract_matches(&store, &plan)? {
             return Err(io::Error::other(
                 "prior semantic contract unexpectedly matched the current plan",
@@ -12790,6 +13736,51 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             .ok_or_else(|| io::Error::other("stale publication missing"))?
             .generation;
         let control = standalone_index_work_control();
+        let before_repair = store.index_publication()?;
+        let before_identity = store.project_instance_id()?;
+        let source_paths = vec![
+            "src/config.rs".to_string(),
+            "src/handler.rs".to_string(),
+            "src/router.rs".to_string(),
+        ];
+        let before_graphs = store.load_symbol_graphs_for_paths(&source_paths)?;
+        let call_query = RepositoryGraphRelationQuery::Family {
+            relation: GraphRelationKind::Legacy(RelationKind::Calls),
+        };
+        let before_calls = store
+            .repository_graph_relations(call_query.clone(), 100)?
+            .rows;
+        let repair =
+            stage_full_index_publication(&store, &plan, &symbol_options, true, false, &control)?;
+        // Cancel after complete repair staging, before the atomic publication owner.
+        let cancelled = standalone_index_work_control();
+        cancelled.cancel();
+        if !matches!(
+            publish_index_batch(&mut store, repair, &cancelled),
+            Err(CliError::IndexWork(IndexWorkFailure::Cancelled { .. }))
+        ) {
+            return Err(io::Error::other("cancelled contract repair was not refused").into());
+        }
+        require_eq(
+            &store.index_publication()?,
+            &before_repair,
+            "cancelled repair publication",
+        )?;
+        require_eq(
+            &store.project_instance_id()?,
+            &before_identity,
+            "cancelled repair identity",
+        )?;
+        require_eq(
+            &store.load_symbol_graphs_for_paths(&source_paths)?,
+            &before_graphs,
+            "cancelled repair raw symbol graphs",
+        )?;
+        require_eq(
+            &store.repository_graph_relations(call_query, 100)?.rows,
+            &before_calls,
+            "cancelled repair canonical calls",
+        )?;
         refresh_index_controlled(&mut store, &plan, &symbol_options, &control)?;
         let refreshed = store
             .index_publication()?
@@ -14327,7 +15318,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
         fs::create_dir_all(&removed_dir)?;
         fs::write(
             source_dir.join("caller.rs"),
-            "pub fn caller() { target(); }\n",
+            "use crate::removed::target::target;\npub fn caller() { target(); }\n",
         )?;
         fs::write(removed_dir.join("target.rs"), "pub fn target() {}\n")?;
 
@@ -15113,6 +16104,7 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             path: "guide.docx".to_owned(),
             graph: facts.symbol_graph("guide.docx", None),
             markdown_facts: None,
+            source_semantics: None,
             source_parser: ParserKind::Structural,
             summary: "Hello".to_owned(),
             summary_is_structural: true,

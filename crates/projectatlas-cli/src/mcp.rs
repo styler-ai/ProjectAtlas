@@ -4457,6 +4457,8 @@ impl ProjectAtlasMcpServer {
             return Ok(report);
         }
 
+        let state_guard =
+            crate::runtime::preflight_generated_state(&state.root, &state.db_path, config_path)?;
         preflight_existing_project_binding(&state.db_path, &state.root)?;
         let project_dir = state.root.join(PROJECTATLAS_DIR_NAME);
         let nonsource_file = project_dir.join(MCP_NONSOURCE_FILE_NAME);
@@ -4464,6 +4466,11 @@ impl ProjectAtlasMcpServer {
         let config_existed = config_path.exists();
         let nonsource_existed = nonsource_file.exists();
         init_project_with_config(&state.root, Some(config_path))?;
+
+        state_guard.verify().map_err(|source| CliError::Io {
+            path: project_dir.clone(),
+            source,
+        })?;
 
         let hydration = if options.no_scan {
             McpWorktreeHydration::Fallback(MCP_HYDRATION_NO_SCAN_REASON.to_string())
@@ -4952,11 +4959,10 @@ impl ProjectAtlasMcpServer {
         &self,
         state: &McpProjectState,
     ) -> Result<String, CliError> {
-        let report = build_settings_report(
-            &state.db_path,
-            state.config_path.as_deref(),
-            OutputFormat::Toon,
-        )?;
+        let admission = crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
+        let database = crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
+        let report =
+            build_settings_report(database, state.config_path.as_deref(), OutputFormat::Toon)?;
         let capabilities = self.session_capabilities(state, report.text_index_max_bytes);
         let rendered = Self::encode_two_named_payloads(
             MCP_PAYLOAD_SETTINGS,
@@ -6355,12 +6361,17 @@ impl ProjectAtlasMcpServer {
                 })?;
         let control = Self::open_existing_mut_store(&self.control_state, &self.control_state)?;
         Self::require_captured_control_identity(Some(selection), &control)?;
+        let admission = crate::runtime::preflight_managed_reset(&state.db_path, &state.root)?;
+        let database = crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
         match control.with_unbound_worktree_registration(registration_id, &alias, |registration| {
             require_registered_worktree_lifecycle(registration, &state.root)?;
             post_validation()?;
-            reset_index_files_with_revalidation(&state.db_path, include_mcp_config, || {
-                require_registered_worktree_lifecycle(registration, &state.root)
-            })
+            reset_index_files_with_revalidation(
+                database,
+                include_mcp_config,
+                admission.as_ref(),
+                || require_registered_worktree_lifecycle(registration, &state.root),
+            )
         }) {
             Ok(result) => result,
             Err(DbError::WorktreeRegistrationConflict { .. }) => Err(CliError::InvalidInput(
@@ -7349,6 +7360,11 @@ impl ProjectAtlasMcpServer {
 
     /// Return whether nearest routing can safely associate one DB with a live root.
     fn nearest_indexed_db_matches_root(db_path: &Path, root: &CanonicalProjectRoot) -> bool {
+        let Ok(admission) = crate::runtime::preflight_managed_database(db_path, root.as_path())
+        else {
+            return false;
+        };
+        let db_path = crate::runtime::admitted_database_path(db_path, admission.as_ref());
         match read_project_root_identity_read_only(db_path) {
             Ok(Some(stored_root)) => Self::nearest_existing_roots_match(&stored_root, root),
             Ok(None) => {
@@ -8389,9 +8405,15 @@ impl ProjectAtlasMcpServer {
                 return Ok(render_repository_control_report(&report));
             }
             let state = self.admin_project_root(params.project_path, params.worktree)?;
-            let report = build_root_report(&state.db_path, state.config_path.as_deref())?;
+            let admission =
+                crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
+            let database =
+                crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
+            let report = build_root_report(database, state.config_path.as_deref())?;
             if params.verify.unwrap_or(false) && report.verified {
-                verify_project_database(&state.db_path, &state.root)?;
+                let _admission =
+                    crate::runtime::preflight_managed_database(&state.db_path, &state.root)?;
+                verify_project_database(database, &state.root)?;
             }
             Self::with_selected_project_audit(
                 &state,
@@ -10175,6 +10197,9 @@ impl ProjectAtlasMcpServer {
             let apply = params.apply.unwrap_or(false);
             let dry_run = params.dry_run.unwrap_or(false);
             let include_mcp_config = params.include_mcp_config.unwrap_or(false);
+            let admission = crate::runtime::preflight_managed_reset(&state.db_path, &state.root)?;
+            let database =
+                crate::runtime::admitted_database_path(&state.db_path, admission.as_ref());
             let report = if apply && !dry_run {
                 if let Some(selection) = state
                     .worktree
@@ -10183,10 +10208,22 @@ impl ProjectAtlasMcpServer {
                 {
                     self.reset_registered_worktree_index(&state, selection, include_mcp_config)?
                 } else {
-                    reset_index_files(&state.db_path, true, false, include_mcp_config)?
+                    reset_index_files(
+                        database,
+                        true,
+                        false,
+                        include_mcp_config,
+                        admission.as_ref(),
+                    )?
                 }
             } else {
-                reset_index_files(&state.db_path, apply, dry_run, include_mcp_config)?
+                reset_index_files(
+                    database,
+                    apply,
+                    dry_run,
+                    include_mcp_config,
+                    admission.as_ref(),
+                )?
             };
             Self::encode_named_payload(MCP_PAYLOAD_RESET_INDEX, &report)
         })())
@@ -17966,7 +18003,7 @@ mod tests {
             "candidate with mismatched DB root was treated as indexed",
         )?;
 
-        reset_index_files(&db_path, true, false, false)?;
+        reset_index_files(&db_path, true, false, false, None)?;
         {
             let _store = open_atlas_store_for_project(&db_path, &repo)?;
         }

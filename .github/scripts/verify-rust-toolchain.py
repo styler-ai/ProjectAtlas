@@ -276,20 +276,28 @@ def evidence_for(
     return ToolEvidence(name, path, output, release, commit)
 
 
-def preflight(root: Path, *, install: bool) -> int:
-    """Run the repository preflight and print all expected/actual identities."""
+def proxy_provenance(
+    paths: dict[str, str | None], cargo_home: Path
+) -> tuple[Path, dict[str, str], str | None]:
+    """Validate directory and exact Rustup backing without invoking any tool."""
 
-    expected = read_declared_channel(root / "rust-toolchain.toml")
-    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
     proxy_directory = cargo_home / "bin"
-    paths = {
-        "rustup": shutil.which("rustup"),
-        "rustc": shutil.which("rustc"),
-        "cargo": shutil.which("cargo"),
-        "cargo-clippy": shutil.which("cargo-clippy"),
-        "rustfmt": shutil.which("rustfmt"),
-    }
     rustup_path = paths["rustup"]
+    proxy_names = ("rustc", "cargo", "cargo-clippy", "rustfmt")
+    canonical_proxies = all(
+        paths[name] and same_directory(Path(paths[name]).parent, proxy_directory)
+        for name in proxy_names
+    )
+    if rustup_path and not canonical_proxies:
+        # Package-managed Rustup may keep all proxies beside its manager.
+        # This selects only a directory; exact backing is still proved below
+        # before any manager or proxy subprocess can run.
+        manager_directory = Path(rustup_path).parent
+        if all(
+            paths[name] and same_directory(Path(paths[name]).parent, manager_directory)
+            for name in proxy_names
+        ):
+            proxy_directory = manager_directory
     path_errors = {
         name: error
         for name, path in paths.items()
@@ -302,7 +310,7 @@ def preflight(root: Path, *, install: bool) -> int:
         rustup_digest: tuple[int, bytes] | None = None
         try:
             same_backing_executable = True
-            for name in ("rustc", "cargo", "cargo-clippy", "rustfmt"):
+            for name in proxy_names:
                 candidate = Path(paths[name])
                 if rustup_executable.samefile(candidate):
                     continue
@@ -317,6 +325,24 @@ def preflight(root: Path, *, install: bool) -> int:
             rustup_error = (
                 "rustup is not the executable backing the validated Rust proxies"
             )
+    return proxy_directory, path_errors, rustup_error
+
+
+def preflight(root: Path, *, install: bool) -> int:
+    """Run the repository preflight and print all expected/actual identities."""
+
+    expected = read_declared_channel(root / "rust-toolchain.toml")
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    proxy_directory = cargo_home / "bin"
+    paths = {
+        "rustup": shutil.which("rustup"),
+        "rustc": shutil.which("rustc"),
+        "cargo": shutil.which("cargo"),
+        "cargo-clippy": shutil.which("cargo-clippy"),
+        "rustfmt": shutil.which("rustfmt"),
+    }
+    rustup_path = paths["rustup"]
+    proxy_directory, path_errors, rustup_error = proxy_provenance(paths, cargo_home)
     override = os.environ.get("RUSTUP_TOOLCHAIN")
     override_error = None
     if override and not version_matches(expected, override):
@@ -430,6 +456,233 @@ def preflight(root: Path, *, install: bool) -> int:
         return 1
     print("Rust toolchain preflight passed")
     return 0
+
+
+def brew_prefix(brew: str, root: Path, *formula: str) -> Path:
+    """Read one absolute package-manager prefix with a bounded no-shell query."""
+
+    result = run([brew, "--prefix", *formula], root)
+    if result is None or result.returncode != 0:
+        raise PreflightError("Homebrew did not report its Rustup prefix")
+    value = result.stdout.strip()
+    if not value or len(value.splitlines()) != 1 or "\r" in value or "\0" in value:
+        raise PreflightError("Homebrew reported an invalid Rustup prefix")
+    prefix = Path(value)
+    if not prefix.is_absolute():
+        raise PreflightError("Homebrew Rustup prefix is not absolute")
+    return prefix
+
+
+def homebrew_native_environment(root: Path) -> dict[str, str] | None:
+    """Prepare exact native aliases only for the selected Homebrew wrapper bundle."""
+
+    names = ("rustup", "rustc", "cargo", "cargo-clippy", "rustfmt")
+    selected = {name: shutil.which(name) for name in names}
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    _, path_errors, manager_error = proxy_provenance(selected, cargo_home)
+    if not path_errors and not manager_error:
+        return None
+    brew = shutil.which("brew")
+    if brew is None or any(path is None for path in selected.values()):
+        return None
+    prefix = brew_prefix(brew, root, "rustup")
+    try:
+        if not all(
+            Path(selected[name]).samefile(prefix / "bin" / name) for name in names
+        ):
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    native_directory = prefix / "libexec" / "bin"
+    native = {name: str(native_directory / name) for name in names}
+    _, path_errors, manager_error = proxy_provenance(native, cargo_home)
+    if path_errors or manager_error:
+        raise PreflightError("Homebrew native Rustup aliases failed exact backing admission")
+    fallback = os.environ.get("RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS")
+    if not fallback:
+        settings = brew_prefix(brew, root) / "etc" / "rustup" / "settings.toml"
+        if not settings.is_file():
+            raise PreflightError("Homebrew Rustup fallback settings are missing")
+        fallback = str(settings)
+    if "\n" in fallback or "\r" in fallback or "\0" in fallback:
+        raise PreflightError("Homebrew Rustup fallback settings path is invalid")
+    return {
+        "PATH": str(native_directory) + os.pathsep + os.environ.get("PATH", ""),
+        "RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS": fallback,
+    }
+
+
+def verify_toolchain(root: Path, *, install: bool, persist_ci: bool = False) -> int:
+    """Verify tools, optionally preparing validated native package aliases for CI."""
+
+    updates = None
+    expected = read_declared_channel(root / "rust-toolchain.toml")
+    override = os.environ.get("RUSTUP_TOOLCHAIN")
+    if install and sys.platform == "darwin" and (
+        not override or version_matches(expected, override)
+    ):
+        try:
+            updates = homebrew_native_environment(root)
+        except PreflightError as error:
+            print(f"Rust toolchain preparation failed: {error}", file=sys.stderr)
+            return 1
+    prior = {name: os.environ.get(name) for name in updates or {}}
+    try:
+        if updates:
+            os.environ.update(updates)
+        result = preflight(root, install=install)
+    finally:
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    if result == 0 and updates and persist_ci:
+        # Only the real hosted install opts in; offline preflight tests cannot
+        # publish their temporary paths into the runner's actual command files.
+        try:
+            path_file = os.environ["GITHUB_PATH"]
+            env_file = os.environ["GITHUB_ENV"]
+            native = updates["PATH"].split(os.pathsep, 1)[0]
+            with open(path_file, "a", encoding="utf-8") as output:
+                output.write(native + "\n")
+            with open(env_file, "a", encoding="utf-8") as output:
+                output.write(
+                    "RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS="
+                    + updates["RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS"] + "\n"
+                )
+        except (KeyError, OSError) as error:
+            print(f"Rust toolchain environment publication failed: {error}", file=sys.stderr)
+            return 1
+    return result
+
+
+def package_native_self_test() -> None:
+    """Prove wrapper admission, native execution and isolated CI publication."""
+
+    with __import__("tempfile").TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        expected = "1.98.0"
+        (root / "rust-toolchain.toml").write_text(f'channel = "{expected}"\n')
+        prefix = root / "formula with spaces"
+        wrappers = prefix / "bin"
+        native = prefix / "libexec" / "bin"
+        wrappers.mkdir(parents=True)
+        native.mkdir(parents=True)
+        settings = root / "etc" / "rustup" / "settings.toml"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('default_toolchain = "stable"\n')
+        names = ("rustup", "rustc", "cargo", "cargo-clippy", "rustfmt")
+        for name in names:
+            (wrappers / name).write_text(f"package env wrapper {name}\n")
+        manager = native / "rustup"
+        manager.write_text("native rustup executable\n")
+        for name in names[1:]:
+            (native / name).hardlink_to(manager)
+        command_paths = root / "outer-paths"
+        command_env = root / "outer-env"
+        command_paths.write_text("existing-path\n")
+        command_env.write_text("EXISTING=value\n")
+        calls = []
+        state = {"foreign": None, "install_code": 0, "bad_prefix": False, "expected_settings": str(settings)}
+
+        def which(name):
+            if name == "brew":
+                return str(root / "brew")
+            if name not in names:
+                return None
+            if state["foreign"] == name:
+                return str(root / "foreign" / name)
+            directory = native if os.environ["PATH"].startswith(str(native)) else wrappers
+            return str(directory / name)
+
+        def probe(command, run_root, *, timeout=20):
+            del run_root, timeout
+            calls.append(command)
+            if command[0] == str(root / "brew"):
+                value = "relative-prefix" if state["bad_prefix"] else str(prefix if len(command) == 3 else root)
+                return subprocess.CompletedProcess(command, 0, value + "\n", "")
+            assert Path(command[0]).parent == native, "package wrapper was executed"
+            assert os.environ["RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS"] == state["expected_settings"]
+            name = Path(command[0]).name
+            if name == "rustup":
+                if command[1:3] == ["toolchain", "install"]:
+                    return subprocess.CompletedProcess(command, state["install_code"], "", "")
+                text = expected + "-aarch64-apple-darwin (default)\n"
+            elif name == "rustc":
+                text = f"rustc {expected}\nrelease: {expected}\ncommit-hash: abcdef123456\n"
+            elif name == "cargo":
+                text = f"cargo {expected}\nrelease: {expected}\n"
+            elif name == "cargo-clippy":
+                text = "clippy 0.1.98 (abcdef123456 2026-08-18)\n"
+            else:
+                text = "rustfmt 1.9.0-stable (abcdef123456 2026-08-18)\n"
+            return subprocess.CompletedProcess(command, 0, text, "")
+
+        environment = {
+            "CARGO_HOME": str(root / "cargo-home"), "PATH": str(wrappers),
+            "RUSTUP_TOOLCHAIN": expected,
+            "RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS": "",
+            "GITHUB_PATH": str(command_paths), "GITHUB_ENV": str(command_env),
+        }
+        with patch.dict(os.environ, environment), patch(f"{__name__}.sys.platform", "darwin"), patch(
+            f"{__name__}.shutil.which", side_effect=which
+        ), patch(f"{__name__}.run", side_effect=probe):
+            original = (command_paths.read_bytes(), command_env.read_bytes())
+            assert verify_toolchain(root, install=True) == 0
+            assert (command_paths.read_bytes(), command_env.read_bytes()) == original
+            assert os.environ["PATH"] == str(wrappers)
+            assert os.environ["RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS"] == ""
+            calls.clear()
+            assert verify_toolchain(root, install=False, persist_ci=True) == 1
+            assert not calls
+            assert (command_paths.read_bytes(), command_env.read_bytes()) == original
+            for invalid_name in names:
+                state["foreign"] = invalid_name
+                calls.clear()
+                assert verify_toolchain(root, install=True, persist_ci=True) == 1
+                assert all(call[0] == str(root / "brew") for call in calls)
+                assert (command_paths.read_bytes(), command_env.read_bytes()) == original
+            state["foreign"] = None
+            for invalid_kind in ("bad_prefix", "install_code"):
+                state[invalid_kind] = True if invalid_kind == "bad_prefix" else 1
+                calls.clear()
+                assert verify_toolchain(root, install=True, persist_ci=True) == 1
+                assert (command_paths.read_bytes(), command_env.read_bytes()) == original
+                state[invalid_kind] = False if invalid_kind == "bad_prefix" else 0
+            broken = native / "cargo"
+            broken.unlink()
+            calls.clear()
+            assert verify_toolchain(root, install=True, persist_ci=True) == 1
+            assert all(call[0] == str(root / "brew") for call in calls)
+            broken.write_text("foreign native executable\n")
+            calls.clear()
+            assert verify_toolchain(root, install=True, persist_ci=True) == 1
+            assert all(call[0] == str(root / "brew") for call in calls)
+            broken.unlink()
+            broken.hardlink_to(manager)
+            assert (command_paths.read_bytes(), command_env.read_bytes()) == original
+            with patch.dict(os.environ, {"RUSTUP_TOOLCHAIN": "1.93.1"}):
+                calls.clear()
+                assert verify_toolchain(root, install=True, persist_ci=True) == 1
+                assert not calls
+            assert verify_toolchain(root, install=True, persist_ci=True) == 0
+            assert command_paths.read_text() == "existing-path\n" + str(native) + "\n"
+            assert command_env.read_text() == "EXISTING=value\nRUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS=" + str(settings) + "\n"
+            custom_settings = root / "custom settings.toml"
+            custom_settings.write_text('default_toolchain = "stable"\n')
+            state["expected_settings"] = str(custom_settings)
+            calls.clear()
+            with patch.dict(os.environ, {
+                "RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS": str(custom_settings)
+            }):
+                assert verify_toolchain(root, install=True, persist_ci=True) == 0
+                assert os.environ["RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS"] == str(custom_settings)
+            assert command_env.read_text().endswith(
+                "RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS=" + str(custom_settings) + "\n"
+            )
+            assert not any(call == [str(root / "brew"), "--prefix"] for call in calls)
+        print("Package-native Rustup environment self-test passed")
 
 
 def self_test() -> None:
@@ -751,6 +1004,96 @@ def self_test() -> None:
                 for name in ("rustc", "cargo", "cargo-clippy", "rustfmt")
             )
 
+        # Package managers can co-locate every Rustup proxy outside Cargo home.
+        managed_bin = root / "package-managed" / "bin"
+        managed_bin.mkdir(parents=True)
+        managed_paths = {name: str(managed_bin / name) for name in executable_names}
+        for path in managed_paths.values():
+            link_to_rustup(Path(path))
+        for install in (False, True):
+            current_paths = managed_paths.copy()
+            manager_state["installed"] = not install
+            calls.clear()
+            with patch.dict(
+                os.environ,
+                {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+                clear=False,
+            ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+                f"{__name__}.run", side_effect=tracking_run
+            ):
+                assert preflight(root, install=install) == 0
+            assert calls[0][1:3] == ["toolchain", "list"]
+            assert any(call[1:3] == ["toolchain", "install"] for call in calls) == install
+            assert all(Path(call[0]).parent == managed_bin for call in calls)
+
+        # Even co-located, same-size impostors cannot reach an identity probe.
+        for invalid_name in executable_names:
+            path = Path(managed_paths[invalid_name])
+            path.unlink()
+            original = rustup_target.read_bytes()
+            path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+            current_paths = managed_paths.copy()
+            calls.clear()
+            with patch.dict(
+                os.environ,
+                {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+                clear=False,
+            ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+                f"{__name__}.run", side_effect=tracking_run
+            ):
+                assert preflight(root, install=True) == 1
+            assert not calls, f"co-located impostor {invalid_name} was invoked"
+            path.unlink()
+            link_to_rustup(path)
+
+        invalid_layouts = []
+        for name in ("rustc", "cargo", "cargo-clippy", "rustfmt"):
+            mixed = managed_paths.copy()
+            mixed[name] = valid_paths[name]
+            invalid_layouts.append(mixed)
+        separate_manager = managed_paths.copy()
+        separate_manager["rustup"] = str(homebrew_rustup)
+        invalid_layouts.append(separate_manager)
+        absent_manager = managed_paths.copy()
+        absent_manager.pop("rustup")
+        invalid_layouts.append(absent_manager)
+        for current_paths in invalid_layouts:
+            calls.clear()
+            with patch.dict(
+                os.environ,
+                {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+                clear=False,
+            ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+                f"{__name__}.run", side_effect=tracking_run
+            ):
+                assert preflight(root, install=True) == 1
+            assert not calls, "mixed or manager-free proxy layout reached a probe"
+
+        current_paths = managed_paths.copy()
+        for override in (historical, linux_hostile):
+            calls.clear()
+            with patch.dict(
+                os.environ,
+                {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": override},
+                clear=False,
+            ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+                f"{__name__}.run", side_effect=tracking_run
+            ):
+                assert preflight(root, install=True) == 1
+            assert not calls, "managed layout bypassed override validation"
+
+        manager_state["installed"] = False
+        calls.clear()
+        with patch.dict(
+            os.environ,
+            {"CARGO_HOME": str(cargo_home), "RUSTUP_TOOLCHAIN": expected},
+            clear=False,
+        ), patch(f"{__name__}.shutil.which", side_effect=fake_which), patch(
+            f"{__name__}.run", side_effect=tracking_run
+        ):
+            assert preflight(root, install=False) == 1
+        assert [call[1:3] for call in calls] == [["toolchain", "list"]]
+
         manager_state["installed"] = True
         manager_state["install_returncode"] = 0
         manager_state["install_timeout"] = False
@@ -1022,6 +1365,7 @@ def self_test() -> None:
             assert preflight(root, install=True) == 1
         assert set(requested) == set(executable_names)
         assert not calls, "missing rustup was probed"
+    package_native_self_test()
     print("Rust toolchain preflight self-test passed")
 
 
@@ -1039,7 +1383,10 @@ def main() -> int:
     if args.self_test:
         self_test()
         return 0
-    return preflight(Path(__file__).resolve().parents[2], install=args.install)
+    return verify_toolchain(
+        Path(__file__).resolve().parents[2], install=args.install,
+        persist_ci=args.install and os.environ.get("GITHUB_ACTIONS") == "true",
+    )
 
 
 if __name__ == "__main__":

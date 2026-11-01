@@ -1,3 +1,15 @@
+## Accepted-main integration in progress on #739
+
+Source/rootwatchcheckpoint832cdd5 safelycontainsall4previouslydirtysourcefiles.
+Original5-filebackup /tmp/projectatlas-739-pre-main-zk6iey18 (manifest+patch+exactfiles),
+privateAtlasDBuntouched. Main6927ed0 includesaccepted731DER24/SEM23and741ownership.
+Sevenmergeconflicts reconciled bypreservingbothowners: lockpackageunion, DBexports,
+allmainnavigationtests plus739externalpolicytest, derivedsourcehashes+inventory,
+acceptedfutureissue-map plus739owner/RCchild andthis739continuity. Newsourcehasnot
+beencompiled/tested; do notclaimmergedgatespassed. Keepall2.x/3.1tasksopen.
+Finishconflictmarker/lockedmetadata/format checks, commitowner739mainmerge, refresh
+sameprivateAtlas, thenaffectedsourceintegrationproof/independentLunaMaxreview.
+
 ## Current #739 selected; preserve root-watch delta and consume accepted main
 
 #741CLOSED/PR743MERGED at6927ed0ca64788db6947b4d43eafce29aac5ed61 afterall9nativeCI

@@ -1,11 +1,48 @@
 //! Bounded same-length projection of accepted inline ECMAScript regions.
 
 use projectatlas_core::language::{
-    EmbeddedLanguageCapability, SemanticProviderOwner, language_capability,
+    EmbeddedHostKind, EmbeddedLanguageCapability, SemanticProviderOwner, language_capability,
 };
 
 /// Maximum script regions admitted from one host file.
 pub(crate) const MAX_EMBEDDED_SCRIPT_REGIONS: usize = 64;
+
+/// Declared source role, independent from the grammar used to parse its bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EmbeddedScriptRole {
+    /// Document globals shared by classic scripts, with a separate directive goal.
+    HtmlClassic,
+    /// One independently scoped strict module in an HTML document.
+    HtmlModule,
+    /// The module portion of a Vue component.
+    VueModule,
+    /// Vue setup locals are separate from the component's module declarations.
+    VueSetup,
+    /// Svelte's module block supplies named exports and instance-visible values.
+    SvelteModule,
+    /// Svelte instance locals cannot flow back into the module block.
+    SvelteInstance,
+}
+
+impl EmbeddedScriptRole {
+    /// Whether this role establishes a source-owned ES module export slot.
+    pub(crate) fn admits_export(self, name: &str) -> bool {
+        match self {
+            Self::HtmlModule | Self::VueModule => true,
+            Self::SvelteModule => name != "default",
+            Self::HtmlClassic | Self::VueSetup | Self::SvelteInstance => false,
+        }
+    }
+}
+
+/// One independently parsed program retaining original host byte coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EmbeddedScriptRegion {
+    /// Admitted source bytes, excluding tag text and without synthetic separators.
+    pub(crate) span: crate::SourceByteSpan,
+    /// Declared host ownership and source goal.
+    pub(crate) role: EmbeddedScriptRole,
+}
 
 /// JavaScript grammar family selected for one projected buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +70,8 @@ pub(crate) struct EmbeddedSourceProjection {
     language: EmbeddedScriptLanguage,
     /// Same-length host buffer containing only admitted region bytes and newlines.
     source: String,
+    /// Bounded programs sharing this immutable same-length projection buffer.
+    regions: Vec<EmbeddedScriptRegion>,
 }
 
 impl EmbeddedSourceProjection {
@@ -44,6 +83,29 @@ impl EmbeddedSourceProjection {
     /// Borrow the same-length projected host buffer.
     pub(crate) fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Borrow source-order regions without copying or reparsing the host buffer.
+    pub(crate) fn regions(&self) -> &[EmbeddedScriptRegion] {
+        &self.regions
+    }
+}
+
+/// One mutable grammar projection assembled in a single host traversal.
+struct ProjectionBuffer {
+    /// Existing same-length source storage, allocated once for this grammar.
+    source: Vec<u8>,
+    /// At most the shared per-file script-region ceiling.
+    regions: Vec<EmbeddedScriptRegion>,
+}
+
+impl ProjectionBuffer {
+    /// Initialize one projection without a whole-file copy per region.
+    fn new(source: &[u8]) -> Self {
+        Self {
+            source: blank_host_bytes(source),
+            regions: Vec::new(),
+        }
     }
 }
 
@@ -99,17 +161,31 @@ pub(crate) fn host_capability(
 }
 
 /// Project admitted inline JavaScript/TypeScript while preserving host byte positions.
+#[cfg(test)]
 pub(crate) fn project(source: &str) -> EmbeddedProjectionBatch {
+    project_for_host(source, EmbeddedHostKind::HtmlLike)
+}
+
+/// Preserve declared program roles while projecting one registered host.
+pub(crate) fn project_for_host(source: &str, host: EmbeddedHostKind) -> EmbeddedProjectionBatch {
     let bytes = source.as_bytes();
     let mut cursor = 0;
     let mut region_count = 0;
     let mut javascript = None;
     let mut typescript = None;
+    let mut component_roles = 0_u8;
+    let mut role_conflict = false;
 
     loop {
         let open = match find_script_open(bytes, cursor) {
             Ok(Some(open)) => open,
-            Ok(None) => return finish_projections(javascript, typescript, None),
+            Ok(None) => {
+                return finish_projections(
+                    javascript,
+                    typescript,
+                    role_conflict.then_some(EmbeddedProjectionError::Malformed),
+                );
+            }
             Err(error) => return finish_projections(javascript, typescript, Some(error)),
         };
         region_count += 1;
@@ -147,6 +223,17 @@ pub(crate) fn project(source: &str) -> EmbeddedProjectionBatch {
         };
         cursor = close_end;
 
+        let Some(role) = script_role(host, &attributes) else {
+            role_conflict |= host != EmbeddedHostKind::HtmlLike;
+            continue;
+        };
+        let role_bit = match role {
+            EmbeddedScriptRole::VueModule | EmbeddedScriptRole::SvelteModule => 1,
+            EmbeddedScriptRole::VueSetup | EmbeddedScriptRole::SvelteInstance => 2,
+            EmbeddedScriptRole::HtmlClassic | EmbeddedScriptRole::HtmlModule => 0,
+        };
+        role_conflict |= component_roles & role_bit != 0;
+        component_roles |= role_bit;
         if attributes.iter().any(|attribute| attribute.name == "src") {
             continue;
         }
@@ -155,37 +242,47 @@ pub(crate) fn project(source: &str) -> EmbeddedProjectionBatch {
         };
         let target = match language {
             EmbeddedScriptLanguage::JavaScript => {
-                javascript.get_or_insert_with(|| blank_host_bytes(bytes))
+                javascript.get_or_insert_with(|| ProjectionBuffer::new(bytes))
             }
             EmbeddedScriptLanguage::TypeScript => {
-                typescript.get_or_insert_with(|| blank_host_bytes(bytes))
+                typescript.get_or_insert_with(|| ProjectionBuffer::new(bytes))
             }
         };
-        target[content_start..content_end].copy_from_slice(&bytes[content_start..content_end]);
+        target.source[content_start..content_end]
+            .copy_from_slice(&bytes[content_start..content_end]);
+        target.regions.push(EmbeddedScriptRegion {
+            span: crate::SourceByteSpan {
+                start: content_start,
+                end: content_end,
+            },
+            role,
+        });
     }
 }
 
 /// Convert admitted same-length buffers into typed projections.
 fn finish_projections(
-    javascript: Option<Vec<u8>>,
-    typescript: Option<Vec<u8>>,
+    javascript: Option<ProjectionBuffer>,
+    typescript: Option<ProjectionBuffer>,
     mut incomplete: Option<EmbeddedProjectionError>,
 ) -> EmbeddedProjectionBatch {
     let mut projections = Vec::with_capacity(2);
-    if let Some(source) = javascript {
-        match String::from_utf8(source) {
+    if let Some(buffer) = javascript {
+        match String::from_utf8(buffer.source) {
             Ok(source) => projections.push(EmbeddedSourceProjection {
                 language: EmbeddedScriptLanguage::JavaScript,
                 source,
+                regions: buffer.regions,
             }),
             Err(_) => incomplete = Some(EmbeddedProjectionError::Malformed),
         }
     }
-    if let Some(source) = typescript {
-        match String::from_utf8(source) {
+    if let Some(buffer) = typescript {
+        match String::from_utf8(buffer.source) {
             Ok(source) => projections.push(EmbeddedSourceProjection {
                 language: EmbeddedScriptLanguage::TypeScript,
                 source,
+                regions: buffer.regions,
             }),
             Err(_) => incomplete = Some(EmbeddedProjectionError::Malformed),
         }
@@ -203,6 +300,60 @@ struct Attribute<'a> {
     name: String,
     /// Borrowed attribute value when explicitly supplied.
     value: Option<&'a str>,
+}
+
+/// Select only documented host roles; language selection remains independent.
+fn script_role(host: EmbeddedHostKind, attributes: &[Attribute<'_>]) -> Option<EmbeddedScriptRole> {
+    Some(match host {
+        EmbeddedHostKind::HtmlLike => {
+            if attributes.iter().any(|attribute| {
+                attribute.name == "type"
+                    && attribute
+                        .value
+                        .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"))
+            }) {
+                EmbeddedScriptRole::HtmlModule
+            } else {
+                EmbeddedScriptRole::HtmlClassic
+            }
+        }
+        EmbeddedHostKind::Component => {
+            let mut setup = attributes
+                .iter()
+                .filter(|attribute| attribute.name == "setup");
+            let present = setup.next().is_some();
+            if setup.next().is_some() {
+                return None;
+            }
+            if present {
+                EmbeddedScriptRole::VueSetup
+            } else {
+                EmbeddedScriptRole::VueModule
+            }
+        }
+        EmbeddedHostKind::Template => {
+            let mut modules = attributes
+                .iter()
+                .filter(|attribute| attribute.name == "module");
+            let mut contexts = attributes
+                .iter()
+                .filter(|attribute| attribute.name == "context");
+            let module = modules.next();
+            let context = contexts.next();
+            if modules.next().is_some()
+                || contexts.next().is_some()
+                || module.is_some_and(|attribute| attribute.value.is_some())
+                || context.is_some_and(|attribute| attribute.value != Some("module"))
+            {
+                return None;
+            }
+            if module.is_some() || context.is_some() {
+                EmbeddedScriptRole::SvelteModule
+            } else {
+                EmbeddedScriptRole::SvelteInstance
+            }
+        }
+    })
 }
 
 /// Parse a conservative attribute subset without interpreting code or entities.
@@ -272,6 +423,23 @@ fn parse_attributes(attributes: &str) -> Result<Vec<Attribute<'_>>, EmbeddedProj
 fn selected_language(attributes: &[Attribute<'_>]) -> Option<EmbeddedScriptLanguage> {
     let lang = attribute_language(attributes, "lang", language_from_lang);
     let script_type = attribute_language(attributes, "type", language_from_type);
+    // Module is a source goal, not a conflicting JavaScript MIME declaration.
+    // The admitted lang attribute still owns JS/TS grammar selection.
+    let mut types = attributes
+        .iter()
+        .filter(|attribute| attribute.name == "type");
+    let module = types.next().is_some_and(|attribute| {
+        attribute
+            .value
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("module"))
+    }) && types.next().is_none();
+    if module {
+        return match lang {
+            AttributeLanguage::Accepted(language) => Some(language),
+            AttributeLanguage::Missing => Some(EmbeddedScriptLanguage::JavaScript),
+            AttributeLanguage::Unsupported => None,
+        };
+    }
     match (lang, script_type) {
         (AttributeLanguage::Missing, AttributeLanguage::Missing) => {
             Some(EmbeddedScriptLanguage::JavaScript)
@@ -330,6 +498,9 @@ fn language_from_lang(value: &str) -> Option<EmbeddedScriptLanguage> {
 
 /// Parse accepted ECMAScript MIME and module `type` spellings.
 fn language_from_type(value: &str) -> Option<EmbeddedScriptLanguage> {
+    if value.trim().eq_ignore_ascii_case("module") {
+        return Some(EmbeddedScriptLanguage::JavaScript);
+    }
     let value = value
         .split(';')
         .next()
@@ -337,8 +508,7 @@ fn language_from_type(value: &str) -> Option<EmbeddedScriptLanguage> {
         .trim()
         .to_ascii_lowercase();
     match value.as_str() {
-        "module"
-        | "text/javascript"
+        "text/javascript"
         | "application/javascript"
         | "text/ecmascript"
         | "application/ecmascript" => Some(EmbeddedScriptLanguage::JavaScript),

@@ -1,0 +1,968 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-30",
+  "source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+  "derivation_contract": 24,
+  "semantic_contract": 23,
+  "baseline_version": "0.5.0",
+  "baseline_archive_sha256": "745db48c00d5dbac2d245284219610582293e9d048949f608a3b4988228b7266",
+  "baseline_binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485",
+  "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+  "host": {
+    "os": "Linux 7.0.0-38-generic",
+    "cpu": "AMD Ryzen 7 5700U",
+    "architecture": "x86_64"
+  },
+  "protocol": {
+    "fresh_process": true,
+    "fresh_fixture_per_sample": true,
+    "rounds": 3,
+    "paired_order": "baseline/candidate, candidate/baseline, baseline/candidate",
+    "telemetry": false,
+    "peak_rss": "per-process KiB from GNU time",
+    "wall_clock": "Python perf_counter around GNU time child execution",
+    "caches": "ordinary warm filesystem/page caches; not cold disk",
+    "scope": "affected binding-work cost evidence, not #708 SLO or final installed #715 acceptance",
+    "fixture_digest": "SHA256 of compact sorted JSON mapping relative authored paths to SHA256",
+    "parse_counters": "source-file candidates, not native parser invocation counts",
+    "binary_samples": 150,
+    "baseline_candidate_pairs": 75,
+    "timed_sample_scope": "initialization; per-sample no-op and query probes excluded from this count",
+    "fixture_groups": 25
+  },
+  "cases": {
+    "roots-4": {
+      "fixture_digest": "3c176b522c3ceada470c54767b5802467ecf05b6d84b9cd879125d0208e75286",
+      "authored_files": 262,
+      "authored_bytes": 17525,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.279889349010773,
+          "peak_rss_kib": 26872,
+          "work": {
+            "candidates": 261,
+            "parsed": 261,
+            "unchanged": 0,
+            "symbols": 777,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.34633086901158094,
+          "peak_rss_kib": 32816,
+          "work": {
+            "candidates": 261,
+            "parsed": 261,
+            "unchanged": 0,
+            "symbols": 777,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "roots-64": {
+      "fixture_digest": "ff6c927263c0d7fce703691a2787fe66f1c5080f2092af6dee0082b1286769c8",
+      "authored_files": 322,
+      "authored_bytes": 22037,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.33583455096231773,
+          "peak_rss_kib": 27940,
+          "work": {
+            "candidates": 321,
+            "parsed": 321,
+            "unchanged": 0,
+            "symbols": 897,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.3915476059773937,
+          "peak_rss_kib": 34536,
+          "work": {
+            "candidates": 321,
+            "parsed": 321,
+            "unchanged": 0,
+            "symbols": 897,
+            "relations": 512
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "dense-comment-nested": {
+      "fixture_digest": "5d948180e65addc8bbdc8747325cdc12e14a83a20af502854d1a2262bb26b4e2",
+      "authored_files": 3,
+      "authored_bytes": 294421,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.16836309398058802,
+          "peak_rss_kib": 25856,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 272,
+            "relations": 526
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.16142168099759147,
+          "peak_rss_kib": 29716,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 272,
+            "relations": 526
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "contextual-keywords": {
+      "fixture_digest": "362b89780ac9c5b9b5b0a24245f6f00c2fb505e1fdff72c1620a74e473ab124a",
+      "authored_files": 3,
+      "authored_bytes": 67733,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.10048642696347088,
+          "peak_rss_kib": 22568,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 2,
+            "relations": 0
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.11956683796597645,
+          "peak_rss_kib": 25184,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 3,
+            "relations": 256
+          },
+          "noop_parsed": 0
+        }
+      }
+    },
+    "contextual-host": {
+      "fixture_digest": "372f303a73797f070e90a8a0a132ecfdb21592629c3433afcf8089545ad2ddcc",
+      "authored_files": 3,
+      "authored_bytes": 519889,
+      "measurements": {
+        "baseline": {
+          "samples": 3,
+          "wall_seconds": 0.1159128820290789,
+          "peak_rss_kib": 23324,
+          "work": {
+            "candidates": 1,
+            "parsed": 1,
+            "unchanged": 0,
+            "symbols": 1,
+            "relations": 0
+          },
+          "noop_parsed": 0
+        },
+        "candidate": {
+          "samples": 3,
+          "wall_seconds": 0.14379518502391875,
+          "peak_rss_kib": 26684,
+          "work": {
+            "candidates": 2,
+            "parsed": 2,
+            "unchanged": 0,
+            "symbols": 65,
+            "relations": 63
+          },
+          "noop_parsed": 0
+        }
+      }
+    }
+  },
+  "correctness": {
+    "cargo_root_selected_caller_baseline": "unresolved",
+    "cargo_root_selected_caller_candidate": "resolved to targets/t0/main.rs::run",
+    "dense_candidate_resolved_occurrences": 257,
+    "all_candidate_samples_checked": true,
+    "raw_failed_pre_fix_measurement": "retained separately; excluded from these results",
+    "timing_sample_root_assertion": "resolved status",
+    "exact_target_and_baseline_assertion": "separate post-measurement probe; supplemented by permanent exact-target root E2Es",
+    "dense_contextual_candidate_resolved_occurrences": 256,
+    "host_programs": 64,
+    "host_named_callers_verified": 63,
+    "contextual_baseline": "selected named caller anchors unavailable in both native and host cases; not merely zero call rows",
+    "sample_assertions": "Every candidate sample checks resolved calls and expected occurrences; current-artifact post-measurement probes check exact Cargo-root targets, baseline anchor state and all 63host callers.",
+    "invalid_identity_neighbors": "Permanent container CLI/MCP selector preserves the explicit cross-file caller and summary beside invalid NUL imports while true local collisions remain unresolved through incremental/full/no-op phases.",
+    "qualified_cpp_owners": "Actual qualified bodies select exact source namespace/type parents, unknown/base/local shadow barriers remain unresolved, and qualified definitions do not leak file bindings across CLI/MCP and incremental/full/no-op phases.",
+    "python_comprehension_order": "Initial iterable targets retain exact enclosing ownership; rewritten loop names remain uncertain, singleton RHS compatibility and invalid syntax isolation pass exact CLI/MCP occurrence/parent/summary probes through refresh and rebuild.",
+    "kotlin_statement_inputs": "Local val/var/destructured/delegated inputs and for-container expressions retain enclosing callable ownership; later calls and loop bodies retain local shadowing. Source units additionally cover initializer lambdas, class members, constructors and accessors. Permanent CLI/MCP checks preserve occurrence states, summaries, identity and incremental/full/noop behavior; native upgrade target sets alone do not prove unresolved occurrence presence."
+  },
+  "reexport_storage": {
+    "protocol": "Three alternating paired rounds, same semantic14 source, fresh fixture/process, GNU time RSS maximum and median elapsed initialization; ordinary exact caller target and zero-parsed no-op verified after every sample. Long missing module remains unresolved, not falsely resolved.",
+    "baseline_source_commit": "3531b47574c3c6409eb7cfe22a51955c24180ff9",
+    "baseline_binary_sha256": "b05d68e498248b2b73cb5660156194532a8bd13126139c7f2a0dcb10ab6ff5f0",
+    "candidate_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
+    "candidate_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
+    "source_hashes": {
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "barrel.js": "bd09d8769016636baaffbd8c1c64c8d5298333865e39d06801aed07986e911ef",
+      "target.js": "daf7c1ff3c305ff0d909f412f001c3ccf10944e05854f628b777b2e0a0908816",
+      "caller.js": "be151cf34dfab9fb26540494c47d17ed0a7d8f84ed5e8434d9d81a7786fadc80"
+    },
+    "module_literal_bytes": 65538,
+    "export_slots": 512,
+    "authored_bytes": 73741,
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 0.16101096701459028,
+        "max_peak_rss_kib": 56752
+      },
+      "candidate": {
+        "wall_seconds": 0.13649863001774065,
+        "max_peak_rss_kib": 25444
+      }
+    },
+    "scope": "Targeted storage regression, separate from 0.5.0 affected-work comparison and release SLOs."
+  },
+  "reopened_containers": {
+    "baseline_source_commit": "0f403aadbdcf1826afa2e1611b82a44069d63b4d",
+    "baseline_binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e",
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "logical_namespaces": 256,
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 0.18963589996565133,
+        "peak_rss_kib": 30088
+      },
+      "candidate": {
+        "wall_seconds": 0.19417763903038576,
+        "peak_rss_kib": 31116
+      }
+    },
+    "source_hashes": {
+      "main.cpp": "3c160cd546f1068e5257afcc4f4027ca14e58fb8346cfd040a09b117fc84e1de",
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "Cargo.toml": "6cd620ff096dd9d1f0c7d4917d6acd70116d99d9313304b98730080d2af5b4b8"
+    },
+    "scope": "same-file C++ reopened namespaces, selected exact caller positive and zero-parsed no-op each sample; candidate performs corrected work"
+  },
+  "instance_fields": {
+    "baseline_source_commit": "d1637e9d5f7174b4bf83ed7cc93f433e888a7489",
+    "baseline_binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f",
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "classes": 256,
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 0.11860164598328993,
+        "peak_rss_kib": 25396
+      },
+      "candidate": {
+        "wall_seconds": 0.11862343800021335,
+        "peak_rss_kib": 25124
+      }
+    },
+    "source_hashes": {
+      "main.js": "7ef7247cb9e3b35a412d0f33153ef164d2517852a4bead2963d279ed47377e5e",
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "Cargo.toml": "6cd620ff096dd9d1f0c7d4917d6acd70116d99d9313304b98730080d2af5b4b8"
+    },
+    "scope": "Instance field calls to a unique later enclosing binding, all256 candidate occurrences and zero-parsed noop checked after each sample; baseline performs incorrect unresolved work, no release SLO exception"
+  },
+  "forwarding_query_modules": {
+    "baseline_source_commit": "dc64f93b5b06c63b7998ef85d7a23ccf71d3de06",
+    "baseline_binary_sha256": "17fa8d4977a8810ea39e441129713163489a037e61ca402cd0bd8788b1bf15a2",
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "export_slots": 8000,
+    "member_calls": 7997,
+    "module_bytes": 1800002,
+    "source_sizes": {
+      ".gitignore": 15,
+      "barrel.js": 1902910,
+      "target.js": 25,
+      "caller.js": 86953
+    },
+    "source_hashes": {
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "barrel.js": "53e53a965fd7a9067dc5f6661611405188e75b5c4e3758f28bcbd9ab83044572",
+      "target.js": "daf7c1ff3c305ff0d909f412f001c3ccf10944e05854f628b777b2e0a0908816",
+      "caller.js": "8f8fb02ae8b18d812a42ae86942c572710720fb5b70a9863e7f6fc4159e84b65"
+    },
+    "samples_per_binary": 3,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 3.7659863889566623,
+        "max_peak_rss_kib": 132084
+      },
+      "candidate": {
+        "wall_seconds": 1.89139890903607,
+        "max_peak_rss_kib": 130048
+      }
+    },
+    "normal_positive_each_sample": true,
+    "complete_calls_each_sample": 7998,
+    "noop_parsed_each_sample": 0,
+    "same_contract_compatibility": {
+      "baseline_contract": 23,
+      "candidate_contract": 24,
+      "repair_identity_and_all_approved_purposes_preserved": true,
+      "same_contract_noop": true,
+      "full_rebuild_positive": true,
+      "final_noop": true
+    },
+    "scope": "Source-owned module storage survives query/cache/frame consumers, no public key/fact/schema change, current24 native owner contracts; cumulative module copies removed, peak parser memory not materially reduced; no release SLO waiver"
+  },
+  "native_member_owners": {
+    "baseline_source_commit": "3e81518048dce82a987a53daed5381028fe2dfae",
+    "baseline_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "samples_per_binary_per_fixture": 3,
+    "query_budget": {
+      "output_bytes": 32768,
+      "intermediate_bytes": 1048576
+    },
+    "cases": {
+      "native-member-owners": {
+        "fixture_digest": "ef46054b717fe7dbc81ebe811b92997cb17abb4fd7ad1f2604667fa781b66ed0",
+        "source_hashes": {
+          "owners.cpp": "60730004d6722fa44f065f294df1e00450fa863826778e4c1b6830da0b17edd8",
+          "owners.rs": "471ea8274f94a35a76abc20a016f170285bac542d96102d7b3dba9e6b6b16017",
+          "owners.kt": "a3970c096ebb8a08f6e32799997eb32b3974788cf7fb02be8046a18e43d5d97b",
+          "owners.zig": "7729a57cd1228f116a77deeea5aac4238050848b20b7c2c2f0a07ad68da124bf",
+          "owners.java": "21e7d04c7a7dcb243c7774c6c65dbe1640de9d5d4bd883c315f46046af01f40e"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.21628301998134702,
+            "peak_rss_kib": 41992
+          },
+          "candidate": {
+            "wall_seconds": 0.21307024196721613,
+            "peak_rss_kib": 41896
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "kotlin-constructor-views": {
+        "fixture_digest": "b57a1a089358468e17ee5faa65b60e12fb67ec85d57dff5f0d387b2f0a8e5a04",
+        "source_hashes": {
+          "owners.kt": "621d2932593e10ff37fa5de95f4fedb2eab7942304903b19a067f893f82d0f0a"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.16472357005113736,
+            "peak_rss_kib": 31092
+          },
+          "candidate": {
+            "wall_seconds": 0.16222785197896883,
+            "peak_rss_kib": 31696
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "csharp-accessor-constructor-views": {
+        "fixture_digest": "ac30416cdaea1058f772b023b02ab09f4ca044b4068ba4a914cab69e1cf423fa",
+        "source_hashes": {
+          "owners.cs": "2bba87d012a19f420cd8daba7ecb3c104bdbb422102d3970ebe12e8384e4317e"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.22756083001149818,
+            "peak_rss_kib": 36896
+          },
+          "candidate": {
+            "wall_seconds": 0.22144241002388299,
+            "peak_rss_kib": 37132
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true,
+        "candidate_implicit_value_and_primary_shadow_negatives_each_sample": true
+      },
+      "cpp-qualified-owners": {
+        "fixture_digest": "d63ef87f9d3ce8dfba223de8d91ad150c5a5d542c569954cd150ed38db09808c",
+        "source_hashes": {
+          "namespaces.cpp": "38c1f23d8c5cdc83b4ee03796e417b9542653a55dbff0aafb63c56edaf545c59",
+          "types.cpp": "d5798cc9e0c1191572efd5385124263500a6ac9b9668aaff98372e00cb39680e"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.17474450101144612,
+            "peak_rss_kib": 31204
+          },
+          "candidate": {
+            "wall_seconds": 0.1753185690031387,
+            "peak_rss_kib": 31280
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "python-comprehension-order": {
+        "fixture_digest": "534f46708f6d1dcd7202698fde494e5f86f37f30d107b802d28709ca7374478c",
+        "source_hashes": {
+          "owners.py": "bb908b5382ad3540dde5f8f30858af2f443602fb82f14b0827e3a71be69a14e2"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.14729295996949077,
+            "peak_rss_kib": 27812
+          },
+          "candidate": {
+            "wall_seconds": 0.14808269805507734,
+            "peak_rss_kib": 28204
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "python-ordinary-calls": {
+        "fixture_digest": "be35663f68b454fa5549317684408ddfaebe65937038af4777410187c14c9a46",
+        "source_hashes": {
+          "owners.py": "e3bfd9df0cf6ec0a16e31a4a4fb107aeee810984ba1714fa3d05793f3bbc540d"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.13257397100096568,
+            "peak_rss_kib": 26352
+          },
+          "candidate": {
+            "wall_seconds": 0.1348010819638148,
+            "peak_rss_kib": 26840
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      },
+      "go-clause-scopes": {
+        "fixture_digest": "d1eaad4e5f4fbfe3c24b120ec7d3bfbdf4d40ef2e96518b0851f1d6b80349e5a",
+        "source_hashes": {
+          "owners.go": "9ae6ece307a7e03d466dc3a2113c60d7e413df78c6ee9d41bea37dc0f6f1c901"
+        },
+        "measurements": {
+          "baseline": {
+            "wall_seconds": 0.12919305503601208,
+            "peak_rss_kib": 25344
+          },
+          "candidate": {
+            "wall_seconds": 0.1255705810035579,
+            "peak_rss_kib": 25960
+          }
+        },
+        "candidate_exact_normal_target_and_noop_each_sample": true
+      }
+    }
+  },
+  "upgrade_validation": {
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "native_baselines": [
+      {
+        "contract": "stable050",
+        "binary_sha256": "aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485"
+      },
+      {
+        "contract": "contract12",
+        "binary_sha256": "c8f6d7cfd6928f03c2f775a30fbcd2f2ec3dbd49b2c0f150c17aaffc6c47d8ac"
+      },
+      {
+        "contract": "contract13",
+        "binary_sha256": "296a58b05b2af00abd3bd431e550d1d5ef6cd9a18e55d71c31ee6dd0a8d320b5"
+      },
+      {
+        "contract": "contract14",
+        "binary_sha256": "852f396f286ea1b428badbcea4428f8810ea624b638250d552d889a09b46698e"
+      },
+      {
+        "contract": "contract15",
+        "binary_sha256": "f20f9de7f25e2b341cffe1ff6679c861dc943c2b336f5fc5e9f30ddbbf401d3f"
+      },
+      {
+        "contract": "contract16",
+        "binary_sha256": "f3579e3cf67590e73744b3326a2076c7a36dd3a8da46c39294081b3d00959287"
+      },
+      {
+        "contract": "contract17",
+        "binary_sha256": "6aeac805ac6942dadb046db77c792372ac361cd9acc9fafc5ffac54181ec4338"
+      },
+      {
+        "contract": "contract18",
+        "binary_sha256": "886742f26c2d3104e518fd7e613786300dbca99f5671a86a9384c6db8bca9e5f"
+      },
+      {
+        "contract": "contract19",
+        "binary_sha256": "cf89e368c04bba0f5578167ca565756342edc312c14915b53c433d452ba31fbf"
+      },
+      {
+        "contract": "contract20",
+        "binary_sha256": "02aa18e5cf561196294503f5b97c064ae6b07aafc10f51e087f36248e09477ea"
+      },
+      {
+        "contract": "contract21",
+        "binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339"
+      },
+      {
+        "contract": "contract22",
+        "binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504"
+      },
+      {
+        "contract": "contract23",
+        "binary_sha256": "e963f7fac2ceacbf3ea9caf38df46895fb863d825705da5afb31798606770eec"
+      },
+      {
+        "contract": "contract5",
+        "binary_sha256": "fba3406a59f624e55f6731d722024f75b7a4f0c00671c432d59ab9e0a745d8e7"
+      },
+      {
+        "contract": "contract6",
+        "binary_sha256": "62d48ea0371ee76c305e1a287301dd086b30176875215094caa4e6166a23a3c9"
+      },
+      {
+        "contract": "contract7",
+        "binary_sha256": "9d7e66f218dbd7127509e0fc39aa5bad27aab0835c471a79f8696eaf7ec34ece"
+      },
+      {
+        "contract": "contract8",
+        "binary_sha256": "77a9397793d357c8edc30d1135d5b1b93fbf77a05ac5dcafe6ea8a70f5db1f8b"
+      },
+      {
+        "contract": "contract9",
+        "binary_sha256": "96088ba9c2e858ee126c82f370e2599bdf69f0ed87db078ccd6062882d05c3bc"
+      },
+      {
+        "contract": "contract10",
+        "binary_sha256": "8a5785586c9305c130cbc26c51d5d6a3d6bf852c4e36ac56b22c0aeafffac57c"
+      },
+      {
+        "contract": "contract11",
+        "binary_sha256": "b3d15be02b59e233eac15f8fb6d74eacdefaba4e69d3a47b57cbe87087166f61"
+      }
+    ],
+    "identity_and_all_approved_purposes_preserved": true,
+    "incremental_full_convergence": true,
+    "second_refresh_noop": true,
+    "early_deadline_preserves_publication": true,
+    "compatible_rollback_and_reupgrade": true,
+    "staging_cancellation": "separate projection_contract_revisions_force_full_projection_refresh unit control",
+    "normalized_projection_convergence": {
+      "baselines": 20,
+      "tables": [
+        "file_content_classifications",
+        "file_texts",
+        "graph_coverage",
+        "graph_entities",
+        "graph_entity_exports",
+        "graph_identity_rejections",
+        "graph_relation_dependencies",
+        "graph_relation_occurrences",
+        "graph_relations",
+        "graph_resolution_keys",
+        "nodes",
+        "purposes",
+        "source_parse_metadata",
+        "summaries",
+        "symbol_relations",
+        "symbols"
+      ],
+      "normalization": {
+        "omitted_surrogate_ids": "nodes/summaries/symbols/symbol_relations/coverage/occurrences/rejections; summary/purpose node_id joined to stable path",
+        "omitted_operation_metadata": "created_at/updated_at/first_seen_at/last_seen_at/last_indexed_at; rejection generation; nodes mtime_ns",
+        "preserved_semantics": "all graph columns except surrogate IDs and rejection generation; complete symbol/source relations, spans, source parse metadata, summaries, all purposes, source text and classification",
+        "excluded_physical_state": "SQLite FTS shadow pages, usage events, publication/task metadata are physical or operation-specific; FTS source contents are included",
+        "authority": "read-only SQL snapshots; every mutation uses the real native CLI"
+      },
+      "each_baseline_incremental_full_hashes_equal": true,
+      "summary_projections_included": true,
+      "final_noop_checked": true
+    }
+  },
+  "propagated_name_storage": {
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "controlled_source_identifier_bytes": 32768,
+    "ancestor_scopes": 48,
+    "before_retained_identifier_bytes_per_producer": 1572864,
+    "after_retained_identifier_bytes_per_producer": 32768,
+    "shared_producers": [
+      "Python comprehension loop barriers",
+      "C++ inline namespace barriers"
+    ],
+    "scope_layout_bytes": {
+      "baseline": 320,
+      "candidate": 336
+    },
+    "name_bindings_layout_bytes": 56,
+    "layout_environment": "Rust1.98 x86_64 Linux; other-platform layout not claimed",
+    "maximum_scope_count": 16384,
+    "maximum_added_scope_bytes_per_live_collector": 262144,
+    "retained_scope_slots_and_map_nodes": "still admitted and charged; identifier text sharing does not remove slot costs",
+    "verification": "actual before/after producer probes; permanent64scope Arc allocation identity unit and actual48nested32KiB Python/C++ navigation unit"
+  },
+  "forwarding_cache_module_identities": {
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "baseline_contract": 21,
+    "baseline_binary_sha256": "4bca2b1b2ea623d946183c5a511e563873a8d2bd592b17572048c2841da62339",
+    "source_hashes": {
+      ".gitignore": "79ca7a5f014eed733ea6ec402b52b7871b21d79102fb30d2df0aa2909978f4b7",
+      "barrel.js": "fb6d8c1c1782b95ebfe06f12c0e3ec917b87057fb3119d99b98e9e763b0f9743",
+      "target.js": "daf7c1ff3c305ff0d909f412f001c3ccf10944e05854f628b777b2e0a0908816",
+      "caller.js": "8f8fb02ae8b18d812a42ae86942c572710720fb5b70a9863e7f6fc4159e84b65"
+    },
+    "source_sizes": {
+      ".gitignore": 15,
+      "barrel.js": 1902930,
+      "target.js": 25,
+      "caller.js": 86953
+    },
+    "export_slots": 8000,
+    "member_calls": 7997,
+    "module_bytes_per_statement": 900002,
+    "independent_equal_source_allocations": 2,
+    "measurements": {
+      "baseline": {
+        "wall_seconds": 1.9811857900349423,
+        "max_peak_rss_kib": 128720
+      },
+      "candidate": {
+        "wall_seconds": 1.8769127019913867,
+        "max_peak_rss_kib": 129500
+      }
+    },
+    "complete_call_summary_each_sample": true,
+    "normal_inbound_caller_each_sample": true,
+    "zero_parsed_noop_each_sample": true,
+    "scope": "Whole native initialization; repeated cache/visited-key lookups use local module IDs, cold interning and module resolution retain ordinary exact text work; no general speedup or security claim."
+  },
+  "cargo_root_cohorts": {
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "protocol": "Three alternating baseline/candidate pairs per fixture; fresh non-Git fixtures/processes, telemetry off, ordinary warm page caches; wall includes GNU time; after-timing SQL/CLI/no-op probes excluded. Retention-only23 is exploratory uncommitted source, used solely to isolate traversal cost.",
+    "initialization_samples": 36,
+    "baseline_candidate_pairs": 18,
+    "fixtures": 6,
+    "medians": {
+      "automatic-128": {
+        "baseline": {
+          "wall_seconds": 1.164317466027569,
+          "peak_rss_kib": 53492,
+          "relation_dependencies": 34176,
+          "db_bytes": 17833984,
+          "work": {
+            "candidates": 129,
+            "parsed": 129,
+            "unchanged": 0,
+            "symbols": 513,
+            "relations": 256
+          },
+          "binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
+          "fixture_digest": "7e25aa44f2dd19c1612ef5ac2f8249f04349bcb4b4a9a4f8061bd8ec0ab1a869"
+        },
+        "candidate": {
+          "wall_seconds": 0.22584527300205082,
+          "peak_rss_kib": 28296,
+          "relation_dependencies": 1664,
+          "db_bytes": 2994176,
+          "work": {
+            "candidates": 129,
+            "parsed": 129,
+            "unchanged": 0,
+            "symbols": 513,
+            "relations": 256
+          },
+          "binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+          "fixture_digest": "7e25aa44f2dd19c1612ef5ac2f8249f04349bcb4b4a9a4f8061bd8ec0ab1a869"
+        }
+      },
+      "automatic-512": {
+        "baseline": {
+          "wall_seconds": 21.73751424899092,
+          "peak_rss_kib": 464612,
+          "relation_dependencies": 529920,
+          "db_bytes": 250777600,
+          "work": {
+            "candidates": 513,
+            "parsed": 513,
+            "unchanged": 0,
+            "symbols": 2049,
+            "relations": 1024
+          },
+          "binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
+          "fixture_digest": "d2bb2e7251cc4a548238c3659ab0ab3121d51a9226d21210dc3a0ab3a8a3056e"
+        },
+        "candidate": {
+          "wall_seconds": 0.5930577900144272,
+          "peak_rss_kib": 41024,
+          "relation_dependencies": 6656,
+          "db_bytes": 10199040,
+          "work": {
+            "candidates": 513,
+            "parsed": 513,
+            "unchanged": 0,
+            "symbols": 2049,
+            "relations": 1024
+          },
+          "binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+          "fixture_digest": "d2bb2e7251cc4a548238c3659ab0ab3121d51a9226d21210dc3a0ab3a8a3056e"
+        }
+      },
+      "explicit-128": {
+        "baseline": {
+          "wall_seconds": 1.1362625279580243,
+          "peak_rss_kib": 52704,
+          "relation_dependencies": 33664,
+          "db_bytes": 17006592,
+          "work": {
+            "candidates": 129,
+            "parsed": 129,
+            "unchanged": 0,
+            "symbols": 513,
+            "relations": 256
+          },
+          "binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
+          "fixture_digest": "0490afb2b4eee8423ec1730953b3659ff7ad61686861dc678b6c656b936742f6"
+        },
+        "candidate": {
+          "wall_seconds": 0.21514777396805584,
+          "peak_rss_kib": 28044,
+          "relation_dependencies": 1408,
+          "db_bytes": 2723840,
+          "work": {
+            "candidates": 129,
+            "parsed": 129,
+            "unchanged": 0,
+            "symbols": 513,
+            "relations": 256
+          },
+          "binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+          "fixture_digest": "0490afb2b4eee8423ec1730953b3659ff7ad61686861dc678b6c656b936742f6"
+        }
+      },
+      "explicit-512": {
+        "baseline": {
+          "wall_seconds": 21.328200620948337,
+          "peak_rss_kib": 457280,
+          "relation_dependencies": 527872,
+          "db_bytes": 241766400,
+          "work": {
+            "candidates": 513,
+            "parsed": 513,
+            "unchanged": 0,
+            "symbols": 2049,
+            "relations": 1024
+          },
+          "binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
+          "fixture_digest": "c93802db5fc5596efadf214af52f99b37fea971b5d9c1855f5a8d159774d0654"
+        },
+        "candidate": {
+          "wall_seconds": 0.5570851119700819,
+          "peak_rss_kib": 40980,
+          "relation_dependencies": 5632,
+          "db_bytes": 9203712,
+          "work": {
+            "candidates": 513,
+            "parsed": 513,
+            "unchanged": 0,
+            "symbols": 2049,
+            "relations": 1024
+          },
+          "binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+          "fixture_digest": "c93802db5fc5596efadf214af52f99b37fea971b5d9c1855f5a8d159774d0654"
+        }
+      },
+      "automatic-2048": {
+        "baseline": {
+          "wall_seconds": 5.146744089957792,
+          "peak_rss_kib": 97752,
+          "relation_dependencies": 26624,
+          "db_bytes": 39071744,
+          "work": {
+            "candidates": 2049,
+            "parsed": 2049,
+            "unchanged": 0,
+            "symbols": 8193,
+            "relations": 4096
+          },
+          "binary_sha256": "9fe89a334138ecbfaebcb057a84b06425a5f39b39ac51cc3e48b611e9f83d5f9",
+          "fixture_digest": "58851050c7e832650319a3f9d35a61dc7af3a8e84354dc610ee722512b7bc9b4"
+        },
+        "candidate": {
+          "wall_seconds": 2.4577934970147908,
+          "peak_rss_kib": 98924,
+          "relation_dependencies": 26624,
+          "db_bytes": 39063552,
+          "work": {
+            "candidates": 2049,
+            "parsed": 2049,
+            "unchanged": 0,
+            "symbols": 8193,
+            "relations": 4096
+          },
+          "binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+          "fixture_digest": "58851050c7e832650319a3f9d35a61dc7af3a8e84354dc610ee722512b7bc9b4"
+        }
+      },
+      "explicit-2048": {
+        "baseline": {
+          "wall_seconds": 4.792356432008091,
+          "peak_rss_kib": 92716,
+          "relation_dependencies": 22528,
+          "db_bytes": 34865152,
+          "work": {
+            "candidates": 2049,
+            "parsed": 2049,
+            "unchanged": 0,
+            "symbols": 8193,
+            "relations": 4096
+          },
+          "binary_sha256": "9fe89a334138ecbfaebcb057a84b06425a5f39b39ac51cc3e48b611e9f83d5f9",
+          "fixture_digest": "f2a7dc5b9affb8f9724fa9a0690f7a70e1b880606181536ae5782550b175ff4e"
+        },
+        "candidate": {
+          "wall_seconds": 2.2494625989929773,
+          "peak_rss_kib": 94576,
+          "relation_dependencies": 22528,
+          "db_bytes": 34852864,
+          "work": {
+            "candidates": 2049,
+            "parsed": 2049,
+            "unchanged": 0,
+            "symbols": 8193,
+            "relations": 4096
+          },
+          "binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+          "fixture_digest": "f2a7dc5b9affb8f9724fa9a0690f7a70e1b880606181536ae5782550b175ff4e"
+        }
+      }
+    },
+    "all_sql_call_targets_exact_each_sample": true,
+    "cli_first_middle_last_exact_each_sample": true,
+    "zero_parsed_noop_each_sample": true,
+    "causal_controls": {
+      "original22_dependency_bound": "permanent CLI/MCP selector fails at12867 rows, corrected23 passes",
+      "eager_index_incremental_work": "app-only edit recovered168 sources; lazy23 passes45-source ceiling",
+      "recovery_unit": "exact relevant captured roots/additional_candidates; unrelated directory slots remain unopened"
+    },
+    "compatibility": "All four automatic directories, explicit siblings/custom/package-root paths, disabled automatic discovery, helpers, ambiguity, edits/add/delete/rename/manifest changes, incremental/full, identity/approved purposes and no-op are covered by the permanent root selector.",
+    "causal_receipts": [
+      {
+        "file": "projectatlas-731-root-cohorts-causal22.log",
+        "sha256": "2f8c79c03fff6a631b763e0cf19a4c9caa9ac13c3dacb3ad2b6815144636b33a"
+      },
+      {
+        "file": "projectatlas-731-root-directory-causal-eager.log",
+        "sha256": "77d28345295829b7bc25dd8b76a9271732fd3fd88a44ba47e8f79777222fbf43"
+      },
+      {
+        "file": "projectatlas-731-root-directory-unit.log",
+        "sha256": "3b70525bc1c19971656bbfed39382d5f597c69bbf33f43ee73a7ab138a5b9f76"
+      },
+      {
+        "file": "projectatlas-731-root-directory-lifecycle.log",
+        "sha256": "6c0f7f6ce4605581857435d4d9e290be28ffb5801aea30117a008ec2079ff79e"
+      }
+    ],
+    "automatic_lifecycle": {
+      "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+      "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+      "baseline_binary_sha256": "74bd98229c2e1a306840ead43e09804dec549ec11c7a7f1009840f2ccb02c504",
+      "layouts": 4,
+      "phases": 13,
+      "normalized_tables_per_phase": 16,
+      "root_edit_delete_add_rename": true,
+      "ambiguity_and_nested_automatic_main_causes": true,
+      "identity_and_all_approved_preserved": true,
+      "final_noop_each_phase": true,
+      "excluded_from_timing_sample_count": true,
+      "receipt": {
+        "file": "projectatlas-731-projection-budget24-auto-lifecycle-proof.json",
+        "sha256": "be83a21fd158e08f8d607152f93bd4c29be5625e9acdb92ec46e4c0393038191",
+        "driver_sha256": "caa2c2b591bb6b30220d01e015a618ace568730c530e5d59dde97cb1427d9368"
+      }
+    }
+  },
+  "renderer": {
+    "file": "projectatlas-731-projection-budget24-publish-costs.py",
+    "sha256": "2f5431e690c03ff3edd8c0c77bf6bb305f0ff7b2af3afb8bdc215f123b5bcb09"
+  },
+  "shared_binding_staging": {
+    "candidate_source_commit": "6576d074b1218bc186bc82a198307fe436c06427",
+    "candidate_binary_sha256": "d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc",
+    "baseline_contract": 23,
+    "baseline_binary_sha256": "e963f7fac2ceacbf3ea9caf38df46895fb863d825705da5afb31798606770eec",
+    "protocol": "Three alternating baseline23/candidate24 pairs per fixture. Fresh processes and non-Git fixtures; telemetry disabled, ordinary warm page caches. Initialization timed through GNU time; following CLI, incremental/full, identity, approved-purpose and no-op probes excluded. Configured64 remains below the ordinary public cap; injected2MiB exhaustion is tested separately in the causal unit. Kotlin initializer baseline performs incomplete work and does not establish an equivalent-work speedup.",
+    "initialization_samples": 18,
+    "baseline_candidate_pairs": 9,
+    "fixtures": 3,
+    "medians": {
+      "configured64": {
+        "baseline": {
+          "wall_seconds": 0.13434471900109202,
+          "peak_rss_kib": 31808,
+          "relation_dependencies": 322,
+          "db_bytes": 1032192
+        },
+        "candidate": {
+          "wall_seconds": 0.13669380196370184,
+          "peak_rss_kib": 30644,
+          "relation_dependencies": 322,
+          "db_bytes": 1032192
+        }
+      },
+      "kotlin-initializers": {
+        "baseline": {
+          "wall_seconds": 0.11999673600075766,
+          "peak_rss_kib": 27504,
+          "relation_dependencies": 0,
+          "db_bytes": 1015808
+        },
+        "candidate": {
+          "wall_seconds": 0.1278607950080186,
+          "peak_rss_kib": 26836,
+          "relation_dependencies": 0,
+          "db_bytes": 1044480
+        }
+      },
+      "kotlin-ordinary": {
+        "baseline": {
+          "wall_seconds": 0.12171981803840026,
+          "peak_rss_kib": 27236,
+          "relation_dependencies": 0,
+          "db_bytes": 1040384
+        },
+        "candidate": {
+          "wall_seconds": 0.12346626096405089,
+          "peak_rss_kib": 26316,
+          "relation_dependencies": 0,
+          "db_bytes": 1040384
+        }
+      }
+    },
+    "per_source_configured_target_witnesses": 64,
+    "configured_sources": 5,
+    "input_imports_per_configured_source": 16,
+    "kotlin_exact_top_level_function_kind_parent_each_caller": true,
+    "candidate_incremental_full_all16_tables_identity_purposes_noop_each_sample": true,
+    "causal_exhaustion": "Owning aggregate unit uses injected2MiB cap; old implementation retained5603545 bytes, corrected owner admits only a valid prefix and returns typed OutputBytes before further retention. This is staging accounting, not an RSS ceiling."
+  }
+}

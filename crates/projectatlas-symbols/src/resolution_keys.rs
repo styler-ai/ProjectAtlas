@@ -3,21 +3,27 @@
 use crate::ConfiguredModuleResolution;
 use crate::configured_modules::ConfiguredModuleSource;
 use crate::semantic;
+use crate::{SourceCallBinding, SourceCallFact, SourceSemanticFacts};
 use blake3::Hasher;
 use projectatlas_core::graph::{
     CanonicalResolutionKey, GraphContractError, GraphIdentityText, GraphLimits, GraphRelationKind,
-    ProjectInstanceId, ResolutionKeyDomain,
+    ProjectInstanceId, ResolutionKeyDomain, SourceSpan,
 };
 use projectatlas_core::language::{LANGUAGE_CAPABILITIES, SemanticProviderOwner};
 use projectatlas_core::symbols::{RelationKind, SymbolGraph, SymbolKind};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 /// Maximum canonical keys emitted for one source, symbol, or relation fact.
 pub const MAX_RESOLUTION_KEYS_PER_FACT: usize = 64;
 /// Version of the currently implemented semantic relation-resolution contract.
-pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 5;
+pub const SEMANTIC_RESOLUTION_CONTRACT_VERSION: u32 = 23;
+/// Disjoint ECMAScript lookup namespaces for explicit files and inferred modules.
+const ECMA_FILE_SCOPE: &str = "file:";
+/// Legacy extensionless and package-entry aliases never identify an explicit file.
+const ECMA_MODULE_SCOPE: &str = "module:";
 
 /// Return a deterministic digest of the live semantic resolution-key contract.
 ///
@@ -117,6 +123,31 @@ impl SymbolResolutionKeys {
     }
 }
 
+/// Lookup keys for one explicit forwarding slot, owned by its source file.
+///
+/// A matching file is export evidence to follow, never a callable declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportResolutionKeys {
+    /// Ordinal in the source semantic export vector.
+    export_index: usize,
+    /// Separately bounded keys for this slot rather than one aggregate file budget.
+    keys: Vec<CanonicalResolutionKey>,
+}
+
+impl ExportResolutionKeys {
+    /// Return the explicit source export ordinal owning these lookup keys.
+    #[must_use]
+    pub const fn export_index(&self) -> usize {
+        self.export_index
+    }
+
+    /// Borrow the slot's sorted, deduplicated file-owned lookup keys.
+    #[must_use]
+    pub fn keys(&self) -> &[CanonicalResolutionKey] {
+        &self.keys
+    }
+}
+
 /// Canonical dependency keys associated with one extracted relation index.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationResolutionKeys {
@@ -147,8 +178,16 @@ pub struct ResolutionKeyProjection {
     source: Vec<CanonicalResolutionKey>,
     /// Canonical declaration exports associated with symbol facts.
     symbols: Vec<SymbolResolutionKeys>,
+    /// File-owned lookup evidence for explicit forwarding slots.
+    exports: Vec<ExportResolutionKeys>,
     /// Canonical dependencies associated with relation facts.
     relations: Vec<RelationResolutionKeys>,
+    /// Source-bound call decisions; absence retains legacy graph-only helper behavior.
+    source_calls: Option<Vec<SourceCallFact>>,
+    /// Exact admitted occurrence coordinates by raw relation ordinal.
+    source_spans: BTreeMap<usize, SourceSpan>,
+    /// Native Rust import outcomes; absent metadata retains graph-only compatibility.
+    rust_toolchain_imports: Option<BTreeMap<usize, Option<ImportReference>>>,
 }
 
 /// Repository configuration supplied to provider-owned semantic projection.
@@ -156,6 +195,72 @@ pub struct ResolutionKeyProjection {
 pub struct ResolutionProjectionContext<'a> {
     /// Validated configured-module snapshot, when the runtime supplied one.
     configured_modules: Option<&'a ConfiguredModuleResolution>,
+    /// Exact admitted parser proof for this graph, when supplied by the runtime.
+    source_semantics: Option<&'a SourceSemanticFacts>,
+    /// Owning Cargo manifest and repository-relative package root, when established.
+    rust_package: Option<(&'a str, &'a str)>,
+    /// Shared parent identity for this exact manifest-listed sibling root.
+    rust_root_cohort: Option<&'a str>,
+    /// Remaining operation allowance supplied by the projection owner.
+    retained_bytes_limit: Option<u64>,
+}
+
+/// One derivation's retained ownership and its first byte-admission refusal.
+struct ProjectionBudget {
+    /// Absence preserves the general library entrypoint's existing contract.
+    limit: Option<u64>,
+    /// Admitted projection payload and coexisting lookup state.
+    used: u64,
+    /// A key helper can defer propagation only until the next owning checkpoint.
+    failure: Option<(u64, u64)>,
+}
+
+impl ProjectionBudget {
+    /// Start one derivation with the caller's remaining allowance.
+    const fn new(limit: Option<u64>) -> Self {
+        Self {
+            limit,
+            used: 0,
+            failure: None,
+        }
+    }
+
+    /// Admit a new owner before insertion; retain the first refusal for helpers.
+    fn charge(&mut self, bytes: u64) -> bool {
+        if self.failure.is_some() {
+            return false;
+        }
+        let Some(limit) = self.limit else { return true };
+        let requested = self.used.saturating_add(bytes);
+        if requested > limit {
+            self.failure = Some((limit, requested));
+            return false;
+        }
+        self.used = requested;
+        true
+    }
+
+    /// Propagate byte refusal without returning a partial projection as authority.
+    fn check(&self) -> Result<(), ResolutionProjectionError> {
+        if let Some((limit, requested)) = self.failure {
+            return Err(ResolutionProjectionError::MemoryLimit { limit, requested });
+        }
+        Ok(())
+    }
+
+    /// Reserve fallible top-level payloads before allocating their owners.
+    fn reserve(&mut self, bytes: u64) -> Result<(), ResolutionProjectionError> {
+        self.charge(bytes);
+        self.check()
+    }
+
+    /// Include inline key-vector spare capacity and actual string allocation.
+    fn key(&mut self, key: &CanonicalResolutionKey) -> bool {
+        self.charge(
+            key.retained_heap_bytes()
+                .saturating_add((4 * std::mem::size_of::<CanonicalResolutionKey>()) as u64),
+        )
+    }
 }
 
 /// Provider scopes expanded once per unique import in one source graph.
@@ -163,28 +268,47 @@ type ImportScopeCache = BTreeMap<String, BTreeMap<String, Vec<String>>>;
 
 /// Bounded contract failures retained while a graph keeps valid siblings.
 struct ContractFailures {
+    /// The same per-graph allowance covers successful and rejected facts.
+    budget: ProjectionBudget,
     /// Rejected derived-key facts retained for typed adapter detail.
     failures: Vec<ResolutionProjectionFactFailure>,
     /// Number of distinct rejected derived-key facts observed.
     rejected_count: usize,
     /// Whether the source fact has already been rejected.
     source_seen: bool,
-    /// Rejected symbol ordinals, bit-packed by `Vec<bool>`.
+    /// Rejection flags for dense symbol ordinals.
     symbol_seen: Vec<bool>,
-    /// Rejected relation ordinals, bit-packed by `Vec<bool>`.
+    /// Rejection flags for dense relation ordinals.
     relation_seen: Vec<bool>,
+    /// Rejected explicit export ordinals.
+    export_seen: Vec<bool>,
 }
 
 impl ContractFailures {
     /// Allocate closed ordinal tracking for one parser graph.
-    fn new(symbol_count: usize, relation_count: usize) -> Self {
-        Self {
+    fn new(
+        symbol_count: usize,
+        relation_count: usize,
+        export_count: usize,
+        mut budget: ProjectionBudget,
+    ) -> Result<Self, ResolutionProjectionError> {
+        budget.reserve(
+            (std::mem::size_of::<Self>() as u64).saturating_add(
+                symbol_count
+                    .saturating_add(relation_count)
+                    .saturating_add(export_count)
+                    .saturating_mul(std::mem::size_of::<bool>()) as u64,
+            ),
+        )?;
+        Ok(Self {
+            budget,
             failures: Vec::new(),
             rejected_count: 0,
             source_seen: false,
             symbol_seen: vec![false; symbol_count],
             relation_seen: vec![false; relation_count],
-        }
+            export_seen: vec![false; export_count],
+        })
     }
 
     /// Record the first failure for one dense parser fact.
@@ -197,6 +321,13 @@ impl ContractFailures {
             }
             ResolutionProjectionFact::Symbol(index) => {
                 self.symbol_seen.get_mut(index).is_some_and(|seen| {
+                    let was_seen = *seen;
+                    *seen = true;
+                    !was_seen
+                })
+            }
+            ResolutionProjectionFact::Export(index) => {
+                self.export_seen.get_mut(index).is_some_and(|seen| {
                     let was_seen = *seen;
                     *seen = true;
                     !was_seen
@@ -215,6 +346,12 @@ impl ContractFailures {
         }
         self.rejected_count = self.rejected_count.saturating_add(1);
         if self.failures.len() < MAX_RESOLUTION_PROJECTION_FAILURES {
+            if !self
+                .budget
+                .charge((4 * std::mem::size_of::<ResolutionProjectionFactFailure>()) as u64)
+            {
+                return;
+            }
             self.failures
                 .push(ResolutionProjectionFactFailure { error, fact });
         }
@@ -229,11 +366,91 @@ impl<'a> ResolutionProjectionContext<'a> {
     ) -> Self {
         Self {
             configured_modules: Some(configured_modules),
+            source_semantics: None,
+            rust_package: None,
+            rust_root_cohort: None,
+            retained_bytes_limit: None,
         }
+    }
+
+    /// Attach source-owned ordinals for exact lexical/import projection.
+    #[must_use]
+    pub const fn with_source_semantics(mut self, semantics: &'a SourceSemanticFacts) -> Self {
+        self.source_semantics = Some(semantics);
+        self
+    }
+
+    /// Attach actual Cargo ownership for automatic-target invalidation keys.
+    #[must_use]
+    pub const fn with_rust_package(mut self, manifest: &'a str, root: &'a str) -> Self {
+        self.rust_package = Some((manifest, root));
+        self
+    }
+
+    /// Attach an admitted cohort only for this exact Cargo root source.
+    #[must_use]
+    pub const fn with_rust_root_cohort(mut self, directory: &'a str) -> Self {
+        self.rust_root_cohort = Some(directory);
+        self
+    }
+
+    /// Bound derivation by the bytes still available in the owning operation.
+    ///
+    /// Exhaustion returns [`ResolutionProjectionError::MemoryLimit`] without a
+    /// partially admitted projection. The owner supplies its existing ceiling.
+    #[must_use]
+    pub const fn with_retained_bytes_limit(mut self, limit: u64) -> Self {
+        self.retained_bytes_limit = Some(limit);
+        self
     }
 }
 
 impl ResolutionKeyProjection {
+    /// Count owned vector capacities, canonical text, and source-proof sidecars.
+    ///
+    /// Inline projection metadata is charged by its containing map or owner.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        fn keys_bytes(keys: &Vec<CanonicalResolutionKey>) -> u64 {
+            keys.iter().fold(
+                (keys.capacity() as u64)
+                    .saturating_mul(std::mem::size_of::<CanonicalResolutionKey>() as u64),
+                |bytes, key| bytes.saturating_add(key.retained_heap_bytes()),
+            )
+        }
+        keys_bytes(&self.source)
+            .saturating_add(
+                (self.symbols.capacity() * std::mem::size_of::<SymbolResolutionKeys>()) as u64,
+            )
+            .saturating_add(
+                (self.exports.capacity() * std::mem::size_of::<ExportResolutionKeys>()) as u64,
+            )
+            .saturating_add(
+                (self.relations.capacity() * std::mem::size_of::<RelationResolutionKeys>()) as u64,
+            )
+            .saturating_add(
+                self.symbols
+                    .iter()
+                    .map(|row| keys_bytes(&row.keys))
+                    .fold(0, u64::saturating_add),
+            )
+            .saturating_add(
+                self.exports
+                    .iter()
+                    .map(|row| keys_bytes(&row.keys))
+                    .fold(0, u64::saturating_add),
+            )
+            .saturating_add(
+                self.relations
+                    .iter()
+                    .map(|row| keys_bytes(&row.keys))
+                    .fold(0, u64::saturating_add),
+            )
+            .saturating_add(self.source_calls_retained_bytes())
+            .saturating_add(self.source_spans_retained_bytes())
+            .saturating_add(self.rust_toolchain_imports_retained_bytes())
+    }
+
     /// Construct an empty projection when one parser graph has no admissible
     /// canonical identity keys. Entity and relation rows can still be staged;
     /// the graph publication layer records the rejected key provenance.
@@ -242,7 +459,11 @@ impl ResolutionKeyProjection {
         Self {
             source: Vec::new(),
             symbols: Vec::new(),
+            exports: Vec::new(),
             relations: Vec::new(),
+            source_calls: None,
+            source_spans: BTreeMap::new(),
+            rust_toolchain_imports: None,
         }
     }
 
@@ -258,10 +479,83 @@ impl ResolutionKeyProjection {
         &self.symbols
     }
 
+    /// Estimate retained lookup vector metadata separately from canonical key text.
+    #[must_use]
+    pub fn export_lookup_vector_bytes(&self) -> u64 {
+        (self.exports.capacity() as u64)
+            .saturating_mul(std::mem::size_of::<ExportResolutionKeys>() as u64)
+            .saturating_add(
+                self.exports
+                    .iter()
+                    .map(|export| {
+                        (export.keys.capacity() as u64)
+                            .saturating_mul(std::mem::size_of::<CanonicalResolutionKey>() as u64)
+                    })
+                    .fold(0_u64, u64::saturating_add),
+            )
+    }
+
+    /// Borrow separately bounded lookup keys owned by explicit source export slots.
+    #[must_use]
+    pub fn export_keys(&self) -> &[ExportResolutionKeys] {
+        &self.exports
+    }
+
     /// Borrow relation-index-associated dependency keys.
     #[must_use]
     pub fn relation_keys(&self) -> &[RelationResolutionKeys] {
         &self.relations
+    }
+
+    /// Borrow source-owned call policies, including an explicitly empty proof set.
+    #[must_use]
+    pub fn source_calls(&self) -> Option<&[SourceCallFact]> {
+        self.source_calls.as_deref()
+    }
+
+    /// Estimate retained call-policy vector and payload capacities, including shared sets.
+    #[must_use]
+    pub fn source_calls_retained_bytes(&self) -> u64 {
+        self.source_calls.as_ref().map_or(0, |calls| {
+            (calls.capacity() as u64)
+                .saturating_mul(std::mem::size_of::<SourceCallFact>() as u64)
+                .saturating_add(crate::source_semantics::call_binding_heap_bytes(calls))
+        })
+    }
+
+    /// Return exact source coordinates only for the corresponding admitted relation.
+    #[must_use]
+    pub fn source_span(&self, relation: usize) -> Option<SourceSpan> {
+        self.source_spans.get(&relation).copied()
+    }
+
+    /// Account conservative retained coordinate map rows, excluding inline map metadata.
+    #[must_use]
+    pub fn source_spans_retained_bytes(&self) -> u64 {
+        (self.source_spans.len() as u64).saturating_mul(
+            (std::mem::size_of::<(usize, SourceSpan)>() + 4 * std::mem::size_of::<usize>()) as u64,
+        )
+    }
+
+    /// Borrow source-proven Rust import ownership, including explicit non-toolchain rows.
+    #[must_use]
+    pub fn rust_toolchain_imports(&self) -> Option<&BTreeMap<usize, Option<ImportReference>>> {
+        self.rust_toolchain_imports.as_ref()
+    }
+
+    /// Account the bounded Rust import policy map and its owned canonical paths.
+    #[must_use]
+    pub fn rust_toolchain_imports_retained_bytes(&self) -> u64 {
+        self.rust_toolchain_imports.as_ref().map_or(0, |imports| {
+            let mut modules = HashSet::new();
+            imports.values().fold(0_u64, |bytes, reference| {
+                bytes.saturating_add(128).saturating_add(
+                    reference
+                        .as_ref()
+                        .map_or(0, |reference| reference.retained_heap_bytes(&mut modules)),
+                )
+            })
+        })
     }
 }
 
@@ -274,6 +568,8 @@ pub enum ResolutionProjectionFact {
     Symbol(usize),
     /// A relation-index-associated dependency.
     Relation(usize),
+    /// A source-semantic export-slot lookup.
+    Export(usize),
 }
 
 /// Maximum rejected derived-key facts retained from one parser graph.
@@ -354,6 +650,15 @@ impl ResolutionProjectionFailure {
 /// Failure while deriving bounded canonical keys from parser facts.
 #[derive(Debug)]
 pub enum ResolutionProjectionError {
+    /// Retained projection growth would exceed the caller's remaining allowance.
+    MemoryLimit {
+        /// Remaining byte allowance provided by the owning operation.
+        limit: u64,
+        /// Bytes requested at the first refused ownership insertion.
+        requested: u64,
+    },
+    /// Source ordinals do not belong to the supplied admitted graph.
+    SourceEvidenceMismatch,
     /// An extracted or caller-supplied identity violated the graph contract.
     Contract(Box<ResolutionProjectionFailure>),
     /// One source fact would exceed the bounded key fan-out.
@@ -370,6 +675,13 @@ pub enum ResolutionProjectionError {
 impl fmt::Display for ResolutionProjectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MemoryLimit { limit, requested } => write!(
+                formatter,
+                "resolution projection requires {requested} retained bytes, exceeding its {limit}-byte allowance"
+            ),
+            Self::SourceEvidenceMismatch => {
+                formatter.write_str("source semantic evidence does not match the projection graph")
+            }
             Self::Contract(failure) => match failure.failures.first() {
                 Some(failure) => {
                     write!(formatter, "invalid resolution identity: {}", failure.error)
@@ -395,7 +707,7 @@ impl Error for ResolutionProjectionError {
                 .failures
                 .first()
                 .map(|failure| &failure.error as &(dyn Error + 'static)),
-            Self::KeyLimit { .. } => None,
+            Self::MemoryLimit { .. } | Self::KeyLimit { .. } | Self::SourceEvidenceMismatch => None,
         }
     }
 }
@@ -429,8 +741,8 @@ pub enum ImportSyntax {
 pub struct ImportReference {
     /// Source-language syntax that produced the reference.
     syntax: ImportSyntax,
-    /// Imported module specifier or path.
-    module: String,
+    /// Immutable module text shared by source slots and consumer clones.
+    module: Arc<str>,
     /// Imported declaration name for named imports.
     imported: Option<String>,
     /// Name visible to callers in the importing source file.
@@ -445,9 +757,19 @@ impl ImportReference {
         imported: Option<&str>,
         local: &str,
     ) -> Self {
+        Self::with_shared_module(syntax, Arc::from(module), imported, local)
+    }
+
+    /// Retain one statement's module allocation without copying it per slot.
+    pub(crate) fn with_shared_module(
+        syntax: ImportSyntax,
+        module: Arc<str>,
+        imported: Option<&str>,
+        local: &str,
+    ) -> Self {
         Self {
             syntax,
-            module: module.to_string(),
+            module,
             imported: imported.map(ToString::to_string),
             local: local.to_string(),
         }
@@ -465,6 +787,12 @@ impl ImportReference {
         &self.module
     }
 
+    /// Share the normalized module allocation without copying its source-owned bytes.
+    #[must_use]
+    pub fn shared_module(&self) -> Arc<str> {
+        Arc::clone(&self.module)
+    }
+
     /// Borrow the imported declaration name, or `None` for a module/namespace import.
     #[must_use]
     pub fn imported(&self) -> Option<&str> {
@@ -475,6 +803,18 @@ impl ImportReference {
     #[must_use]
     pub fn local(&self) -> &str {
         &self.local
+    }
+
+    /// Charge a shared module once within its containing source estimate.
+    pub(crate) fn retained_heap_bytes(&self, modules: &mut HashSet<*const str>) -> u64 {
+        let module = if modules.insert(Arc::as_ptr(&self.module)) {
+            (self.module.len() as u64).saturating_add((2 * std::mem::size_of::<usize>()) as u64)
+        } else {
+            0
+        };
+        module
+            .saturating_add(self.imported.as_ref().map_or(0, String::capacity) as u64)
+            .saturating_add(self.local.capacity() as u64)
     }
 }
 
@@ -577,19 +917,90 @@ pub fn derive_resolution_keys(
 ///
 /// # Errors
 ///
-/// Returns an error when a graph identity is invalid or one parser fact exceeds
-/// the bounded canonical-key fan-out.
+/// Returns an error when a graph identity is invalid, one parser fact exceeds
+/// the bounded canonical-key fan-out, or an explicitly supplied operation
+/// allowance is exhausted before retaining the complete projection.
 pub fn derive_resolution_keys_with_context(
     project: ProjectInstanceId,
     package: Option<&str>,
     graph: &SymbolGraph,
     context: ResolutionProjectionContext<'_>,
 ) -> Result<ResolutionKeyProjection, ResolutionProjectionError> {
+    if context
+        .source_semantics
+        .is_some_and(|facts| !facts.matches_graph(graph))
+    {
+        return Err(ResolutionProjectionError::SourceEvidenceMismatch);
+    }
+    let mut budget = ProjectionBudget::new(context.retained_bytes_limit);
+    budget.reserve(std::mem::size_of::<ResolutionKeyProjection>() as u64)?;
+    if let Some(facts) = context.source_semantics {
+        budget.reserve(
+            (facts.calls().len() as u64)
+                .saturating_mul((2 * std::mem::size_of::<SourceCallFact>()) as u64)
+                .saturating_add(crate::source_semantics::call_binding_heap_bytes(
+                    facts.calls(),
+                )),
+        )?;
+    }
+    let source_calls = context.source_semantics.map(|facts| facts.calls().to_vec());
+    let mut source_spans = BTreeMap::new();
+    if let Some(facts) = context.source_semantics {
+        for (relation, span) in facts
+            .calls()
+            .iter()
+            .map(|fact| (fact.relation, fact.source_span))
+            .chain(
+                facts
+                    .imports()
+                    .iter()
+                    .map(|fact| (fact.relation, fact.source_span)),
+            )
+        {
+            if let Some(span) = span {
+                if let Some(previous) = source_spans.get(&relation) {
+                    if *previous != span {
+                        return Err(ResolutionProjectionError::SourceEvidenceMismatch);
+                    }
+                } else {
+                    budget.reserve(128)?;
+                    source_spans.insert(relation, span);
+                }
+            }
+        }
+    }
+    let rust_toolchain_imports = context
+        .source_semantics
+        .filter(|_| semantic::provider_for_graph(graph) == Some(SemanticProviderOwner::Rust))
+        .map(|facts| {
+            let mut modules = HashSet::new();
+            let bytes = facts.imports().iter().fold(0_u64, |bytes, import| {
+                bytes.saturating_add(128).saturating_add(
+                    import
+                        .rust_toolchain
+                        .as_deref()
+                        .map_or(0, |reference| reference.retained_heap_bytes(&mut modules)),
+                )
+            });
+            budget.reserve(bytes)?;
+            Ok::<_, ResolutionProjectionError>(
+                facts
+                    .imports()
+                    .iter()
+                    .map(|import| (import.relation, import.rust_toolchain.as_deref().cloned()))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        })
+        .transpose()?;
     let Some(provider_owner) = semantic::provider_for_graph(graph) else {
         return Ok(ResolutionKeyProjection {
             source: Vec::new(),
             symbols: Vec::new(),
+            exports: Vec::new(),
             relations: Vec::new(),
+            source_calls,
+            source_spans,
+            rust_toolchain_imports,
         });
     };
     let provider = GraphIdentityText::new(provider_owner.as_str())?;
@@ -597,24 +1008,40 @@ pub fn derive_resolution_keys_with_context(
         return Ok(ResolutionKeyProjection {
             source: Vec::new(),
             symbols: Vec::new(),
+            exports: Vec::new(),
             relations: Vec::new(),
+            source_calls,
+            source_spans,
+            rust_toolchain_imports,
         });
     };
-    let mut contract_failures = ContractFailures::new(graph.symbols.len(), graph.relations.len());
+    let mut contract_failures = ContractFailures::new(
+        graph.symbols.len(),
+        graph.relations.len(),
+        context
+            .source_semantics
+            .map_or(0, |facts| facts.exports().len()),
+        budget,
+    )?;
     let language = GraphIdentityText::new(resolution_family)?;
     let package = package.map(GraphIdentityText::new).transpose()?;
 
-    let source_scopes = canonical_source_scopes(&graph.path);
+    let source_scopes = canonical_source_scopes(&graph.path, provider_owner);
     let configured_source_scopes =
         if provider_owner == SemanticProviderOwner::EcmaScript && package.is_some() {
             canonical_configured_source_scopes(&graph.path)
         } else {
             Vec::new()
         };
-    let emits_source_module_keys = semantic::emits_source_module_keys(graph);
+    let emits_source_module_keys = semantic::emits_source_module_keys(graph)
+        || (provider_owner == SemanticProviderOwner::EcmaScript
+            && context.source_semantics.is_some_and(|facts| {
+                !facts.imports().is_empty()
+                    || !facts.calls().is_empty()
+                    || !facts.exports().is_empty()
+            }));
     let mut source_keys = Vec::new();
     if emits_source_module_keys {
-        source_keys.reserve(source_scopes.len() + configured_source_scopes.len());
         for scope in &source_scopes {
             if let Some(key) = retain_derived_key(
                 canonical_key(
@@ -652,10 +1079,88 @@ pub fn derive_resolution_keys_with_context(
             }
         }
     }
+    if provider_owner == SemanticProviderOwner::Rust
+        && let Some((manifest, root)) = context.rust_package
+        && let Some(package) = package.as_ref()
+        && let Some(directory) = crate::cargo_automatic_target_directory(&graph.path, root)
+        && let Some(key) = retain_derived_key(
+            crate::cargo_target_inventory_key(project, package.as_str(), manifest, directory),
+            ResolutionProjectionFact::Source,
+            &mut contract_failures,
+        )
+    {
+        source_keys.push(key);
+    }
+    if provider_owner == SemanticProviderOwner::Rust
+        && let Some((manifest, _root)) = context.rust_package
+        && let Some(package) = package.as_ref()
+        && let Some(directory) = context.rust_root_cohort
+        && let Some(key) = retain_derived_key(
+            crate::cargo_root_cohort_key(project, package.as_str(), manifest, directory),
+            ResolutionProjectionFact::Source,
+            &mut contract_failures,
+        )
+    {
+        source_keys.push(key);
+    }
+    contract_failures.budget.check()?;
     let source_keys = bounded_keys(source_keys, "source", 0)?;
 
+    let explicit_export_names = context
+        .source_semantics
+        .filter(|_| {
+            matches!(
+                provider_owner,
+                SemanticProviderOwner::EcmaScript | SemanticProviderOwner::Python
+            )
+        })
+        .map(|facts| {
+            let mut names = BTreeMap::<usize, Vec<&str>>::new();
+            if !facts.exports_complete() {
+                return (0..graph.symbols.len())
+                    .map(|symbol| (symbol, Vec::new()))
+                    .collect();
+            }
+            let mut slots = BTreeMap::<&str, usize>::new();
+            for export in facts
+                .exports()
+                .iter()
+                .filter(|export| export.namespace == crate::SourceExportNamespace::Value)
+            {
+                *slots.entry(export.name.as_str()).or_default() += 1;
+            }
+            for export in facts
+                .exports()
+                .iter()
+                .filter(|export| export.namespace == crate::SourceExportNamespace::Value)
+            {
+                match &export.binding {
+                    crate::SourceExportBinding::LocalDeclaration(symbol) => {
+                        let names = names.entry(*symbol).or_default();
+                        if slots.get(export.name.as_str()) == Some(&1) {
+                            names.push(export.name.as_str());
+                        }
+                    }
+                    crate::SourceExportBinding::AmbiguousDeclarations(symbols)
+                    | crate::SourceExportBinding::UnresolvedDeclarations(symbols) => {
+                        for symbol in symbols.iter() {
+                            names.entry(*symbol).or_default();
+                        }
+                    }
+                    crate::SourceExportBinding::ReExport(_)
+                    | crate::SourceExportBinding::RustReExport(_)
+                    | crate::SourceExportBinding::Unresolved => {}
+                }
+            }
+            for names in names.values_mut() {
+                names.sort_unstable();
+                names.dedup();
+            }
+            names
+        });
     let mut symbol_keys = Vec::new();
     for (symbol_index, symbol) in graph.symbols.iter().enumerate() {
+        contract_failures.budget.check()?;
         let mut keys = Vec::new();
         match symbol.kind {
             SymbolKind::Package if provider_owner == SemanticProviderOwner::Cargo => {
@@ -678,71 +1183,35 @@ pub fn derive_resolution_keys_with_context(
             }
             SymbolKind::Dependency | SymbolKind::Import | SymbolKind::Workspace => {}
             _ if emits_source_module_keys
-                && semantic::is_export_candidate(provider_owner, graph, symbol_index) =>
+                && context
+                    .source_semantics
+                    .is_none_or(|facts| !facts.bindings_incomplete)
+                && !semantic::blocks_direct_call_export(provider_owner, symbol.kind)
+                && (semantic::is_export_candidate(provider_owner, graph, symbol_index)
+                    || explicit_export_names
+                        .as_ref()
+                        .is_some_and(|names| names.contains_key(&symbol_index))) =>
             {
-                let identity = match GraphIdentityText::new(symbol.name.clone()) {
-                    Ok(identity) => identity,
-                    Err(error) => {
-                        remember_contract_failure(
-                            &mut contract_failures,
-                            ResolutionProjectionFact::Symbol(symbol_index),
-                            error,
-                        );
-                        continue;
-                    }
-                };
-                let mut scopes = source_scopes.clone();
-                if let Some(parent) = symbol.parent.as_deref() {
-                    scopes.extend(
-                        source_scopes
-                            .iter()
-                            .map(|scope| format!("{scope}/{parent}")),
-                    );
-                    scopes.push(parent.to_string());
-                }
-                scopes.push(String::new());
-                scopes.sort();
-                scopes.dedup();
-                for scope in &scopes {
-                    let scope = if scope.is_empty() {
-                        None
+                let names = match explicit_export_names
+                    .as_ref()
+                    .and_then(|names| names.get(&symbol_index))
+                {
+                    Some(names) => names
+                        .iter()
+                        .map(|name| std::borrow::Cow::Borrowed(*name))
+                        .collect::<Vec<_>>(),
+                    None => vec![if provider_owner == SemanticProviderOwner::EcmaScript {
+                        semantic::ecmascript_identifier_value(&symbol.name).map_or(
+                            std::borrow::Cow::Borrowed(symbol.name.as_str()),
+                            std::borrow::Cow::Owned,
+                        )
                     } else {
-                        match GraphIdentityText::new(scope.clone()) {
-                            Ok(scope) => Some(scope),
-                            Err(error) => {
-                                remember_contract_failure(
-                                    &mut contract_failures,
-                                    ResolutionProjectionFact::Symbol(symbol_index),
-                                    error,
-                                );
-                                continue;
-                            }
-                        }
-                    };
-                    keys.push(CanonicalResolutionKey::new(
-                        project,
-                        ResolutionKeyDomain::Declaration,
-                        &provider,
-                        &language,
-                        package.as_ref(),
-                        scope.as_ref(),
-                        Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
-                        &identity,
-                    ));
-                }
-                let mut configured_scopes = configured_source_scopes.clone();
-                if let Some(parent) = symbol.parent.as_deref() {
-                    configured_scopes.extend(
-                        configured_source_scopes
-                            .iter()
-                            .map(|scope| format!("{scope}/{parent}")),
-                    );
-                    configured_scopes.sort();
-                    configured_scopes.dedup();
-                }
-                for scope in configured_scopes {
-                    let scope = match GraphIdentityText::new(scope) {
-                        Ok(scope) => scope,
+                        std::borrow::Cow::Borrowed(symbol.name.as_str())
+                    }],
+                };
+                for name in names {
+                    let identity = match GraphIdentityText::new(name.into_owned()) {
+                        Ok(identity) => identity,
                         Err(error) => {
                             remember_contract_failure(
                                 &mut contract_failures,
@@ -752,40 +1221,204 @@ pub fn derive_resolution_keys_with_context(
                             continue;
                         }
                     };
-                    keys.push(CanonicalResolutionKey::new(
-                        project,
-                        ResolutionKeyDomain::Declaration,
-                        &provider,
-                        &language,
-                        None,
-                        Some(&scope),
-                        Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
-                        &identity,
-                    ));
+                    let mut scopes = Vec::new();
+                    if let Some(parent) = symbol.parent.as_deref() {
+                        scopes.extend(
+                            source_scopes.iter().map(|scope| {
+                                normalize_repository_scope(&format!("{scope}/{parent}"))
+                            }),
+                        );
+                        scopes.push(normalize_repository_scope(parent));
+                    } else {
+                        scopes.extend(source_scopes.iter().cloned());
+                        scopes.push(String::new());
+                    }
+                    scopes.sort();
+                    scopes.dedup();
+                    for scope in &scopes {
+                        let scope = if scope.is_empty() {
+                            None
+                        } else {
+                            match GraphIdentityText::new(scope.clone()) {
+                                Ok(scope) => Some(scope),
+                                Err(error) => {
+                                    remember_contract_failure(
+                                        &mut contract_failures,
+                                        ResolutionProjectionFact::Symbol(symbol_index),
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            }
+                        };
+                        let key = CanonicalResolutionKey::new(
+                            project,
+                            ResolutionKeyDomain::Declaration,
+                            &provider,
+                            &language,
+                            package.as_ref(),
+                            scope.as_ref(),
+                            Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
+                            &identity,
+                        );
+                        if contract_failures.budget.key(&key) {
+                            keys.push(key);
+                        }
+                        contract_failures.budget.check()?;
+                    }
+                    let configured_scopes = configured_source_scopes.iter().map(|scope| {
+                        symbol.parent.as_deref().map_or_else(
+                            || scope.clone(),
+                            |parent| normalize_repository_scope(&format!("{scope}/{parent}")),
+                        )
+                    });
+                    for scope in configured_scopes {
+                        let scope = match GraphIdentityText::new(scope) {
+                            Ok(scope) => scope,
+                            Err(error) => {
+                                remember_contract_failure(
+                                    &mut contract_failures,
+                                    ResolutionProjectionFact::Symbol(symbol_index),
+                                    error,
+                                );
+                                continue;
+                            }
+                        };
+                        let key = CanonicalResolutionKey::new(
+                            project,
+                            ResolutionKeyDomain::Declaration,
+                            &provider,
+                            &language,
+                            None,
+                            Some(&scope),
+                            Some(GraphRelationKind::from_legacy(RelationKind::Calls)),
+                            &identity,
+                        );
+                        if contract_failures.budget.key(&key) {
+                            keys.push(key);
+                        }
+                        contract_failures.budget.check()?;
+                    }
+                    if keys.len() > MAX_RESOLUTION_KEYS_PER_FACT {
+                        keys = bounded_keys(keys, "symbol", symbol_index)?;
+                    }
                 }
             }
             _ => {}
         }
         let keys = bounded_keys(keys, "symbol", symbol_index)?;
         if !keys.is_empty() {
+            contract_failures
+                .budget
+                .reserve((4 * std::mem::size_of::<SymbolResolutionKeys>()) as u64)?;
             symbol_keys.push(SymbolResolutionKeys { symbol_index, keys });
         }
     }
 
-    let parsed_imports = graph
-        .relations
-        .iter()
-        .map(|relation| {
-            if relation.kind == RelationKind::Imports {
-                semantic::parse_imports(provider_owner, &relation.target_name)
-            } else {
-                Vec::new()
+    let mut export_keys = Vec::new();
+    if matches!(
+        provider_owner,
+        SemanticProviderOwner::EcmaScript | SemanticProviderOwner::Rust
+    ) && let Some(facts) = context
+        .source_semantics
+        .filter(|facts| facts.exports_complete())
+    {
+        for (export_index, export) in facts.exports().iter().enumerate() {
+            contract_failures.budget.check()?;
+            if export.namespace != crate::SourceExportNamespace::Value
+                || !matches!(
+                    export.binding,
+                    crate::SourceExportBinding::ReExport(_)
+                        | crate::SourceExportBinding::RustReExport(_)
+                        | crate::SourceExportBinding::UnresolvedDeclarations(_)
+                        | crate::SourceExportBinding::Unresolved
+                )
+            {
+                continue;
             }
-        })
-        .collect::<Vec<_>>();
+            let fact = ResolutionProjectionFact::Export(export_index);
+            let mut keys = Vec::new();
+            let rust_module = match &export.binding {
+                crate::SourceExportBinding::RustReExport(binding) => binding.module.as_ref(),
+                _ => &[],
+            };
+            for scope in source_scopes.iter().map(|scope| {
+                if rust_module.is_empty() {
+                    scope.clone()
+                } else {
+                    format!("{scope}/{}", rust_module.join("/"))
+                }
+            }) {
+                if let Some(key) = retain_derived_key(
+                    canonical_key(
+                        project,
+                        ResolutionKeyDomain::Declaration,
+                        &provider,
+                        &language,
+                        package.as_ref(),
+                        Some(&scope),
+                        RelationKind::Calls,
+                        &export.name,
+                    ),
+                    fact,
+                    &mut contract_failures,
+                ) {
+                    keys.push(key);
+                }
+            }
+            for scope in &configured_source_scopes {
+                if let Some(key) = retain_derived_key(
+                    canonical_key(
+                        project,
+                        ResolutionKeyDomain::Declaration,
+                        &provider,
+                        &language,
+                        None,
+                        Some(scope),
+                        RelationKind::Calls,
+                        &export.name,
+                    ),
+                    fact,
+                    &mut contract_failures,
+                ) {
+                    keys.push(key);
+                }
+            }
+            let keys = bounded_keys(keys, "export", export_index)?;
+            if !keys.is_empty() {
+                contract_failures
+                    .budget
+                    .reserve((4 * std::mem::size_of::<ExportResolutionKeys>()) as u64)?;
+                export_keys.push(ExportResolutionKeys { export_index, keys });
+            }
+        }
+    }
+
+    contract_failures.budget.reserve(
+        (graph.relations.len() as u64)
+            .saturating_mul(std::mem::size_of::<Vec<ImportReference>>() as u64),
+    )?;
+    let mut parsed_imports = vec![Vec::new(); graph.relations.len()];
+    if let Some(source) = context.source_semantics {
+        for import in source.imports() {
+            reserve_import_references(&import.references, &mut contract_failures.budget)?;
+            parsed_imports[import.relation].clone_from(&import.references);
+        }
+    } else {
+        for (relation, references) in graph.relations.iter().zip(&mut parsed_imports) {
+            if relation.kind == RelationKind::Imports {
+                let parsed = semantic::parse_imports(provider_owner, &relation.target_name);
+                reserve_import_references(&parsed, &mut contract_failures.budget)?;
+                *references = parsed;
+            }
+        }
+    }
     let mut aliases: BTreeMap<&str, Vec<&ImportReference>> = BTreeMap::new();
     for references in &parsed_imports {
         for reference in references {
+            contract_failures
+                .budget
+                .reserve(128 + (4 * std::mem::size_of::<&ImportReference>()) as u64)?;
             aliases
                 .entry(reference.local())
                 .or_default()
@@ -795,44 +1428,201 @@ pub fn derive_resolution_keys_with_context(
     let configured_source = context
         .configured_modules
         .map(|configured| configured.for_source(&graph.path));
-    let import_scopes = build_import_scope_cache(
+    let mut import_scopes = build_import_scope_cache(
         provider_owner,
         graph,
         &parsed_imports,
         configured_source.as_ref(),
-    );
+        &mut contract_failures.budget,
+    )?;
+    contract_failures
+        .budget
+        .reserve(context.source_semantics.map_or(0, |facts| {
+            (facts.calls().len().saturating_mul(256) + facts.imports().len().saturating_mul(128))
+                as u64
+        }))?;
+    let rust_calls = context
+        .source_semantics
+        .map(|facts| {
+            facts
+                .calls()
+                .iter()
+                .filter_map(|call| {
+                    if let SourceCallBinding::RustPath(path) = &call.binding {
+                        path.reference().map(|reference| (call.relation, reference))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for reference in rust_calls.values().chain(
+        context
+            .source_semantics
+            .into_iter()
+            .flat_map(SourceSemanticFacts::calls)
+            .filter_map(|call| {
+                if let SourceCallBinding::Qualified(reference) = &call.binding {
+                    Some(reference)
+                } else {
+                    None
+                }
+            }),
+    ) {
+        cache_import_scopes(
+            &mut import_scopes,
+            provider_owner,
+            &graph.path,
+            reference,
+            configured_source.as_ref(),
+            &mut contract_failures.budget,
+        )?;
+    }
 
     let mut relation_keys = Vec::new();
+    let source_import_index = context.source_semantics.map(|facts| {
+        facts
+            .imports()
+            .iter()
+            .map(|fact| (fact.relation, fact))
+            .collect::<BTreeMap<_, _>>()
+    });
+    let source_call_index = source_calls.as_ref().map(|calls| {
+        calls
+            .iter()
+            .map(|fact| (fact.relation, fact))
+            .collect::<BTreeMap<_, _>>()
+    });
     for (relation_index, relation) in graph.relations.iter().enumerate() {
+        contract_failures.budget.check()?;
         let mut keys = match relation.kind {
             RelationKind::Imports if semantic::supports_source_dependencies(provider_owner) => {
-                import_dependency_keys(
-                    project,
-                    provider_owner,
-                    &provider,
-                    &language,
-                    package.as_ref(),
-                    &relation.path,
-                    &parsed_imports[relation_index],
-                    &import_scopes,
-                    relation_index,
-                    &mut contract_failures,
-                )
+                if provider_owner == SemanticProviderOwner::EcmaScript
+                    && let Some(module) = source_import_index
+                        .as_ref()
+                        .and_then(|imports| imports.get(&relation_index))
+                        .and_then(|fact| fact.module.as_deref())
+                {
+                    semantic::ecmascript_module_scopes(
+                        &relation.path,
+                        module,
+                        configured_source.as_ref(),
+                    )
+                    .iter()
+                    .filter_map(|scope| {
+                        retain_derived_key(
+                            canonical_key(
+                                project,
+                                ResolutionKeyDomain::Module,
+                                &provider,
+                                &language,
+                                dependency_package(provider_owner, module, package.as_ref()),
+                                None,
+                                RelationKind::Imports,
+                                scope,
+                            ),
+                            ResolutionProjectionFact::Relation(relation_index),
+                            &mut contract_failures,
+                        )
+                    })
+                    .collect()
+                } else {
+                    import_dependency_keys(
+                        project,
+                        provider_owner,
+                        &provider,
+                        &language,
+                        package.as_ref(),
+                        &relation.path,
+                        &parsed_imports[relation_index],
+                        &import_scopes,
+                        relation_index,
+                        &mut contract_failures,
+                    )
+                }
             }
             RelationKind::Calls if semantic::supports_source_dependencies(provider_owner) => {
-                call_dependency_keys(
-                    project,
-                    provider_owner,
-                    &provider,
-                    &language,
-                    package.as_ref(),
-                    &relation.path,
-                    &relation.target_name,
-                    &aliases,
-                    &import_scopes,
-                    relation_index,
-                    &mut contract_failures,
-                )
+                if let Some(calls) = &source_call_index {
+                    if let Some(SourceCallFact {
+                        binding:
+                            SourceCallBinding::Imported {
+                                import,
+                                reference,
+                                member,
+                                ..
+                            },
+                        ..
+                    }) = calls.get(&relation_index).copied()
+                    {
+                        let reference = &context
+                            .source_semantics
+                            .ok_or(ResolutionProjectionError::SourceEvidenceMismatch)?
+                            .imports()[*import]
+                            .references[*reference];
+                        imported_reference_call_keys(
+                            project,
+                            provider_owner,
+                            &provider,
+                            &language,
+                            package.as_ref(),
+                            &relation.path,
+                            reference,
+                            member.as_deref(),
+                            &import_scopes,
+                            relation_index,
+                            &mut contract_failures,
+                        )
+                    } else if let Some(SourceCallFact {
+                        binding: SourceCallBinding::Qualified(reference),
+                        ..
+                    }) = calls.get(&relation_index).copied()
+                    {
+                        imported_reference_call_keys(
+                            project,
+                            provider_owner,
+                            &provider,
+                            &language,
+                            package.as_ref(),
+                            &relation.path,
+                            reference,
+                            None,
+                            &import_scopes,
+                            relation_index,
+                            &mut contract_failures,
+                        )
+                    } else if let Some(reference) = rust_calls.get(&relation_index) {
+                        imported_reference_call_keys(
+                            project,
+                            provider_owner,
+                            &provider,
+                            &language,
+                            package.as_ref(),
+                            &relation.path,
+                            reference,
+                            None,
+                            &import_scopes,
+                            relation_index,
+                            &mut contract_failures,
+                        )
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    call_dependency_keys(
+                        project,
+                        provider_owner,
+                        &provider,
+                        &language,
+                        package.as_ref(),
+                        &relation.path,
+                        &relation.target_name,
+                        &aliases,
+                        &import_scopes,
+                        relation_index,
+                        &mut contract_failures,
+                    )
+                }
             }
             RelationKind::DependsOn if semantic::supports_package_dependencies(provider_owner) => {
                 retain_derived_key(
@@ -856,16 +1646,25 @@ pub fn derive_resolution_keys_with_context(
             RelationKind::Imports | RelationKind::Calls | RelationKind::DependsOn => Vec::new(),
         };
         keys = bounded_keys(keys, "relation", relation_index)?;
+        contract_failures.budget.check()?;
+        contract_failures
+            .budget
+            .reserve((4 * std::mem::size_of::<RelationResolutionKeys>()) as u64)?;
         relation_keys.push(RelationResolutionKeys {
             relation_index,
             keys,
         });
     }
 
+    contract_failures.budget.check()?;
     let projection = ResolutionKeyProjection {
         source: source_keys,
         symbols: symbol_keys,
+        exports: export_keys,
         relations: relation_keys,
+        source_calls,
+        source_spans,
+        rust_toolchain_imports,
     };
     if contract_failures.failures.is_empty() {
         Ok(projection)
@@ -886,25 +1685,76 @@ fn build_import_scope_cache(
     graph: &SymbolGraph,
     parsed_imports: &[Vec<ImportReference>],
     configured_source: Option<&ConfiguredModuleSource<'_>>,
-) -> ImportScopeCache {
+    budget: &mut ProjectionBudget,
+) -> Result<ImportScopeCache, ResolutionProjectionError> {
     let mut cache = ImportScopeCache::new();
     for (relation, references) in graph.relations.iter().zip(parsed_imports) {
-        let caller_path = &relation.path;
-        let modules = cache.entry(caller_path.clone()).or_default();
         for reference in references {
-            modules
-                .entry(reference.module().to_string())
-                .or_insert_with(|| {
-                    semantic::import_scopes(
-                        provider_owner,
-                        caller_path,
-                        reference,
-                        configured_source,
-                    )
-                });
+            cache_import_scopes(
+                &mut cache,
+                provider_owner,
+                &relation.path,
+                reference,
+                configured_source,
+                budget,
+            )?;
         }
     }
+    Ok(cache)
+}
+
+/// Charge cloned import payload before retaining one relation's references.
+fn reserve_import_references(
+    references: &[ImportReference],
+    budget: &mut ProjectionBudget,
+) -> Result<(), ResolutionProjectionError> {
+    let mut modules = HashSet::new();
+    budget.reserve(
+        references.iter().fold(
+            (references.len() as u64)
+                .saturating_mul((2 * std::mem::size_of::<ImportReference>()) as u64),
+            |bytes, reference| bytes.saturating_add(reference.retained_heap_bytes(&mut modules)),
+        ),
+    )
+}
+
+/// Retain each bounded provider expansion only after admitting its cache owner.
+fn cache_import_scopes(
+    cache: &mut ImportScopeCache,
+    provider: SemanticProviderOwner,
+    caller: &str,
+    reference: &ImportReference,
+    configured: Option<&ConfiguredModuleSource<'_>>,
+    budget: &mut ProjectionBudget,
+) -> Result<(), ResolutionProjectionError> {
+    if cache
+        .get(caller)
+        .is_some_and(|modules| modules.contains_key(reference.module()))
+    {
+        return Ok(());
+    }
+    // A provider expansion has the existing per-fact fan-out bound. Only this
+    // one temporary expansion exists before its aggregate cache reservation.
+    let scopes = semantic::import_scopes(provider, caller, reference, configured);
+    let bytes = scopes
+        .iter()
+        .fold(
+            128_u64
+                .saturating_add(reference.module().len() as u64)
+                .saturating_add((scopes.capacity() * std::mem::size_of::<String>()) as u64),
+            |bytes, scope| bytes.saturating_add(scope.capacity() as u64),
+        )
+        .saturating_add(if cache.contains_key(caller) {
+            0
+        } else {
+            128_u64.saturating_add(caller.len() as u64)
+        });
+    budget.reserve(bytes)?;
     cache
+        .entry(caller.to_string())
+        .or_default()
+        .insert(reference.module().to_string(), scopes);
+    Ok(())
 }
 
 /// Borrow one pre-expanded import scope list without allocating lookup keys.
@@ -935,7 +1785,7 @@ fn import_dependency_keys(
     let mut keys = Vec::new();
     for reference in references {
         let scopes = cached_import_scopes(import_scopes, caller_path, reference);
-        let package = dependency_package(provider_owner, reference, package);
+        let package = dependency_package(provider_owner, reference.module(), package);
         for scope in scopes {
             if let Some(key) = retain_derived_key(
                 canonical_key(
@@ -977,39 +1827,19 @@ fn call_dependency_keys(
     if let Some(references) = aliases.get(alias) {
         let mut keys = Vec::new();
         for reference in references {
-            let identity = remainder.or_else(|| reference.imported());
-            let Some(identity) = identity else {
-                continue;
-            };
-            let scopes = cached_import_scopes(import_scopes, caller_path, reference);
-            let package = dependency_package(provider_owner, reference, package);
-            for scope in scopes {
-                let scoped_parent;
-                let scope = if remainder.is_some()
-                    && let Some(imported_parent) = reference.imported()
-                {
-                    scoped_parent = format!("{scope}/{imported_parent}");
-                    scoped_parent.as_str()
-                } else {
-                    scope.as_str()
-                };
-                if let Some(key) = retain_derived_key(
-                    canonical_key(
-                        project,
-                        ResolutionKeyDomain::Declaration,
-                        provider,
-                        language,
-                        package,
-                        Some(scope),
-                        RelationKind::Calls,
-                        identity,
-                    ),
-                    ResolutionProjectionFact::Relation(relation_index),
-                    contract_failures,
-                ) {
-                    keys.push(key);
-                }
-            }
+            keys.extend(imported_reference_call_keys(
+                project,
+                provider_owner,
+                provider,
+                language,
+                package,
+                caller_path,
+                reference,
+                remainder,
+                import_scopes,
+                relation_index,
+                contract_failures,
+            ));
         }
         return keys;
     }
@@ -1040,15 +1870,74 @@ fn call_dependency_keys(
     .collect()
 }
 
+/// Derive one call from its selected source import, without a file-wide alias guess.
+fn imported_reference_call_keys(
+    project: ProjectInstanceId,
+    provider_owner: SemanticProviderOwner,
+    provider: &GraphIdentityText,
+    language: &GraphIdentityText,
+    package: Option<&GraphIdentityText>,
+    caller_path: &str,
+    reference: &ImportReference,
+    member: Option<&str>,
+    import_scopes: &ImportScopeCache,
+    relation_index: usize,
+    contract_failures: &mut ContractFailures,
+) -> Vec<CanonicalResolutionKey> {
+    let mut keys = Vec::new();
+    let (member_parent, identity) = match member {
+        Some(member) if provider_owner == SemanticProviderOwner::Rust => member
+            .rsplit_once("::")
+            .map_or((None, Some(member)), |(parent, name)| {
+                (Some(parent), Some(name))
+            }),
+        _ => (None, member.or_else(|| reference.imported())),
+    };
+    let Some(identity) = identity else {
+        return Vec::new();
+    };
+    let scopes = cached_import_scopes(import_scopes, caller_path, reference);
+    let package = dependency_package(provider_owner, reference.module(), package);
+    for scope in scopes {
+        let mut scope = std::borrow::Cow::Borrowed(scope.as_str());
+        if member.is_some()
+            && let Some(imported_parent) = reference.imported()
+        {
+            scope = std::borrow::Cow::Owned(format!("{scope}/{imported_parent}"));
+        }
+        if let Some(parent) = member_parent {
+            scope =
+                std::borrow::Cow::Owned(format!("{scope}/{}", normalize_repository_scope(parent)));
+        }
+        if let Some(key) = retain_derived_key(
+            canonical_key(
+                project,
+                ResolutionKeyDomain::Declaration,
+                provider,
+                language,
+                package,
+                Some(scope.as_ref()),
+                RelationKind::Calls,
+                identity,
+            ),
+            ResolutionProjectionFact::Relation(relation_index),
+            contract_failures,
+        ) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
 /// Configured ECMAScript targets are repository paths, so caller Cargo
 /// ownership must not prevent them from matching a sibling package export.
 fn dependency_package<'a>(
     provider_owner: SemanticProviderOwner,
-    reference: &ImportReference,
+    module: &str,
     package: Option<&'a GraphIdentityText>,
 ) -> Option<&'a GraphIdentityText> {
     if provider_owner == SemanticProviderOwner::EcmaScript
-        && !(reference.module().starts_with("./") || reference.module().starts_with("../"))
+        && !(module.starts_with("./") || module.starts_with("../"))
     {
         None
     } else {
@@ -1089,7 +1978,7 @@ fn retain_derived_key(
     contract_failures: &mut ContractFailures,
 ) -> Option<CanonicalResolutionKey> {
     match result {
-        Ok(key) => Some(key),
+        Ok(key) => contract_failures.budget.key(&key).then_some(key),
         Err(error) => {
             remember_contract_failure(contract_failures, fact, error);
             None
@@ -1125,7 +2014,10 @@ fn bounded_keys(
 }
 
 /// Return normalized canonical scopes exported by a repository source path.
-fn canonical_source_scopes(path: &str) -> Vec<String> {
+fn canonical_source_scopes(path: &str, provider: SemanticProviderOwner) -> Vec<String> {
+    if provider == SemanticProviderOwner::EcmaScript {
+        return canonical_configured_source_scopes(path);
+    }
     let mut scopes = source_stems_for_path(path);
     scopes.extend(module_aliases_for_path(path));
     normalize_scopes(scopes, normalize_repository_scope)
@@ -1135,12 +2027,53 @@ fn canonical_source_scopes(path: &str) -> Vec<String> {
 fn canonical_configured_source_scopes(path: &str) -> Vec<String> {
     let mut scopes = source_stems_for_path(path)
         .into_iter()
-        .map(|scope| normalize_repository_scope(&scope))
         .filter(|scope| !scope.is_empty())
         .collect::<Vec<_>>();
     scopes.sort();
     scopes.dedup();
+    ecmascript_source_scopes(path, scopes)
+}
+
+/// Frame extensionless aliases separately from explicit file identities.
+///
+/// Keep only the established JavaScript-output source substitutions. These keys
+/// represent candidate sets, not compiler search order; competing files remain
+/// ambiguous. In particular `.mjs`, `.cjs` and embedded hosts never share them.
+fn ecmascript_source_scopes(path: &str, module_scopes: Vec<String>) -> Vec<String> {
+    let mut scopes = module_scopes
+        .into_iter()
+        .map(|scope| format!("{ECMA_MODULE_SCOPE}{scope}"))
+        .collect::<Vec<_>>();
+    scopes.push(format!("{ECMA_FILE_SCOPE}{path}"));
+    let lower = path.to_ascii_lowercase();
+    let substitution = [".d.ts", ".tsx", ".ts", ".jsx"]
+        .into_iter()
+        .find(|extension| lower.ends_with(extension));
+    if let Some(extension) = substitution {
+        let stem = &path[..path.len() - extension.len()];
+        scopes.push(format!("{ECMA_FILE_SCOPE}{stem}.js"));
+        if matches!(extension, ".d.ts" | ".tsx") {
+            scopes.push(format!("{ECMA_FILE_SCOPE}{stem}.jsx"));
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
     scopes
+}
+
+/// Preserve explicit terminal suffixes independently of automatic language
+/// detection; directory dots do not make an extensionless module a file lookup.
+pub(super) fn ecmascript_module_scope(path: &str) -> String {
+    let explicit = path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('.'));
+    let namespace = if explicit {
+        ECMA_FILE_SCOPE
+    } else {
+        ECMA_MODULE_SCOPE
+    };
+    format!("{namespace}{path}")
 }
 
 /// Normalize, expand, sort, and deduplicate candidate scopes.
@@ -1241,24 +2174,748 @@ mod tests {
         imported: Option<&str>,
         local: &str,
     ) -> ImportReference {
-        ImportReference {
-            syntax,
-            module: module.to_string(),
-            imported: imported.map(ToString::to_string),
-            local: local.to_string(),
+        ImportReference::new(syntax, module, imported, local)
+    }
+
+    #[test]
+    fn explicit_forwarding_slots_have_separate_file_owned_lookup_budgets()
+    -> Result<(), Box<dyn Error>> {
+        use std::fmt::Write;
+        let project = project_id(91)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let mut source = String::new();
+        for index in 0..80 {
+            writeln!(
+                source,
+                "export {{ work as slot{index} }} from './worker.js';"
+            )?;
         }
+        source.push_str("export type { Item as typed } from './types'; export * from './wild';");
+        let extracted = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/barrel.ts",
+            Some("typescript"),
+            &source,
+            &control,
+        )?;
+        let projection = derive_resolution_keys_with_context(
+            project,
+            None,
+            extracted.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(extracted.semantics()),
+        )?;
+        require(
+            projection.export_keys().len() == 80,
+            "forwarding slots used an aggregate file fanout budget or admitted a type/wildcard slot",
+        )?;
+        require(
+            projection.symbol_keys().is_empty(),
+            "forwarding slot synthesized declaration keys",
+        )?;
+        require(
+            projection.export_lookup_vector_bytes() > 0,
+            "slot vector capacity not accounted",
+        )?;
+        for export in projection.export_keys() {
+            require(
+                !export.keys().is_empty()
+                    && export.keys().len() <= super::MAX_RESOLUTION_KEYS_PER_FACT,
+                "per-slot key bound",
+            )?;
+            require(
+                matches!(
+                    extracted.semantics().exports()[export.export_index()].binding,
+                    crate::SourceExportBinding::ReExport(_)
+                ),
+                "lookup keys lost source association",
+            )?;
+        }
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/caller.ts",
+            Some("typescript"),
+            "import {slot79} from './barrel'; function caller() {slot79();}",
+            &control,
+        )?;
+        let caller_projection = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        require(
+            projection.export_keys().iter().any(|slot| {
+                keys_intersect(
+                    relation_keys(caller.graph(), &caller_projection, "slot79"),
+                    slot.keys(),
+                )
+            }),
+            "consumer cannot find file-owned forwarding slot",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_forwarding_identity_retains_separately_valid_export_slots()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(92)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let extracted = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/barrel.js",
+            Some("javascript"),
+            "export { work as '' } from './worker';\nexport {work as good} from './worker';",
+            &control,
+        )?;
+        let Err(ResolutionProjectionError::Contract(failure)) = derive_resolution_keys_with_context(
+            project,
+            None,
+            extracted.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(extracted.semantics()),
+        ) else {
+            return Err("invalid export lookup identity did not reach admission".into());
+        };
+        require(
+            failure.rejected_count() == 1
+                && failure.failures()[0].fact() == super::ResolutionProjectionFact::Export(0),
+            "export rejection did not retain exact source ordinal",
+        )?;
+        require(
+            failure.projection().export_keys().len() == 1
+                && failure.projection().export_keys()[0].export_index() == 1,
+            "invalid slot erased valid sibling",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_default_slots_never_narrow_to_one_surviving_declaration()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(87)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        for (language, path) in [
+            ("javascript", "target.js"),
+            ("typescript", "target.ts"),
+            ("tsx", "target.tsx"),
+            ("vue", "target.vue"),
+            ("svelte", "target.svelte"),
+            ("html", "target.html"),
+        ] {
+            for second in [
+                "export default class Second {}",
+                "export default function () {}",
+                "export default {};",
+                "export default function First() {}",
+                "export { secondary as default };",
+                "export { secondary as 'default' };",
+                "export { default } from './other';",
+                "export * as default from './other';",
+            ] {
+                let script = format!(
+                    "export default function First() {{}}\n{second}\nexport function secondary() {{}}"
+                );
+                let content = if matches!(language, "vue" | "svelte" | "html") {
+                    let role = match language {
+                        "html" => "type=module",
+                        "svelte" => "module",
+                        _ => "",
+                    };
+                    format!("<script {role}>{script}</script>")
+                } else {
+                    script
+                };
+                let extracted = crate::extract_symbol_graph_with_semantics_controlled(
+                    path,
+                    Some(language),
+                    &content,
+                    &control,
+                )?;
+                let projection = derive_resolution_keys_with_context(
+                    project,
+                    None,
+                    extracted.graph(),
+                    ResolutionProjectionContext::default()
+                        .with_source_semantics(extracted.semantics()),
+                )?;
+                if !symbol_keys(extracted.graph(), &projection, "First").is_empty() {
+                    return Err(
+                        format!("duplicate default gained a target: {language}: {second}").into(),
+                    );
+                }
+                if symbol_keys(extracted.graph(), &projection, "secondary").is_empty() {
+                    return Err(format!(
+                        "invalid default removed independent named export: {language}: {second}"
+                    )
+                    .into());
+                }
+                let (_, mut graph, mut facts) = extracted.into_parts();
+                let symbols = graph
+                    .symbols
+                    .iter()
+                    .map(|symbol| symbol.name != "Second")
+                    .collect::<Vec<_>>();
+                let relations = vec![true; graph.relations.len()];
+                facts.retain_graph_facts(&mut graph, &symbols, &relations)?;
+                let projection = derive_resolution_keys_with_context(
+                    project,
+                    None,
+                    &graph,
+                    ResolutionProjectionContext::default().with_source_semantics(&facts),
+                )?;
+                require(
+                    symbol_keys(&graph, &projection, "First").is_empty(),
+                    "filtering a competing default narrowed export proof",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_export_slots_do_not_erase_independent_names_for_one_declaration()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(88)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/caller.js",
+            Some("javascript"),
+            "import Entry, { named, duplicate, Actual } from './target'; function caller() { Entry(); named(); duplicate(); Actual(); }",
+            &control,
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        for source in [
+            "export default function Actual() {} export { Actual as named, Actual as duplicate }; export { missing as default, missing as duplicate };",
+            "function Actual() {} export { Actual as default, Actual as named, Actual as duplicate }; export { missing as default, missing as duplicate };",
+        ] {
+            let target = crate::extract_symbol_graph_with_semantics_controlled(
+                "src/target.js",
+                Some("javascript"),
+                source,
+                &control,
+            )?;
+            let target_keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                target.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+            )?;
+            let actual = symbol_keys(target.graph(), &target_keys, "Actual");
+            require(
+                keys_intersect(relation_keys(caller.graph(), &caller_keys, "named"), actual),
+                "duplicate removed independent named slot",
+            )?;
+            for name in ["Entry", "duplicate", "Actual"] {
+                require(
+                    !keys_intersect(relation_keys(caller.graph(), &caller_keys, name), actual),
+                    "duplicate or absent slot fabricated a target",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn python_rebound_module_names_withhold_only_their_export_keys() -> Result<(), Box<dyn Error>> {
+        let project = project_id(93)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        for (suffix, rebound) in [
+            ("def mutate():\n global run\n run = unknown\n", true),
+            ("run = unknown\n", true),
+            (
+                "def invalid():\n run()\n global run\n run = unknown\n",
+                false,
+            ),
+        ] {
+            let source =
+                format!("def run(): pass\ndef safe(): pass\ndef _private(): pass\n{suffix}");
+            let extracted = crate::extract_symbol_graph_with_semantics_controlled(
+                "worker.py",
+                Some("python"),
+                &source,
+                &control,
+            )?;
+            let keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                extracted.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(extracted.semantics()),
+            )?;
+            require(
+                symbol_keys(extracted.graph(), &keys, "run").is_empty() == rebound,
+                "Python export authority disagreed with valid writer evidence",
+            )?;
+            require(
+                symbol_keys(extracted.graph(), &keys, "_private").is_empty(),
+                "source export roles exposed a private Python declaration",
+            )?;
+            require(
+                !symbol_keys(extracted.graph(), &keys, "safe").is_empty(),
+                "unrelated Python export lost its callable keys",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn type_and_ordinary_value_exports_do_not_supply_callable_keys() -> Result<(), Box<dyn Error>> {
+        let project = project_id(90)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        for (language, extension, source) in [
+            (
+                "typescript",
+                "ts",
+                "export type Alias = () => void; export interface Shape {} export class Runtime {} export enum Values { One } export const scalar = 1; export function run() {}",
+            ),
+            (
+                "tsx",
+                "tsx",
+                "export type Alias = () => void; export interface Shape {} export class Runtime {} export enum Values { One } export const scalar = 1; export function run() {}",
+            ),
+            (
+                "rust",
+                "rs",
+                "pub type Alias = fn(); pub trait Shape {} pub struct Runtime(); pub enum Values { One } pub const scalar: i32 = 1; pub fn run() {}",
+            ),
+            (
+                "rust-build-script",
+                "rs",
+                "pub type Alias = fn(); pub trait Shape {} pub struct Runtime(); pub enum Values { One } pub const scalar: i32 = 1; pub fn run() {}",
+            ),
+        ] {
+            let target = crate::extract_symbol_graph_with_semantics_controlled(
+                &format!("src/worker.{extension}"),
+                Some(language),
+                source,
+                &control,
+            )?;
+            let keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                target.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+            )?;
+            for name in ["Alias", "Shape", "scalar"] {
+                require(
+                    symbol_keys(target.graph(), &keys, name).is_empty(),
+                    "type-only declaration supplied call keys",
+                )?;
+            }
+            require(
+                !symbol_keys(target.graph(), &keys, "run").is_empty(),
+                "function positive lost callable keys",
+            )?;
+            require(
+                !symbol_keys(target.graph(), &keys, "Runtime").is_empty(),
+                "runtime constructor positive lost callable keys",
+            )?;
+            require(
+                !symbol_keys(target.graph(), &keys, "Values").is_empty(),
+                "runtime enum export compatibility lost keys",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn type_only_export_names_do_not_suppress_runtime_callable_exports()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(89)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/caller.ts",
+            Some("typescript"),
+            "import { named } from './target'; function caller() { named(); }",
+            &control,
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        let target = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/target.ts",
+            Some("typescript"),
+            "type Item = unknown; function run() {} export type {Item as named}; export {type Item as typed, run as named};",
+            &control,
+        )?;
+        let target_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            target.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+        )?;
+        require(
+            keys_intersect(
+                relation_keys(caller.graph(), &caller_keys, "named"),
+                symbol_keys(target.graph(), &target_keys, "run"),
+            ),
+            "type-only slot suppressed runtime export",
+        )?;
+        require(
+            symbol_keys(target.graph(), &target_keys, "Item").is_empty(),
+            "type-only export became callable",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn source_default_slots_target_named_declarations_without_named_export_guessing()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([81; 16])?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        for (language, extension) in [("javascript", "js"), ("typescript", "ts"), ("tsx", "tsx")] {
+            let caller = crate::extract_symbol_graph_with_semantics_controlled(
+                &format!("src/caller.{extension}"),
+                Some(language),
+                "import Entry, { secondary as named } from './target'; function caller() { Entry(); named(); }",
+                &control,
+            )?;
+            let caller_keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                caller.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+            )?;
+            let leaked = crate::extract_symbol_graph_with_semantics_controlled(
+                &format!("src/leaked.{extension}"),
+                Some(language),
+                "import { Actual as leaked } from './target'; function caller() { leaked(); }",
+                &control,
+            )?;
+            let leaked_keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                leaked.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(leaked.semantics()),
+            )?;
+            for declaration in ["function Actual() {}", "class Actual {}"] {
+                let target = crate::extract_symbol_graph_with_semantics_controlled(
+                    &format!("src/target.{extension}"),
+                    Some(language),
+                    &format!("export default {declaration}\nexport function secondary() {{}}"),
+                    &control,
+                )?;
+                let target_keys = derive_resolution_keys_with_context(
+                    project,
+                    None,
+                    target.graph(),
+                    ResolutionProjectionContext::default()
+                        .with_source_semantics(target.semantics()),
+                )?;
+                let actual = symbol_keys(target.graph(), &target_keys, "Actual");
+                require(
+                    keys_intersect(relation_keys(caller.graph(), &caller_keys, "Entry"), actual),
+                    "default slot did not identify actual declaration",
+                )?;
+                require(
+                    !keys_intersect(
+                        relation_keys(leaked.graph(), &leaked_keys, "leaked"),
+                        actual,
+                    ),
+                    "default declaration fabricated a named export",
+                )?;
+                require(
+                    keys_intersect(
+                        relation_keys(caller.graph(), &caller_keys, "named"),
+                        symbol_keys(target.graph(), &target_keys, "secondary"),
+                    ),
+                    "default slot lost named sibling",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_export_roles_survive_hosts_and_never_narrow_coalesced_declarations()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([82; 16])?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/caller.js",
+            Some("javascript"),
+            "import Entry, { Actual as leaked } from './target'; function caller() { Entry(); leaked(); }",
+            &control,
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        for (language, attributes, admits_default) in [
+            ("vue", "", true),
+            ("vue", "setup", false),
+            ("svelte", "module", false),
+            ("svelte", "", false),
+            ("html", "type=module", true),
+            ("html", "", false),
+        ] {
+            for (source, valid) in [
+                ("export default function Actual() {}", true),
+                (
+                    "export default function Actual() {} export default function Actual() {}",
+                    false,
+                ),
+            ] {
+                let target = crate::extract_symbol_graph_with_semantics_controlled(
+                    &format!("src/target.{language}"),
+                    Some(language),
+                    &format!("<script {attributes}>{source}</script>"),
+                    &control,
+                )?;
+                let keys = derive_resolution_keys_with_context(
+                    project,
+                    None,
+                    target.graph(),
+                    ResolutionProjectionContext::default()
+                        .with_source_semantics(target.semantics()),
+                )?;
+                let actual = symbol_keys(target.graph(), &keys, "Actual");
+                require(
+                    keys_intersect(relation_keys(caller.graph(), &caller_keys, "Entry"), actual)
+                        == (valid && admits_default),
+                    "host default target correspondence changed",
+                )?;
+                require(
+                    !keys_intersect(
+                        relation_keys(caller.graph(), &caller_keys, "leaked"),
+                        actual,
+                    ),
+                    "host coalescing fabricated the default declaration as a named export",
+                )?;
+                require(
+                    !keys.source_keys().is_empty(),
+                    "default ambiguity discarded admitted module evidence",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn component_export_targets_require_unambiguous_script_roles() -> Result<(), Box<dyn Error>> {
+        let project = project_id(90)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "caller.js",
+            Some("javascript"),
+            "import {run} from './target'; function caller(){run();}",
+            &control,
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        let verify = |language: &str, source: &str, valid: bool| -> Result<(), Box<dyn Error>> {
+            let target = crate::extract_symbol_graph_with_semantics_controlled(
+                &format!("target.{language}"),
+                Some(language),
+                source,
+                &control,
+            )?;
+            let keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                target.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+            )?;
+            require(
+                keys_intersect(
+                    relation_keys(caller.graph(), &caller_keys, "run"),
+                    symbol_keys(target.graph(), &keys, "run"),
+                ) == valid,
+                "host role changed its exported target authority",
+            )
+        };
+        for (language, attributes, valid) in [
+            ("svelte", "context=instance context=module", false),
+            ("svelte", "context=module context=module", false),
+            ("svelte", "module module", false),
+            ("svelte", "module context=instance", false),
+            ("svelte", "module='false'", false),
+            ("vue", "setup setup", false),
+            ("vue", "", true),
+            ("svelte", "module", true),
+            ("svelte", "context=module", true),
+            ("svelte", "module context=module", true),
+        ] {
+            verify(
+                language,
+                &format!("<script {attributes}>export function run(){{}}</script>"),
+                valid,
+            )?;
+        }
+        for (language, source) in [
+            (
+                "vue",
+                "<script>export function run(){}</script><script>function other(){}</script>",
+            ),
+            (
+                "svelte",
+                "<script module>export function run(){}</script><script module>function other(){}</script>",
+            ),
+        ] {
+            verify(language, source, false)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn default_expressions_and_anonymous_exports_do_not_select_a_named_sibling()
+    -> Result<(), Box<dyn Error>> {
+        let project = ProjectInstanceId::from_bytes([83; 16])?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/caller.js",
+            Some("javascript"),
+            "import Entry from './target'; function caller() { Entry(); }",
+            &control,
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            None,
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        for source in [
+            "export function Only() {} export default Only;",
+            "export function Only() {} export default function() {}",
+            "export function Only() {} export default { run() {} };",
+        ] {
+            let target = crate::extract_symbol_graph_with_semantics_controlled(
+                "src/target.js",
+                Some("javascript"),
+                source,
+                &control,
+            )?;
+            let keys = derive_resolution_keys_with_context(
+                project,
+                None,
+                target.graph(),
+                ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+            )?;
+            for symbol in keys.symbol_keys() {
+                require(
+                    !keys_intersect(
+                        relation_keys(caller.graph(), &caller_keys, "Entry"),
+                        symbol.keys(),
+                    ),
+                    "unsupported default expression guessed an unrelated declaration",
+                )?;
+            }
+            require(
+                !keys.source_keys().is_empty(),
+                "unsupported default lost module dependency evidence",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn contract_rejection_flags_admit_actual_bool_vector_storage() -> Result<(), Box<dyn Error>> {
+        let counts = [19_usize, 23, 29];
+        let header = std::mem::size_of::<super::ContractFailures>() as u64;
+        let flags = (counts.iter().sum::<usize>() * std::mem::size_of::<bool>()) as u64;
+        let exact = header + flags;
+        let admitted = super::ContractFailures::new(
+            counts[0],
+            counts[1],
+            counts[2],
+            super::ProjectionBudget::new(Some(exact)),
+        )?;
+        let actual = header
+            + ([
+                admitted.symbol_seen.capacity(),
+                admitted.relation_seen.capacity(),
+                admitted.export_seen.capacity(),
+            ]
+            .iter()
+            .sum::<usize>()
+                * std::mem::size_of::<bool>()) as u64;
+        require(
+            actual <= exact && admitted.budget.used >= actual,
+            "dense rejection flags were charged as packed bits instead of owned bool bytes",
+        )?;
+        require(
+            matches!(
+                super::ContractFailures::new(
+                    counts[0],
+                    counts[1],
+                    counts[2],
+                    super::ProjectionBudget::new(Some(exact - 1))
+                ),
+                Err(ResolutionProjectionError::MemoryLimit { .. })
+            ),
+            "flag vectors were allocated past the remaining byte allowance",
+        )?;
+        super::ContractFailures::new(
+            counts[0],
+            counts[1],
+            counts[2],
+            super::ProjectionBudget::new(None),
+        )?;
+        Ok(())
     }
 
     #[test]
     fn semantic_resolution_contract_digest_is_bounded_and_deterministic() {
+        const PRE_ARROW_CONTEXT_DIGEST: &str =
+            "66cab1855f1689308cdc5bb858a63e8d3ed42e825b073d62cada7347383731a7";
+        const PRE_SOURCE_CONTEXT_DIGEST: &str =
+            "784435da80445735c78b112bebab6352f74c660d550399a9617dae87d2df0424";
+        const PRE_GENERATOR_DECLARATION_DIGEST: &str =
+            "4542cd9a22a1df432d3a3d212f2ee5b6c52067411c3f54ca77221566a8f2ab7d";
         const PRE_MODULE_CALLBACK_DIGEST: &str =
             "487625adf2f9ec76f98034d4ef5667e707960b6b8afd280b213021cb64a0f10f";
         let first = semantic_resolution_contract_digest();
-        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 5);
+        assert_eq!(SEMANTIC_RESOLUTION_CONTRACT_VERSION, 23);
         assert_eq!(first.len(), 64);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(first, semantic_resolution_contract_digest());
         assert_ne!(first, PRE_MODULE_CALLBACK_DIGEST);
+        assert_ne!(first, PRE_GENERATOR_DECLARATION_DIGEST);
+        assert_ne!(first, PRE_SOURCE_CONTEXT_DIGEST);
+        assert_ne!(first, PRE_ARROW_CONTEXT_DIGEST);
     }
 
     #[test]
@@ -1337,7 +2994,7 @@ mod tests {
         for malformed in [
             "use crate::worker::{run, nested::{start, stop}};",
             "use crate::worker::{run, broken as };",
-            "import defaultValue, { read } from './reader';",
+            "import defaultValue, { read } unexpected from './reader';",
             "import { read, nested { broken } } from './reader';",
             "import { read as load as fetch } from './reader';",
             "from package.reader import read, broken as ",
@@ -1473,6 +3130,173 @@ mod tests {
             resolve_relative_import_path("src/foo.bar/main.ts", "./reader"),
             Some("src/foo.bar/reader".to_string())
         );
+    }
+
+    #[test]
+    fn explicit_ecmascript_suffixes_do_not_merge_module_or_callable_targets()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(94)?;
+        let configured = ConfiguredModuleResolution::new(vec![EcmaScriptModuleConfig::new(
+            "tsconfig.json",
+            EcmaScriptConfigKind::TypeScript,
+            Some("src".to_string()),
+            vec![EcmaScriptPathMapping::new(
+                "@/*",
+                vec!["src/*".to_string()],
+            )?],
+        )?])?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let targets = [
+            ("js", "javascript", "export function run(){}"),
+            ("jsx", "javascript", "export function run(){}"),
+            ("ts", "typescript", "export function run(){}"),
+            ("tsx", "tsx", "export function run(){}"),
+            ("d.ts", "typescript", "export declare function run(): void;"),
+            ("mjs", "javascript", "export function run(){}"),
+            ("cjs", "javascript", "function run(){}"),
+            ("vue", "vue", "<script>export function run(){}</script>"),
+            (
+                "svelte",
+                "svelte",
+                "<script module>export function run(){}</script>",
+            ),
+            (
+                "html",
+                "html",
+                "<script type='module'>export function run(){}</script>",
+            ),
+            (
+                "htm",
+                "html",
+                "<script type='module'>export function run(){}</script>",
+            ),
+            ("js.ts", "typescript", "export function run(){}"),
+            ("json.ts", "typescript", "export function run(){}"),
+            ("widget", "typescript", "export function run(){}"),
+        ];
+        for (specifier, allowed) in [
+            ("target.svelte", &["svelte"][..]),
+            ("target.html", &["html"][..]),
+            ("target.htm", &["htm"][..]),
+            ("target.vue", &["vue"][..]),
+            ("target.mjs", &["mjs"][..]),
+            ("target.cjs", &["cjs"][..]),
+            ("target.ts", &["ts"][..]),
+            ("target.tsx", &["tsx"][..]),
+            ("target.d.ts", &["d.ts"][..]),
+            ("target.js", &["js", "jsx", "ts", "tsx", "d.ts"][..]),
+            ("target.jsx", &["jsx", "tsx", "d.ts"][..]),
+            ("target.json", &[][..]),
+            ("target.widget", &["widget"][..]),
+            ("target/index.js", &[][..]),
+            ("../target", &[][..]),
+        ] {
+            for prefix in ["./", "@/", ""] {
+                let source = format!(
+                    "import {{run}} from '{prefix}{specifier}'; function caller(){{run();}}"
+                );
+                let caller = crate::extract_symbol_graph_with_semantics_controlled(
+                    "src/caller.ts",
+                    Some("typescript"),
+                    &source,
+                    &control,
+                )?;
+                let caller_keys = derive_resolution_keys_with_context(
+                    project,
+                    Some("app"),
+                    caller.graph(),
+                    ResolutionProjectionContext::with_configured_modules(&configured)
+                        .with_source_semantics(caller.semantics()),
+                )?;
+                let dependencies =
+                    relation_keys_of_kind(caller.graph(), &caller_keys, RelationKind::Imports);
+                for (suffix, language, source) in targets {
+                    let path = format!("src/target.{suffix}");
+                    let target = crate::extract_symbol_graph_with_semantics_controlled(
+                        &path,
+                        Some(language),
+                        source,
+                        &control,
+                    )?;
+                    let target_keys = derive_resolution_keys_with_context(
+                        project,
+                        Some("app"),
+                        target.graph(),
+                        ResolutionProjectionContext::default()
+                            .with_source_semantics(target.semantics()),
+                    )?;
+                    let expected = allowed.contains(&suffix);
+                    require(
+                        dependencies
+                            .iter()
+                            .any(|keys| keys_intersect(keys, target_keys.source_keys()))
+                            == expected,
+                        &format!("module: {prefix}{specifier} -> {path}"),
+                    )?;
+                    let calls = relation_keys(caller.graph(), &caller_keys, "run");
+                    let exports = symbol_keys(target.graph(), &target_keys, "run");
+                    require(
+                        keys_intersect(calls, exports)
+                            == (expected && !matches!(suffix, "cjs" | "d.ts")),
+                        &format!("call: {prefix}{specifier} -> {path}"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ecmascript_module_paths_preserve_entry_aliases_and_literal_file_names()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(95)?;
+        for (caller_path, module, target_path, expected) in [
+            ("src/main.ts", "./tools", "src/tools/index.ts", true),
+            (
+                "src/main.ts",
+                "./tools/index.ts",
+                "src/tools/index.ts",
+                true,
+            ),
+            ("src/main.ts", "./tools.js", "src/tools/index.ts", false),
+            (
+                "src/foo.bar/main.ts",
+                "./tools",
+                "src/foo.bar/tools.ts",
+                true,
+            ),
+            ("src/main.ts", "./tools", "packages/other/tools.ts", false),
+            ("main.ts", "./target  name.js", "target  name.js", true),
+            ("main.ts", "./target::name.js", "target::name.js", true),
+        ] {
+            let caller = extract_symbol_graph(
+                caller_path,
+                Some("typescript"),
+                &format!("import {{run}} from '{module}'; function caller(){{run();}}"),
+            );
+            let target =
+                extract_symbol_graph(target_path, Some("typescript"), "export function run(){}");
+            let caller_keys = derive_resolution_keys(project, None, &caller)?;
+            let target_keys = derive_resolution_keys(project, None, &target)?;
+            require(
+                relation_keys_of_kind(&caller, &caller_keys, RelationKind::Imports)
+                    .iter()
+                    .any(|keys| keys_intersect(keys, target_keys.source_keys()))
+                    == expected,
+                &format!("module: {caller_path}: {module} -> {target_path}"),
+            )?;
+            require(
+                keys_intersect(
+                    relation_keys(&caller, &caller_keys, "run"),
+                    symbol_keys(&target, &target_keys, "run"),
+                ) == expected,
+                &format!("call: {caller_path}: {module} -> {target_path}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -1841,11 +3665,13 @@ mod tests {
             &graph,
             &parsed_imports,
             Some(&configured_source),
-        );
+            &mut super::ProjectionBudget::new(None),
+        )?;
         let modules = cache
             .get("src/page.ts")
             .ok_or_else(|| io::Error::other("source graph omitted its import-scope cache"))?;
-        if modules.len() != 1 || modules.get("@/controller") != Some(&vec!["src/controller".into()])
+        if modules.len() != 1
+            || modules.get("@/controller") != Some(&vec!["module:src/controller".into()])
         {
             return Err(io::Error::other(
                 "repeated imported calls did not reuse one configured scope expansion",
@@ -1931,17 +3757,12 @@ mod tests {
             (
                 "src/main.rs",
                 "rust",
-                "use crate::worker::{run, nested::{start, stop}};\nfn main() { run(); }\n",
+                "use crate::worker::{run, broken as };\nfn main() { run(); }\n",
             ),
             (
                 "src/main.ts",
                 "typescript",
-                "import defaultValue, { read } from './reader';\ndefaultValue();\n",
-            ),
-            (
-                "src/main.py",
-                "python",
-                "from package.reader import (read, # note\n close)\nread()\n",
+                "import defaultValue, { read } unexpected from './reader';\ndefaultValue();\n",
             ),
         ] {
             let graph = extract_symbol_graph(path, Some(language), source);
@@ -1956,6 +3777,164 @@ mod tests {
                 "unsupported complex import syntax fabricated resolution keys",
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn syntax_trivia_and_literals_keep_dependency_and_aliased_call_keys()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(15)?;
+        for (language, target_path, target_source, caller_path, caller_source) in [
+            (
+                "rust",
+                "src/worker.rs",
+                "pub fn run() {}\npub fn stop() {}\n",
+                "src/main.rs",
+                "use crate::worker::{run as launch, /* separator */ stop};\nfn caller() { launch(); }\n",
+            ),
+            (
+                "typescript",
+                "src/worker.ts",
+                "export function run() {}\nexport function stop() {}\n",
+                "src/main.ts",
+                "import { run as launch, /* separator */ stop } from './worker';\nexport function caller() { launch(); }\n",
+            ),
+            (
+                "python",
+                "package/worker.py",
+                "def run():\n    pass\ndef stop():\n    pass\n",
+                "main.py",
+                "from package.worker import (run as launch, # separator\n stop)\ndef caller():\n    launch()\n",
+            ),
+            (
+                "javascript",
+                "src/dep  space.js",
+                "export function run() {}\n",
+                "src/main.js",
+                "import { run as launch } from './dep  space.js';\nexport function caller() { launch(); }\n",
+            ),
+            (
+                "javascript",
+                "src/odd'name.js",
+                "export function run() {}\n",
+                "src/main.js",
+                "import { run as launch } from './odd\\'name.js';\nexport function caller() { launch(); }\n",
+            ),
+            (
+                "javascript",
+                "src/🚀.js",
+                "export function run() {}\n",
+                "src/main.js",
+                "import { run as launch } from './\\uD83D\\uDE80.js';\nexport function caller() { launch(); }\n",
+            ),
+            (
+                "python",
+                "package/worker.py",
+                "def run():\n    pass\n",
+                "main.py",
+                "from package.worker import run \\\n    as launch\ndef caller():\n    launch()\n",
+            ),
+        ] {
+            let target = extract_symbol_graph(target_path, Some(language), target_source);
+            let caller = extract_symbol_graph(caller_path, Some(language), caller_source);
+            let projection = derive_resolution_keys(project, Some("app"), &caller)?;
+            require(
+                relation_keys_of_kind(&caller, &projection, RelationKind::Imports)
+                    .iter()
+                    .any(|keys| !keys.is_empty()),
+                "syntax-preserving import lost dependency keys",
+            )?;
+            assert_alias_resolution(project, Some("app"), &target, "run", &caller, &["launch"])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rust_namespace_aliases_preserve_nested_member_ownership() -> Result<(), Box<dyn Error>> {
+        let project = project_id(86)?;
+        let control = projectatlas_core::IndexWorkControl::new(
+            projectatlas_core::IndexCancellation::new(),
+            None,
+        );
+        let target = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/fake.rs",
+            Some("rust"),
+            "pub fn read(_: &str) {}\npub mod fs { pub fn read(_: &str) {} }",
+            &control,
+        )?;
+        let caller = crate::extract_symbol_graph_with_semantics_controlled(
+            "src/main.rs",
+            Some("rust"),
+            "use crate::fake as std; fn root_call(std: u8) { std::read(\"x\"); } fn nested_call() { std::fs::read(\"x\"); }",
+            &control,
+        )?;
+        let target_keys = derive_resolution_keys_with_context(
+            project,
+            Some("app"),
+            target.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(target.semantics()),
+        )?;
+        let caller_keys = derive_resolution_keys_with_context(
+            project,
+            Some("app"),
+            caller.graph(),
+            ResolutionProjectionContext::default().with_source_semantics(caller.semantics()),
+        )?;
+        for (reference, parent) in [("std::read", None), ("std::fs::read", Some("fs"))] {
+            let requests = relation_keys(caller.graph(), &caller_keys, reference);
+            let matches = target_keys
+                .symbol_keys()
+                .iter()
+                .filter(|keys| keys_intersect(requests, keys.keys()))
+                .map(|keys| &target.graph().symbols[keys.symbol_index()])
+                .collect::<Vec<_>>();
+            require(
+                matches.len() == 1,
+                "qualified member did not resolve uniquely",
+            )?;
+            require(matches[0].name == "read", "qualified member lost leaf name")?;
+            require(
+                matches[0].parent.as_deref() == parent,
+                "qualified member escaped owning namespace",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nested_rust_imports_keep_distinct_dependencies_and_alias_callers()
+    -> Result<(), Box<dyn Error>> {
+        let project = project_id(15)?;
+        let worker = extract_symbol_graph("src/worker.rs", Some("rust"), "pub fn run() {}\n");
+        let nested =
+            extract_symbol_graph("src/worker/nested.rs", Some("rust"), "pub fn tail() {}\n");
+        let caller = extract_symbol_graph(
+            "src/main.rs",
+            Some("rust"),
+            "use crate::worker::{run as launch, nested::{self as tools, tail as last}, *};\nfn caller() { launch(); last(); tools::tail(); }\n",
+        );
+        let projection = derive_resolution_keys(project, Some("app"), &caller)?;
+        let worker_projection = derive_resolution_keys(project, Some("app"), &worker)?;
+        let nested_projection = derive_resolution_keys(project, Some("app"), &nested)?;
+        let imports = relation_keys_of_kind(&caller, &projection, RelationKind::Imports);
+        for expected in [
+            worker_projection.source_keys(),
+            nested_projection.source_keys(),
+        ] {
+            require(
+                imports.iter().any(|keys| keys_intersect(keys, expected)),
+                "nested use lost a distinct module dependency",
+            )?;
+        }
+        assert_alias_resolution(project, Some("app"), &worker, "run", &caller, &["launch"])?;
+        assert_alias_resolution(
+            project,
+            Some("app"),
+            &nested,
+            "tail",
+            &caller,
+            &["last", "tools::tail"],
+        )?;
         Ok(())
     }
 
@@ -2181,7 +4160,8 @@ mod tests {
         let provider = projectatlas_core::graph::GraphIdentityText::new("ecma-script")?;
         let family = projectatlas_core::graph::GraphIdentityText::new("ecmascript")?;
         let package = projectatlas_core::graph::GraphIdentityText::new("web")?;
-        let identity = projectatlas_core::graph::GraphIdentityText::new("src/shared/reader")?;
+        let identity =
+            projectatlas_core::graph::GraphIdentityText::new("module:src/shared/reader")?;
         let expected = CanonicalResolutionKey::new(
             project,
             projectatlas_core::graph::ResolutionKeyDomain::Module,
@@ -2611,11 +4591,11 @@ mod tests {
         Ok(())
     }
 
-    fn require(condition: bool, message: &'static str) -> Result<(), Box<dyn Error>> {
+    fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
         if condition {
             Ok(())
         } else {
-            Err(io::Error::other(message).into())
+            Err(io::Error::other(message.to_string()).into())
         }
     }
 

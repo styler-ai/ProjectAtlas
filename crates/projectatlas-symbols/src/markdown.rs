@@ -225,7 +225,7 @@ pub(crate) fn extract_markdown_facts_checked<E>(
     let mut extraction = MarkdownExtraction::new(content);
     if content.len() > MAX_MARKDOWN_BYTES {
         extraction.limit(MarkdownFactLimit::InputBytes);
-        return Ok(extraction.finish());
+        return extraction.finish(check);
     }
 
     let parser = Parser::new_ext(content, Options::all()).into_offset_iter();
@@ -234,7 +234,7 @@ pub(crate) fn extract_markdown_facts_checked<E>(
         extraction.consume(event, range);
     }
     check()?;
-    Ok(extraction.finish())
+    extraction.finish(check)
 }
 
 /// Mutable bounded state for one parser pass.
@@ -517,7 +517,7 @@ impl<'a> MarkdownExtraction<'a> {
     }
 
     /// Finalize immutable public facts and derive completeness.
-    fn finish(mut self) -> MarkdownFacts {
+    fn finish<E>(mut self, check: &mut impl FnMut() -> Result<(), E>) -> Result<MarkdownFacts, E> {
         let mut offsets = Vec::with_capacity(
             self.headings
                 .len()
@@ -532,7 +532,7 @@ impl<'a> MarkdownExtraction<'a> {
             offsets.push(source.byte_start);
             offsets.push(source.byte_end);
         }
-        let positions = source_positions(self.content, offsets);
+        let positions = crate::source_positions::source_positions(self.content, offsets, check)?;
         for source in self
             .headings
             .iter_mut()
@@ -550,7 +550,7 @@ impl<'a> MarkdownExtraction<'a> {
         } else {
             MarkdownFactCompleteness::Partial
         };
-        MarkdownFacts {
+        Ok(MarkdownFacts {
             provenance: MarkdownParserProvenance::PulldownCmark,
             headings: self.headings,
             link_candidates: self.link_candidates,
@@ -559,43 +559,8 @@ impl<'a> MarkdownExtraction<'a> {
                 limits: self.limits,
                 unsupported: self.unsupported,
             },
-        }
+        })
     }
-}
-
-/// Map sorted fact byte boundaries to exact source lines and Unicode-scalar columns in one pass.
-fn source_positions(content: &str, mut offsets: Vec<usize>) -> Vec<(usize, usize, usize)> {
-    offsets.sort_unstable();
-    offsets.dedup();
-    let mut positions = Vec::with_capacity(offsets.len());
-    let mut next_offset = 0;
-    let mut byte = 0;
-    let mut line = 1;
-    let mut column = 0;
-    for character in content.chars() {
-        while offsets
-            .get(next_offset)
-            .is_some_and(|offset| *offset == byte)
-        {
-            positions.push((byte, line, column));
-            next_offset += 1;
-        }
-        byte += character.len_utf8();
-        if character == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-    while offsets
-        .get(next_offset)
-        .is_some_and(|offset| *offset == byte)
-    {
-        positions.push((byte, line, column));
-        next_offset += 1;
-    }
-    positions
 }
 
 /// Apply exact positions for one parser source selector.

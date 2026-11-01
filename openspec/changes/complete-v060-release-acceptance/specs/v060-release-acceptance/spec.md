@@ -11,6 +11,10 @@ Issue #493 SHALL be the sole native parent of every other accepted `v0.6.0-00` i
 - **WHEN** another issue enters the milestone
 - **THEN** it becomes one direct #493 sub-issue and blocker while its own `blocked_by` list contains only genuine prerequisites
 
+#### Scenario: Deferred real-task evaluation is reconciled
+- **WHEN** #490 is admitted for the v0.6 evidence cycle under its current specification
+- **THEN** it is a direct #493 child and blocker, #310 and #563 are its direct prerequisites, and release acceptance consumes its reviewed preregistration and bounded observed results without claiming historical v0.5 execution or adding evaluation work to v0.5.1-rc1
+
 ### Requirement: Release acceptance freezes exact complete inputs
 #493 SHALL freeze one exact revision/artifact set only after every child issue, mapped task, required test/document/diagram, dependency, and actionable review finding is complete.
 

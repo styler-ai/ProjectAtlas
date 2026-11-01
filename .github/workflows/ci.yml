@@ -152,7 +152,7 @@ jobs:
                   },
                   {
                       "label": "macos-arm64",
-                      "os": "macos-14",
+                      "os": "macos-15",
                       "contracts": ["compile", "mac-quality", "mcp", "parser", "plugin", "process", "tui", "worktree"],
                   },
               ]
@@ -202,6 +202,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.plan.outputs.head }}
+
+      - name: Native volume cleanup causal proof
+        run: python3 .github/scripts/test-native-volume-cleanup.py
 
       - name: Install Mermaid parser
         if: contains(fromJSON(needs.plan.outputs.plan).repository_contracts, 'mermaid')
@@ -258,6 +261,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    # Full debug type information exhausts hosted disk during independent runtime
+    # copies. Keep limited debug information and every check/test, without changing optimization.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 1
+      CARGO_PROFILE_TEST_DEBUG: 1
     steps:
       - name: Checkout exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -384,7 +392,7 @@ jobs:
     name: e2e-smoke ${{ matrix.label }}
     needs: plan
     if: needs.plan.outputs.platform == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.label == 'macos-arm64' && 'macos-15' || matrix.os }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.platform_matrix) }}
@@ -470,6 +478,335 @@ jobs:
           cargo test --locked -p projectatlas-symbols --lib extracts_php_symbols_relations_and_exact_selectors
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::graph_projection::tests::php_scoped_and_case_insensitive_calls_resolve_without_member_edges -- --exact --nocapture
           cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture
+
+      - name: Managed project-state ownership platform regressions
+        if: contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
+        timeout-minutes: 15
+        shell: bash
+        env:
+          PROJECTATLAS_CI_PLATFORM: ${{ matrix.label }}
+        run: |
+          run_managed_state_routes() {
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact
+          }
+          native_policy_status=0
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture || native_policy_status=$?
+            cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::windows_managed_database_aliases_preserve_wal_recovery_and_reset -- --exact --nocapture || native_policy_status=$?
+          fi
+          cargo test --locked -p projectatlas-cli --bin projectatlas project_state:: || native_policy_status=$?
+          cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::relative_config_roots_follow_native_private_directory_names -- --exact || native_policy_status=$?
+          cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::default_init_config_root_points_from_subdir_back_to_repo -- --exact || native_policy_status=$?
+          if [ "$native_policy_status" -ne 0 ]; then
+            exit "$native_policy_status"
+          fi
+          # Compile and exercise the real routes before moving test temporaries
+          # onto the small disposable filesystem images.
+          if [ "$RUNNER_OS" = Windows ]; then
+            export PROJECTATLAS_TEST_NATIVE_EFS=1
+          fi
+          run_managed_state_routes
+          if [ "$RUNNER_OS" = Windows ]; then
+            PROJECTATLAS_TEST_CASE_SENSITIVE=true cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            # Build as the runner; elevate only the disposable native-label test.
+            target_receipt="$RUNNER_TEMP/project-state-unit-target.jsonl"
+            cargo test --locked -p projectatlas-cli --bin projectatlas --no-run --message-format=json > "$target_receipt"
+            test_executable="$(python3 - "$target_receipt" <<'PY'
+          import json
+          import sys
+          artifacts = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+          binaries = {row["executable"] for row in artifacts if row.get("reason") == "compiler-artifact" and row.get("target", {}).get("name") == "projectatlas" and row.get("profile", {}).get("test") and row.get("executable")}
+          if len(binaries) != 1:
+              raise SystemExit("expected one exact native unit-test executable")
+          print(next(iter(binaries)))
+          PY
+            )"
+            sudo -n env TMPDIR="$RUNNER_TEMP" "$test_executable" --exact project_state::tests::replacement_preserves_linux_security_labels_without_optional_relabel_privilege --ignored --nocapture
+            # Disposable ext4 and f2fs prove both implemented Unicode profiles.
+            sudo -n apt-get update
+            sudo -n apt-get install --yes f2fs-tools
+            for native_filesystem in ext4 f2fs; do
+              image="$RUNNER_TEMP/project-state-native.$native_filesystem"
+              native_root="$RUNNER_TEMP/project-state-native-$native_filesystem"
+              mkdir "$native_root"
+              truncate -s 512M "$image"
+              if [ "$native_filesystem" = ext4 ]; then
+                mkfs.ext4 -q -F -b 4096 -O casefold,verity -E encoding=utf8-12.1 "$image"
+              else
+                mkfs.f2fs -q -f -O extra_attr,inode_checksum,flexible_inline_xattr,casefold,verity -C utf8 "$image"
+              fi
+              native_mounted=false
+              native_cleanup_failed=false
+              cleanup_native_state() {
+                if [ "$native_cleanup_failed" = true ]; then return 1; fi
+                if [ "$native_mounted" = true ]; then
+                  if ! sudo -n umount "$native_root"; then
+                    native_cleanup_failed=true
+                    findmnt -T "$native_root" || true
+                    sudo -n fuser -vm "$native_root" || true
+                    ps -axo pid,ppid,stat,command
+                    return 1
+                  fi
+                  native_mounted=false
+                fi
+                rm -f "$image"
+                rmdir "$native_root"
+              }
+              trap cleanup_native_state EXIT
+              sudo -n mount -o loop,nodev,nosuid "$image" "$native_root"
+              native_mounted=true
+              sudo -n chown "$(id -u):$(id -g)" "$native_root"
+              mkdir "$native_root/sensitive" "$native_root/casefold"
+              chattr +F "$native_root/casefold"
+              lsattr -d "$native_root/sensitive" "$native_root/casefold"
+              for native_mode in sensitive casefold; do
+                export TMPDIR="$native_root/$native_mode"
+                export PROJECTATLAS_TEST_NATIVE_VERITY=1
+                export PROJECTATLAS_TEST_CASE_SENSITIVE=true
+                if [ "$native_mode" = casefold ]; then
+                  export PROJECTATLAS_TEST_CASE_SENSITIVE=false
+                fi
+                "$test_executable" project_state:: --nocapture
+                "$test_executable" --exact project_state::tests::replacement_refuses_native_verity_and_late_sealing_without_leaking_stages --ignored --nocapture
+                run_managed_state_routes
+              done
+              export TMPDIR="$RUNNER_TEMP"
+              unset PROJECTATLAS_TEST_CASE_SENSITIVE
+              unset PROJECTATLAS_TEST_NATIVE_VERITY
+              cleanup_native_state
+              native_mounted=false
+              trap - EXIT
+            done
+          elif [ "$RUNNER_OS" = macOS ]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
+          fi
+          cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::init_admits_legacy_config_before_repairing_missing_root_identity -- --exact
+          # The existing worktree-contract step covers the other three platforms.
+          if [ "$PROJECTATLAS_CI_PLATFORM" = "macos-x64" ]; then
+            cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored
+          fi
+
+      - name: Managed state across macOS volume case and Unicode modes
+        if: runner.os == 'macOS' && contains(matrix.contracts, 'compile') && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
+        # Four real filesystems include exhaustive native alias and ACL controls.
+        # The Intel runner completed HFSX admission at five minutes; allow the
+        # final writer and owned image cleanup to finish within a bounded budget.
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          original_tmpdir="${TMPDIR:-$RUNNER_TEMP}"
+          fixture="$(mktemp -d /private/tmp/projectatlas-case-modes.XXXXXX)"
+          # Native nobody ACL controls must reach this disposable mount through
+          # its ancestors; otherwise an unrelated 0700 temp parent masks access.
+          chmod 755 "$fixture"
+          volume="$fixture/volume"
+          mounted=false
+          nested_mounted=false
+          detach_failed=false
+          nested="$volume/.projectatlas/bridge"
+          attach_native_volume() {
+            local target="$1" elevated="$2" image_path="$3" receipt="$4"
+            python3 - "$image_path" "$target" "$receipt.owner.json" <<'PY'
+          import json, os, stat, sys
+          image, target, output = sys.argv[1:]
+          identity = os.lstat(image)
+          if not stat.S_ISREG(identity.st_mode):
+              raise SystemExit("fixture image is not a direct regular file")
+          with open(output, "w", encoding="utf-8") as stream:
+              json.dump({"path": os.path.realpath(image), "device": identity.st_dev, "inode": identity.st_ino, "mountpoint": os.path.realpath(target)}, stream)
+          PY
+            if [ "$elevated" = true ]; then
+              sudo -n hdiutil attach -plist -nobrowse -owners on -mountpoint "$target" "$image_path" > "$receipt"
+            else
+              hdiutil attach -plist -nobrowse -owners on -mountpoint "$target" "$image_path" > "$receipt"
+            fi
+          }
+          native_volume_state() {
+            local image_path="$1" receipt="$2"
+            hdiutil info -plist > "$receipt.current.plist" || return
+            python3 - "$image_path" "$receipt" "$receipt.current.plist" <<'PY'
+          import json, os, plistlib, re, sys
+          image, receipt, current = sys.argv[1:]
+          with open(receipt + ".owner.json", encoding="utf-8") as stream:
+              owner = json.load(stream)
+          identity = os.lstat(image)
+          if (os.path.realpath(image), identity.st_dev, identity.st_ino) != (owner["path"], owner["device"], owner["inode"]):
+              raise SystemExit("fixture image identity changed")
+          with open(receipt, "rb") as stream:
+              attached = plistlib.load(stream)["system-entities"]
+          with open(current, "rb") as stream:
+              images = plistlib.load(stream)["images"]
+          devices = [item["dev-entry"] for item in attached if "dev-entry" in item]
+          whole = [device for device in devices if re.fullmatch(r"/dev/disk[0-9]+", device)]
+          if not whole or len(set(devices)) != len(devices):
+              raise SystemExit("attachment lacks an unambiguous whole device")
+          mounts = [owner["mountpoint"], *[item["mount-point"] for item in attached if item.get("mount-point")]]
+          matching = [item for item in images if os.path.realpath(item.get("image-path", "")) == owner["path"]]
+          if len(matching) > 1:
+              raise SystemExit("fixture image attachment is ambiguous")
+          reported_mounts = [os.path.realpath(entity["mount-point"]) for item in images for entity in item.get("system-entities", []) if entity.get("mount-point")]
+          if not matching:
+              if any(os.path.ismount(path) or path in reported_mounts for path in mounts):
+                  raise SystemExit("fixture mount persists without its image mapping")
+              print("detached")
+          else:
+              entities = matching[0]["system-entities"]
+              observed = [item["dev-entry"] for item in entities if "dev-entry" in item]
+              if set(observed) != set(devices):
+                  raise SystemExit("fixture image device mapping changed")
+              owned_mounts = [os.path.realpath(item["mount-point"]) for item in entities if item.get("mount-point")]
+              if owned_mounts or any(os.path.ismount(path) for path in mounts):
+                  if owner["mountpoint"] not in owned_mounts or reported_mounts.count(owner["mountpoint"]) != 1:
+                      raise SystemExit("fixture mount ownership changed")
+                  print("mounted")
+              else:
+                  print("unmounted:" + whole[0])
+          PY
+          }
+          detach_native_volume() {
+            local target="$1" elevated="$2" image_path="$3" receipt="$4"
+            local state="unknown" device="" attempt admitted=false
+            if state="$(native_volume_state "$image_path" "$receipt")"; then
+              case "$state" in
+                detached) return 0 ;;
+                mounted|unmounted:*) admitted=true ;;
+              esac
+            fi
+            # The first mountpoint operation needs the same ownership proof as
+            # recovery. Successful exit alone does not prove the image detached.
+            if [ "$admitted" = true ] && [ "$state" = mounted ]; then
+              if [ "$elevated" = true ]; then
+                if sudo -n hdiutil detach "$target"; then
+                  if state="$(native_volume_state "$image_path" "$receipt")"; then
+                    if [ "$state" = detached ]; then return 0; fi
+                  else admitted=false; fi
+                fi
+              else
+                if hdiutil detach "$target"; then
+                  if state="$(native_volume_state "$image_path" "$receipt")"; then
+                    if [ "$state" = detached ]; then return 0; fi
+                  else admitted=false; fi
+                fi
+              fi
+            fi
+            # A non-force detach can unmount successfully and then find the image's
+            # device busy. Recover only that proven partial completion, never a live mount.
+            if [ "$admitted" = true ]; then
+              for attempt in 1 2 3; do
+                if ! state="$(native_volume_state "$image_path" "$receipt")"; then break; fi
+                if [ "$state" = detached ]; then
+                  echo "Owned image detached after its volume unmounted: $image_path"
+                  return 0
+                fi
+                case "$state" in
+                  unmounted:*) device="${state#unmounted:}" ;;
+                  *) break ;;
+                esac
+                if [ "$attempt" -lt 3 ]; then sleep 1; fi
+              done
+            fi
+            if [ "$admitted" = true ] && [ "$state" = "unmounted:$device" ] && [ -n "$device" ]; then
+              # Openers can outlive the unmount. Revalidate ownership and the
+              # unmounted state before EVERY bounded, non-force eject attempt.
+              for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                if ! state="$(native_volume_state "$image_path" "$receipt")"; then break; fi
+                if [ "$state" = detached ]; then return 0; fi
+                case "$state" in
+                  unmounted:*) device="${state#unmounted:}" ;;
+                  *) break ;;
+                esac
+                echo "Finishing owned unmounted image detach through verified device: $device (attempt $attempt/10)"
+                if [ "$elevated" = true ]; then
+                  if sudo -n hdiutil detach "$device"; then
+                    if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                  fi
+                else
+                  if hdiutil detach "$device"; then
+                    if [ "$(native_volume_state "$image_path" "$receipt")" = detached ]; then return 0; fi
+                  fi
+                fi
+                if [ "$attempt" -lt 10 ]; then sleep 2; fi
+              done
+            fi
+            detach_failed=true
+            diskutil info "${device:-$target}" || true
+            hdiutil info || true
+            mount
+            sudo -n lsof -nP "${device:-$target}" || true
+            ps -axo pid,ppid,stat,command
+            return 1
+          }
+          cleanup() {
+            export TMPDIR="$original_tmpdir"
+            if [ "$detach_failed" = true ]; then return 1; fi
+            if [ "$nested_mounted" = true ]; then
+              detach_native_volume "$nested" true "$nested_image" "$nested_receipt" || return 1
+              nested_mounted=false
+            fi
+            if [ "$mounted" = true ]; then
+              detach_native_volume "$volume" false "$image" "$volume_receipt" || return 1
+              mounted=false
+            fi
+            rm -rf "$fixture"
+          }
+          trap cleanup EXIT
+          mkdir "$volume"
+          create_case_image() {
+            local filesystem="$1"
+            # APFSX is diskutil's personality; hdiutil uses this full name.
+            if [ "$filesystem" = APFSX ]; then
+              filesystem="Case-sensitive APFS"
+            fi
+            hdiutil create -size 128m -fs "$filesystem" -volname "$2" -ov "$3"
+          }
+          for filesystem in APFS APFSX HFS+ HFSX; do
+            image="$fixture/$filesystem.dmg"
+            create_case_image "$filesystem" ProjectAtlasCase "$image"
+            volume_receipt="$fixture/$filesystem-attach.plist"
+            # Track attempted attachments too: a failed attach may be partial.
+            mounted=true
+            attach_native_volume "$volume" false "$image" "$volume_receipt"
+            mkdir -p "$volume/tmp" "$nested"
+            nested_filesystem=APFSX
+            if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
+              nested_filesystem=APFS
+            fi
+            nested_image="$fixture/nested-$filesystem.dmg"
+            create_case_image "$nested_filesystem" ProjectAtlasNested "$nested_image"
+            # The runner's unprivileged mount is refused below another volume.
+            # Scope elevation to this disposable image and return its root to
+            # the runner before executing any product command.
+            nested_receipt="$fixture/nested-$filesystem-attach.plist"
+            nested_mounted=true
+            attach_native_volume "$nested" true "$nested_image" "$nested_receipt"
+            sudo -n chown "$(id -u):$(id -g)" "$nested"
+            export PROJECTATLAS_TEST_CASE_MOUNT="$nested"
+            export TMPDIR="$volume/tmp"
+            export PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT="$volume/tmp"
+            diskutil info "$volume"
+            ls -lde /private /private/tmp "$fixture" "$volume" "$volume/tmp"
+            sudo -n -u nobody /bin/test -x "$volume/tmp"
+            export PROJECTATLAS_TEST_CASE_SENSITIVE=false
+            if [ "$filesystem" = APFSX ] || [ "$filesystem" = HFSX ]; then
+              export PROJECTATLAS_TEST_CASE_SENSITIVE=true
+            fi
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
+            cargo test --locked -p projectatlas-cli --bin projectatlas atlas_map::tests::relative_config_roots_follow_native_private_directory_names -- --exact
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+            export TMPDIR="$original_tmpdir"
+            unset PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT
+            detach_native_volume "$nested" true "$nested_image" "$nested_receipt"
+            nested_mounted=false
+            detach_native_volume "$volume" false "$image" "$volume_receipt"
+            mounted=false
+          done
 
       - name: Install cargo-deny for PDF source validation
         if: matrix.label != 'linux' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-symbols')
@@ -890,11 +1227,215 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p projectatlas-cli generated_mcp_config_preserves_explicit_conventional_database_authority --test e2e_lifecycle -- --exact --nocapture
 
+  windows-security-diagnostics:
+    name: windows-security-diagnostics
+    needs: plan
+    if: needs.plan.result == 'success' && contains(fromJSON(needs.plan.outputs.plan).rust_packages, 'projectatlas-cli')
+    runs-on: windows-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.head }}
+          fetch-depth: 1
+      - name: Observe native system-policy query contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content crates/projectatlas-cli/src/project_state_tests.rs -Raw
+          $match = [regex]::Match($source, '(?s)const WINDOWS_SYSTEM_POLICY_FIXTURE: &str = r#"(.*?)"#;')
+          if (-not $match.Success) { throw 'Native security fixture declaration is missing' }
+          $fixture = $match.Groups[1].Value
+          $boundary = $fixture.IndexOf('$mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE')
+          if ($boundary -lt 0) { throw 'Native security fixture entry point is missing' }
+          Invoke-Expression $fixture.Substring(0, $boundary)
+          $directories = @(
+            @{ name='runner-temp'; path=(Join-Path $env:RUNNER_TEMP ('system-policy-' + [guid]::NewGuid())) },
+            @{ name='native-temp'; path=(Join-Path ([IO.Path]::GetTempPath()) ('system-policy-' + [guid]::NewGuid())) }
+          )
+          $results = @()
+          try {
+            foreach ($root in $directories) {
+              $directory = $root.path
+              New-Item -ItemType Directory -Path $directory | Out-Null
+              foreach ($case in @('ordinary', 'audit', 'label', 'mixed', 'empty', 'protected-empty', 'null', 'dacl-dotnet', 'dacl-native')) {
+                [SystemPolicyFixture]::Enable($true)
+                $path = Join-Path $directory $case
+                [IO.File]::WriteAllText($path, 'disposable native policy fixture')
+                $policy = switch ($case) {
+                  'audit' { 'S:P(AU;SAFA;FW;;;WD)' }
+                  'label' { 'S:P(ML;;NW;;;HI)' }
+                  'mixed' { 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)' }
+                  'empty' { 'S:' }
+                  'protected-empty' { 'S:P' }
+                  'null' { 'S:NO_ACCESS_CONTROL' }
+                  default { '' }
+                }
+                if ($case -eq 'dacl-dotnet' -or $case -eq 'dacl-native') {
+                  $value = [SystemPolicyFixture]::Policy($path, '', 24)
+                  @{ case=$case; root=$root.name; operation='before-dacl'; value=$value } | ConvertTo-Json -Compress
+                  if ($case -eq 'dacl-dotnet') {
+                    $acl = Get-Acl -LiteralPath $path
+                    $acl.SetAccessRuleProtection($true, $false)
+                    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'FullControl', 'Allow'))
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'Delete', 'Deny'))
+                    $guest = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-546')
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($guest, 'Write', 'Deny'))
+                    Set-Acl -LiteralPath $path -AclObject $acl
+                  } else {
+                    [SystemPolicyFixture]::DiscretionaryPolicy($path, 'D:P(A;;FA;;;OW)')
+                  }
+                }
+                [SystemPolicyFixture]::Policy($path, $policy, 24) | Out-Null
+                foreach ($enabled in @($false, $true)) {
+                  [SystemPolicyFixture]::Enable($enabled)
+                  foreach ($retained in @($false, $true)) {
+                    foreach ($mask in @(8, 16, 24)) {
+                      try {
+                        $value = [SystemPolicyFixture]::Policy($path, '', $mask, $retained)
+                        $results += @{ case=$case; root=$root.name; retained=$retained; security_privilege=$enabled; mask=$mask; value=$value }
+                      } catch {
+                        $results += @{ case=$case; root=$root.name; retained=$retained; security_privilege=$enabled; mask=$mask; error=$_.Exception.ToString() }
+                      }
+                      $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                    }
+                  }
+                }
+              }
+              [SystemPolicyFixture]::Enable($true)
+              $maskPolicies = @(
+                '', 'S:P(AU;SAFA;FW;;;WD)', 'S:P(ML;;NW;;;HI)',
+                'S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))',
+                'S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)',
+                'S:P(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)',
+                'S:P(TL;;GR;;;S-1-19-512-4096)',
+                'S:P(FL;;GR;;;WD;(@User.PublicationClaim == "alpha"))'
+              )
+              foreach ($policy in $maskPolicies) {
+                $path = Join-Path $directory ('query-mask-' + [guid]::NewGuid())
+                try {
+                  $value = [SystemPolicyFixture]::QueryMaskControl($path, $policy)
+                  $results += @{ case='retained-query-mask'; root=$root.name; policy=$policy; value=$value }
+                } catch {
+                  $results += @{ case='retained-query-mask'; root=$root.name; policy=$policy; error=$_.Exception.ToString() }
+                }
+                $results[-1] | ConvertTo-Json -Depth 4 -Compress
+              }
+              foreach ($retained in @($false, $true)) {
+                $ownershipModes = if ($retained) { @($false, $true) } else { @($false) }
+                foreach ($writeOwner in $ownershipModes) {
+                  foreach ($allocated in @($false, $true)) {
+                    foreach ($labels in @($false, $true)) {
+                      $path = Join-Path $directory ('empty-setter-' + $retained + '-' + $writeOwner + '-' + $allocated + '-' + $labels)
+                      try {
+                        $value = [SystemPolicyFixture]::EmptySystemPolicyControl($path, $retained, $allocated, $labels, $writeOwner)
+                        $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; write_owner=$writeOwner; allocated=$allocated; labels=$labels; value=$value }
+                      } catch {
+                        $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; write_owner=$writeOwner; allocated=$allocated; labels=$labels; error=$_.Exception.ToString() }
+                      }
+                      $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                    }
+                  }
+                }
+              }
+              foreach ($sensitive in @($false, $true)) {
+                $path = Join-Path $directory ('native-case-' + $sensitive)
+                try {
+                  $value = [SystemPolicyFixture]::CaseBehaviorControl($path, $sensitive)
+                  $results += @{ case='windows-case-behavior'; root=$root.name; sensitive=$sensitive; value=$value }
+                } catch {
+                  $results += @{ case='windows-case-behavior'; root=$root.name; sensitive=$sensitive; error=$_.Exception.ToString() }
+                }
+                $results[-1] | ConvertTo-Json -Depth 4 -Compress
+              }
+              # These controls distinguish safe refusal from a creator-rights
+              # regression; the former positive matrix used OwnerRights-Full only.
+              try {
+                $value = [SystemPolicyFixture]::ForeignOwnerControl((Join-Path $directory 'authorized-foreign-owner'))
+                $results += @{ case='authorized-foreign-owner'; root=$root.name; value=$value }
+              } catch {
+                $results += @{ case='authorized-foreign-owner'; root=$root.name; error=$_.Exception.ToString() }
+              }
+              $results[-1] | ConvertTo-Json -Depth 4 -Compress
+              $sourceDacls = @(
+                @{ name='owner-full'; dacl='D:P(A;;FA;;;OW)' },
+                @{ name='owner-without-write-dac'; dacl='D:P(A;;0x0013019f;;;OW)' },
+                @{ name='owner-denied-write-dac'; dacl='D:P(D;;WD;;;OW)(A;;FA;;;OW)' },
+                @{ name='owner-denied-modification-admin-grant'; dacl='D:P(D;;0x00050002;;;OW)(A;;FA;;;BA)(A;;FR;;;OW)' }
+              )
+              foreach ($systemAccess in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($systemAccess)
+                foreach ($source in $sourceDacls) {
+                  foreach ($maximumAllowed in @($false, $true)) {
+                    $assignments = if ($systemAccess) { @(8, 120) } else { @(8) }
+                    foreach ($assignment in $assignments) {
+                      $path = Join-Path $directory ('source-rights-' + [guid]::NewGuid())
+                      $policy = if ($systemAccess) { 'S:P(AU;SAFA;FW;;;WD)' } else { '' }
+                      try {
+                        $value = [SystemPolicyFixture]::SourceDescriptorControl($path, $true, $true, $false, $systemAccess, $policy, $source.dacl, $maximumAllowed, $assignment)
+                        $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; maximum_allowed=$maximumAllowed; system_assignment=$assignment; security_privilege=$systemAccess; value=$value }
+                      } catch {
+                        $results += @{ case='source-creator-rights'; root=$root.name; source=$source.name; dacl=$source.dacl; maximum_allowed=$maximumAllowed; system_assignment=$assignment; security_privilege=$systemAccess; error=$_.Exception.ToString() }
+                      }
+                      $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                    }
+                  }
+                }
+              }
+              foreach ($systemAccess in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($systemAccess)
+                $policies = if ($systemAccess) {
+                  @('', 'S:P(AU;SAFA;FW;;;WD)', 'S:P(ML;;NW;;;HI)', 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)', 'S:', 'S:NO_ACCESS_CONTROL',
+                    'S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))',
+                    'S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)',
+                    'S:P(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)')
+                } else { @('') }
+                foreach ($policy in $policies) {
+                  foreach ($protectedSource in @($false, $true)) {
+                    foreach ($widerParent in @($false, $true)) {
+                      foreach ($movedSource in @($false, $true)) {
+                        $path = Join-Path $directory ('source-descriptor-' + [guid]::NewGuid())
+                        try {
+                          $value = [SystemPolicyFixture]::SourceDescriptorControl($path, $protectedSource, $widerParent, $movedSource, $systemAccess, $policy)
+                          $results += @{ case='source-descriptor'; root=$root.name; protected_source=$protectedSource; wider_parent=$widerParent; moved_source=$movedSource; security_privilege=$systemAccess; policy=$policy; value=$value }
+                        } catch {
+                          $results += @{ case='source-descriptor'; root=$root.name; protected_source=$protectedSource; wider_parent=$widerParent; moved_source=$movedSource; security_privilege=$systemAccess; policy=$policy; error=$_.Exception.ToString() }
+                        }
+                        $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                      }
+                    }
+                  }
+                }
+              }
+              foreach ($systemAccess in @($false, $true)) {
+                [SystemPolicyFixture]::Enable($systemAccess)
+                foreach ($maximumAllowed in @($false, $true)) {
+                  $path = Join-Path $directory ('private-creator-' + $systemAccess + '-' + $maximumAllowed)
+                  try {
+                    $value = [SystemPolicyFixture]::CreatorControl($path, $systemAccess, $maximumAllowed)
+                    $results += @{ case='private-creator'; root=$root.name; maximum_allowed=$maximumAllowed; security_privilege=$systemAccess; value=$value }
+                  } catch {
+                    $results += @{ case='private-creator'; root=$root.name; maximum_allowed=$maximumAllowed; security_privilege=$systemAccess; error=$_.Exception.ToString() }
+                  }
+                  $results[-1] | ConvertTo-Json -Depth 4 -Compress
+                }
+              }
+            }
+            $results | ConvertTo-Json -Depth 4
+          } finally {
+            [SystemPolicyFixture]::Enable($false)
+            foreach ($root in $directories) {
+              if (Test-Path -LiteralPath $root.path) { Remove-Item -LiteralPath $root.path -Recurse -Force }
+            }
+          }
+
   verify:
     name: verify
     # Every native CI suite supplies verify; metadata must validate real source proof.
     if: always()
-    needs: [plan, repository, rust, e2e-smoke]
+    needs: [plan, repository, rust, e2e-smoke, windows-security-diagnostics]
     runs-on: ubuntu-latest
     timeout-minutes: 125
     permissions:
@@ -940,10 +1481,16 @@ jobs:
           REPOSITORY_RESULT: ${{ needs.repository.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           PLATFORM_RESULT: ${{ needs.e2e-smoke.result }}
+          WINDOWS_SECURITY_RESULT: ${{ needs.windows-security-diagnostics.result }}
         run: |
           set -euo pipefail
           if [[ "$PLAN_RESULT" != "success" ]]; then
             echo "proof planning concluded $PLAN_RESULT" >&2
+            exit 1
+          fi
+          windows_security_expected="$(python3 -c 'import json,os; print("success" if "projectatlas-cli" in json.loads(os.environ["PLAN"])["rust_packages"] else "skipped")')"
+          if [[ "$WINDOWS_SECURITY_RESULT" != "$windows_security_expected" ]]; then
+            echo "Windows security diagnostics concluded $WINDOWS_SECURITY_RESULT" >&2
             exit 1
           fi
           export GIT_NO_REPLACE_OBJECTS=1

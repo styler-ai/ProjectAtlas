@@ -240,7 +240,7 @@ jobs:
           - os: macos-15-intel
             label: macos-x64
             suffix: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64
             suffix: aarch64-apple-darwin
     steps:
@@ -525,7 +525,7 @@ jobs:
             suffix: x86_64-apple-darwin
             codex_package: codex-darwin-x64
             codex_target: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64-posix
             suffix: aarch64-apple-darwin
             codex_package: codex-darwin-arm64
@@ -1533,7 +1533,7 @@ jobs:
           - os: macos-15-intel
             label: macos-x64-posix
             suffix: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64-posix
             suffix: aarch64-apple-darwin
     steps:

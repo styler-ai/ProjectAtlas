@@ -3,18 +3,18 @@
   "source_contract": {
     "normalization": "UTF-8 source with CRLF and CR normalized to LF; relative binary keys only; no absolute paths or line metadata",
     "files": {
-      "crates/projectatlas-cli/tests/e2e_delivery.rs": "c4e20538ffe3f35ffa77f236cb68c5a3f46813b3f467aee2ed615ed8b0a31349",
-      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "4c4a53eff4375a14394515b572c45891c8b1980e902382a7aadb941a83b5fe2f",
+      "crates/projectatlas-cli/tests/e2e_delivery.rs": "cdf0fb4f7cd8425a05fdcd49588e8ca25601261c467350a1c71e80a61e7a31d8",
+      "crates/projectatlas-cli/tests/e2e_lifecycle.rs": "0342e06db8745f0eb2f65d94d7d513e9137f70fc5b537a81451c72956b11af0c",
       "crates/projectatlas-cli/tests/e2e_maintenance.rs": "3f583175a078d607cbc7d7db0ac6d26361e7507e518e79e6113ae8a97e27ad08",
-      "crates/projectatlas-cli/tests/e2e_navigation.rs": "62cea574d7aad1541782783df9dfb83a35c76133e8cd9e6974ab6bb020f1e18f",
-      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "542f4c71c46a0fc857fba10e9bf4dbfa3ea41e546f6b7463e2785e6906ec654f"
+      "crates/projectatlas-cli/tests/e2e_navigation.rs": "fc6fbd78f2dbd4226d4ec4b6d34cd78fedc1c3c4d1f9a8ea6fcbc558bc91ca9d",
+      "crates/projectatlas-cli/tests/e2e_worktrees.rs": "ebb8c769da7d018645761bfcc4de3cda47fda0721de7c16ef1c46df413201c9a"
     }
   },
   "baseline_commit": "b8f368c0f1e2299b7d0cbb0c3646bb4c238dbceb",
   "source": "crates/projectatlas-cli/tests/e2e.rs",
   "source_sha256_baseline": "e26c7b9d450b105e09c2259b243f95a1fddb26cd8b64e176379149ca8050b43c",
   "source_sha256_before_deletion": "942b802ab4c215f1742d2c41f35eb29654946da8e8372218e0d1a787cc3c4757",
-  "test_count": 209,
+  "test_count": 222,
   "symbol_count": 440,
   "binaries": {
     "e2e_lifecycle": "lifecycle and database contracts",
@@ -29,6 +29,13 @@
     "cli_e2e_inventory_contract_rejects_frozen_metadata_and_support_drift"
   ],
   "tests": [
+    {
+      "name": "go_clause_bindings_agree_across_cli_mcp_and_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
     {
       "name": "parenthesized_python_imports_resolve_and_converge_after_refresh",
       "owner": "e2e_navigation",
@@ -1868,6 +1875,90 @@
     {
       "name": "relation_defaults_and_legacy_limits_hold_at_real_adapter_boundaries",
       "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_root_aliases_follow_manifest_and_module_changes",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_namespace_aliases_keep_values_types_and_toolchain_identity",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_absolute_and_bare_use_paths_follow_the_owning_edition",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "rust_added_automatic_roots_and_broken_cycles_repair_unchanged_consumers",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "same_line_call_occurrences_keep_exact_ranges_after_refresh_and_rebuild",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "lexical_capacity_preserves_navigation_and_repairs_after_source_reduction",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "bare_var_redeclarations_preserve_cli_mcp_calls_and_export_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "python_directive_calls_agree_across_cli_mcp_and_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "ecmascript_source_contexts_preserve_cli_mcp_targets_and_host_roles",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "reopened_container_calls_agree_across_cli_mcp_and_refresh",
+      "owner": "e2e_navigation",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "automatic_state_admission_preserves_cli_mcp_navigation",
+      "owner": "e2e_lifecycle",
+      "attributes": [
+        "#[test]"
+      ]
+    },
+    {
+      "name": "managed_document_writers_preserve_cli_mcp_capabilities",
+      "owner": "e2e_lifecycle",
       "attributes": [
         "#[test]"
       ]
@@ -19693,6 +19784,35 @@
       "workflow": ".github/workflows/ci.yml",
       "line": 456,
       "text": "          cargo test --locked -p projectatlas-cli --test e2e_navigation composer_shaped_php_cli_mcp_and_incremental_refresh_agree -- --exact --include-ignored --nocapture"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "line": 504,
+      "text": "            PROJECTATLAS_TEST_CASE_SENSITIVE=true cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "            cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "text": "          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact"
     },
     {
       "workflow": ".github/workflows/ci.yml",

@@ -161,9 +161,9 @@
 
 ## 24. Repeatable real-task agent evaluation (#490)
 
-- [ ] 24.1 Gap-audit the existing agent-navigation preregistration, harness, tests, and v0.4 results; freeze v0.5 representative tasks covering PHP, documents, dead-code profiles, communities, and ordinary navigation, with exact repository/candidate/runtime/tool identity, equal-arm prompts, warm/cold state, success rubric, timeout, context/wrong-file accounting, privacy, output bounds, repeats, and uncertainty.
-- [ ] 24.2 Reuse the existing harness unchanged when it satisfies the frozen contract; make only demonstrated minimal corrections, then run both arms in rotated order while retaining every success, failure, timeout, invalid trace, setup result, and self-audit rather than filtering unfavorable outcomes.
-- [ ] 24.3 Validate repeatability and metric calculations, equal treatment of arms, modeled-versus-observed wording, bounded/sanitized artifacts, compact retained evidence, representative repository behavior, and no private paths/content/secrets; publish the v0.5 preregistration, bounded result, and evaluation, with an explicit no-product-code outcome when appropriate.
+- [ ] 24.1 After prerequisite acceptance, gap-audit the existing harness and published evaluation, then freeze representative v0.6 tasks, repositories, exact baseline/candidate/runtime/tool identities, equal-arm prompts and capabilities, success and stop rules, cold/warm conditions, rotated ordering, repeats, metrics, uncertainty, privacy and output bounds before observing either arm.
+- [ ] 24.2 Reuse the existing harness unchanged when adequate, correct only demonstrated gaps with causal and positive compatibility proof plus applicable locked Rust/database/workspace gates, and execute both arms in rotated order while retaining every success, failure, timeout, invalid/setup trace, uncertainty and self-audit outcome.
+- [ ] 24.3 Validate repeatability and metric calculations, equal arm treatment, preregistered exclusions, sanitization and artifact bounds; publish compact observed results separately from modeled estimates, accept null or negative and no-product-code outcomes, and pass applicable owning harness, documentation and dependency gates without private paths, content or secrets.
 - [ ] 24.4 Review the final implementation against the architecture diagrams, update the diagrams or implementation until they agree, or reconfirm the reasoned N/A.
 
 ## 25. Complete cross-platform atlas CLI (#491)
