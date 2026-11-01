@@ -1389,6 +1389,10 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
     if name.eq_ignore_ascii_case(expected) {
         return Ok(true);
     }
+    #[cfg(target_os = "linux")]
+    if linux_access::fixed_name_matches(name, expected) {
+        return Ok(true);
+    }
     // This is only a candidate filter: APFS also folds multi-scalar aliases
     // such as the fi ligature. The containing filesystem decides ownership.
     if !name.is_ascii() && expected.is_ascii() {
@@ -1433,8 +1437,11 @@ fn unicode_name_matches(name: &str, expected: &str) -> bool {
 }
 
 /// Match fixed components using the supported platform's case behavior.
-// Keep one fallible caller contract: only macOS needs a native volume query.
-#[cfg_attr(not(target_os = "macos"), allow(clippy::unnecessary_wraps))]
+// Keep one fallible caller contract for native directory/volume queries.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux")),
+    allow(clippy::unnecessary_wraps)
+)]
 fn named(path: &Path, expected: &str) -> io::Result<bool> {
     let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
         return Ok(false);
@@ -1498,7 +1505,11 @@ fn named(path: &Path, expected: &str) -> io::Result<bool> {
             )),
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_access::named(path, expected)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         Ok(false)
     }

@@ -262,7 +262,7 @@ fn fixture_names_are_case_sensitive(root: &Path) -> io::Result<bool> {
     fs::write(&probe, b"case behavior")?;
     let sensitive = !root.join(PROBE_NAME.to_ascii_lowercase()).try_exists()?;
     fs::remove_file(probe)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let Ok(expected) = std::env::var("PROJECTATLAS_TEST_CASE_SENSITIVE") {
         require(
             expected == sensitive.to_string(),
@@ -310,6 +310,25 @@ fn managed_name_case_variants(name: &str) -> Vec<String> {
         '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}',
         '\u{202d}', '\u{202e}', '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}',
         '\u{206f}', '\u{feff}',
+    ] {
+        variants.push(name.replace('.', &format!("{character}.")));
+    }
+    #[cfg(target_os = "linux")]
+    for character in [
+        '\u{00ad}',
+        '\u{034f}',
+        '\u{061c}',
+        '\u{115f}',
+        '\u{180e}',
+        '\u{2060}',
+        '\u{3164}',
+        '\u{fe00}',
+        '\u{ffa0}',
+        '\u{1bca0}',
+        '\u{1d173}',
+        '\u{e0001}',
+        '\u{e0020}',
+        '\u{e0100}',
     ] {
         variants.push(name.replace('.', &format!("{character}.")));
     }
@@ -363,6 +382,43 @@ fn hfs_fixed_names_ignore_only_the_frozen_format_characters() -> io::Result<()> 
         !super::hfs_managed_name_matches("conﬁg.toml", super::CONFIG_FILE),
         "HFS expanded a compatibility ligature",
     )
+}
+
+/// Linux's pinned model includes assigned ignorables, rather than modern folds.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_fixed_names_follow_the_frozen_ascii_projection() -> io::Result<()> {
+    let matches = super::linux_access::fixed_name_matches;
+    for (variant, expected) in [
+        ("CONFIG.TOML", "config.toml"),
+        ("config.toml", "CONFIG.TOML"),
+        ("conﬁg.toml", "config.toml"),
+        ("projectatlaſ.db", "projectatlas.db"),
+        ("con\u{034f}fig.toml", "config.toml"),
+        ("config\u{e0100}.toml", "config.toml"),
+        ("config\u{1bca0}.toml", "config.toml"),
+    ] {
+        require(
+            matches(variant, expected),
+            "Linux fixed-name alias was lost",
+        )?;
+        require(
+            super::fixed_name_candidate(Path::new(variant), expected)?,
+            "Linux alias was filtered before native classification",
+        )?;
+    }
+    for variant in [
+        "conﬃg.toml",
+        "config\u{2065}.toml",
+        "conéf ig.toml",
+        "config\u{13430}.toml",
+    ] {
+        require(
+            !matches(variant, super::CONFIG_FILE),
+            "distinct custom Unicode name became a Linux alias",
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -1193,14 +1249,22 @@ fn managed_database_root_prefix_aliases_keep_their_ownership_checks() -> io::Res
         .is_err(),
         "root-prefix alias bypassed database admission",
     )?;
-    #[cfg(windows)]
+    let sensitive = fixture_names_are_case_sensitive(&root)?;
+    let case_path = root.join(".PROJECTATLAS").join("PROJECTATLAS.DB");
+    let entries = fs::read_dir(&root)?.count();
+    let case_admission = ProjectStateGuard::preflight_database_path(&case_path, &root);
     require(
-        ProjectStateGuard::preflight_database_path(
-            &root.join(".PROJECTATLAS").join("PROJECTATLAS.DB"),
-            &root,
-        )
-        .is_err(),
-        "case alias bypassed database admission",
+        if sensitive {
+            case_admission?.is_none()
+        } else {
+            case_admission.is_err()
+        },
+        "private-directory case alias bypassed ownership or blocked a distinct name",
+    )?;
+    require(
+        fs::read(&outside)? == b"preserve outside database"
+            && fs::read_dir(&root)?.count() == entries,
+        "private-directory alias admission changed outside bytes or created an entry",
     )?;
     Ok(())
 }
@@ -1455,6 +1519,133 @@ fn replacement_targets() -> impl Iterator<Item = (bool, &'static str, bool)> {
             (false, super::LEGACY_CONFIG_FILE, false),
             (true, super::JSON_MAP_FILE, false),
         ])
+}
+
+/// Independently enable and measure native verity using the public Linux UAPI.
+#[cfg(target_os = "linux")]
+fn fixture_verity(path: &Path, enable: bool) -> io::Result<Vec<u8>> {
+    const SCRIPT: &str = r"
+import fcntl, os, struct, sys
+with open(sys.argv[1], 'rb') as source:
+    if sys.argv[2] == 'enable':
+        argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 0, 0, 0, 0, 0, 0, *([0]*11))
+        assert len(argument) == 128
+        fcntl.ioctl(source, 0x40806685, argument)
+    digest = bytearray(struct.pack('=HH', 0, 64) + bytes(64))
+    fcntl.ioctl(source, 0xc0046686, digest, True)
+    algorithm, size = struct.unpack('=HH', digest[:4])
+    assert algorithm == 1 and size == 32
+    print(digest[4:4+size].hex())
+";
+    let result = std::process::Command::new("python3")
+        .args(["-c", SCRIPT])
+        .arg(path)
+        .arg(if enable { "enable" } else { "measure" })
+        .output()?;
+    require(
+        result.status.success(),
+        &format!("native fs-verity fixture failed: {result:?}"),
+    )?;
+    Ok(result.stdout)
+}
+
+/// A rename can discard native sealing; actual managed publication must refuse it.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires an fs-verity-enabled native filesystem; selected explicitly in Linux CI"]
+fn replacement_refuses_native_verity_and_late_sealing_without_leaking_stages() -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for (private, filename, host) in replacement_targets() {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let directory = if private {
+            let state = root.join(STATE_DIRECTORY);
+            fs::create_dir(&state)?;
+            state
+        } else {
+            root.clone()
+        };
+        let output = directory.join(filename);
+        let outside = root.join("outside-owner");
+        fs::write(&output, b"sealed last valid output")?;
+        fs::hard_link(&output, &outside)?;
+        let digest = fixture_verity(&output, true)?;
+        let identity = fs::metadata(&output)?;
+        require(
+            fs::OpenOptions::new().write(true).open(&output).is_err(),
+            "native sealing did not prohibit data writes",
+        )?;
+        let guard = if host {
+            ProjectStateGuard::preflight(&root, None, None)?
+        } else {
+            ProjectStateGuard::preflight_document(&root, &output)?
+                .ok_or_else(|| io::Error::other("sealed document was external"))?
+        };
+        let entries = fs::read_dir(&directory)?.count();
+        let result = guard.publish(
+            &output,
+            b"unsealed candidate",
+            FilePublication::Replace,
+            || Ok(()),
+        );
+        require(
+            result
+                .as_ref()
+                .is_err_and(|source| source.to_string().contains("fs-verity")),
+            "sealed output replacement was not refused causally",
+        )?;
+        require(
+            fs::metadata(&output)?.ino() == identity.ino()
+                && fs::read(&output)? == b"sealed last valid output"
+                && fs::read(&outside)? == b"sealed last valid output"
+                && fixture_verity(&output, false)? == digest
+                && fixture_verity(&outside, false)? == digest
+                && fs::read_dir(&directory)?.count() == entries,
+            "sealed refusal changed native state or leaked staging",
+        )?;
+
+        // Reproduce the faulty mechanism on the same filesystem. The outside
+        // hardlink stays sealed while pathname replacement silently loses it.
+        let raw = root.join("raw-rename-stage");
+        fs::write(&raw, b"unsealed raw replacement")?;
+        fs::rename(&raw, &output)?;
+        let flags = rustix::fs::ioctl_getflags(&fs::File::open(&output)?)?;
+        require(
+            flags.bits() & 0x0010_0000 == 0 && fixture_verity(&outside, false)? == digest,
+            "raw rename did not isolate loss of native sealing",
+        )?;
+
+        // The source can become sealed after capture without changing inode,
+        // mode, owner or access xattrs; final retained-source admission must see it.
+        let late = guard.publish(
+            &output,
+            b"must remain unpublished",
+            FilePublication::Replace,
+            || fixture_verity(&output, true).map(|_| ()),
+        );
+        require(
+            late.as_ref()
+                .is_err_and(|source| source.to_string().contains("fs-verity"))
+                && fs::read(&output)? == b"unsealed raw replacement"
+                && fixture_verity(&output, false)?.len() == digest.len()
+                && fs::read_dir(&directory)?.count() == entries,
+            "late sealing escaped final admission or leaked staging",
+        )?;
+        fs::remove_file(&output)?;
+        fs::write(&output, b"ordinary output")?;
+        guard.publish(
+            &output,
+            b"ordinary replacement",
+            FilePublication::Replace,
+            || Ok(()),
+        )?;
+        require(
+            fs::read(&output)? == b"ordinary replacement"
+                && fixture_verity(&outside, false)? == digest,
+            "ordinary recovery or outside sealed owner was lost",
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -2567,7 +2758,11 @@ public static class SystemPolicyFixture {
   static string CreatorFileControl(string path, bool systemAccess, bool maximumAllowed) {
     string phase="convert creation descriptor";
     try { return CreatorFileControlCore(path,systemAccess,maximumAllowed,ref phase); }
-    catch (Exception error) { throw new Exception("Private creator phase: "+phase,error); }
+    catch (Exception error) {
+      var native=error as Win32Exception;
+      if (native != null) Console.WriteLine("private creator failure native="+native.NativeErrorCode);
+      throw new Exception("Private creator phase: "+phase,error);
+    }
   }
   static string CreatorFileControlCore(string path, bool systemAccess, bool maximumAllowed, ref string phase) {
     IntPtr descriptor=IntPtr.Zero;
@@ -2662,6 +2857,10 @@ if ($mode -eq 'query') {
   [SystemPolicyFixture]::CreatorControl($env:PROJECTATLAS_TEST_ACL_PATH,$false,$false)
   [SystemPolicyFixture]::Enable($true)
   [SystemPolicyFixture]::CreatorControl(($env:PROJECTATLAS_TEST_ACL_PATH+'-system'),$true,$false)
+} elseif ($mode -eq 'efs-complete' -or $mode -eq 'efs-unprivileged') {
+  [SystemPolicyFixture]::Enable($mode -eq 'efs-complete')
+  & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication --include-ignored --nocapture
+  exit $LASTEXITCODE
 } else {
   [SystemPolicyFixture]::Enable($mode -eq 'complete')
   & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_system_policy_replacement_preserves_or_refuses_without_global_privilege_changes --nocapture
@@ -2669,12 +2868,13 @@ if ($mode -eq 'query') {
 }
 "#;
 
-/// Prove the exact creation descriptor and retained creator rights natively.
+/// The restrictive Owner Rights experiment cannot supply later policy rights.
 #[cfg(windows)]
 #[test]
-fn windows_private_creation_descriptor_preserves_creator_data_and_policy_rights() -> io::Result<()>
-{
+fn windows_restrictive_creation_does_not_grant_unavailable_policy_rights() -> io::Result<()> {
     let temp = tempfile::tempdir()?;
+    let sentinel = temp.path().join("outside-fixture-owner");
+    fs::write(&sentinel, b"unchanged fixture owner")?;
     let result = std::process::Command::new("powershell.exe")
         .args([
             "-NoProfile",
@@ -2688,9 +2888,144 @@ fn windows_private_creation_descriptor_preserves_creator_data_and_policy_rights(
             temp.path().join("private-creation-control"),
         )
         .output()?;
+    let stdout = String::from_utf8(result.stdout).map_err(io::Error::other)?;
+    let stderr = String::from_utf8(result.stderr).map_err(io::Error::other)?;
+    let mask = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("private creator granted access="))
+        .ok_or_else(|| io::Error::other("native creator did not report granted rights"))?;
+    let mask = u32::from_str_radix(mask.trim(), 16).map_err(io::Error::other)?;
     require(
-        result.status.success(),
-        &format!("private creator native control failed: {result:?}"),
+        !result.status.success()
+            && stdout.contains("private creator failure native=5")
+            && stderr.contains("Private creator phase: apply creator DACL through retained")
+            && mask & 0x0004_0000 == 0
+            && mask & 0x0001_0003 == 0x0001_0003
+            && fs::read(&sentinel)? == b"unchanged fixture owner"
+            && fs::read_dir(temp.path())?.count() == 1,
+        "rejected private-descriptor design lost its exact rights/refusal/cleanup control",
+    )
+}
+
+/// EFS is a separate native protection; this probe establishes actual publisher
+/// behavior without assuming how Rust's full-attribute setter treats it.
+#[cfg(windows)]
+#[test]
+#[ignore = "requires EFS-capable NTFS and a fixture encryption key; selected explicitly in Windows CI"]
+fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    const ENCRYPTED: u32 = 0x0000_4000;
+    const MODE: &str = "PROJECTATLAS_TEST_SYSTEM_POLICY_MODE";
+    if !matches!(
+        std::env::var(MODE).as_deref(),
+        Ok("efs-complete" | "efs-unprivileged")
+    ) {
+        // A hidden-SACL refusal must not mask the encrypted-file path for
+        // callers whose full policy rights are already available.
+        for mode in ["efs-complete", "efs-unprivileged"] {
+            let child = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_SYSTEM_POLICY_FIXTURE,
+                ])
+                .env(MODE, mode)
+                .env(
+                    "PROJECTATLAS_TEST_SYSTEM_POLICY_EXE",
+                    std::env::current_exe()?,
+                )
+                .output()?;
+            require(
+                child.status.success(),
+                &format!("native EFS {mode} control failed: {child:?}"),
+            )?;
+        }
+        return Ok(());
+    }
+    let encrypt = |path: &Path| -> io::Result<()> {
+        let result = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[System.IO.File]::Encrypt($env:PROJECTATLAS_TEST_ACL_PATH)",
+            ])
+            .env("PROJECTATLAS_TEST_ACL_PATH", path)
+            .output()?;
+        require(
+            result.status.success() && fs::metadata(path)?.file_attributes() & ENCRYPTED != 0,
+            &format!("native EFS setup failed: {result:?}"),
+        )
+    };
+    for (private, filename, host) in replacement_targets() {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let directory = if private {
+            let state = root.join(STATE_DIRECTORY);
+            fs::create_dir(&state)?;
+            state
+        } else {
+            root.clone()
+        };
+        require(
+            fs::metadata(&directory)?.file_attributes() & ENCRYPTED == 0,
+            "file-level encryption probe needs an ordinary parent",
+        )?;
+        let output = directory.join(filename);
+        fs::write(&output, b"last valid encrypted output")?;
+        encrypt(&output)?;
+        let outside = root.join("outside-encrypted-owner");
+        fs::hard_link(&output, &outside)?;
+        let guard = if host {
+            ProjectStateGuard::preflight(&root, None, None)?
+        } else {
+            ProjectStateGuard::preflight_document(&root, &output)?
+                .ok_or_else(|| io::Error::other("EFS document was external"))?
+        };
+        let entries = fs::read_dir(&directory)?.count();
+        let replaced = guard.publish(
+            &output,
+            b"encrypted replacement",
+            FilePublication::Replace,
+            || Ok(()),
+        );
+        let expected: &[u8] = if replaced.is_ok() {
+            b"encrypted replacement"
+        } else {
+            b"last valid encrypted output"
+        };
+        require(
+            fs::read(&output)? == expected
+                && fs::metadata(&output)?.file_attributes() & ENCRYPTED != 0
+                && fs::read(&outside)? == b"last valid encrypted output"
+                && fs::metadata(&outside)?.file_attributes() & ENCRYPTED != 0
+                && fs::read_dir(&directory)?.count() == entries,
+            &format!("EFS replacement lost protection, outside bytes or cleanup: {replaced:?}"),
+        )?;
+    }
+    // Genuinely new generated outputs retain ordinary directory EFS inheritance.
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    // File.Encrypt rejects directories; the OS cipher tool supports this
+    // directory attribute and does not recurse without /s.
+    let encrypted_directory = std::process::Command::new("cipher.exe")
+        .arg("/e")
+        .arg(&guard.directory)
+        .output()?;
+    require(
+        encrypted_directory.status.success()
+            && fs::metadata(&guard.directory)?.file_attributes() & ENCRYPTED != 0,
+        &format!("native EFS directory setup failed: {encrypted_directory:?}"),
+    )?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    guard.write_generated(&output, b"new encrypted output")?;
+    require(
+        fs::read(&output)? == b"new encrypted output"
+            && fs::metadata(output)?.file_attributes() & ENCRYPTED != 0,
+        "new output lost EFS directory inheritance",
     )
 }
 
@@ -2892,10 +3227,13 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                 require(
                     control & 0x10 != 0
                         && (control & 0x2000 != 0) == (policy == "S:P")
-                        && native[1] == "allocated"
+                        && matches!(native[1], "allocated" | "null")
                         && native[2] == "0",
-                    &format!("empty SACL fixture normalized to another native class: {before}"),
+                    &format!("empty SACL request produced an unsupported native class: {before}"),
                 )?;
+                // NTFS on the supported hosted image normalizes an explicitly
+                // initialized empty ACL to NULL. Preserve the actual snapshot
+                // exactly below; this is not allocated-empty filesystem proof.
             } else if policy == "S:NO_ACCESS_CONTROL" {
                 require(
                     control & 0x10 != 0 && native[1] == "null" && native[2] == "0",

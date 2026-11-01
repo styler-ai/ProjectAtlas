@@ -193,6 +193,62 @@ names. Controlled macOS CI covers APFS/APFSX and HFS+/HFSX with an opposite-case
 nested mount. Windows Unicode aliases remain a native proof lead, not a claimed fix;
 its fixtures must establish actual lookup behavior before changing classification.
 
+### Recognize Linux directory casefolding and preserve sealed outputs
+
+The Linux platform is not uniformly case-sensitive. Keep exact spellings fast;
+after the existing logical namespace proof, query a retained descriptor for the
+actual containing directory with locked rustix FS_IOC_GETFLAGS and fstatfs. Resolve
+existing physical prefixes and parent reductions first; missing child directories
+inherit the existing creation parent's casefold flag. Never query unrelated external
+parents or infer file-name equivalence from leaf inode equality.
+
+Mounted ext4 and f2fs currently accept only their Unicode 12.1 encoding identifier;
+their native casefold flag selects that model. Use a small ASCII-target projection
+derived from official UCD 12.1 canonical decomposition, full/default casefold and
+assigned default-ignorable deletion. It is not the APFS Unicode 9 or modern regex
+model. Keep its input provenance and an exhaustive independent UCD derivation.
+ASCII conversion, nineteen assigned-ignorable ranges and thirteen nonempty ASCII
+chunks suffice; every other scalar cannot match a fixed ASCII product name.
+Sensitive ext4/f2fs and unflagged btrfs/tmpfs retain distinct custom names; XFS's
+flagged ASCII model uses ASCII folding. Flagged tmpfs is currently treated as an
+unrecognized/parameterized model, not claimed sensitive. Current upstream ships
+only Unicode 12.1 tables; future table additions require comparison-profile and
+candidate-filter review. An unrecognized or parameterized model gives a
+causal ownership error only after a potential fixed-name candidate and namespace
+proof, never an external-writer downgrade. No all-filesystem claim is made.
+
+Apply the candidate and native predicates to database/sidecars, managed documents,
+host outputs, private-directory components and root aliases. Native disposable
+ext4/f2fs images prove folded and sensitive siblings, inherited flags, Unicode and
+custom hardlinks, reductions, outside-owner preservation and real CLI/MCP behavior.
+Other driver profiles require their own evidence; do not claim ext4 proves them.
+
+Linux replacement also refuses fs-verity-protected destinations through the retained
+no-follow source before creating a stage and during final source revalidation.
+Use rustix statx EMPTY_PATH with the VERITY support mask, falling back to GETFLAGS
+when the field/API is unavailable. A successful clear flag proves absence; a set
+flag refuses. Combined documented unsupported APIs establish unavailable fs-verity
+under the kernel contract: GETFLAGS exposes verity on the Linux 5.4 implementation,
+and statx exposes it since 5.5. Permission/I/O/other errors propagate, never absence.
+No filesystem whitelist, re-sealing, stale signature copying or privilege change.
+Native sealed-file controls prove the prior rename loses protection, unchanged
+source/outside hardlinks and no leaked stage on refusal, a late-seal recheck, and
+ordinary and custom-path positives. Local unsupported setup is not native proof.
+
+Primary sources: Linux fs/unicode/README.utf8data and mkutf8data.c;
+fs/ext4/super.c and fs/f2fs/super.c encoding maps; official Unicode 12.1 UCD;
+https://docs.kernel.org/filesystems/fsverity.html.
+The independent derivation checked every assigned scalar against the official
+UCD inputs, including canonical corrections and assigned default-ignorable
+deletion. SHA-256 provenance: CaseFolding.txt
+`9c772627c6ee77eea6a17b42927b8ee28ca05dc65d6a511062104baaf3d12294`,
+DerivedAge.txt `2fc081011d8fabaf7cf4937732dd5a6d6a57e492c43f3adfeded513387ee0ec3`,
+DerivedCoreProperties.txt
+`a6eb7a8671fb532fbd88c37fd7b20b5b2e7dbfc8b121f74c14abe2947db0da68`,
+UnicodeData.txt `93ab1acd8fd9d450463b50ae77eab151a7cda48f98b25b56baed8070f80fc936`.
+Canonical crates in the locked graph use other Unicode versions, so this tiny
+fixed-ASCII projection is a reviewed exception, not a replacement Unicode library.
+
 ### Preserve native access controls during replacement
 
 The shared publication boundary replaces a file object rather than truncating it.

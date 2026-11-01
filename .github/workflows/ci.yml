@@ -478,7 +478,15 @@ jobs:
         env:
           PROJECTATLAS_CI_PLATFORM: ${{ matrix.label }}
         run: |
+          run_managed_state_routes() {
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+            cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact
+          }
           cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
+          # Compile and exercise the real routes before moving test temporaries
+          # onto the small disposable filesystem images.
+          run_managed_state_routes
           if [ "$RUNNER_OS" = Linux ]; then
             # Build as the runner; elevate only the disposable native-label test.
             target_receipt="$RUNNER_TEMP/project-state-unit-target.jsonl"
@@ -494,13 +502,67 @@ jobs:
           PY
             )"
             sudo -n env TMPDIR="$RUNNER_TEMP" "$test_executable" --exact project_state::tests::replacement_preserves_linux_security_labels_without_optional_relabel_privilege --ignored --nocapture
+            # Disposable ext4 and f2fs prove both implemented Unicode profiles.
+            sudo -n apt-get update
+            sudo -n apt-get install --yes f2fs-tools
+            for native_filesystem in ext4 f2fs; do
+              image="$RUNNER_TEMP/project-state-native.$native_filesystem"
+              native_root="$RUNNER_TEMP/project-state-native-$native_filesystem"
+              mkdir "$native_root"
+              truncate -s 512M "$image"
+              if [ "$native_filesystem" = ext4 ]; then
+                mkfs.ext4 -q -F -O casefold,verity -E encoding=utf8-12.1 "$image"
+              else
+                mkfs.f2fs -q -f -O extra_attr,inode_checksum,flexible_inline_xattr,casefold,verity -C utf8 "$image"
+              fi
+              native_mounted=false
+              native_cleanup_failed=false
+              cleanup_native_state() {
+                if [ "$native_cleanup_failed" = true ]; then return 1; fi
+                if [ "$native_mounted" = true ]; then
+                  if ! sudo -n umount "$native_root"; then
+                    native_cleanup_failed=true
+                    findmnt -T "$native_root" || true
+                    sudo -n fuser -vm "$native_root" || true
+                    ps -axo pid,ppid,stat,command
+                    return 1
+                  fi
+                  native_mounted=false
+                fi
+                rm -f "$image"
+                rmdir "$native_root"
+              }
+              trap cleanup_native_state EXIT
+              sudo -n mount -o loop,nodev,nosuid "$image" "$native_root"
+              native_mounted=true
+              sudo -n chown "$(id -u):$(id -g)" "$native_root"
+              mkdir "$native_root/sensitive" "$native_root/casefold"
+              chattr +F "$native_root/casefold"
+              lsattr -d "$native_root/sensitive" "$native_root/casefold"
+              for native_mode in sensitive casefold; do
+                export TMPDIR="$native_root/$native_mode"
+                export PROJECTATLAS_TEST_NATIVE_VERITY=1
+                export PROJECTATLAS_TEST_CASE_SENSITIVE=true
+                if [ "$native_mode" = casefold ]; then
+                  export PROJECTATLAS_TEST_CASE_SENSITIVE=false
+                fi
+                "$test_executable" project_state:: --nocapture
+                "$test_executable" --exact project_state::tests::replacement_refuses_native_verity_and_late_sealing_without_leaking_stages --ignored --nocapture
+                run_managed_state_routes
+              done
+              export TMPDIR="$RUNNER_TEMP"
+              unset PROJECTATLAS_TEST_CASE_SENSITIVE
+              unset PROJECTATLAS_TEST_NATIVE_VERITY
+              cleanup_native_state
+              native_mounted=false
+              trap - EXIT
+            done
           elif [ "$RUNNER_OS" = macOS ]; then
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
+          elif [ "$RUNNER_OS" = Windows ]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture
           fi
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::init_admits_legacy_config_before_repairing_missing_root_identity -- --exact
-          cargo test --locked -p projectatlas-cli --test e2e_lifecycle automatic_state_admission_preserves_cli_mcp_navigation -- --exact
-          cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
-          cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact
           # The existing worktree-contract step covers the other three platforms.
           if [ "$PROJECTATLAS_CI_PLATFORM" = "macos-x64" ]; then
             cargo test --locked -p projectatlas-cli --test e2e_worktrees holistic_agent_worktree_flow_keeps_local_atlases_isolated_across_cli_watch_and_mcp -- --exact --include-ignored
@@ -523,20 +585,41 @@ jobs:
           volume="$fixture/volume"
           mounted=false
           nested_mounted=false
+          detach_failed=false
           nested="$volume/.projectatlas/bridge"
+          detach_native_volume() {
+            local target="$1"
+            local elevated="$2"
+            if [ "$elevated" = true ]; then
+              if sudo -n hdiutil detach "$target"; then return 0; fi
+            else
+              if hdiutil detach "$target"; then return 0; fi
+            fi
+            # Do not blindly retry a detach that may have partially unmounted
+            # its image. Preserve the failure and exact mount/holder evidence.
+            detach_failed=true
+            diskutil info "$target" || true
+            hdiutil info || true
+            mount
+            sudo -n lsof -nP +f -- "$target" || true
+            ps -axo pid,ppid,stat,command
+            return 1
+          }
           cleanup() {
             export TMPDIR="$original_tmpdir"
+            if [ "$detach_failed" = true ]; then return 1; fi
             if [ "$nested_mounted" = true ]; then
-              sudo -n hdiutil detach "$nested" || return
+              detach_native_volume "$nested" true || return
+              nested_mounted=false
             fi
             if [ "$mounted" = true ]; then
-              hdiutil detach "$volume" || return
+              detach_native_volume "$volume" false || return
+              mounted=false
             fi
             rm -rf "$fixture"
           }
           trap cleanup EXIT
           mkdir "$volume"
-          hdiutil create -help
           create_case_image() {
             local filesystem="$1"
             # APFSX is diskutil's personality; hdiutil uses this full name.
@@ -579,9 +662,9 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
             export TMPDIR="$original_tmpdir"
             unset PROJECTATLAS_TEST_NATIVE_ACCESS_ROOT
-            sudo -n hdiutil detach "$nested"
+            detach_native_volume "$nested" true
             nested_mounted=false
-            hdiutil detach "$volume"
+            detach_native_volume "$volume" false
             mounted=false
           done
 

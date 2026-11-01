@@ -131,6 +131,12 @@ is refused before creating the intermediate directory; a failed ownership check
 cannot silently select an external writer. Existing symlink parents retain their
 physical filesystem meaning, and custom external destinations remain supported.
 Missing managed legacy configuration is admitted before database identity repair.
+On Linux, managed aliases use the containing directory's native casefold flag and
+filesystem model. Ext4/f2fs use their frozen Unicode 12.1 comparison; sensitive
+directories retain distinct custom names. Potential fixed-name aliases on an
+unrecognized comparison model report ownership uncertainty before writes. This
+does not claim support for every Linux driver or mount-specific comparison mode.
+
 On macOS, managed case aliases follow the containing volume's case behavior,
 including Unicode case aliases. Distinct custom filenames on case-sensitive volumes
 remain supported. Unavailable case evidence for a possible managed alias causes a
@@ -155,6 +161,9 @@ causal refusal before valid output is replaced. Linux prepares changed policy an
 complete bytes on an unnamed inode. macOS isolates every existing-file replacement
 and binds ACL operations to retained descriptors; Windows policy updates use the
 original staging handle.
+Linux fs-verity-sealed outputs are refused before staging, and sealing is rechecked
+on the retained source before replacement. Ordinary regeneration remains available;
+ProjectAtlas does not silently replace a sealed inode with an unsealed file.
 Ordinary Windows outputs with no system ACL remain replaceable without additional
 privilege. Replacing explicitly labeled or audited files requires full policy
 access already available to the caller; otherwise it leaves valid output intact.

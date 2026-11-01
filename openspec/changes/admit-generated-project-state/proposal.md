@@ -25,6 +25,10 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
 - Recognize macOS filename and directory case aliases, including Unicode folding,
   from the actual destination volume; preserve distinct custom names on sensitive
   volumes and resolve missing-parent reductions across mount boundaries before writes.
+- Classify Linux fixed-name aliases using the actual containing directory's native
+  casefold flag and filesystem model. Match mounted ext4/f2fs Unicode 12.1 behavior,
+  preserve distinct sensitive-directory custom names, and refuse uncertain ownership
+  for potential aliases on unrecognized models before side effects.
 - Trace analogous producer/write/admission paths and prove positive compatibility,
   causal failures and real installed CLI/MCP behavior on supported platforms.
 - Preserve existing access-control lists when replacing an admitted generated host
@@ -36,6 +40,8 @@ This confirmed self-hosting/security-triage finding is required for RC1 as #741.
   policy on an anonymous stage before exposing a pathname. Protect macOS replacement
   stages from inherited ACL grants before opening payload data; retain normal
   direct-parent inheritance when creating genuinely new outputs.
+- Refuse replacement of fs-verity-sealed Linux outputs before staging and recheck
+  the retained source before publication; retain ordinary replacement and explicit paths.
 - Protect Windows replacement stages at creation from broader inherited access
   and implicit owner policy-changing rights. Later DACL tightening cannot revoke
   previously acquired handles; preserve retained creator rights and ordinary

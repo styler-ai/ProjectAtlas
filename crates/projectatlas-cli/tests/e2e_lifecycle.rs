@@ -5737,6 +5737,77 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
             }
             fs::write(&config, &original_config)?;
 
+            #[cfg(target_os = "linux")]
+            if std::env::var_os("PROJECTATLAS_TEST_NATIVE_VERITY").is_some() {
+                // Real CLI and persistent MCP must refuse sealed automatic
+                // documents; use the independent public ioctl fixture only here.
+                const SEAL: &str = r"
+import fcntl, struct, sys
+with open(sys.argv[1], 'rb') as source:
+    argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 0, 0, 0, 0, 0, 0, *([0]*11))
+    fcntl.ioctl(source, 0x40806685, argument)
+";
+                fs::remove_file(&sidecar)?;
+                fs::write(&sidecar, b"sealed map bytes")?;
+                for (sealed, outside) in [
+                    (&config, root.with_extension("sealed-config-owner")),
+                    (&sidecar, root.with_extension("sealed-map-owner")),
+                ] {
+                    fs::hard_link(sealed, &outside)?;
+                    let before = fs::read(sealed)?;
+                    let seal = std::process::Command::new("python3")
+                        .args(["-c", SEAL])
+                        .arg(sealed)
+                        .output()?;
+                    if !seal.status.success() {
+                        return Err(io::Error::other(format!(
+                            "native sealed CLI/MCP fixture failed: {seal:?}"
+                        ))
+                        .into());
+                    }
+                    let error = if sealed == &config {
+                        invoke(
+                            &executable,
+                            &root,
+                            mcp.then_some(&mut session),
+                            &[
+                                "ignore",
+                                "add",
+                                "--kind",
+                                "path-prefix",
+                                "sealed-control-path",
+                            ],
+                            "atlas_ignore_add",
+                            &json!({"kind":"path-prefix", "value":"sealed-control-path"}),
+                            true,
+                        )?
+                    } else {
+                        invoke(
+                            &executable,
+                            &root,
+                            mcp.then_some(&mut session),
+                            &["map", "--json", "--force"],
+                            "atlas_map",
+                            &json!({"project_path":root,"json":true,"force":true}),
+                            true,
+                        )?
+                    };
+                    if !error.contains("fs-verity")
+                        || fs::read(sealed)? != before
+                        || fs::read(&outside)? != before
+                    {
+                        return Err(io::Error::other(format!(
+                            "sealed CLI/MCP refusal changed output: {error}"
+                        ))
+                        .into());
+                    }
+                }
+                // Continue the same positive workflow with fresh ordinary entries.
+                fs::remove_file(&config)?;
+                fs::write(&config, &original_config)?;
+                fs::remove_file(&sidecar)?;
+            }
+
             // A volume alias is managed; a separate case-sensitive name keeps
             // its intentional custom writer, even when both names share an inode.
             for config_name in [
