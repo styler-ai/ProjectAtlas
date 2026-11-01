@@ -67,6 +67,7 @@ destinations SHALL be refused without outside-owner side effects.
 - **THEN** ACL reads and writes remain bound to the retained original descriptor/handle and preserve the foreign object's native policy and bytes
 - **AND** metadata preservation does not reopen a mutable project pathname or fall back to a following setter; ordinary same-owner Windows regeneration does not demand unused take-ownership rights
 - **AND** Windows releases its destination snapshot only after the final identity/policy checks so the retained query handles do not prevent normal atomic replacement
+- **AND** Windows publication renames the retained stage handle, preserves no-clobber collisions and never cleans a substituted former stage name after success
 
 #### Scenario: Windows system access policy survives replacement
 - **WHEN** an existing generated output has Windows integrity, audit or other SACL policy

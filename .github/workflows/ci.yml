@@ -699,11 +699,11 @@ jobs:
             export TMPDIR="$original_tmpdir"
             if [ "$detach_failed" = true ]; then return 1; fi
             if [ "$nested_mounted" = true ]; then
-              detach_native_volume "$nested" true "$nested_image" "$nested_receipt" || return
+              detach_native_volume "$nested" true "$nested_image" "$nested_receipt" || return 1
               nested_mounted=false
             fi
             if [ "$mounted" = true ]; then
-              detach_native_volume "$volume" false "$image" "$volume_receipt" || return
+              detach_native_volume "$volume" false "$image" "$volume_receipt" || return 1
               mounted=false
             fi
             rm -rf "$fixture"
@@ -1278,7 +1278,10 @@ jobs:
               foreach ($systemAccess in @($false, $true)) {
                 [SystemPolicyFixture]::Enable($systemAccess)
                 $policies = if ($systemAccess) {
-                  @('', 'S:P(AU;SAFA;FW;;;WD)', 'S:P(ML;;NW;;;HI)', 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)', 'S:', 'S:NO_ACCESS_CONTROL')
+                  @('', 'S:P(AU;SAFA;FW;;;WD)', 'S:P(ML;;NW;;;HI)', 'S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)', 'S:', 'S:NO_ACCESS_CONTROL',
+                    'S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))',
+                    'S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)',
+                    'S:P(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)')
                 } else { @('') }
                 foreach ($policy in $policies) {
                   foreach ($protectedSource in @($false, $true)) {

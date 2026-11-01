@@ -21,6 +21,10 @@ mod macos_acl;
 #[path = "project_state_windows_security.rs"]
 mod windows_security;
 
+#[cfg(windows)]
+#[path = "project_state_windows.rs"]
+mod windows_publication;
+
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";
 /// Automatic SQLite filename whose aliases must be checked before opening SQLite.
@@ -616,12 +620,31 @@ impl ProjectStateGuard {
             if let Err(source) = prepared {
                 return Err(self.staging_failure(&mut temporary, source, &staging_identity));
             }
-            // MoveFileEx replacement refuses a destination with our retained
+            // Windows replacement refuses a destination with our retained
             // READ_CONTROL snapshot open, even with delete sharing. Keep every
             // snapshot through the final identity/policy check, then release all
             // of its file/identity handles before the Windows rename boundary.
             #[cfg(windows)]
             drop(access);
+            #[cfg(windows)]
+            let result: Result<fs::File, tempfile::PersistError> =
+                match windows_publication::publish(
+                    temporary.as_file(),
+                    path,
+                    matches!(publication, FilePublication::Replace),
+                ) {
+                    Ok(()) => {
+                        // The old temporary name is no longer ours. Never let its
+                        // destructor remove a foreign entry substituted there.
+                        temporary.disable_cleanup(true);
+                        return Ok(true);
+                    }
+                    Err(error) => Err(tempfile::PersistError {
+                        error,
+                        file: temporary,
+                    }),
+                };
+            #[cfg(not(windows))]
             let result = match publication {
                 FilePublication::Create => temporary.persist_noclobber(path),
                 FilePublication::Replace => temporary.persist(path),
@@ -1011,7 +1034,8 @@ fn create_windows_staging_file(
 ) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_permissions::constants::AccessRights;
-    let mut rights = (AccessRights::GenericRead | AccessRights::GenericWrite).bits();
+    let mut rights =
+        (AccessRights::GenericRead | AccessRights::GenericWrite | AccessRights::Delete).bits();
     if replacing {
         // Capture optional ownership rights if granted, without requiring
         // WRITE_OWNER for ordinary same-owner replacements. The payload is a

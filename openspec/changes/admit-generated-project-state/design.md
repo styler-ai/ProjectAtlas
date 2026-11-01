@@ -89,6 +89,17 @@ directory or file identity changes, using the existing typed retention error. Ke
 the same bounded final-check guarantee, without claiming an atomic adversarial race
 barrier. Cover both normal-publication and controlled-failure substitutions.
 
+On Windows, bind the rename itself to that retained stage object using the
+canonical SDK `SetFileInformationByHandle` / `FILE_RENAME_INFO` boundary, with
+the original handle acquiring DELETE at creation. Preserve both replacement and
+no-clobber semantics. A successful rename disables cleanup of the former temporary
+name; a failed rename retains the existing identity-checked cleanup path. Check
+the variable UTF-16 buffer size and use SDK-aligned storage, without introducing
+a second path resolver or claiming an atomic destination-directory race barrier.
+Native causal coverage exchanges the old stage name for a foreign file and proves
+that no-clobber preserves the destination, replacement publishes the held object,
+and neither operation changes the foreign entry.
+
 ### Manual helpers share exact automatic document ownership
 
 Actual installed 0.5.0 CLI and MCP tests confirm that `ignore add` follows a dangling
@@ -313,7 +324,8 @@ safe windows-permissions dependency, which retains bitflags 1; the dependency ba
 exception is exact and justified by safe handle/OsStr compatibility. Alternatives
 using in-place writes violate hardlink/atomicity guarantees; a common ReplaceFile
 wrapper accepts only str paths and has different partial-publication failures.
-Apart from the isolated macOS descriptor ACL and Windows descriptor/empty-ACL exceptions
+Apart from the isolated macOS descriptor ACL, Windows descriptor/empty-ACL and
+retained Windows rename exceptions
 below, no project unsafe code, shell runtime dependency, global ACL change, or blanket ban
 on regeneration is introduced. Native failures keep the old valid output; do not
 fall back to a publication that drops access controls. All platform-specific proof

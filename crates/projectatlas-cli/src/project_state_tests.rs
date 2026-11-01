@@ -2663,6 +2663,7 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control, out uint revision);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor, out bool present, out IntPtr sacl, out bool defaulted);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetAclInformation(IntPtr acl, out AclSize size, uint length, uint information);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetAce(IntPtr acl, uint index, out IntPtr ace);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool InitializeAcl(IntPtr acl, uint length, uint revision);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, out bool present, out IntPtr dacl, out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
@@ -2705,6 +2706,10 @@ public static class SystemPolicyFixture {
           sacl=empty;
         }
         uint flags=0x18u | ((control & 0x2000) != 0 ? 0x40000000u : 0x10000000u);
+        // Extended fixture setup explicitly selects each requested ACE class;
+        // production's combined SACL/LABEL query remains the subject of proof.
+        if (replacement.Contains("(RA;")) flags |= 0x20u;
+        if (replacement.Contains("(SP;")) flags |= 0x40u;
         uint error=SetNamedSecurityInfo(path, 1, flags, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
         if (error != 0) throw new Win32Exception((int)error);
         LocalFree(descriptor); descriptor=IntPtr.Zero;
@@ -2773,7 +2778,7 @@ public static class SystemPolicyFixture {
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetSecurityDescriptorControl(IntPtr descriptor, ushort interest, ushort value);
   [StructLayout(LayoutKind.Sequential)] struct FileDisposition { public byte Delete; }
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetFileInformationByHandle(IntPtr file, uint kind, ref FileDisposition information, uint size);
-  static string DescriptorImage(IntPtr descriptor, uint information, bool ignoreProtection) {
+  static string DescriptorImage(IntPtr descriptor, uint information, bool ignoreProtection, bool ignoreSystemInheritance=false) {
     ushort control; uint revision,length; IntPtr text=IntPtr.Zero;
     if (!GetSecurityDescriptorControl(descriptor,out control,out revision)) throw new Win32Exception();
     if (revision != 1) throw new Exception("Unexpected descriptor revision");
@@ -2790,7 +2795,18 @@ public static class SystemPolicyFixture {
         if (ignoreProtection) header=header.Replace("P","");
         image=image.Substring(0,start)+header+image.Substring(end);
       }
+      // This diagnostic comparison may ignore only the SACL's inheritance
+      // bookkeeping, never its ACEs, presence, NULL state or protection.
+      if (ignoreSystemInheritance) {
+        start=image.IndexOf("S:",StringComparison.Ordinal);
+        if (start >= 0) {
+          start+=2; int end=image.IndexOf('(',start);
+          if (end < 0) end=image.Length;
+          image=image.Substring(0,start)+image.Substring(start,end-start).Replace("AI","")+image.Substring(end);
+        }
+      }
       uint mask=0x3f3fu & ~0x400u & (ignoreProtection ? ~0x1000u : uint.MaxValue);
+      if (ignoreSystemInheritance) mask &= ~0x800u;
       return (control & mask).ToString("x")+"|"+image;
     } finally { if (text != IntPtr.Zero) LocalFree(text); }
   }
@@ -2805,6 +2821,60 @@ public static class SystemPolicyFixture {
     uint result=GetNamedSecurityInfo(path,1,information,out owner,out group,out dacl,out sacl,out descriptor);
     if (result != 0) throw new Win32Exception((int)result);
     return descriptor;
+  }
+  // Independent fixture oracle: compare the native opaque ACL bytes, including
+  // resource-attribute payloads and scoped-policy SIDs, without an ACE parser.
+  static string NativeSystemImage(IntPtr descriptor, bool ignoreAutoInherited=false) {
+    ushort control; uint revision; bool present,defaulted; IntPtr acl;
+    if (!GetSecurityDescriptorControl(descriptor,out control,out revision) || revision != 1) throw new Win32Exception();
+    if (!GetSecurityDescriptorSacl(descriptor,out present,out acl,out defaulted)) throw new Win32Exception();
+    string image=!present ? "absent" : acl == IntPtr.Zero ? "null" : "allocated";
+    if (present && acl != IntPtr.Zero) {
+      AclSize size;
+      if (!GetAclInformation(acl,out size,(uint)Marshal.SizeOf(typeof(AclSize)),2)) throw new Win32Exception();
+      byte[] bytes=new byte[checked((int)size.Used)];
+      Marshal.Copy(acl,bytes,0,bytes.Length);
+      image+="|"+Convert.ToHexString(bytes);
+    }
+    uint mask=ignoreAutoInherited ? 0x2230u : 0x2a30u;
+    return (control & mask).ToString("x")+"|"+image;
+  }
+  static void RequireNativeAceClass(IntPtr descriptor, byte required) {
+    bool present,defaulted; IntPtr acl;
+    if (!GetSecurityDescriptorSacl(descriptor,out present,out acl,out defaulted)) throw new Win32Exception();
+    if (!present || acl == IntPtr.Zero) throw new Exception("Extended fixture has no native SACL");
+    AclSize size;
+    if (!GetAclInformation(acl,out size,(uint)Marshal.SizeOf(typeof(AclSize)),2)) throw new Win32Exception();
+    for (uint index=0; index<size.Count; index++) {
+      IntPtr ace;
+      if (!GetAce(acl,index,out ace)) throw new Win32Exception();
+      // ACE_HEADER.AceType is the SDK-returned header's first byte. The
+      // fixture inspects no variable ACE or claim layout.
+      if (Marshal.ReadByte(ace) == required) return;
+    }
+    throw new Exception("Extended fixture did not install requested native ACE type="+required);
+  }
+  static void VerifyExtendedPolicy(IntPtr descriptor, string path, uint information, string requested) {
+    IntPtr complete=IntPtr.Zero,text=IntPtr.Zero,decoded=IntPtr.Zero,reference=IntPtr.Zero; uint length;
+    try {
+      complete=NamedDescriptor(path,0x78u);
+      if (requested.Contains("(RA;")) RequireNativeAceClass(complete,0x12);
+      if (requested.Contains("(SP;")) RequireNativeAceClass(complete,0x13);
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptor(requested,1,out reference,out length)) throw new Win32Exception();
+      // Creation may set AI. Every other control and the exact native ACE
+      // bytes/order must match the independent requested-policy descriptor.
+      if (NativeSystemImage(reference,true) != NativeSystemImage(complete,true)) throw new Exception("Extended fixture native policy differs from requested payload");
+      string expected=NativeSystemImage(complete);
+      if (NativeSystemImage(descriptor) != expected) throw new Exception("Combined SACL/LABEL query omitted native extended policy");
+      if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor,1,information,out text,out length)) throw new Win32Exception();
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptor(Marshal.PtrToStringUni(text),1,out decoded,out length)) throw new Win32Exception();
+      if (NativeSystemImage(decoded) != expected) throw new Exception("Native extended policy changed through SDDL codec");
+    } finally {
+      if (decoded != IntPtr.Zero) LocalFree(decoded);
+      if (reference != IntPtr.Zero) LocalFree(reference);
+      if (text != IntPtr.Zero) LocalFree(text);
+      if (complete != IntPtr.Zero) LocalFree(complete);
+    }
   }
   public static string SourceDescriptorControl(string root, bool protectedSource, bool widerParent, bool movedSource, bool systemAccess, string systemPolicy) {
     string preparation=System.IO.Path.Combine(root,"preparation"), parent=System.IO.Path.Combine(root,"publication");
@@ -2822,11 +2892,16 @@ public static class SystemPolicyFixture {
       if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
       uint information=7u | (systemAccess ? 24u : 16u);
       sourceDescriptor=NamedDescriptor(destination,information);
+      bool extended=systemPolicy.Contains("(RA;") || systemPolicy.Contains("(SP;");
+      if (extended) {
+        phase="verify native extended-policy query and codec";
+        VerifyExtendedPolicy(sourceDescriptor,destination,information,systemPolicy);
+      }
       parentDescriptor=NamedDescriptor(parent,information);
       ushort sourceControl; uint revision;
       if (!GetSecurityDescriptorControl(sourceDescriptor,out sourceControl,out revision)) throw new Win32Exception();
       if (!systemAccess && (sourceControl & 0x10) != 0) return "refused hidden source SACL before creation";
-      string expected=DescriptorImage(sourceDescriptor,information,false), initialExpected=DescriptorImage(sourceDescriptor,information,true);
+      string expected=DescriptorImage(sourceDescriptor,information,false), initialExpected=DescriptorImage(sourceDescriptor,information,true,true);
       observations="moved-source="+movedSource+";source="+expected;
       phase="preview native inheritance";
       if (!OpenProcessToken(GetCurrentProcess(),0xau,out token)) throw new Win32Exception();
@@ -2834,14 +2909,14 @@ public static class SystemPolicyFixture {
       if (!CreatePrivateObjectSecurityEx(parentDescriptor,sourceDescriptor,out preview,IntPtr.Zero,false,3u,token,ref mapping)) throw new Win32Exception();
       string predicted=DescriptorImage(preview,information,false);
       observations+=";preview="+predicted;
-      if (predicted != expected) return "refused differing inheritance before creation;"+observations;
+      if (DescriptorImage(preview,information,false,true) != DescriptorImage(sourceDescriptor,information,false,true)) return "refused differing inheritance before creation;"+observations;
       // Protection at creation prevents parent ACEs from granting a capability
       // before readback. Restore it only after the independent preview matches.
       phase="protect creation descriptor";
       if (!SetSecurityDescriptorControl(sourceDescriptor,0x1000,0x1000)) throw new Win32Exception();
       SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor=sourceDescriptor, Inherit=false };
       phase="create original data/security/delete handle";
-      raw=CreateFile(stage,0xc0070000u | (systemAccess ? 0x01000000u : 0u),7,ref security,1,0x00200080,IntPtr.Zero);
+      raw=CreateFile(stage,0xc2070000u | (systemAccess ? 0x01000000u : 0u),4,ref security,1,0x00200080,IntPtr.Zero);
       if (raw == new IntPtr(-1)) throw new Win32Exception();
       ObjectBasicInformation basic; uint returned;
       uint size=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
@@ -2849,8 +2924,11 @@ public static class SystemPolicyFixture {
       observations+=";granted="+basic.GrantedAccess.ToString("x");
       if ((basic.GrantedAccess & 0x00070003u) != 0x00070003u) throw new Exception("Creator lacks required data/security/delete rights");
       stageDescriptor=HeldDescriptor(raw,information);
-      string initial=DescriptorImage(stageDescriptor,information,true);
-      observations+=";initial="+initial;
+      ushort initialControl; uint initialRevision;
+      if (!GetSecurityDescriptorControl(stageDescriptor,out initialControl,out initialRevision) || initialRevision != 1) throw new Win32Exception();
+      if ((initialControl & 0x1000) == 0) throw new Exception("Creation did not retain protected DACL");
+      string initial=DescriptorImage(stageDescriptor,information,true,true);
+      observations+=";initial="+DescriptorImage(stageDescriptor,information,false);
       if (initial != initialExpected) return "refused initial policy before payload;"+observations;
       LocalFree(stageDescriptor);stageDescriptor=IntPtr.Zero;
       if (!protectedSource) {
@@ -2860,10 +2938,25 @@ public static class SystemPolicyFixture {
         uint result=SetSecurityInfo(raw,1,0x20000004u,IntPtr.Zero,IntPtr.Zero,acl,IntPtr.Zero);
         if (result != 0) throw new Win32Exception((int)result);
       }
+      if (systemAccess && (sourceControl & 0x10) != 0) {
+        bool present,defaulted; IntPtr acl,empty=IntPtr.Zero;
+        if (!GetSecurityDescriptorSacl(sourceDescriptor,out present,out acl,out defaulted) || !present) throw new Win32Exception();
+        try {
+          if (acl == IntPtr.Zero && (sourceControl & 0x2000) == 0) {
+            empty=Marshal.AllocHGlobal(8);
+            if (!InitializeAcl(empty,8,2)) throw new Win32Exception();
+            acl=empty;
+          }
+          phase="restore exact system inheritance through original handle";
+          uint result=SetSecurityInfo(raw,1,24u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
+          if (result != 0) throw new Win32Exception((int)result);
+        } finally { if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty); }
+      }
       stageDescriptor=HeldDescriptor(raw,information);
       string restored=DescriptorImage(stageDescriptor,information,false);
       observations+=";restored="+restored;
       if (restored != expected) return "refused final policy before payload;"+observations;
+      if (extended && NativeSystemImage(stageDescriptor) != NativeSystemImage(sourceDescriptor)) throw new Exception("Extended policy setter changed opaque native ACL bytes");
       LocalFree(stageDescriptor);stageDescriptor=IntPtr.Zero;
       phase="creator payload and publication";
       using (var borrowed=new Microsoft.Win32.SafeHandles.SafeFileHandle(raw,false))
@@ -2873,7 +2966,14 @@ public static class SystemPolicyFixture {
       }
       if (!MoveFileEx(stage,destination,1)) throw new Win32Exception();
       published=true;
+      // File.ReadAllText does not share a writer. Release our successful
+      // publication handle before independently opening the resulting name.
+      CloseHandle(raw);raw=new IntPtr(-1);
       if (System.IO.File.ReadAllText(destination) != "verified source-descriptor payload") throw new Exception("Published payload differs");
+      if (extended) {
+        stageDescriptor=NamedDescriptor(destination,0x78u);
+        if (NativeSystemImage(stageDescriptor) != NativeSystemImage(sourceDescriptor)) throw new Exception("Publication changed opaque native extended policy");
+      }
       return "source descriptor creation/publication PASS;"+observations;
     } catch (Exception error) { throw new Exception("Source descriptor phase: "+phase+";"+observations,error); }
     finally {
@@ -3295,7 +3395,10 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
     // directory attribute and does not recurse without /s.
     let encrypted_directory = std::process::Command::new("cipher.exe")
         .arg("/e")
-        .arg(&guard.directory)
+        // cipher's drive parser rejects canonical \\?\ paths. Select this
+        // disposable directory as cwd instead of rewriting filesystem paths.
+        .current_dir(&guard.directory)
+        .arg(".")
         .output()?;
     require(
         encrypted_directory.status.success()
@@ -3941,6 +4044,61 @@ fn windows_same_owner_replacement_does_not_require_take_ownership() -> io::Resul
         fs::read(&output)? == b"replacement" && windows_acl(&output, None)? == acl,
         "same-owner regeneration required take-ownership rights or changed policy",
     )
+}
+
+#[cfg(windows)]
+#[test]
+fn readonly_destination_is_preserved_or_natively_refused() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().canonicalize()?;
+    let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
+    guard.ensure_directory()?;
+    let output = guard.directory.join(HOST_FILES[0]);
+    let outside = root.join("outside-owner");
+    fs::write(&output, b"previous readonly output")?;
+    fs::hard_link(&output, &outside)?;
+    let mut permissions = fs::metadata(&output)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&output, permissions)?;
+    let acl = windows_acl(&output, None)?;
+    let result = guard.write_generated(&output, b"replacement");
+    let replaced = match &result {
+        Ok(()) => true,
+        Err(source) => {
+            require(
+                source.kind() == io::ErrorKind::PermissionDenied
+                    && native_io_error_code(source) == Some(5),
+                &format!(
+                    "readonly replacement failed outside the native access boundary: {result:?}"
+                ),
+            )?;
+            false
+        }
+    };
+    require(
+        fs::read(&output)?
+            == if replaced {
+                b"replacement".as_slice()
+            } else {
+                b"previous readonly output".as_slice()
+            }
+            && fs::metadata(&output)?.permissions().readonly()
+            && windows_acl(&output, None)? == acl
+            && fs::read(&outside)? == b"previous readonly output"
+            && fs::metadata(&outside)?.permissions().readonly()
+            && fs::read_dir(&guard.directory)?.count() == 1,
+        &format!("readonly publication changed protected policy or cleanup: {result:?}"),
+    )?;
+    for path in [&output, &outside] {
+        let mut permissions = fs::metadata(path)?.permissions();
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "Restore only verified disposable readonly fixture objects"
+        )]
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

@@ -83,7 +83,9 @@ require dependency gates and native behavior proof before acceptance. Anonymous
 Linux staging and non-following source snapshots reuse the already locked rustix
 safe filesystem APIs; macOS also uses its effective-user-ID accessor.
 Windows uses the already locked official windows-sys 0.61.2 for canonical security
-getters, SDK empty-ACL initialization and encrypted-file metadata constants.
+getters, SDK empty-ACL initialization, encrypted-file metadata constants and a
+narrow retained-handle rename binding. The latter prevents final publication from
+resolving an exchanged temporary name while preserving no-clobber behavior.
 
 Windows SACL preservation requires a second narrowly reviewed native getter:
 GetSecurityDescriptorControl, missing from the canonical safe wrapper. Preserve
