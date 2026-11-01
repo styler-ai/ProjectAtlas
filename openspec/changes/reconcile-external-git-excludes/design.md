@@ -75,6 +75,22 @@ Native callback filtering drops only proven unrelated immediate children of sele
 
 Replacing the selected source directory at the same pathname can also leave its recursive registration on the retired object, especially with an external database that survives the replacement. Retain structural uncertainty until the cold owner rebinds recursive coverage under the original work control, before exact source sampling; never add an unconditional warm-read rewatch. In the source-observation adapter, publish that uncertainty under the same receiver fence as the event and ingress sequence so final acceptance cannot acknowledge an empty queue while a rebind marker has already become visible. Ordinary access events without rescan retain their existing ignored behavior before any marker mutation; notify errors and genuine rescan/overflow still invalidate continuity. Add a deterministic callback/fence negative control and permanent CLI/MCP replacement proof with external database/config, unchanged project identity and all approved purposes, updated source results and no accidental conventional database creation. Existing root/config and registered-worktree lifecycle admission remain authoritative; this does not authorize bypassing an identity refusal or adopting a different root.
 
+Continuous CLI batch classification must not require the captured root to exist
+before the existing debounce window settles a supported replacement. An affecting
+child or root event can arrive while the old directory has been renamed and the
+prepared replacement has not yet taken its pathname. Treat only an exact-root
+RootNotDirectory or exact-root canonicalization NotFound/NotADirectory as full-scan
+uncertainty and retain recursive-rebind state; unrelated policy, parser and I/O
+failures still propagate. Once full reconciliation is required, keep draining
+native results under the original debounce, preserving notification errors,
+disconnection and overflow, without classifying redundant path/document sets.
+The existing plan reload, native rebind and fresh reconciliation remain authoritative
+after settling: a persistently absent/file root still fails without publication.
+Do not add a retry budget, suppress initial or one-shot root admission, or weaken
+root/lifecycle/DB binding. Exercise the actual batch helper causally, including
+child-before-root ordering, ordinary/non-regular policy and native-error controls;
+the standalone test helper's fallback must not mask the production failure.
+
 Policy-only proof includes absent-document classification with an unchanged source inventory: no source-node delta is not evidence that document admission/reasons are unchanged. Reproduce any mismatch through real CLI/MCP before choosing a repair, then reuse the existing bounded reconciliation/projection owner rather than hashing every external edit into an unconditional all-source reparse. Preserve last-valid state on failed observation/reconciliation.
 
 Selected external configuration and excludes must be repeatable file inputs. Reject unsupported non-regular inputs promptly under existing typed failure semantics while retaining regular files and symlinks to regular files. Unix config opens avoid waiting on a FIFO replaced between metadata and open; do not claim hard kernel-I/O preemption or universal adversarial race freedom from cooperative controls. Cover failure and positive operator workflows before declaring the guard complete.

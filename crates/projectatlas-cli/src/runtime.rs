@@ -8194,6 +8194,7 @@ pub(crate) fn run_notify_watch_loop(
             &current_plan.scan_options,
             &continuity_lost,
             &policy_inputs,
+            &policy_selection,
         )?;
         changes.requires_full_scan |= policy_selection.recursive_rebind_pending();
         if changes.has_changes() {
@@ -8237,6 +8238,7 @@ fn wait_for_index_event_with_continuity(
     scan_options: &ScanOptions,
     continuity_lost: &AtomicBool,
     policy_inputs: &policy_watch::PolicyWatchInputs,
+    policy_selection: &policy_watch::PolicyWatchSelection,
 ) -> Result<WatchChangeSet, CliError> {
     let first = receiver
         .recv()
@@ -8249,7 +8251,34 @@ fn wait_for_index_event_with_continuity(
             return Ok(WatchChangeSet::default());
         }
         if policy.is_none() {
-            policy = Some(RootScanPolicy::discover(root, scan_options, &control)?);
+            match RootScanPolicy::discover(root, scan_options, &control) {
+                Ok(selected) => policy = Some(selected),
+                Err(error) => {
+                    let root_unavailable = match &error {
+                        FsError::RootNotDirectory(path) => path.as_path() == root,
+                        FsError::Io { path, source } => {
+                            path.as_path() == root
+                                && matches!(
+                                    source.kind(),
+                                    std::io::ErrorKind::NotFound
+                                        | std::io::ErrorKind::NotADirectory
+                                )
+                        }
+                        _ => false,
+                    };
+                    if !root_unavailable {
+                        return Err(CliError::from(error));
+                    }
+                    // Replacement can briefly remove the selected pathname.
+                    // Keep uncertainty until the existing debounce has drained;
+                    // reload/rebind still validate the settled root before refresh.
+                    policy_selection.require_recursive_rebind();
+                    return Ok(WatchChangeSet {
+                        requires_full_scan: true,
+                        ..WatchChangeSet::default()
+                    });
+                }
+            }
         }
         let mut changes = if let Some(policy) = &policy {
             notify_event_changes_with_policy(root, scan_options, event, policy)?
@@ -8264,7 +8293,11 @@ fn wait_for_index_event_with_continuity(
         match receiver.recv_timeout(debounce) {
             Ok(result) => {
                 let event = result.map_err(|source| CliError::Watcher(source.to_string()))?;
-                changes.merge(classify(&event)?);
+                if !changes.requires_full_scan {
+                    // Full reconciliation owns all paths and document outcomes.
+                    // Still drain native errors and preserve the original debounce.
+                    changes.merge(classify(&event)?);
+                }
             }
             Err(RecvTimeoutError::Timeout) => break,
             Err(RecvTimeoutError::Disconnected) => {
@@ -14613,6 +14646,178 @@ nonsource_files_path = ".projectatlas/projectatlas-nonsource-files.toon"
             "fallback preserves approved purpose",
         )?;
         verify_index_freshness(&store, root, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn watcher_root_gap_retains_full_scan_and_recursive_coverage() -> Result<(), Box<dyn Error>> {
+        for child_first in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("source-root");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            let selection = policy_watch::PolicyWatchSelection::new(root.clone());
+            fs::rename(&root, temp.path().join("retired-root"))?;
+            let (sender, receiver) = mpsc::sync_channel(4);
+            let path = if child_first {
+                root.join("source.rs")
+            } else {
+                root.clone()
+            };
+            sender.send(Ok(Event::new(EventKind::Modify(
+                notify::event::ModifyKind::Data(notify::event::DataChange::Any),
+            ))
+            .add_path(path)))?;
+            sender.send(Ok(Event::new(EventKind::Create(
+                notify::event::CreateKind::File,
+            ))
+            .add_path(root.join("later.rs"))))?;
+            let continuity_lost = AtomicBool::new(true);
+            let changes = wait_for_index_event_with_continuity(
+                &receiver,
+                &root,
+                Duration::ZERO,
+                &ScanOptions::default(),
+                &continuity_lost,
+                &policy_watch::PolicyWatchInputs::default(),
+                &selection,
+            )?;
+            require_eq(
+                &changes.requires_full_scan,
+                &true,
+                "root gap remains uncertain",
+            )?;
+            require_eq(
+                &selection.recursive_rebind_pending(),
+                &true,
+                "root absence invalidates recursive coverage",
+            )?;
+            require_eq(
+                &continuity_lost.load(Ordering::Acquire),
+                &false,
+                "overflow is consumed into full verification",
+            )?;
+            require_eq(
+                &matches!(
+                    RootScanPolicy::discover(
+                        &root,
+                        &ScanOptions::default(),
+                        &standalone_index_work_control(),
+                    ),
+                    Err(FsError::RootNotDirectory(_))
+                ),
+                &true,
+                "persistent root absence is still refused by reconciliation policy",
+            )?;
+            fs::create_dir(&root)?;
+            RootScanPolicy::discover(
+                &root,
+                &ScanOptions::default(),
+                &standalone_index_work_control(),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn watcher_root_gap_keeps_native_error_and_disconnect_failures() -> Result<(), Box<dyn Error>> {
+        for native_error in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().join("source-root");
+            fs::create_dir(&root)?;
+            let root = root.canonicalize()?;
+            fs::rename(&root, temp.path().join("retired-root"))?;
+            let (sender, receiver) = mpsc::sync_channel(4);
+            sender.send(Ok(Event::new(EventKind::Remove(
+                notify::event::RemoveKind::Folder,
+            ))
+            .add_path(root.clone())))?;
+            if native_error {
+                sender.send(Err(notify::Error::generic("fixture native failure")))?;
+            }
+            drop(sender);
+            require_eq(
+                &matches!(
+                    wait_for_index_event_with_continuity(
+                        &receiver,
+                        &root,
+                        Duration::ZERO,
+                        &ScanOptions::default(),
+                        &AtomicBool::new(false),
+                        &policy_watch::PolicyWatchInputs::default(),
+                        &policy_watch::PolicyWatchSelection::new(root.clone()),
+                    ),
+                    Err(CliError::Watcher(_))
+                ),
+                &true,
+                "root uncertainty hid a native error or disconnected channel",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn watcher_policy_errors_remain_distinct_from_root_replacement() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let input = root.join(".ignore");
+        fs::create_dir(&input)?;
+        let selection = policy_watch::PolicyWatchSelection::new(root.clone());
+        let options = ScanOptions::default();
+        let inputs = policy_watch::PolicyWatchInputs::default();
+        let continuity = AtomicBool::new(false);
+        let (sender, receiver) = mpsc::sync_channel(2);
+        sender.send(Ok(Event::new(EventKind::Create(
+            notify::event::CreateKind::File,
+        ))
+        .add_path(root.join("source.rs"))))?;
+        require_eq(
+            &matches!(
+                wait_for_index_event_with_continuity(
+                    &receiver,
+                    &root,
+                    Duration::ZERO,
+                    &options,
+                    &continuity,
+                    &inputs,
+                    &selection,
+                ),
+                Err(CliError::Fs(FsError::Io { source, .. }))
+                    if source.kind() == io::ErrorKind::InvalidInput
+            ),
+            &true,
+            "non-regular policy was treated as a temporary root gap",
+        )?;
+        require_eq(
+            &selection.recursive_rebind_pending(),
+            &false,
+            "policy failure changed root coverage",
+        )?;
+        fs::remove_dir(&input)?;
+        fs::write(&input, "")?;
+        sender.send(Ok(Event::new(EventKind::Create(
+            notify::event::CreateKind::File,
+        ))
+        .add_path(root.join("source.rs"))))?;
+        let changes = wait_for_index_event_with_continuity(
+            &receiver,
+            &root,
+            Duration::ZERO,
+            &options,
+            &continuity,
+            &inputs,
+            &selection,
+        )?;
+        require_eq(
+            &changes.requires_full_scan,
+            &false,
+            "ordinary file admission",
+        )?;
+        require_eq(
+            &changes.paths.contains(&root.join("source.rs")),
+            &true,
+            "regular policy no longer admits the source event",
+        )?;
         Ok(())
     }
 

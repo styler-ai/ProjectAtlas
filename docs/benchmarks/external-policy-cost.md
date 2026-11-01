@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 348,664 bytes (0.50%) to the optimized
+The derivation-25 policy repair adds 349,704 bytes (0.50%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -53,6 +53,8 @@ rerun. The helper
 relinked from the final source is byte-identical to that measured helper; the
 CLI measurements, upgrade cases and public CLI/MCP scenarios were rerun against
 the final CLI binary. Its identity and source manifest are in the compact result.
+The watch-gap repair retains uncertainty through batch settling; the CLI samples,
+upgrade cases and public scenarios use its rebuilt binary.
 Component timings use canonical roots; separate regressions cover lexical aliases,
 relative root selection and selected symlink roots without claiming alias timings.
 
@@ -66,9 +68,9 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 293.0 → 292.1 | 48.6 → 48.9 | 31,428 → 30,636 | 20,616 → 20,240 |
-| Large config | 296.3 → 297.9 | 49.1 → 53.8 | 31,696 → 33,352 | 20,500 → 23,384 |
-| 10,000 rules | 372.0 → 379.3 | 70.3 → 97.9 | 43,908 → 41,708 | 31,744 → 32,624 |
+| Ordinary | 289.6 → 294.6 | 49.5 → 48.1 | 32,376 → 30,408 | 21,860 → 20,620 |
+| Large config | 295.2 → 301.3 | 48.7 → 53.5 | 32,772 → 33,044 | 21,708 → 23,116 |
+| 10,000 rules | 367.9 → 380.9 | 69.6 → 97.4 | 45,028 → 41,404 | 32,896 → 33,032 |
 
 The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old

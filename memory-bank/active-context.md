@@ -1,133 +1,148 @@
-# Active RC1 context — 2026-11-01
+# Active RC1 checkpoint — 2026-11-01
 
-Finish, normally merge and verify closure of one issue before the next:
-#739 → #738 → #708 → release acceptance #715 → v0.5.1-rc1 non-draft prerelease,
-Latest=false, independently downloaded/installed/verified. Stable050 stays Latest;
-stable publication and milestone closure need later instruction. Primary codes;
-independent Luna Max reviews are read-only. Preserve parked work and private DBs.
+Goal: normally merge/verify closure of one RC1 issue at a time, then non-draft
+v0.5.1-rc1 prerelease Latest=false and independent download/install verification.
+Order739→738→708→715. Stable050 staysLatest; stablepublication/milestoneclosure
+requirelaterinstruction. Primary codes; independentread-onlyLunaMax reviews.
+Preserve parkedwork and everyprivateAtlasDB; no reset/force/admin/hookbypass.
 
-## Current #739 checkpoint
+## Current owner and live hosted work
 
-Exact checkout `.worktrees/issue-739`, branch `fix/external-excludes-739`.
-Public PR745 OPEN/READY, soleowner739 (Refs, not Closes), base main6927ed0,
-head f8a8fa8ed6d4aa8256c82d114fa9f57f948c2572. Local repaired source, cost docs,
-design and memory ready for normal commit/push; read git for next actual HEAD.
-No auto-merge, force, admin or hook bypass. Normal pre-push hook is mandatory.
+Exact checkout .worktrees/issue-739, branchfix/external-excludes-739.
+Public PR745 OPEN/READY at bad7fb3b293a390c19273de8f0f35c0c0b51dee9,
+base main6927ed0, milestone37 v0.5.1-00, soleowner739 (Refs, not Closes).
+New primary-owned runtime root-gap fix/design/costdocs/memory await normalcommit/push.
+Read git for the next actual HEAD. OpenSpec reconcile-external-git-excludes,
+schema spec-driven; task1.1only checked (1/4),2.1/2.2/3.1/all5acceptanceopen.
+LiveissueWhy/WhatChanges updated for newgap rootcause and readbackmatched.
+Strict OpenSpec/fmt/strings/plannedIssueOps local4/remote4/checked1 PASS.
+CLI ~/.npm/_npx/21a1280729add0a7/node_modules/.bin/openspec.
 
-OpenSpec reconcile-external-git-excludes, spec-driven, owns issue739. Only1.1 is
-checked (1/4);2.1 and mitigations were reopened after supported-platform failures.
-2.2/3.1 and all five acceptance rows remain open. Luna741 final changed-boundary
-review found no new blocker and approved next native/hosted gates; keep2.1 open
-until repaired current-source native and four-platform proof. Luna731 approved
-bounded DER25 and Windows fixture composition, without claiming nativeWindows proof.
-Strict OpenSpec, fmt, strict-strings, planned IssueOps local4/remote4/checked1 pass.
-CLI: ~/.npm/_npx/21a1280729add0a7/node_modules/.bin/openspec.
-Current status/apply JSON: /tmp/projectatlas-739-current-openspec-{status,apply}.json.
+Normalpush94433 forbad7 TERMINAL0:1773PASS0FAIL12ignored34suites,lockedRust/docs,
+repository/localAtlasgates, no bypass. /tmp/projectatlas-739-native-spelling-push-summary.json.
+Oldsource CI41353486619 STILL LIVE at lastpoll; watcher execsession98043,
+log /tmp/projectatlas-739-bad7-ci-watch.log; neverrestart/cancel on timeout.
+Rustjob124988531739 TERMINALFAILURE: public rootreplacement test failed during
+short rename gap (55PASS1FAIL navigation suite); exactlog /tmp/projectatlas-739-bad7-rust.log.
+Linux124988531704 wholePASS incl external-policy step. MacARM124988531722,
+Macx64124988531733, Windows124988531890 stillrunning, ownedstep pending at lastpoll.
+Repository124988531707 andWindowsdiagnostics124988531771 PASS.
+Snapshot /tmp/projectatlas-739-bad7-ci-snapshot.json. Preserve nativejob proof
+rather than restarting; next normalpush eventually supersedes oldsource automatically.
+Earlier f8 CI41344940865/watcher50183 TERMINALFAILURE, notlive/restartable.
 
-Old CI41344940865 TERMINALFAILURE; watcher50183 TERMINAL1; never restart oldsource.
-Linux124962832387 passed fulljob/FS46/policy10/observer36/public2. BothMacjobs
-124962832480/124962832454 failed FS44PASS2FAIL (root alias/FIFO bypass and APFS
-invalid-byte fixture EILSEQ). Windows124962832471 FS40PASS then policy7PASS1FAIL
-(verbatim PathBuf::join normalized away the fixture's intermediate/.. component).
-Logs: /tmp/projectatlas-739-f8a8-{linux,macos-arm64,macos-x64,windows}{,-policy-step}.log.
-Previous normalpush93555 passed1770/0fail/12ignored/34suites, but attests f8 only.
+## New rename-gap root cause and fix
 
-## Repairs and owning boundaries
+wait_for_index_event_with_continuity discovers rootpolicy for the first affecting
+event BEFOREdebounce. A prepared rootreplacement still has two rename syscalls;
+an event can arrive in that namespacegap. A child event can precede rootnotification.
+Early RootNotDirectory was fatal even though replacement settles before refresh.
+Do not weaken the realCLI/MCP scenario or restore testhelper fallback masking.
 
-RootScanPolicy stores an optional selected absolute lexical root when distinct
-from canonical. Relative selection captures CWD once; drive-relative native fallback
-preserved; empty root rejects and '.' remains valid. Component-wise rebase matching
-absolute targets before both Atlas/native ignores, without target canonicalization
-or target I/O. Canonical/relative/unrelated paths retain handling. Full Node vectors
-and canonical plan/persisted root are unchanged, DER25/semantic23 remain sufficient.
-Causal oldsource0PASS2FAIL; fixedFS49PASS. Root spelling test always3 selections under
-capturedCWD, distinct Windowsalias assertion, existing/absent targets/fullrow equality.
-Unix symlinkalias test proves FIFO refusal, pruning and outside prefix-sibling isolation.
+At the batch owner, catch ONLY exactcapturedroot RootNotDirectory, or exactroot
+FsErrorIo NotFound/NotADirectory (is_dir→canonicalize race). Retainfullscan and
+PolicyWatchSelection recursive-rebind uncertainty. Drain originaldebounce/native
+results, preserving nativeerrors/disconnect/overflow; stop redundantclassification
+oncefullscan required. Existing outerplanreload→rebind→freshreconcile validates
+settled root before publication. Initial/one-shot/persistentlyinvalid roots still
+fail, otherpolicy/parser/IOfailures propagate. No newretrybudget/pollfallback,
+callbackI/O/unconditionalwarmrewatch/schema/rootidentity/graphfact change.
+DER25/semantic23 sufficient; bothindependentreviewers confirmed bounded scope.
 
-APFS fixture falls back ONLY on direct EILSEQ to real Unicode Git/worktree lifecycle;
-raw-byte roundtrip retained where representable and typed NonUtf8Path always tested.
-Windows changes are TEST-ONLY: raw OsString retains ParentDir; separately assert
-verbatim-join normalized control accepts actualrules/rejects unrelatedintermediate.
-Isolated actual gix config producer test retains absolute parent components. No new
-callback I/O or production filter change. HostedWindows remains native authority.
+Causalactualhelper old2FAIL /fixed2PASS:
+/tmp/projectatlas-739-root-gap-{negative,positive}.log. Root/child-first events,
+fullscan+rebind, overflow, queuednativeerror/disconnect preserved. Thirdcontrol
+nonregular.ignore directory remainsInvalidInput/no rebind; regularfile restores
+ordinarysourceevent/no fullscan. Allwatch25PASS,notify4PASS, CLIalltarget/allfeature
+ClippyPASS,strictstringsPASS,fmtPASS; terminalgate1350.
+/tmp/projectatlas-739-root-gap-{watch-tests,notify-tests,clippy,strict-strings}.log.
+Luna741 approved source/DER25 and finalartifact/proof/doc binding; Luna731 found
+no boundedsource/securitydisposition blocker. Wholeissueacceptance remainsconditional.
 
-Existing repair: canonical gix-config0.62.2 defaults-off/sha1 and ignore0.4.34,
-1MiB/file4MiBaggregate direct config reads, declared precedence/no implicit includes;
-no-Git/inherited rules/pruning/operator paths retained. Bounded external coverage,
-alias retarget, cold parent/source-root rebinding, ingress fence, no warmrewatch;
-queue1024/registration256/convergence3. Policy-only unresolved probe pages256 and
-reuses unchanged parses in atomic projection. Shared #738 native prefix guard at
-uncached document inspector covers cached/probe/staging consumers under original
-control; #738 still owns fullacceptance. Publication rediscovers policy from original
-plan options before transaction; no staged matcher reuse/schema/authored-state change.
+## Current frozen artifact and proof
 
-## Current artifact and affected proof
+~/.cache/projectatlas-benchmarks/external-policy-739-root-gap-release:
+CLI985d7b123e07ffbe40995611edb46c9f15c913309aa221c7f5e935157b9a0ccc,
+69,806,664bytes. Current139inputmanifest
+7e32535a26580f2da683b1be374cf97a9fecf8b944c466f0a3c239360a817e7f.
+All current savedsource hashes independently match; Rustsource FROZEN after proof.
+Fresh receipt records actualdirtybad7 source/buildlogmtime/freezetime/uniquerlibs;
+no historicalprovenance copy. Normal locked default releasebuild35544 TERMINAL0.
+FS helper68663dbeaf98788375eb33213c0b472b4e0fcc3c3bd5da176089e79113aebb72
+relinked against actualdefaultrelease libs and BYTEIDENTICAL to measuredhelper;
+reuse ONLY18FSmeasurements from /tmp/projectatlas-739-root-alias-policy-cost-proof.json.
 
-Frozen candidate ~/.cache/projectatlas-benchmarks/external-policy-739-native-spelling-release:
-CLI10c3f448a999b47e22153979379b8f9511712c9f93f7f6a16e0c8fc982fff9cf,
-69,805,624bytes;139inputmanifest884c65c1a1986dfb7075fc917fc3903a6a9ee7d3993462a80cea58599c17f8bc.
-Current exact saved139source hashes and frozenbytes independently match.
-Helper68663dbeaf98788375eb33213c0b472b4e0fcc3c3bd5da176089e79113aebb72
-relinked byte-identically to newly measured root-alias helper. OnlyFS18measurements
-reused; CLI18samples/upgrades4/public2 reran on10c. Micro sourcebe8b7ab61c0230a7...
-Receipts copied some historical provenance: correction at
-/tmp/projectatlas-739-native-spelling-provenance.json explicitly records current
-source/artifacts/buildlogmtime; do not claim original built_at/dirty_paths are current.
-Normal locked default release build, policy10/0, CLI alltarget/allfeatureClippy PASS.
-Final public2PASS (1.27s/8.08s), upgrade4/4 and CLIcost18passedtrue, outputs each
-inspected: /tmp/projectatlas-739-native-spelling-{external-policy-e2e,
-root-replacement-e2e,upgrade-proof,cli-cost-proof}.*. No proof/build process live now.
-
-Durable docs/benchmarks/external-policy-cost.{md,json} regenerated and Luna741 checked:
-18FS +18CLI samples,4upgrades, identities and limitations. Baseline acceptedmain
-adfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c;
+Failfastchain76995 TERMINAL0; everyoutputchecked: optimized external-policy1PASS
+1.31s, rootreplacement1PASS7.98s, upgrade4/4PASS, CLI18samplespassedtrue.
+/tmp/projectatlas-739-root-gap-{external-policy-e2e,root-replacement-e2e,
+upgrade-proof,cli-cost-proof}.*. Allidentity/approvedpurposes/noop/failure/rollback
+controls preserved; earlyzero deadline not midpublication cancellation claim.
+Durable docs/benchmarks/external-policy-cost.{md,json} now985/current139manifest,
+18FS+18CLI/4upgrades verified byLuna741. Binary+349704bytes/+0.50348%; ordinary
+CLIinit289.6→294.6ms/noop49.5→48.1ms;10krulesnoop69.6→97.4ms (+27.8ms).
+No general speedup/#708SLOwaiver. Canonicalroot costfixtures do not quantify alias
+or transientgap branches. Old10c/bd86/9c receipts immutableHISTORICAL, notcurrentCLI.
+Acceptedmain baselineadfe95f1ae05c4a3bbbf1776a460e754d6fc016468d51238558611218b0e2b3c,
 stable050aa6188e11a05c54f4a69680e74055a02bdae4db7503aa0144d5e7157316ab485.
-Binary+348664bytes/+0.502%. Ordinary CLIinit293.0→292.1ms/noop48.6→48.9ms;
-10krulesnoop70.3→97.9ms (+27.6ms). Componenttarget18.03→2.52ms is no general
-speedup/#708SLOwaiver. Warmcanonicalroot fixtures do not quantify aliasbranch costs.
-Upgradeearlydeadline is not midpublication cancellation; controlledtests cover that.
-Historical9c/bd86 artifacts immutable, not current CLI evidence.
 
-Unchanged causal mechanisms: /tmp/projectatlas-739-{root-public,ingress}-causal-control.json;
-publication /tmp/projectatlas-739-policy-publication-{negative,positive}.log;
-shared document /tmp/projectatlas-739-document-probes-{negative,positive}.log (33units).
-Old fixdisabled controls fail; source restored byte-exactly. Root child-event proof
-uses relation reads after required childedit (no explicitwatch masking coverage).
-Inventory223selectors; current normalnative hook reruns affected fullscope.
+## Security at committed bad7 (not yet the dirty repair)
 
-## Current security/review and next steps
+CodeQL41353483020 TERMINALSUCCESS all7languages. Rust2073052996 has13results,
+Actions2073011002 has1, other5languages0. Codexcode/security BOTHCOMPLETED bad7;
+codeflagsfalse/securityflagsnull; no newpostedfindings. Sevenexistinginline threads
+resolved; new412/413 have noinline at lastread. Never claim cleanscan/suppress/dismiss.
+Primary staticallytriaged all14 inputs and rendered results; Luna731 independently
+reviewed dispositions. /tmp/projectatlas-739-bad7-complete-triage-result.json.
+10existingRust fullfacts/flows equal after exactunchangedGitline mapping/numeric
+SARIFreferences/relatedpresentation normalization; duplicates retained. 409overlaps
+changedaliasbranch and was SEPARATELYREASSESSED, not falsely declaredidentical.
+Immutableplanroot/DBaggregate counterevidence still holds. 412/413sourceONLY private
+CWD-created TempDir rootspelling test; fixedchild targets reach metadataexists/is_dir,
+not targetcontentread/write. Does not claim everymetadataread followscontainment.
+Actions411 fullresult+2flows identical and workflow/producerbytes unchanged; eventSHA
+and documentedcache scope counterevidence retained, not readonlytokenalone.
+/tmp/projectatlas-739-bad7-{rust-reconciliation,new-rust-triage-result,
+actions-triage-result,alerts,codeql-analyses}.json; fullSARIFbad7-{rust,actions}.sarif.json.
+Public dispositioncomment6563449602 updated/readbackexact; PRbody candidly records
+hostedrootgapfailure/localrepair. Newsource needs freshscan/review reconciliation.
 
-Pushedf8 CodeQL41344938393 SUCCESS: Rust2072779166 11results, Actions2072728208
-alert411, other5languages0. /tmp/projectatlas-739-f8a8-rust-reconciliation.json
-preserves full facts/codeflows/related multisets, normalizes only numericrefs and
-relatedlocation presentationorder/ids; Luna731 independently confirmed. All7inline
-threads individually dispositioned/resolved/readback. Actions411 primary+Luna741
-not_actionable eventref/cacheboundary triage posted/readbackcomment6563449602.
-Codex code/securityf8 completed, codeflagsfalse/securityflagsnull, no newfindings.
-Not a cleanscan/suppression/dismissal. Reinspect next-source scans and ALL reviews;
-do not transfer counts/approvals blindly across code changes.
+## Existing accepted mechanisms and continuity
 
-Next: normalcommit/push with hooks; capture livehandle/PID and update INTEGRATION
-memory only while gate runs to keep candidate clean. Inspect actualfourplatform
-proof/reviews then sync2.1/2.2/3.1 and acceptance as proven; update Closes739 only
-when ready. Normallymerge745 and verify native739CLOSEDbefore738.
-StableAtlas050 index-4 COMPLETE (log /tmp/projectatlas-739-index-4.log), available
-exactroot brief, privateDB preserved. Low.cargo/.githooks purposes approved.
-Known dependency_closure_limit guidance authorizes fullrefresh; no reset.
+Canonicalgix-config0.62.2 defaults-off/sha1, ignore0.4.34;1MiB/file4MiBtotal,
+directconfigprecedence/no implicitincludes. No-Git/hierarchy/pruning/operator paths
+preserved. FSrootalias API repair captures optionallexicalroot/rebases matching
+prefix beforeAtlas/native matching withouttargetI/O; fullcanonicalrows unchanged.
+APFSfixture onlydirectEILSEQ falls backrealUnicodeGit/worktree; typedNonUtf8Path
+alwayschecked. Windows rawOsString fixture preservesParentDir and normalizedcontrol;
+productioncallbackfilterunchanged. FS49/policy10/observer36 previouslypassed Linux;
+currentbad7 Linuxhostedpassed; newsource fullnative/4platformproof stillrequired.
+Queue1024/registrations256/convergence3; cold selectedparent/rootcoverage, ingress
+fence; unresolveddocument pages256/freshpublicationpolicy/originaloptions; no warmrewatch.
+Shared #738 nativeprefix guard covers cached/probe/staging underoriginalcontrol;
+#738 retains ownfullacceptance. Sourcefacts DER25,semantic23; no DBreset.
+Causal priorroot/ingress/publication/document controls unchanged and preserved:
+/tmp/projectatlas-739-{root-public,ingress}-causal-control.json,
+policy-publication-{negative,positive}.log, document-probes-{negative,positive}.log.
+Inventory223selectors. Stable050 index5 COMPLETE after mandatorypolicy_drift refresh
+following candidate nativeindex; preserveprivateDB. No localbuild/index/proof lease
+remains now. Low.cargo/.githooks purposes approved.
 
-## Accepted closures and parked work
+## Next and parked work
 
-#731/PR737 closedmerged. #741/PR743 closedmergedmain6927ed0 Nov1 16:32:45Z,
-reviewed5dda tree equals49893e53b41eb98bd3e641a200dab26d9981e941.
-/tmp/projectatlas-741-closure.json. Do not reopen or start more741source work.
-#738 parked8814d6d+memorydirty preserved; reconcile shared739guard without losing
-accepted spec/full platform/upgrade acceptance or duplicating contract increments.
-#708/PR728 publicc65dfed/local587ecbe+memorydirty preserved. Warm1201.127FAIL,
-focused1.031526partial/no SLOwaiver. Acceptedmain globalIssueOps known708task2.3
-livechecked/mainunchecked drift; reconcile when708accepted, do not uncheck private
-progress. Candidate739 scope excludes it;715globalgate must pass.
-Integration .worktrees/v0.5.1 release/0.5.1 retains private715spec changes.
-Queued CodexCI gapreview /tmp/projectatlas-codex-ci-followup.json belongs laterowner,
-not permission for parallelissueimplementation. PR744 Dependabot outsideRCmilestone;
-reconcile current dependency/security at715. Four openRCissues739/738/708/715.
-No RC published. Preserve originalbackup /tmp/projectatlas-739-pre-main-snapshot-path.txt.
+Normalcommit with sole(#739) owner, normalpushwithhooks (captureactualhandle/PID).
+Duringgate keep selectedcheckoutCLEAN and updateintegrationmemory only. Verifynew
+artifact/commit-source binding, allcurrentCI/jobs/botthreads, then task/acceptance
+sync onlyasproven, Closes739 onlywhenready, normalmerge745, native739CLOSEDreadback
+BEFORE738. No newissuecode in parallel, stable publication/milestone closure excluded.
+#731/PR737 closedmerged. #741/PR743 closedmergedmain6927ed0 Nov1 16:32:45Z;
+reviewed5dda tree49893e53b41eb98bd3e641a200dab26d9981e941 equalsmerge,
+/tmp/projectatlas-741-closure.json. Do not reopen/rework741.
+#738 parked8814d6d+memorydirty preserved; reconcile sharedguard/spec/contract without
+blindduplicatechanges. #708/PR728 publicc65dfed/local587ecbe+memorydirty preserved;
+warm1201.127FAIL/focused1.031526partial, noSLOwaiver. Known708task2.3livechecked/main
+unchecked drift reconcileswhen708accepted, not byuncheckingprivateprogress;715global
+IssueOpsmustpass. Integration release/0.5.1 retains private715spec edits.
+Queued CodexCIgapreview /tmp/projectatlas-codex-ci-followup.json belongslaterowner;
+PR744 Dependabot outsideRCmilestone, final715 evaluatescurrentdeps/security.
+FouropenRCissues739/738/708/715. NoRCpublished. Originalbackup pointer
+/tmp/projectatlas-739-pre-main-snapshot-path.txt preserved.
