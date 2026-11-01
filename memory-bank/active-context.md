@@ -1,149 +1,130 @@
 # Active context
 
-## Serial authority
+## Goal and serial ownership
 
-Only #731 / PR #737 is active. Finish its normal merge and verify BOTH CLOSED
-before #741. No issue closed this execution; no RC published. Continue through
-v0.5.1-rc1 as a non-draft prerelease, Latest=false, independently verified. Stable
-v0.5.0 stays Latest; stable promotion/milestone closure need later user instruction.
-Exact checkout `.worktrees/issue-731`, branch `fix/static-bindings-731`.
-Public/local HEAD33f89504c64da0fa084c0283da181472ef8d26ac remains unmerged.
-Current production source6576d074b1218bc186bc82a198307fe436c06427 (DER24/SEM23).
-Local/live9/9 implementation COMPLETE after current native+hosted/security proof.
-All five acceptance outcomes independently APPROVED and checked on live issue.
-Live readback and strict OpenSpec/scoped IssueOps9/9 PASS after the latest task transition.
+Continue until v0.5.1-rc1 is a non-draft prerelease, Latest=false, independently
+downloaded/installed/verified. Stable v0.5.0 remains Latest; stable publication and
+milestone closure require a later instruction. No RC exists. Finish, normally
+merge and verify BOTH issue/PR CLOSED one at a time: ONLY #741 / PR743 now, then
+#739, #738, #708, #715. #731 / PR737 closed Oct31; accepted main
+a5b1bebcaa79c8386b68e9c247eff73aa11e5e15. Dev retired; #720 not_planned.
 
-## Current approved implementation and proof
+Selected .worktrees/issue-741, branch fix/generated-state-741. Reviewed source
+f90458110b92f0e79ecbdc7adf72eb3caf13abf1; final memory/tasks-only acceptance commit
+follows that source. Resolve actual HEAD and public head through Git/GitHub rather
+than treating the source-proof revision as current metadata. Primary writes; review_741/review_731
+are independent read-only Luna Max. Use installed050 complete skill, custom Rust
+and applicable database/SQLite skills, accepted admit-generated-project-state.
+No schema/DER/SEM change. All5 implementation tasks, all3 mitigation rows and all5
+canonical acceptance rows checked after both independent final reviews approved
+the whole issue. Live mirror readback exact. Issue/PR remain OPEN until normal
+final-metadata publication, current required checks and normal merge. No permission pending.
 
-Primary writes all implementation. Exact-root read-only Luna Max review_731 approved
-areas1–5 for current24: source/spec, causal controls, actual proofs/docs and final
-readiness. Normal native push, all8 hosted and all7 security jobs are verified. Reuse this review; do not
-repeat trusted source exploration without a concrete new finding.
+## Current proof and live hosted work
 
-Kotlin local val/var/destructured/delegated binding starts after the whole property;
-loop bindings start after the actual container expression. File/class reservation
-stays zero.13-case source matrix had11 causal failures before and all13 pass after.
-The permanent container selector adds7 actual CLI/MCP cases for input calls and
-later/body shadows, with summaries, incremental/full, identity and no-op. Lambda
-initializer proof is source-fact coverage, not new anonymous-caller query support.
+NO LOCAL SOURCE/BUILD LEASE. Normal f904 publication PID511357 and queued60842
+TERMINALPASS (776.148s), then immutable proof TERMINALPASS144 bound inputs. Prefix
+/tmp/projectatlas-741-cohort-execution; -active-session.json, -native-push.json,
+-native-proof.json. Binary88eb105dc1691c39b60751e689313bec6dfd81188791c62e5a353437f0d1cbd8.
+CLI/MCP admission3.622s, writers5.126s, registered9.285s, five050upgrades7.230s PASS;
+inputs/binary/identity/config/approved purposes unchanged throughout proof.
+Normal gates34suites1733PASS12ignored. Both processes terminal BEFORE memory edits.
 
-Shared aggregate budget admits retained growth across source/configured projections,
-identity admission/hydration/merge, source/cache/package recovery, entity/parent/
-resolver indexes, key workspaces, borrowed SQLite decoding/returned page owners,
-and candidate registry transfer. Move ownership rather than clone where possible;
-reserve before distinct growth, keep live pages charged, release temporary package
-reservations on failure, restore scope allowances on every exit. Existing2GiB
-publication envelope,512MiB identity/spill sublimits and row limits are preserved.
-This is conservative staging accounting, not an exact allocation or RSS guarantee.
-DB bounded overloads preserve the old wrappers' ordinary return types.
+Production D65 d65a50a7fab1b98551a739294ed07b1fe2cf621e ALLCI41308696614 SUCCESS,
+including Rust/repository/Windows/Linux/MacARM/MacIntel/verify. Receipt
+/tmp/projectatlas-741-d65a-completed-run.json, Windows124854493714 terminal log
+/tmp/projectatlas-741-d65a-windows-job.log. Native ownership53PASS0FAIL1ignored,
+full system-policy matrix, actor/foreign-owner all6roles, EFS, DBcohort/rootunits,
+actual CLI/MCP admission/writers/rootmetadata and sensitive-root writer allPASS.
+Both Mac native APFS/APFSX/HFS+/HFSX volume matrices PASS.
 
-Causal unit:5sources x16imports x64 valid ~1KiB targets retained5,603,545bytes under
-injected2MiB before; corrected owner refuses further growth with a valid admitted
-prefix. Includes real partial Contract projection beside valid imports, split
-admission, nonzero identity base and cancellation. Separate page-transfer mutant
-fails101 before exact source restoration and positivePASS. Package partial cleanup
-and Vec<bool> actual storage also have causal beforeFAIL/afterPASS controls. The
-new producer's mistaken packed-bool estimate was corrected at its owning boundary;
-all crates searched, no analogous occurrence remained.
+F904 adds ONLY test proofguard and both lifecycle hashpins/specmetadata: each
+hosted CLI/MCP reset surface MUST obtain actual DB8.3alias, no silentcontinue;
+completion marker follows all checks and MCP shutdown. Local unsupported fixture
+is explicit. Both inventory pins0342e06db8745f0eb2f65d94d7d513e9137f70fc5b537a81451c72956b11af0c.
+Portable Winbody Clippy/CLIalltargets-allfeaturesClippy/inventory3/Linuxadmission1/
+fmt/strings/strictOpenSpec/scopedIssueOps PASS before normal publication.
 
-Default optimized build PASS1m05s from committed6576. Immutable executable:
-~/.cache/projectatlas-benchmarks/binding-731-projection-budget-contract24-20261031/projectatlas
-SHA d96f3904506f8528ab17d25343393aa4f962ba82dfbb494da8319ef24e1d74bc.
-Its candidate-binding.json binds130 source/test/manifest/lock/toolchain inputs and
-actual rustc identity; all130 remain unchanged. Default features, locked build.
+Exact f904 Source41315256233 TERMINALSUCCESS ALL9jobs including verify124889200258.
+Receipt /tmp/projectatlas-741-f904-completed-run.json. Required verify and pr-state
+both SUCCESS on f904. Watcher11053 TERMINAL0, final logs/status retained under
+/tmp/projectatlas-741-cohort-execution. No native source-proof run remains live.
+Windows124873857980 wholejob TERMINALSUCCESS14:56:06UTC. Full log
+/tmp/projectatlas-741-cohort-execution-hosted-e2e-smoke-windows.log:2399 CLIactualalias
+PASS,2400 MCPactualaliasPASS,2401admissionok,2417writersok,2441sensitivewriterok;
+nativeowning53PASS0FAIL1ignored, root/metadata and all later native gates PASS.
+Receipt /tmp/projectatlas-741-f904-windows-completed-job.json. Linux/MacARM/Rust/
+repository/securitydiag/MacIntel124873857687 fulljobs SUCCESS. ALL4OS ownership
+and native-volume steps SUCCESS. Full Intel log retained at
+/tmp/projectatlas-741-cohort-execution-hosted-e2e-smoke-macos-x64.log.
 
-Main serialized campaign1558 TERMINAL PASS all18 tasks. Receipt
-/tmp/projectatlas-731-projection-budget24-proof-session.json, sameprefix proof.log
-and proof-manifest.json. Five optimized CLI/MCP selectors,20native baselines
-(stable050/contracts5..23), resource23→24 compatibility, all16 normalized stored
-projections per baseline incremental/full, identity/allapproved/deadline/rollback/
-reupgrade/noop,132 timing samples,4automatic layouts/13functional phases and exact
-Cargo/host targets. Target-set upgrade checks alone do not prove unresolved-call
-presence; source and permanent CLI/MCP occurrence checks provide that proof.
+## Review and security
 
-Separate79978 affected-cost TERMINAL PASS18samples/9pairs/3fixtures: configured64
-long targets with ordinary alias, Kotlin initializers, ordinary Kotlin control.
-All5configured sources retain all64 exact target witnesses. Every Kotlin caller
-has exact top-level function kind/parent. Candidate samples compare all16 tables
-through edit/full, identity/allapproved and finalnoop. All130 inputs checked before
-and after. Total150initializations/75pairs/25fixtures, three alternating pairs each.
+ALL45 review threads RESOLVED, readback0open. XLkE PRRT_kwDOQyFgJ86yXLkE resolved
+after BOTH Luna reviewers verified terminalWindows log and actualCLI/MCPalias
+markers; reply4436137924 posted/readbackexact thenresolvedtrue confirmed. VUod
+resolved4435697072 and overallACL P6jJ resolved4435800279 after native evidence
+and independent review. Do not confuse resolved findings with wholeissue closure.
 
-Current docs/benchmarks/static-binding-cost.{md,json} bind6576/d96 and all current
-receipts. Renderer /tmp/projectatlas-731-projection-budget24-publish-costs.py;
-renderer-repro.json proves byte-identical second render and corrected current24
-scope label. Docs/source/spec/test inventories reconcile DER24/SEM23. Final715
-derivation must exceed24 and retain SEM23; #708 combined SLOs remain mandatory.
-Local measurements: automatic51222→24 21.7375→.5931s,464612→41024KiB; explicit512
-21.3282→.5571s,457280→40980KiB. The2048 baseline is historical exploratory
-retention-only23, not an accepted release. Configured64 accepted23→24 .13434→.13669s,
-31808→30644KiB, same322dependencies. Initializer baseline does incomplete work;
-no general speedup or equivalent-work claim. Raw receipts preserve exact counters.
+F904 automatic code and security summaries COMPLETED, exact head; code reports
+no findings. Summary6540706416 historical advisory list is not authoritative
+thread resolution; use thread-aware API. Current ActionsCodeQL2071796940 has4
+exact normalized source/flow matches vsD65,36indices valid. Report
+/tmp/projectatlas-741-f904-actions-reconciliation.json. Rust2071840929 TERMINAL
+SUCCESS; all27 normalized primary source/flows exactly match D65Rust2071632609,
+1548indices valid in each. Report /tmp/projectatlas-741-f904-rust-reconciliation.json.
+CodeQL workflow41315253073 TERMINALSUCCESS on exactf904; temporary missingRust
+configuration warning cleared. Advisory aggregate remainsFAILURE for the same31
+reviewed alerts (27Rust+4Actions), not a clean scan. No suppressions/dismissals.
 
-Current source gates PASS453symbols+1ignored/381CLI/242DB, alltargetClippy, permanent
-Kotlin lifecycle,3inventory, strictstrings/workspace doctests/rustdoc/fmt. Details
-in /tmp/projectatlas-731-projection-budget-* logs and source-checkpoint.json.
-Navigation SHA82821d6136374241a25358d9fbdc45267662b36cfeea13bf9239131da9ef5f87
-matches support/source_contract.rs and docs/v050-cli-e2e-inventory.json.
+Both Luna Max reviewers independently APPROVED the WHOLE issue on f904 after
+all hosted gates finished, authorizing task3.1 and all5 canonical acceptance rows.
+No material accepted-scope source/spec/proof gap remains. This is genuine agent
+review, not a fabricated formal GitHub APPROVED state. Both require the final
+metadata commit's normal hook and current protected checks before merge.
+Follow docs/workflow.md evidence reuse:
+commit identity alone does not invalidate unchanged expensive proof; required
+current protected checks/conversations still must pass. No bypass/admin/force.
 
-## Native publication and next work
+## Accepted boundary and final handoff
 
-Delivery33f8950 committed; normal CLEAN nativepush60219 TERMINAL PASS832.87s,
-hooks enabled and telemetryoverrideUNSET. Public33f8950 exact readback;34Rustsuites,
-381CLI/453symbols+1ignored/242DB/54navigation228.15s, docs/security/scan/lint PASS.
-The14 existing asset advisories are exit0; zero source/purpose findings. External
-/tmp/projectatlas-731-projection-budget24-native-push-session.json +log own proof.
-No active lease. Current hostedCI41168712727(all4OS+Rust/repository/verify),
-CodeQL41168711026 TERMINAL all7languagesSUCCESS; PRstate41168711937PASS;
-follow exact jobs rather than infer from old runs. TERMINAL CI41168712727 ALL8SUCCESS:plan/Rust/repository/all4OS/verify, exacthead33. All26existing threads resolved
-and read back after replies4430496791/4430497178; fresh feedback still required.
+Production uses retained filesystem objects and shared ownership admission before
+managed SQLite opens/generated writes, canonical Windows DB cohort routing,
+native naming and root inference, no-SQL reset, protected staging and exact native
+policy readback. D65 narrow CPE NULL-preview exception requires complete source/
+parent queries, absent parent, zero native entries/NULL pointers, rawSACL XORonly
+PRESENT, exact owner/group/DACL. Actual stage creation/restoration/finalreadback
+stay strict. Existing EFS replacements refuse; new encrypted-parent creation,
+custom/external paths, indexing and ordinary operators remain supported.
 
-FinalLunaMax review APPROVED allfive outcomes after exact live9/9, all8CI/all7CodeQL,
-metadataCI41171611341/PRstate41171611630SUCCESS,26resolvedthreads and no newfeedback.
-Current native/security/baseline reconciliation is approved without alert dismissal.
-Next normal metadata-gated push of finaltask/memory state, mechanicalreadiness,
-normal737merge and BOTHCLOSED readback before741. Local/live9/9 +5/5 acceptance. No edits to production130inputs; immutable proof remains valid.
+#715 live WhatChanges has exact permanent installed selectors, executableoverride,
+positive compatibility, Windows native case/8.3/EFS/cohort/recovery/reset, Linux
+fourprofiles, Macfourformats/botharches, prooflimits and combined-source requirement.
+Readback exact; no715 task state changed. Support docs/architecture reasoned N/A/
+inventory aligned. This is #741 handoff only, not next-issue implementation.
+TL/FL setup, enforced SELinux/Smack, domainCAP enforcement, EFS key-list fidelity,
+unknown short-name orphans after main removal and universal ancestor races are
+NOT claimed. Retain documented boundary, no blanket operator restriction.
 
-## Public baseline / feedback
+Next: strict OpenSpec/scopedIssueOps and normal final metadata commit/push,
+current protected checks then normalmerge743. F904 source run is already terminal;
+completed proof is preserved. Metadata proof-reuse validator ready
+/tmp/projectatlas-741-final-proof-reuse.py: only memory/tasks may differ fromf904,
+all other144boundinputs/readonlybinary must remain unchanged. This never waives
+normalhook/currentprotectedchecks. Normal driver /tmp/projectatlas-741-acl-native-push.py
+accepts a FRESH externalprefix; no source edits/competingbuild during normalpush.
+PRusesRefs741,
+so explicitly close741completed AFTER merge and verify BOTH CLOSED. Then739only.
 
-Public23 sourceff50, metadata c802, immutablee963f7fac2ceacbf3ea9caf38df46895fb863d825705da5afb31798606770eec.
-Its nativepush62972 passed807.77s; hosted41153614591 all8jobsSUCCESS including real
-correctedARM+Intel+Windows+Linux; CodeQL41153611803 all7SUCCESS. These are baseline,
-not current24 acceptance. Historical receipts use root-cohorts23 prefix.
-26threads26resolved after public33f8950 corrected proof. Kotlin and aggregate
-threads have technical replies, source/proof review and normalnative verification.
-Old17Rust alerts have owner/counterevidence dispositions,244 belongs738; toolchain
-370/371 trustedGITHUB_PATH/ENV falsepositive threads resolved without dismissing
-alerts. Current-head all-alert reconciliation complete: fullPRref68 =66 already in accepted
-main baseline368 +2known toolchain leads370/371. Earlier21 was an issue-relevant
-subset;47additional main leads lie in7 entire files unchanged from3ef/c802. This
-is affected-only baseline reconciliation, not blanket false-positive classification.
-All17 reviewed Rust owners/cfg variants are exact-byte unchanged. Receipts
-projection-budget24-alert-{owner-equivalence,reconciliation}.json and raw{open,main}
-alerts preserve identities; unchanged helperhash18ebfa handles all4Python leads.
-Independent reconciliation review APPROVED. No alert dismissal.
-Old23SEM22 digest77ce9ef63aa9da217f35e41d59470395e7be08d45f167c14b2477eb29309d2ca
-is preserved; do not overwrite its receipts with current SEM23. Actual new SEM23 digest
-20fcd49d68b915412b70c76001a50c27513d0604511a06f3cf87fa637d9383ad is captured from
-the current release Rlib; receipt /tmp/projectatlas-731-current24-semantic23-digest.json.
+## Parked continuity and self-hosting
 
-## Navigation and parked work
-
-Read complete installed stable050Atlas skill after compaction and selected memory.
-Always login:false/exactroot for exec_command: old reviewer login-shell reads had
-silently selected integration and were discarded. Current731 privateDB preserved;
-MCP brief policy_drift/full/changed0 is tracked739. No orientation reset/scan or
-installer repair. Native hook scan during publication is authorized.
-Source /tmp/projectatlas-rc1-test-env.sh beforeCargo. Shared v0.5.1/target and homecache
-TMPDIR; cleanPATH lacksrg. UNSET PROJECTATLAS_NO_TELEMETRY for native suites/push;
-isolated probes/bench/CLI/MCP use it. Exactlyone (#731) percommit; sole Fixes#731
-in PRbody. StrictOpenSpec at $HOME/.npm/_npx/21a1280729add0a7/node_modules/.bin/openspec.
-Scoped gate: python3 .github/scripts/issue-checklists.py --repo styler-ai/ProjectAtlas
---root . --issue-map openspec/issue-map.json --planned-issue 731.
-
-Parked untouched:741e1e633c plus ownedatlas_map/configdirt;7396eb0dfd watch/mapbudget;
-7388814d6d composes739;708PR728publicc65/local587ecbe combined4OSperf/upgrade closure,
-120warm1.127FAIL/focused1.031526partial and725deferred.715integration owns proposal/
-design/spec dirt, not RC. Root715 children708/718/721/722/731/732/738/739/741,
-milestone37;718/721/722/732closed. Future41/root493 accepted740/main3ef exact
-310/314/388/490/563. Previousfeedback uploadDONE. Old context saved inGit and
-/tmp/projectatlas-731-active-context-before-proof24-complete.md.
+Installed050 exactroot Atlas returns policy_drift/fullchanged0 even after a prior
+successful refresh: confirmed owner739. Preserve privateDB/config/purposes; no
+reset/reinstaller/repeated broadscan. Use bounded known slices for tracked defect.
+7396eb0dfd+memorydirt,7388814d6d+dirt,708publicc65dfed/local587ecbePR728,715integration
+preserved.708warm120samples1.127FAIL,focused1.031526partial: no SLO waiver.715children
+708/718/721/722/731/732/738/739/741;718/721/722/731/732closed. Queued CodexCI followup
+AFTER741 /tmp/projectatlas-codex-ci-followup.json. AcceptedmainDER24/SEM23; final715
+DER exceeds ALL privatecandidates,SEM>=23. Finalcombined CLI/MCP/plugin/skills/hooks/
+4OS/upgrades/cancellation/concurrency/security/perf/packages/checksums before RC.
+Earlier detailed checkpoints: Git f904581:memory-bank/active-context.md and history.

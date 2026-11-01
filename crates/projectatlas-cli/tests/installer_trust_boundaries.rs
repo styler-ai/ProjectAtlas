@@ -1,5 +1,7 @@
 //! Verify release bootstraps treat target projects as untrusted installer input.
 
+mod support;
+
 use assert_cmd::Command;
 use std::env;
 use std::error::Error;
@@ -457,7 +459,16 @@ fn isolated_runtime_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     } else {
         "projectatlas"
     });
-    fs::copy(assert_cmd::cargo::cargo_bin("projectatlas"), &runtime)?;
+    support::copy_executable_fixture(
+        &assert_cmd::cargo::cargo_bin("projectatlas"),
+        &runtime,
+        |command, _label| {
+            Command::from_std(command)
+                .timeout(INSTALL_TIMEOUT)
+                .output()
+                .map_err(Into::into)
+        },
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

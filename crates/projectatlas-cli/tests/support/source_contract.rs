@@ -3,11 +3,11 @@
 pub(super) const CLI_E2E_SOURCE_SHA256: &[(&str, &str)] = &[
     (
         "crates/projectatlas-cli/tests/e2e_delivery.rs",
-        "8b6cfc1b705f558effc8aac49aa66785de8db6b73b3edb66839a5c183d09751c",
+        "cdf0fb4f7cd8425a05fdcd49588e8ca25601261c467350a1c71e80a61e7a31d8",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_lifecycle.rs",
-        "4c4a53eff4375a14394515b572c45891c8b1980e902382a7aadb941a83b5fe2f",
+        "0342e06db8745f0eb2f65d94d7d513e9137f70fc5b537a81451c72956b11af0c",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_maintenance.rs",
@@ -15,10 +15,10 @@ pub(super) const CLI_E2E_SOURCE_SHA256: &[(&str, &str)] = &[
     ),
     (
         "crates/projectatlas-cli/tests/e2e_navigation.rs",
-        "82821d6136374241a25358d9fbdc45267662b36cfeea13bf9239131da9ef5f87",
+        "1bcff38597c693777248e88673648624f8003766944c214eda835b0cbdb7d98e",
     ),
     (
         "crates/projectatlas-cli/tests/e2e_worktrees.rs",
-        "e416034a42890de43892722fb21ec2f262734f165f3a67400d366a9cb8913643",
+        "ebb8c769da7d018645761bfcc4de3cda47fda0721de7c16ef1c46df413201c9a",
     ),
 ];

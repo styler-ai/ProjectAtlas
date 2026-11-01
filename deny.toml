@@ -40,6 +40,7 @@ multiple-versions-include-dev = true
 wildcards = "deny"
 highlight = "all"
 skip = [
+  { crate = "bitflags@1.3.2", reason = "Windows-only windows-permissions 0.2.4 provides safe OsStr-compatible handle-based ACL snapshot/application without project unsafe bindings; it retains bitflags 1 while the remaining graph uses 2. Remove when that wrapper updates its flag dependency or an equivalent safe native handle API replaces it." },
   { crate = "compact_str@0.10.0", reason = "Canonical ECMAScript identifier predicates in pinned oxc_syntax 0.156 require compact_str 0.10 through oxc_span/oxc_str; ratatui 0.30 requires 0.9. Remove when those upstream dependency ranges converge." },
   { crate = "phf@0.14.0", reason = "Pinned oxc_syntax 0.156 and oxc_ast_macros require phf 0.14; cssparser/selectors/web_atoms require 0.13. Remove when the upstream ranges converge." },
   { crate = "phf_generator@0.14.0", reason = "Required by the phf 0.14 macro line of pinned oxc_syntax 0.156; the HTML parser build graph retains phf_generator 0.13. Remove when upstream phf dependency ranges converge." },
