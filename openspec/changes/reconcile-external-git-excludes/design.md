@@ -43,6 +43,18 @@ prove real native events for writes through both selected and canonical root
 spellings using distinct leaves so a delayed earlier event cannot satisfy the
 next observation. Preserve the existing stale-read/mutation invalidation assertions.
 
+Windows parent-component fixtures must use ordinary Win32 spelling: a raw
+verbatim `\\?\` path containing `..` is an invalid native filename, not proof
+that callback filtering lost a valid selected path. Keep the normalized verbatim
+positive control, assert an ordinary absolute Disk/UNC base before raw parent
+construction, and read the parser-selected rules to prove native use. Do not add
+a production normalization exception for unsupported verbatim parent syntax.
+Limit display-spelling conversion to Windows so valid non-UTF-8 Unix roots remain
+native paths. Keep relative-root coverage under captured CWD; use a separate
+ordinary temporary base for the Windows alias case so a long CWD or another
+volume cannot silently omit it. Compare each selection with its own canonical
+root and complete node vector, retaining all three cases.
+
 Use canonical Git-config parsing with bounded input reads and no automatic unbounded includes/network/process execution. The implementation selects pinned `gix-config` 0.62.2 with default features disabled and its required `sha1` feature; that feature satisfies the dependency's hash-type contract and does not change ProjectAtlas content hashing. The parser has a transitive dependency graph, not a standalone tiny syntax-only footprint. Project code owns direct source precedence, cancellation and input inventory. Review the exact locked graph, MSRV, licenses and measured construction/scan overhead before acceptance. A home-grown parser or normal Git command invocation is the rejected alternative.
 
 Pinned `ignore` 0.4.34 repairs Git-control type discovery when `git_exclude` is enabled even with `require_git(false)`. Keep native common-dir and nested Git behavior rather than installing a second hand-written common matcher. Configure one `WalkBuilder` with native .ignore/.gitignore/info-exclude, disable the incomplete built-in global-config selector, and add the canonically selected global excludes at the engine's lowest precedence, anchored at the selected root. Reuse `build_matchers`/`IncrementalIgnore` for targeted checks so inherited parents, subroot selection and ignored-parent pruning agree with traversal. Reuse compiled external policy within the operation/batch; do not retain a stale, unbounded incremental matcher across unrelated source epochs.

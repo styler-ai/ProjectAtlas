@@ -745,10 +745,27 @@ mod tests {
                     && !selection.may_affect(&event(base.join("intermediate"))),
                 "normalized selection retained an unrelated lexical component",
             )?;
+            let mut unsupported = base.as_os_str().to_os_string();
+            unsupported.push(std::path::MAIN_SEPARATOR_STR);
+            unsupported.push(["intermediate", "..", "rules"].join(std::path::MAIN_SEPARATOR_STR));
+            require(
+                selected(&root, &[PathBuf::from(unsupported)]).is_err(),
+                "verbatim parent syntax unexpectedly became a supported native input",
+            )?;
         }
-        // Joining onto a Windows verbatim base removes `..` before selection.
-        // Retain the operator's absolute spelling as the config producer does.
-        let mut spelling = base.as_os_str().to_os_string();
+        // Win32 paths process parent components; verbatim paths do not.
+        #[cfg(windows)]
+        let ordinary_base = PathBuf::from(projectatlas_core::lossless_native_path_display(&base)?);
+        #[cfg(not(windows))]
+        let ordinary_base = base.clone();
+        #[cfg(windows)]
+        require(
+            ordinary_base.is_absolute()
+                && matches!(ordinary_base.components().next(), Some(std::path::Component::Prefix(prefix))
+                    if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::UNC(..))),
+            "parent fixture requires an ordinary Win32 base",
+        )?;
+        let mut spelling = ordinary_base.as_os_str().to_os_string();
         spelling.push(std::path::MAIN_SEPARATOR_STR);
         spelling.push(["intermediate", "..", "rules"].join(std::path::MAIN_SEPARATOR_STR));
         let parent_path = PathBuf::from(spelling);

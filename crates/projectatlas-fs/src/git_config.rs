@@ -416,7 +416,18 @@ mod tests {
         fs::create_dir(&home)?;
         fs::create_dir(root.join("intermediate"))?;
         fs::write(root.join("rules"), "blocked.rs\n")?;
-        let mut spelling = root.as_os_str().to_os_string();
+        #[cfg(windows)]
+        let ordinary_root = PathBuf::from(projectatlas_core::lossless_native_path_display(&root)?);
+        #[cfg(not(windows))]
+        let ordinary_root = root.clone();
+        #[cfg(windows)]
+        require(
+            ordinary_root.is_absolute()
+                && matches!(ordinary_root.components().next(), Some(std::path::Component::Prefix(prefix))
+                    if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::UNC(..))),
+            "configured parent fixture requires an ordinary Win32 root",
+        )?;
+        let mut spelling = ordinary_root.as_os_str().to_os_string();
         spelling.push(std::path::MAIN_SEPARATOR_STR);
         spelling.push(["intermediate", "..", "rules"].join(std::path::MAIN_SEPARATOR_STR));
         let expected = PathBuf::from(spelling);
@@ -436,6 +447,13 @@ mod tests {
                     .components()
                     .any(|component| matches!(component, std::path::Component::ParentDir)),
             "absolute configured selection lost native parent components",
+        )?;
+        let selected = selected
+            .excludes
+            .ok_or_else(|| io::Error::other("configured fixture did not select rules"))?;
+        require(
+            fs::read_to_string(selected)? == "blocked.rs\n",
+            "configured native parent spelling did not read the selected rules",
         )
     }
 

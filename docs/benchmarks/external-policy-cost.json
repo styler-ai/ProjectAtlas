@@ -21,9 +21,9 @@
   "candidate": {
     "derivation": 25,
     "semantic": 23,
-    "source_manifest_sha256": "92fdd9928dc29ee9dd230fc5f4547faa1670e6a37ea43203312f9ea7ae82314b",
+    "source_manifest_sha256": "8b177fe561e8c40e8bb3fc1066f0146521a388cc1d5644a6bf838a800197b24b",
     "bytes": 69806784,
-    "sha256": "e71f3328406b27004dd94c46c812216df0707037264b86133e66ec52c8392d83"
+    "sha256": "7eaa11bab7d95b8310f0e70de0f016e757fe83df2f15ead1e0ecd7b151ce965e"
   },
   "protocol": {
     "trials": 3,
@@ -625,66 +625,66 @@
       "ordinary": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.2925790770095773,
-            "peak_rss_kib": 31140
+            "wall_seconds": 0.29145468899514526,
+            "peak_rss_kib": 30544
           },
           "noop": {
-            "wall_seconds": 0.04956810502335429,
-            "peak_rss_kib": 20612
+            "wall_seconds": 0.049492623016703874,
+            "peak_rss_kib": 19212
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.293084540986456,
-            "peak_rss_kib": 30344
+            "wall_seconds": 0.2891449290327728,
+            "peak_rss_kib": 29748
           },
           "noop": {
-            "wall_seconds": 0.048689793969970196,
-            "peak_rss_kib": 20492
+            "wall_seconds": 0.05018336494686082,
+            "peak_rss_kib": 19188
           }
         }
       },
       "large-config": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.2931314489687793,
-            "peak_rss_kib": 31380
+            "wall_seconds": 0.29616081004496664,
+            "peak_rss_kib": 29900
           },
           "noop": {
-            "wall_seconds": 0.050076733983587474,
-            "peak_rss_kib": 20780
+            "wall_seconds": 0.04936499602627009,
+            "peak_rss_kib": 18988
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.2965506780310534,
-            "peak_rss_kib": 32800
+            "wall_seconds": 0.29906114703044295,
+            "peak_rss_kib": 32372
           },
           "noop": {
-            "wall_seconds": 0.053282295004464686,
-            "peak_rss_kib": 23296
+            "wall_seconds": 0.05427111801691353,
+            "peak_rss_kib": 22320
           }
         }
       },
       "many-rules": {
         "accepted-main": {
           "init": {
-            "wall_seconds": 0.373818330001086,
-            "peak_rss_kib": 43324
+            "wall_seconds": 0.3774041840224527,
+            "peak_rss_kib": 42040
           },
           "noop": {
-            "wall_seconds": 0.0696080100024119,
-            "peak_rss_kib": 31756
+            "wall_seconds": 0.07243131595896557,
+            "peak_rss_kib": 30252
           }
         },
         "candidate": {
           "init": {
-            "wall_seconds": 0.3820345480344258,
-            "peak_rss_kib": 41604
+            "wall_seconds": 0.38149508205242455,
+            "peak_rss_kib": 40756
           },
           "noop": {
-            "wall_seconds": 0.09829155501211062,
-            "peak_rss_kib": 32792
+            "wall_seconds": 0.09914221696089953,
+            "peak_rss_kib": 32008
           }
         }
       }
@@ -700,12 +700,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.29161562595982105,
-          "peak_rss_kib": 31140
+          "wall_seconds": 0.28984216501703486,
+          "peak_rss_kib": 30132
         },
         "noop": {
-          "wall_seconds": 0.04956810502335429,
-          "peak_rss_kib": 20648
+          "wall_seconds": 0.049540652020368725,
+          "peak_rss_kib": 19588
         }
       },
       {
@@ -718,12 +718,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.293084540986456,
-          "peak_rss_kib": 29960
+          "wall_seconds": 0.2891449290327728,
+          "peak_rss_kib": 29748
         },
         "noop": {
-          "wall_seconds": 0.048689793969970196,
-          "peak_rss_kib": 20492
+          "wall_seconds": 0.04900125996209681,
+          "peak_rss_kib": 19188
         }
       },
       {
@@ -736,12 +736,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.2870374749763869,
-          "peak_rss_kib": 30596
+          "wall_seconds": 0.2890868320246227,
+          "peak_rss_kib": 29796
         },
         "noop": {
-          "wall_seconds": 0.0482803670456633,
-          "peak_rss_kib": 20168
+          "wall_seconds": 0.05056976398918778,
+          "peak_rss_kib": 19504
         }
       },
       {
@@ -754,12 +754,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.29360436799470335,
-          "peak_rss_kib": 31064
+          "wall_seconds": 0.29676016396842897,
+          "peak_rss_kib": 30600
         },
         "noop": {
-          "wall_seconds": 0.04894778202287853,
-          "peak_rss_kib": 20544
+          "wall_seconds": 0.04889723699307069,
+          "peak_rss_kib": 19020
         }
       },
       {
@@ -772,12 +772,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.2925790770095773,
-          "peak_rss_kib": 31592
+          "wall_seconds": 0.29145468899514526,
+          "peak_rss_kib": 30544
         },
         "noop": {
-          "wall_seconds": 0.04999120003776625,
-          "peak_rss_kib": 20612
+          "wall_seconds": 0.049492623016703874,
+          "peak_rss_kib": 19212
         }
       },
       {
@@ -790,12 +790,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3043648000457324,
-          "peak_rss_kib": 30344
+          "wall_seconds": 0.29314885596977547,
+          "peak_rss_kib": 29204
         },
         "noop": {
-          "wall_seconds": 0.049464698997326195,
-          "peak_rss_kib": 20768
+          "wall_seconds": 0.05018336494686082,
+          "peak_rss_kib": 19144
         }
       },
       {
@@ -808,12 +808,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.30040253698825836,
-          "peak_rss_kib": 31380
+          "wall_seconds": 0.30315099301515147,
+          "peak_rss_kib": 30188
         },
         "noop": {
-          "wall_seconds": 0.04978546203346923,
-          "peak_rss_kib": 20828
+          "wall_seconds": 0.04936499602627009,
+          "peak_rss_kib": 19176
         }
       },
       {
@@ -826,12 +826,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.2965506780310534,
-          "peak_rss_kib": 32768
+          "wall_seconds": 0.299655391019769,
+          "peak_rss_kib": 32372
         },
         "noop": {
-          "wall_seconds": 0.053282295004464686,
-          "peak_rss_kib": 23372
+          "wall_seconds": 0.054400497989263386,
+          "peak_rss_kib": 22320
         }
       },
       {
@@ -844,12 +844,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.296384631015826,
-          "peak_rss_kib": 34952
+          "wall_seconds": 0.29432731500128284,
+          "peak_rss_kib": 31860
         },
         "noop": {
-          "wall_seconds": 0.05235017399536446,
-          "peak_rss_kib": 22060
+          "wall_seconds": 0.05381213501095772,
+          "peak_rss_kib": 22244
         }
       },
       {
@@ -862,12 +862,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.2931314489687793,
-          "peak_rss_kib": 31084
+          "wall_seconds": 0.29616081004496664,
+          "peak_rss_kib": 29900
         },
         "noop": {
-          "wall_seconds": 0.05082486500032246,
-          "peak_rss_kib": 20780
+          "wall_seconds": 0.050636137020774186,
+          "peak_rss_kib": 18872
         }
       },
       {
@@ -880,12 +880,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.2885190889937803,
-          "peak_rss_kib": 31768
+          "wall_seconds": 0.29548726900247857,
+          "peak_rss_kib": 29492
         },
         "noop": {
-          "wall_seconds": 0.050076733983587474,
-          "peak_rss_kib": 20472
+          "wall_seconds": 0.04843490797793493,
+          "peak_rss_kib": 18988
         }
       },
       {
@@ -898,12 +898,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3036148160463199,
-          "peak_rss_kib": 32800
+          "wall_seconds": 0.29906114703044295,
+          "peak_rss_kib": 34048
         },
         "noop": {
-          "wall_seconds": 0.05431142100133002,
-          "peak_rss_kib": 23296
+          "wall_seconds": 0.05427111801691353,
+          "peak_rss_kib": 22480
         }
       },
       {
@@ -916,12 +916,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.373818330001086,
-          "peak_rss_kib": 43632
+          "wall_seconds": 0.37576083198655397,
+          "peak_rss_kib": 42040
         },
         "noop": {
-          "wall_seconds": 0.06947784498333931,
-          "peak_rss_kib": 31144
+          "wall_seconds": 0.07311366399517283,
+          "peak_rss_kib": 30152
         }
       },
       {
@@ -934,12 +934,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3820345480344258,
-          "peak_rss_kib": 41604
+          "wall_seconds": 0.3768117940053344,
+          "peak_rss_kib": 40988
         },
         "noop": {
-          "wall_seconds": 0.0976727869710885,
-          "peak_rss_kib": 31960
+          "wall_seconds": 0.09797622100450099,
+          "peak_rss_kib": 32008
         }
       },
       {
@@ -952,12 +952,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.38528641598531976,
-          "peak_rss_kib": 41480
+          "wall_seconds": 0.38380365003831685,
+          "peak_rss_kib": 40756
         },
         "noop": {
-          "wall_seconds": 0.09829155501211062,
-          "peak_rss_kib": 33148
+          "wall_seconds": 0.09914221696089953,
+          "peak_rss_kib": 32280
         }
       },
       {
@@ -970,12 +970,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3756147159729153,
-          "peak_rss_kib": 43000
+          "wall_seconds": 0.3808856600080617,
+          "peak_rss_kib": 41756
         },
         "noop": {
-          "wall_seconds": 0.07110371201997623,
-          "peak_rss_kib": 31756
+          "wall_seconds": 0.07243131595896557,
+          "peak_rss_kib": 30364
         }
       },
       {
@@ -988,12 +988,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.3720844719791785,
-          "peak_rss_kib": 43324
+          "wall_seconds": 0.3774041840224527,
+          "peak_rss_kib": 42372
         },
         "noop": {
-          "wall_seconds": 0.0696080100024119,
-          "peak_rss_kib": 31884
+          "wall_seconds": 0.07160037400899455,
+          "peak_rss_kib": 30252
         }
       },
       {
@@ -1006,12 +1006,12 @@
         "symbols": 514,
         "document_reason": "missing",
         "init": {
-          "wall_seconds": 0.37837035302072763,
-          "peak_rss_kib": 41920
+          "wall_seconds": 0.38149508205242455,
+          "peak_rss_kib": 40276
         },
         "noop": {
-          "wall_seconds": 0.09849256899906322,
-          "peak_rss_kib": 32792
+          "wall_seconds": 0.09969216905301437,
+          "peak_rss_kib": 31860
         }
       }
     ]

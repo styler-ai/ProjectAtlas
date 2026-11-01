@@ -68,11 +68,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 292.6 → 293.1 | 49.6 → 48.7 | 31,140 → 30,344 | 20,612 → 20,492 |
-| Large config | 293.1 → 296.6 | 50.1 → 53.3 | 31,380 → 32,800 | 20,780 → 23,296 |
-| 10,000 rules | 373.8 → 382.0 | 69.6 → 98.3 | 43,324 → 41,604 | 31,756 → 32,792 |
+| Ordinary | 291.5 → 289.1 | 49.5 → 50.2 | 30,544 → 29,748 | 19,212 → 19,188 |
+| Large config | 296.2 → 299.1 | 49.4 → 54.3 | 29,900 → 32,372 | 18,988 → 22,320 |
+| 10,000 rules | 377.4 → 381.5 | 72.4 → 99.1 | 42,040 → 40,756 | 30,252 → 32,008 |
 
-The large-rule fresh-process refresh adds about 29 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 27 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in

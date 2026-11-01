@@ -2496,22 +2496,50 @@ mod tests {
     #[test]
     fn selected_root_spelling_keeps_targeted_policy_and_scans_consistent()
     -> Result<(), Box<dyn Error>> {
+        fn write_policy_root(directory: &Path) -> Result<PathBuf, Box<dyn Error>> {
+            let root = directory.join("repo");
+            fs::create_dir(&root)?;
+            fs::create_dir(directory.join("step"))?;
+            fs::write(root.join(".gitignore"), "blocked.rs\nmissing.md\n")?;
+            fs::write(root.join("kept.rs"), "pub fn kept() {}")?;
+            fs::write(root.join("blocked.rs"), "pub fn blocked() {}")?;
+            Ok(root)
+        }
+
         let cwd = std::env::current_dir()?;
         let temp = tempfile::tempdir_in(&cwd)?;
         let directory = temp.path().canonicalize()?;
-        let root = directory.join("repo");
-        fs::create_dir(&root)?;
-        fs::create_dir(directory.join("step"))?;
-        fs::write(root.join(".gitignore"), "blocked.rs\nmissing.md\n")?;
-        fs::write(root.join("kept.rs"), "pub fn kept() {}")?;
-        fs::write(root.join("blocked.rs"), "pub fn blocked() {}")?;
+        let root = write_policy_root(&directory)?;
+        // Keep relative-root coverage under CWD even when a long Windows CWD
+        // requires verbatim spelling. The Win32 parent case uses its own temp root.
+        #[cfg(windows)]
+        let alias_temp = tempfile::tempdir()?;
+        #[cfg(windows)]
+        let alias_directory = alias_temp.path().canonicalize()?;
+        #[cfg(not(windows))]
+        let alias_directory = directory;
+        #[cfg(windows)]
+        let alias_root = write_policy_root(&alias_directory)?;
+        #[cfg(not(windows))]
+        let alias_root = root.clone();
         // A Win32 spelling retains `..`; joining onto a verbatim path would
         // normalize it away and silently miss the alias branch on Windows.
-        let directory_spelling =
-            PathBuf::from(projectatlas_core::lossless_native_path_display(&directory)?);
+        #[cfg(windows)]
+        let directory_spelling = PathBuf::from(projectatlas_core::lossless_native_path_display(
+            &alias_directory,
+        )?);
+        #[cfg(not(windows))]
+        let directory_spelling = alias_directory;
+        #[cfg(windows)]
+        require(
+            directory_spelling.is_absolute()
+                && matches!(directory_spelling.components().next(), Some(std::path::Component::Prefix(prefix))
+                    if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::UNC(..))),
+            "root parent fixture requires an ordinary Win32 base",
+        )?;
         let spelling = directory_spelling.join("step").join("..").join("repo");
         require(
-            spelling != root,
+            spelling != alias_root,
             "fixture did not retain a distinct root spelling",
         )?;
         let relative = PathBuf::from(
@@ -2524,9 +2552,9 @@ mod tests {
         .join("repo");
         let absolute_relative = cwd.join(&relative);
         let selections = [
-            (root.clone(), root.clone()),
-            (spelling.clone(), spelling),
-            (relative, absolute_relative),
+            (root.clone(), root.clone(), root.clone()),
+            (alias_root, spelling.clone(), spelling),
+            (root, relative, absolute_relative),
         ];
         let options = ScanOptions::default();
         let control = IndexWorkControl::new(IndexCancellation::new(), None);
@@ -2539,8 +2567,8 @@ mod tests {
                 == cwd.canonicalize()?,
             "explicit current-directory root changed its identity",
         )?;
-        let canonical_nodes = scan_repo(&root, &options)?;
-        for (selected, absolute) in selections {
+        for (root, selected, absolute) in selections {
+            let canonical_nodes = scan_repo(&root, &options)?;
             let policy = RootScanPolicy::discover(&selected, &options, &control)?;
             require(
                 policy.root == root,
