@@ -1851,12 +1851,94 @@ mod tests {
             ),
         )?;
         drop(store);
-        Ok((database, source))
+        // Inject native events beneath the root used for registration, while
+        // retaining the caller's explicit database spelling for alias controls.
+        Ok((database, plan.root.join("source.rs")))
     }
 
     /// Build a bounded non-cancelled control for observer tests.
     fn test_control() -> IndexWorkControl {
         IndexWorkControl::new(IndexCancellation::new(), Some(Duration::from_secs(30)))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_event_fixture_preserves_invalidation_below_operator_alias()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("actual-root");
+        let selected = temp.path().join("selected-root");
+        fs::create_dir(&root)?;
+        std::os::unix::fs::symlink(&root, &selected)?;
+        let (database, source) = indexed_project(&selected)?;
+        let registry = SourceObservationRegistry::default();
+        let admission = registry.admit_mutation(&database, &selected, None, &test_control())?;
+        let MutationSourceWitness::Observed { entry, .. } = &admission.witness else {
+            return Err(std::io::Error::other("native fixture witness unavailable").into());
+        };
+        *entry
+            .acceptance_event
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("acceptance event lock poisoned"))? =
+            Some(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(source));
+        require(
+            matches!(admission.verify(), Err(CliError::RefreshRequired(_))),
+            "selected-root fixture spelling bypassed delayed source invalidation",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_observer_classifies_source_edits_through_selected_root_alias()
+    -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("actual-root");
+        let selected = temp.path().join("selected-root");
+        fs::create_dir(&root)?;
+        std::os::unix::fs::symlink(&root, &selected)?;
+        let (database, _source) = indexed_project(&selected)?;
+        let entry = SourceObservationEntry::start(SourceBinding::new(&database, &selected, None)?)?;
+        for (spelling, leaf, content) in [
+            (&selected, "selected.rs", "fn selected_alias_edit() {}\n"),
+            (
+                &entry.binding.root,
+                "canonical.rs",
+                "fn canonical_root_edit() {}\n",
+            ),
+        ] {
+            let canonical_source = entry.binding.root.join(leaf);
+            entry.clear_before_exact_verification(&test_control())?;
+            fs::write(spelling.join(leaf), content)?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let event = entry
+                    .receiver
+                    .lock()
+                    .map_err(|_poisoned| std::io::Error::other("observer receiver lock poisoned"))?
+                    .recv_timeout(Duration::from_millis(100));
+                if let Ok(event) = event
+                    && event.paths.iter().any(|path| path == &canonical_source)
+                {
+                    let changes = observer_event_changes(
+                        &entry.binding,
+                        &projectatlas_fs::ScanOptions::default(),
+                        &event,
+                    );
+                    require(
+                        changes.paths.contains(&canonical_source),
+                        "actual native source event was not admitted for verification",
+                    )?;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::other(
+                        "selected-root source edit did not reach its canonical native registration",
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Return a fallible test failure without panicking inside result-returning tests.
