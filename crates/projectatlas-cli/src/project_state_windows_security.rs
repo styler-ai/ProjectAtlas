@@ -123,7 +123,13 @@ fn admitted_control(control: u16, complete: bool) -> io::Result<u16> {
             ),
         ));
     }
-    Ok(control)
+    // The SDK defines DEFAULTED only when PRESENT is set. Separate and combined
+    // queries need not preserve this ignored bit for an absent SACL.
+    Ok(if control & SACL_PRESENT == 0 {
+        control & !SACL_DEFAULTED
+    } else {
+        control
+    })
 }
 
 /// Borrow only a present non-NULL native ACL from its owning descriptor.
@@ -189,8 +195,8 @@ fn transferable_sacl_image(
     let represented_image =
         ConvertSecurityDescriptorToStringSecurityDescriptor(represented, system_information())?;
     require_complete_sacl_image(represented, &represented_image)?;
-    if descriptor_control(complete)? & SACL_CONTROL
-        != descriptor_control(represented)? & SACL_CONTROL
+    if admitted_control(descriptor_control(complete)?, true)?
+        != admitted_control(descriptor_control(represented)?, true)?
         || descriptor_sacl(complete)?.is_some() != descriptor_sacl(represented)?.is_some()
         || sacl_entry_count(complete)? != sacl_entry_count(represented)?
         || complete_image != represented_image
@@ -296,7 +302,8 @@ impl SystemPolicy {
     /// # Errors
     /// Returns native failures or refuses an unverifiable/mismatched stage.
     pub(super) fn apply(&self, staged: &File) -> io::Result<()> {
-        if self == &Self::capture(staged, self.complete)? {
+        let observed = Self::capture(staged, self.complete)?;
+        if self == &observed {
             return Ok(());
         }
         if !self.complete {
@@ -313,7 +320,7 @@ impl SystemPolicy {
                 None
             };
         let sacl = sacl.or_else(|| empty.as_ref().map(EmptySacl::as_acl));
-        let information = assignment_information()
+        let information = self.assignment_for(&observed)?
             | if self.control & SACL_PROTECTED != 0 {
                 SecurityInformation::ProtectedSacl
             } else {
@@ -331,6 +338,32 @@ impl SystemPolicy {
         )?;
         self.verify(&retained)
     }
+
+    /// Metadata-only restoration must not request rights for unchanged classes.
+    fn assignment_for(&self, observed: &Self) -> io::Result<SecurityInformation> {
+        let same_presence =
+            (self.control ^ observed.control) & (SACL_PRESENT | SACL_DEFAULTED) == 0;
+        let same_null_state = descriptor_sacl(&self.descriptor)?.is_some()
+            == descriptor_sacl(&observed.descriptor)?.is_some();
+        if same_presence
+            && same_null_state
+            && sacl_entries_image(&self.sddl)? == sacl_entries_image(&observed.sddl)?
+        {
+            // All opaque entries already match. Restore only SACL inheritance;
+            // LABEL/ATTRIBUTE/SCOPE would demand unrelated WRITE_OWNER/WRITE_DAC.
+            Ok(SecurityInformation::Sacl)
+        } else {
+            Ok(assignment_information())
+        }
+    }
+}
+
+/// Borrow the exact ordered native ACE image, without interpreting ACE contents.
+fn sacl_entries_image(value: &OsStr) -> io::Result<&str> {
+    let text = value.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, "native SACL image is not text")
+    })?;
+    Ok(&text[text.find('(').unwrap_or(text.len())..])
 }
 
 /// SDK-owned inheritance preview, released by its matching native allocator.
@@ -406,6 +439,7 @@ fn inheritance_system_control(control: u16) -> u16 {
 fn snapshot_system_image(
     descriptor: &SecurityDescriptor,
     expected: &super::WindowsAccessSnapshot,
+    role: &str,
 ) -> io::Result<OsString> {
     let complete = expected.system.needs_system_access();
     let discretionary =
@@ -417,14 +451,19 @@ fn snapshot_system_image(
     };
     let image = ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, system)?;
     require_complete_sacl_image(descriptor, &image)?;
-    if ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, discretionary)?
-        != expected.discretionary
-        || admitted_control(descriptor_control(descriptor)?, complete)? != expected.system.control
+    let actual_discretionary =
+        ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, discretionary)?;
+    let actual_control = admitted_control(descriptor_control(descriptor)?, complete)?;
+    if actual_discretionary != expected.discretionary
+        || actual_control != expected.system.control
         || image != expected.system.sddl
     {
-        return Err(io::Error::other(
-            "native policy changed before replacement creation",
-        ));
+        return Err(io::Error::other(format!(
+            "native policy changed before replacement creation: role={role}, complete={complete}, discretionary_matches={}, expected_system_control={:04x}, observed_system_control={actual_control:04x}, system_image_matches={}",
+            actual_discretionary == expected.discretionary,
+            expected.system.control,
+            image == expected.system.sddl,
+        )));
     }
     Ok(image)
 }
@@ -488,10 +527,10 @@ impl ReplacementCreation {
         };
         let information = discretionary | system;
         let mut descriptor = GetSecurityInfo(source, SeObjectType::SE_FILE_OBJECT, information)?;
-        let source_system = snapshot_system_image(&descriptor, expected)?;
+        let source_system = snapshot_system_image(&descriptor, expected, "source")?;
         let parent_descriptor =
             GetSecurityInfo(&parent, SeObjectType::SE_FILE_OBJECT, information)?;
-        snapshot_system_image(&parent_descriptor, &parent_policy)?;
+        snapshot_system_image(&parent_descriptor, &parent_policy, "parent")?;
         let token = effective_token()?;
         let mapping = GENERIC_MAPPING {
             GenericRead: FILE_GENERIC_READ,
@@ -737,6 +776,50 @@ mod tests {
         Ok(())
     }
 
+    /// Unchanged opaque entries need no label, attribute or scope setter rights.
+    #[test]
+    fn inheritance_only_assignment_does_not_request_unchanged_class_rights() -> io::Result<()> {
+        let snapshot = |text: &str| -> io::Result<SystemPolicy> {
+            let descriptor = ConvertStringSecurityDescriptorToSecurityDescriptor(text)?;
+            let control = admitted_control(descriptor_control(&descriptor)?, true)?;
+            let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &descriptor,
+                system_information(),
+            )?;
+            require_complete_sacl_image(&descriptor, &sddl)?;
+            Ok(SystemPolicy {
+                descriptor,
+                sddl,
+                control,
+                complete: true,
+            })
+        };
+        for entries in [
+            "(AU;SAFA;FW;;;WD)",
+            "(ML;;NW;;;HI)",
+            r#"(AU;SAFA;FW;;;WD)(RA;;;;;WD;("Claim",TS,0,"alpha"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)"#,
+        ] {
+            let expected = snapshot(&format!("S:P{entries}"))?;
+            let observed = snapshot(&format!("S:AI{entries}"))?;
+            if expected.assignment_for(&observed)? != SecurityInformation::Sacl {
+                return Err(io::Error::other(
+                    "unchanged native policy demanded unrelated class rights",
+                ));
+            }
+        }
+        let high = snapshot("S:P(ML;;NW;;;HI)")?;
+        let medium = snapshot("S:P(ML;;NW;;;ME)")?;
+        if high.assignment_for(&medium)? != assignment_information()
+            || snapshot("O:BA")?.assignment_for(&snapshot("S:NO_ACCESS_CONTROL")?)?
+                != assignment_information()
+        {
+            return Err(io::Error::other(
+                "changed native policy was reduced to an inheritance-only setter",
+            ));
+        }
+        Ok(())
+    }
+
     /// The safe wrapper recognizes the SDK-owned zero-entry ACL representation.
     #[test]
     fn sdk_initialized_empty_sacl_has_no_native_entries() -> io::Result<()> {
@@ -793,7 +876,7 @@ mod tests {
         }
         if admitted_control(0x8000, false)? != 0
             || admitted_control(0x8800, false)? != 0x0800
-            || admitted_control(0x8800 | SACL_DEFAULTED, false)? != 0x0800 | SACL_DEFAULTED
+            || admitted_control(0x8800 | SACL_DEFAULTED, false)? != 0x0800
             || admitted_control(0x8010 | SACL_PROTECTED, true)? != 0x2010
         {
             return Err(io::Error::other("supported system controls were changed"));

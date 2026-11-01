@@ -9979,10 +9979,15 @@ mod tests {
             fs::hard_link(&short_wal, &outside_wal)?;
             let admission = preflight_managed_reset(&short, &root)?;
             let preview = reset_index_files(&short, false, true, false, admission.as_ref())?;
+            let alternate_leaf = short
+                .file_name()
+                .ok_or_else(|| io::Error::other("short database has no leaf"))?;
+            let canonical_parent_wal = db_sidecar_path(&directory.join(alternate_leaf), "wal");
             if !preview
                 .files
                 .iter()
-                .any(|file| file.path == lossless_native_path_display(&short_wal))
+                .any(|file| file.path == lossless_native_path_display(&canonical_parent_wal))
+                || !same_file::is_same_file(&canonical_parent_wal, &short_wal)?
             {
                 return Err(io::Error::other(
                     "reset preview omitted proven alternate recovery state",

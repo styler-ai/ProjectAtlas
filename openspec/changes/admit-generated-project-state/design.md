@@ -459,8 +459,12 @@ it to match the admitted snapshots, and capture/retain the exact parent director
 and matching policy. Use canonical CreatePrivateObjectSecurityEx with the effective
 thread token (process fallback only for ERROR_NO_TOKEN), real DACL/SACL inheritance
 checks and file generic mapping. Require matching owner/group and ordered ACL policy
-before creating a name; only preview AI is ignored, plus the SDK-undefined default
-bit when SACL is absent. Final system-policy verification remains strict.
+before creating a name; only preview AI is ignored. Normalize the SDK-ignored
+DEFAULTED bit consistently only when SACL_PRESENT is clear, across separate,
+combined and assignment-view queries. Present defaulted policy still refuses and
+all meaningful final system-policy controls remain strict. Combined-snapshot
+mismatch diagnostics identify source/parent, query mode, control values and match
+booleans without exposing native ACEs or principals.
 
 Protect DACL inheritance and present SACL inheritance in the owned creation
 descriptor; never synthesize SACL presence from absence. Retain the original native
@@ -485,7 +489,17 @@ opens before policy preparation; use an all-share native clone of its actual DAC
 to distinguish data-policy denial from sharing denial. Cover all six replacement
 roles, final policy/payload, outside hardlinks and original-handle failure cleanup.
 Audit/integrity/RA/SP positives must also cover protected sources without optional
-discretionary policy rights. New files keep ordinary inheritance.
+discretionary policy rights. If SACL presence, NULL/allocation state and the complete
+ordered opaque ACE image already match, restore inheritance with the SACL selector
+and its protection flag only. Requesting unchanged LABEL/ATTRIBUTE/SCOPE selectors
+can unnecessarily require WRITE_OWNER/WRITE_DAC. A meaningful data difference retains
+the supported full assignment view; every single setter requires exact full readback,
+with no drop-then-repair fallback. Require an unprotected mixed AU/ML/RA/SP source
+under reduced and denied discretionary rights across all six roles, proving that
+the stage starts protected and actual restoration occurs before payload. New files
+keep ordinary inheritance. Restricted-actor reopen controls include synchronous
+handle and metadata rights; their failure before tightening is a fixture failure,
+not a successful negative security control.
 
 Different-owner-but-authorized restoration is a separate native compatibility
 question: compare the former setter under already enabled SeRestorePrivilege,

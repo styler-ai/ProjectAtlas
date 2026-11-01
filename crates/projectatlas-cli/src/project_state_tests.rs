@@ -3181,7 +3181,9 @@ public static class SystemPolicyFixture {
   }
   public static string ActorSetup(string parent,string target) {
     DiscretionaryPolicy(target,"D:P(D;;0x00050000;;;OW)(A;;FA;;;BA)(A;;FR;;;WD)");
-    DiscretionaryPolicy(parent,"D:P(D;;0x00040000;;;OW)(A;OICI;FA;;;BA)(A;;0x001200a3;;;WD)(A;OIIO;0x00050002;;;WD)");
+    // Synchronous CreateFile reopens also request SYNCHRONIZE. Its omission
+    // would deny the baseline before any policy tightening is exercised.
+    DiscretionaryPolicy(parent,"D:P(D;;0x00040000;;;OW)(A;OICI;FA;;;BA)(A;;0x001200a3;;;WD)(A;OIIO;0x00150082;;;WD)");
     using (var actor=new RestrictedActor()) { ActorPremises(actor,parent,target); }
     return "restricted actor parent/target premises PASS";
   }
@@ -3218,6 +3220,9 @@ public static class SystemPolicyFixture {
         SecurityAttributes ordinary=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
         raw=CreateFile(stage,0xc2070000u,4,ref ordinary,1,0x00200080,IntPtr.Zero);
         if (raw == new IntPtr(-1)) throw new Win32Exception();
+        IntPtr inherited=FileDescriptor(stage,4u);
+        try { Console.WriteLine("actor baseline inherited DACL="+DescriptorImage(inherited,4u,false)); }
+        finally { LocalFree(inherited); }
         deletion=actor.Allowed(stage,0x10000u);policy=actor.Allowed(stage,0x40000u);
         data=CreateFile(dataControl,0xc0030000u,7,ref ordinary,1,0x00200080,IntPtr.Zero);
         if (data == new IntPtr(-1)) throw new Win32Exception();
@@ -3250,19 +3255,26 @@ public static class SystemPolicyFixture {
     return "former stage actor acquisition persists after tightening and publication PASS";
   }
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool GetSecurityDescriptorOwner(IntPtr descriptor,out IntPtr owner,out bool defaulted);
+  public static void ForeignOwner(string path) {
+    DiscretionaryPolicy(path,"D:P(A;;FA;;;BA)");
+    IntPtr descriptor=IntPtr.Zero;
+    try {
+      uint length;IntPtr owner;bool defaulted;
+      if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:SY",1,out descriptor,out length) || !GetSecurityDescriptorOwner(descriptor,out owner,out defaulted)) throw new Win32Exception();
+      uint status=SetNamedSecurityInfo(path,1,1u,owner,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+      if (status != 0) throw new Win32Exception((int)status,"Authorized foreign-owner fixture setup failed");
+    } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+  }
   public static string ForeignOwnerControl(string root) {
     System.IO.Directory.CreateDirectory(root);
     string source=System.IO.Path.Combine(root,"foreign-owner-source");
-    IntPtr ownerDescriptor=IntPtr.Zero,sourceDescriptor=IntPtr.Zero,parentDescriptor=IntPtr.Zero,token=IntPtr.Zero;
+    IntPtr sourceDescriptor=IntPtr.Zero,parentDescriptor=IntPtr.Zero,token=IntPtr.Zero;
     var results=new System.Collections.Generic.List<string>();
     EnablePrivilege("SeRestorePrivilege",true);
     try {
       System.IO.File.WriteAllText(source,"foreign owner original");
-      DiscretionaryPolicy(source,"D:P(A;;FA;;;BA)");
-      uint length;IntPtr owner;bool defaulted;
-      if (!ConvertStringSecurityDescriptorToSecurityDescriptor("O:SY",1,out ownerDescriptor,out length) || !GetSecurityDescriptorOwner(ownerDescriptor,out owner,out defaulted)) throw new Win32Exception();
-      uint status=SetNamedSecurityInfo(source,1,1u,owner,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
-      if (status != 0) throw new Win32Exception((int)status,"Authorized foreign-owner fixture setup failed");
+      ForeignOwner(source);
+      IntPtr owner;bool defaulted;uint status;
       sourceDescriptor=FileDescriptor(source,7u);parentDescriptor=NamedDescriptor(root,7u);
       if (!OpenProcessToken(GetCurrentProcess(),0xau,out token)) throw new Win32Exception();
       GenericMapping mapping=new GenericMapping { Read=0x120089u,Write=0x120116u,Execute=0x1200a0u,All=0x1f01ffu };
@@ -3297,7 +3309,7 @@ public static class SystemPolicyFixture {
       return String.Join("\n",results);
     } finally {
       if (token != IntPtr.Zero) CloseHandle(token);
-      foreach (IntPtr descriptor in new IntPtr[] { ownerDescriptor,sourceDescriptor,parentDescriptor }) if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      foreach (IntPtr descriptor in new IntPtr[] { sourceDescriptor,parentDescriptor }) if (descriptor != IntPtr.Zero) LocalFree(descriptor);
       EnablePrivilege("SeRestorePrivilege",false);
       System.IO.Directory.Delete(root,true);
     }
@@ -3719,6 +3731,108 @@ fn windows_replacement_creation_denies_inherited_actor_capabilities() -> io::Res
                 && fs::read(&outside)? == b"protected previous output"
                 && fs::read_dir(&parent)?.count() == entries,
             &format!("protected stage failed original-handle cleanup: {failed:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// An already authorized caller preserves a different owner's policy and cleanup.
+#[cfg(windows)]
+#[test]
+fn windows_authorized_foreign_owner_replacement_preserves_policy() -> io::Result<()> {
+    const MODE: &str = "PROJECTATLAS_TEST_SYSTEM_POLICY_MODE";
+    if std::env::var(MODE).as_deref() != Ok("authorized-owner") {
+        let executable = std::env::current_exe()?;
+        let script = windows_fixture_script(
+            "[SystemPolicyFixture]::Enable($false); [SystemPolicyFixture]::EnablePrivilege('SeRestorePrivilege',$true); & $env:PROJECTATLAS_TEST_SYSTEM_POLICY_EXE --exact project_state::tests::windows_authorized_foreign_owner_replacement_preserves_policy --nocapture; exit $LASTEXITCODE",
+        )?;
+        let child = windows_powershell_fixture(&script, |command| {
+            command
+                .env(MODE, "authorized-owner")
+                .env("PROJECTATLAS_TEST_SYSTEM_POLICY_EXE", &executable);
+        })?;
+        return require(
+            child.status.success(),
+            &format!("authorized-owner child failed: {child:?}"),
+        );
+    }
+    let setup = windows_fixture_script(
+        "[SystemPolicyFixture]::EnablePrivilege('SeRestorePrivilege',$true); [SystemPolicyFixture]::ForeignOwner($env:PROJECTATLAS_TEST_ACL_PATH)",
+    )?;
+    for (private, name, host) in replacement_targets() {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let directory = if private {
+            root.join(STATE_DIRECTORY)
+        } else {
+            root.clone()
+        };
+        fs::create_dir_all(&directory)?;
+        let output = directory.join(name);
+        fs::write(&output, b"foreign owner original")?;
+        let prepared = windows_powershell_fixture(&setup, |command| {
+            command.env("PROJECTATLAS_TEST_ACL_PATH", &output);
+        })?;
+        require(
+            prepared.status.success(),
+            &format!("foreign-owner setup failed: {prepared:?}"),
+        )?;
+        let expected = windows_acl(&output, None)?;
+        require(
+            expected.contains("O:SY") || expected.contains("O:S-1-5-18"),
+            "fixture did not establish SYSTEM ownership",
+        )?;
+        let outside = root.join("foreign-owner-outside");
+        fs::hard_link(&output, &outside)?;
+        let guard = if host {
+            ProjectStateGuard::preflight(&root, None, None)?
+        } else {
+            ProjectStateGuard::preflight_document(&root, &output)?
+                .ok_or_else(|| io::Error::other("foreign-owner target was external"))?
+        };
+        let entries = fs::read_dir(&directory)?.count();
+        guard.publish_with_stage_check(
+            &output,
+            b"foreign owner replacement",
+            FilePublication::Replace,
+            |stage| {
+                require(
+                    windows_acl(stage.path(), None)? == expected,
+                    "initial stage lost authorized foreign-owner policy",
+                )
+            },
+            || Ok(()),
+        )?;
+        require(
+            fs::read(&output)? == b"foreign owner replacement"
+                && fs::read(&outside)? == b"foreign owner original"
+                && windows_acl(&output, None)? == expected
+                && windows_acl(&outside, None)? == expected
+                && !same_file::is_same_file(&output, &outside)?
+                && fs::read_dir(&directory)?.count() == entries,
+            "authorized foreign-owner replacement lost payload, policy or outside owner",
+        )?;
+        let failed = guard.publish_with_stage_check(
+            &output,
+            b"unpublished foreign-owner payload",
+            FilePublication::Replace,
+            |_| Ok(()),
+            || {
+                Err(io::Error::other(
+                    "injected foreign-owner publication failure",
+                ))
+            },
+        );
+        require(
+            failed.as_ref().is_err_and(|error| {
+                error
+                    .to_string()
+                    .contains("injected foreign-owner publication failure")
+            }) && fs::read(&output)? == b"foreign owner replacement"
+                && fs::read(&outside)? == b"foreign owner original"
+                && windows_acl(&output, None)? == expected
+                && fs::read_dir(&directory)?.count() == entries,
+            &format!("authorized foreign-owner cleanup failed: {failed:?}"),
         )?;
     }
     Ok(())
@@ -4655,34 +4769,71 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
         }
     }
     if complete {
-        for dacl in ["D:P(A;;0x0013019f;;;OW)", "D:P(D;;WD;;;OW)(A;;FA;;;OW)"] {
+        for dacl in [
+            "D:P(A;;0x0013019f;;;OW)",
+            "D:P(D;;WD;;;OW)(A;;FA;;;OW)",
+            "D:P(D;;0x000c0000;;;OW)(A;;FA;;;OW)",
+        ] {
             for policy in [
                 "S:P(AU;SAFA;FW;;;WD)",
                 "S:P(ML;;NW;;;HI)",
                 r#"S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))"#,
                 "S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)",
+                r#"S:(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)"#,
             ] {
-                let temp = tempfile::tempdir()?;
-                let root = temp.path().canonicalize()?;
-                let mut guard = ProjectStateGuard::preflight(&root, None, None)?;
-                guard.ensure_directory()?;
-                let output = guard.directory.join(HOST_FILES[0]);
-                let outside = root.join("restricted-policy-outside-owner");
-                fs::write(&output, b"restricted policy original")?;
-                windows_system_policy(&output, Some(policy))?;
-                windows_discretionary_policy(&output, dacl)?;
-                fs::hard_link(&output, &outside)?;
-                let expected = windows_native_system_policy(&output, 0x1f8)?;
-                let expected_dacl = windows_acl(&output, None)?;
-                guard.write_generated(&output, b"restricted policy replacement")?;
-                require(
-                    fs::read(&output)? == b"restricted policy replacement"
-                        && fs::read(&outside)? == b"restricted policy original"
-                        && windows_native_system_policy(&output, 0x1f8)? == expected
-                        && windows_native_system_policy(&outside, 0x1f8)? == expected
-                        && windows_acl(&output, None)? == expected_dacl,
-                    "available system-policy preservation required unused discretionary rights",
-                )?;
+                let unprotected = policy.starts_with("S:(");
+                let targets = if unprotected {
+                    replacement_targets().collect::<Vec<_>>()
+                } else {
+                    vec![(true, HOST_FILES[0], true)]
+                };
+                for (private, name, host) in targets {
+                    let temp = tempfile::tempdir()?;
+                    let root = temp.path().canonicalize()?;
+                    let directory = if private {
+                        root.join(STATE_DIRECTORY)
+                    } else {
+                        root.clone()
+                    };
+                    fs::create_dir_all(&directory)?;
+                    let output = directory.join(name);
+                    let guard = if host {
+                        ProjectStateGuard::preflight(&root, None, None)?
+                    } else {
+                        ProjectStateGuard::preflight_document(&root, &output)?.ok_or_else(|| {
+                            io::Error::other("restricted policy target was external")
+                        })?
+                    };
+                    let outside = root.join("restricted-policy-outside-owner");
+                    fs::write(&output, b"restricted policy original")?;
+                    windows_system_policy(&output, Some(policy))?;
+                    windows_discretionary_policy(&output, dacl)?;
+                    fs::hard_link(&output, &outside)?;
+                    let expected = windows_native_system_policy(&output, 0x1f8)?;
+                    let expected_dacl = windows_acl(&output, None)?;
+                    let observed = std::cell::Cell::new(false);
+                    guard.publish_with_stage_check(&output, b"restricted policy replacement", FilePublication::Replace,
+                    |stage| {
+                        if unprotected {
+                            let initial = windows_native_system_policy(stage.path(), 0x1f8)?;
+                            let flags = |image: &str| -> io::Result<u16> {
+                                u16::from_str_radix(image.split('|').next().ok_or_else(|| io::Error::other("native policy has no controls"))?,16).map_err(io::Error::other)
+                            };
+                            require(flags(&expected)? & 0x2000 == 0 && flags(&initial)? & 0x2000 != 0,
+                                "unprotected mixed-policy case did not require actual SACL restoration")?;
+                        }
+                        observed.set(true);Ok(())
+                    }, || Ok(()))?;
+                    require(
+                        observed.get()
+                            && fs::read(&output)? == b"restricted policy replacement"
+                            && fs::read(&outside)? == b"restricted policy original"
+                            && windows_native_system_policy(&output, 0x1f8)? == expected
+                            && windows_native_system_policy(&outside, 0x1f8)? == expected
+                            && windows_acl(&output, None)? == expected_dacl,
+                        "available system-policy preservation required unused discretionary rights",
+                    )?;
+                }
             }
         }
     }

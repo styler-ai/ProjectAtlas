@@ -1,5 +1,73 @@
 # Active context
 
+## Native bee Windows FAIL; native-controls candidate DIRTY, no lease
+
+SOURCE41294400624 Windows124812136337 TERMINALFAIL. SDK124812136261/plan/
+repository/Rust SUCCESS; otherwholejobs readwatcher34613 currentstatus. NativeWindows
+protectedconstructor causes14owning failures (31PASS1ignore) at generic combined
+snapshot check BEFOREstage. Actualcausefield notcaptured; absentDEFAULTED bit is
+plausible, notproven. Actorbaselinefails DELETEreopen beforetightening; inherited
+Everyone mask lackedSYNCHRONIZE/metadata. Cohortunitprogressed sharedrevisions/all
+open/refusal/bytes/original-spellingcheckpoint+identity, thenpreview fullpath mismatch
+(FSOshortensparents; inventoryusescanonicalretainedparent). Owningfailuremasked
+actualCLI/MCProutes andfullreducedrights restoration; no such nativePASSclaimed.
+NativeEFS sixinitialroles correctlyrefused butlatecontrolmaskedbyconstructor.
+
+482SDKrows /tmp/projectatlas-741-bee7-windows-security-matrix.json: ForeignOwner
+BOTHrootsCPEflags3and19success; all4oldsetter/directcreate backup/noBackup exactTrue.
+CreatorRights48 has34actualpublicationPASS14setter78failures (unusedWO), sameaudit
+sources setter8 allPASS. SourceDescriptor160 NOerrors. No fullmixedselector8 proof
+yet; SDKjobSUCCESSmeansdiagnosticcompletionONLY. TL/FLremainunproven.
+
+CURRENTDIRTY: admmitted_control and transferable-query comparison normalize ONLY
+SDK-ignoredDEFAULTEDwhenSACL_PRESENTclear; preserveAI/protection/present-default
+refusal. Combinedsnapshot diagnostics role/mode/controls/matchbools, noSDDL.
+SystemPolicy.apply metadata-onlysetterSACL8 ifforderedcompleteopaqueACEimage,
+presence/defaulting/NULLallocationmatch; otherwise78oldpath. Singlesetter+fullstrict
+readback, no fallbackrepair/noextraunsafe. NewWindowsSDKsyntheticselectionunit.
+Protected12lowrightscases(host0) + UNPROTECTEDMIXED18cases(all6roles*3DACLs), callback
+assertssourcePclear/actualstagePset so restorationcannotnoop; full1f8output+outside
+policy/payload/DACLproof. Newauthorized-owner6roleactualpublisher+failurecleanup in
+ownedSeRestorechild/SeSecurityoff. FixtureForeignOwnerhelperextractedfromsameSDK
+verifiedsetup. ActorInheritedEveryone nowSYNC+metadata0x150082 andtestonlyDACLlog
+(excludesOwnerGroup). Cohortpreviewassertcanonicalparent+provenshortleafANDsame_file
+identity, no productreset change. No productionprivtoggle.
+
+BothLunaMaxapprove currentdelta for NEXTNATIVEPUBLICATIONONLY; notnative-ready or
+acceptance. GNUwholeowner/testsClippyPASS; CLIalltargets/allfeaturesClippyPASS;
+Linux32PASS2ignore; strictstrings/OpenSpec/scopedIssueOps1of5PASS. Updatedcohortunit
+portableClippyPASS; exactsavedbytesrestored (cfgWindowsretained). Liveissue newcontractupdated/
+readbackexact. No newtaskschecked. Nextfreshprefixnative-controlsnormalpush+immutable
+proof; derivebindingcountfrompreviousbee144+newdiff. No currentexecutionlease.
+Only741untilnormalmerge+BOTHCLOSED, then739/738/708/715, noRC. Earlier beePASSbelow
+meanslocalnormal+immutable ONLY; its Windows hosted FAILUREaboveiscurrentauthority.
+
+## Published bee71db: normal and immutable PASS, no lease
+
+Public bee71db90f324b6c4bdf58385f24ba7ddd6d6738; only741/PR743. Normal45586/
+PID3704108 TERMINALPASS805.8037s,34suites1733PASS12ignored. Immutable39924
+TERMINALPASS144boundinputs; readonlybinary378cab62fb25fac0cf58087f7f75125a61f379d1bceb59f0f2fa6b1569980c6e.
+Prefix/tmp/projectatlas-741-protected-creation-retry, admission12.096s/writer5.276s/
+registered9.386s/5stable050upgrades6.981sPASS; binary/inputs/identity/config/approved
+purposes unchanged during proof. No executionlease. Current normalpub includes
+protectedconstructor+initialreadback/cachedpolicy/actor+8fullSACLrights positives,
+canonicalmanagedDBcohort+legacyrefusal/no-SQLreset, registered lifecycle correction
+and guardedstagedrecovery (existing3resetcontrols+behavioralmutant/restoredpositive).
+BothLunaMaxapprove nativepublication ONLY. Windowsownerforeign compatibility OPEN.
+
+SOURCE41294400624 currently running exactbee, PRstate41294397839SUCCESS, CodeQL
+41294396556running. Hostedwatcher34613 /tmp/projectatlas-741-protected-creation-retry-hosted-status.json
+saves TERMINALlogs only. Need actual owning DB8.3/CLI/MCP+creationactor+fullSACL/
+foreignowner SDK data; diagnosticjob success alone is not row success. Nativecase
+family/scope/metadata allnewbranches require own proof. Three threadsOPEN, tasks1/5
+allacceptanceOPEN. No merge/issueclosure/noRC. Current PRbody updated/readback exact.
+652allhostedPASS is priorhead only. 652CodeQL27Rust exactnormalizedsource/flows;
+Actions4stablekeys (2exact/2whole-step changes individually reconciled for exact
+root-test commands and alreadyreviewed guardedMaccleanup; no cacheauthority change).
+No suppress/dismiss. Newbee scan still pending. Earlier headers below historical
+where inconsistent. Preserve privateDBs and parked owners; no installer repair needed
+(installed050 directruntime verified).
+
 ## Goal and serial owner
 
 Finish, normally merge and verify BOTH CLOSED one RC1 issue/PR at a time. Only
