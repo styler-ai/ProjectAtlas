@@ -12,6 +12,24 @@ Keep interpretation at the filesystem policy owner. Reuse the existing root/stru
 
 Configure traversal so the same external global/common-Git matchers apply at their established precedence below local .ignore/.gitignore rules. Where WalkBuilder options are used, preserve no-Git behavior and explicitly prove linked control files, canonical/operator root aliases, rooted and nested patterns and whitelist overrides. Do not add external files as ordinary project nodes or make an external config choice a source-root escape. Reuse existing trusted configuration capabilities rather than a generalized filesystem jail.
 
+Capture the selected root's absolute lexical spelling at policy discovery only
+when it differs from its canonical root. Anchor a relative selection to one
+captured working directory before canonicalizing that same selection. Rebase
+absolute targets beneath that exact component prefix onto the canonical root
+before both Atlas exclusions and native ignore matching; relative targets stay
+canonical-root-relative and unrelated absolute paths remain untouched. Do not
+canonicalize absent targets or add target I/O. This prevents root aliases such
+as macOS's temporary-directory spelling from being mistaken for excluded outside
+paths before nested-policy validation. Canonical runtime plans and persisted
+source rows remain unchanged, so this API correction does not require another
+derivation increment. Prove canonical/selected/relative spelling, admitted and
+ignored/missing targets, non-regular inputs, pruning and unchanged full-scan rows.
+The native-byte worktree fixture must distinguish a filesystem's direct EILSEQ
+filename refusal from a product defect: preserve raw-byte round trips where
+representable, always retain typed lossless-UTF-8 rejection, and run real Unicode
+Git/worktree lifecycle controls on the refusing filesystem rather than skipping
+the platform or coercing invalid bytes into another path.
+
 Use canonical Git-config parsing with bounded input reads and no automatic unbounded includes/network/process execution. The implementation selects pinned `gix-config` 0.62.2 with default features disabled and its required `sha1` feature; that feature satisfies the dependency's hash-type contract and does not change ProjectAtlas content hashing. The parser has a transitive dependency graph, not a standalone tiny syntax-only footprint. Project code owns direct source precedence, cancellation and input inventory. Review the exact locked graph, MSRV, licenses and measured construction/scan overhead before acceptance. A home-grown parser or normal Git command invocation is the rejected alternative.
 
 Pinned `ignore` 0.4.34 repairs Git-control type discovery when `git_exclude` is enabled even with `require_git(false)`. Keep native common-dir and nested Git behavior rather than installing a second hand-written common matcher. Configure one `WalkBuilder` with native .ignore/.gitignore/info-exclude, disable the incomplete built-in global-config selector, and add the canonically selected global excludes at the engine's lowest precedence, anchored at the selected root. Reuse `build_matchers`/`IncrementalIgnore` for targeted checks so inherited parents, subroot selection and ignored-parent pruning agree with traversal. Reuse compiled external policy within the operation/batch; do not retain a stale, unbounded incremental matcher across unrelated source epochs.

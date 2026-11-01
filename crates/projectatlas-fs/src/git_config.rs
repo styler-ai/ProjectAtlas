@@ -409,6 +409,37 @@ mod tests {
     }
 
     #[test]
+    fn absolute_configured_paths_retain_native_parent_components() -> Result<(), Box<dyn Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let home = root.join("home");
+        fs::create_dir(&home)?;
+        fs::create_dir(root.join("intermediate"))?;
+        fs::write(root.join("rules"), "blocked.rs\n")?;
+        let mut spelling = root.as_os_str().to_os_string();
+        spelling.push(std::path::MAIN_SEPARATOR_STR);
+        spelling.push(["intermediate", "..", "rules"].join(std::path::MAIN_SEPARATOR_STR));
+        let expected = PathBuf::from(spelling);
+        let text = expected
+            .to_str()
+            .ok_or_else(|| io::Error::other("configured fixture path was not UTF-8"))?
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        fs::write(
+            home.join(".gitconfig"),
+            format!("[core]\nexcludesFile = \"{text}\"\n"),
+        )?;
+        let selected = ExternalGitConfig::from_environment(&root, &environment(&home), &control())?;
+        require(
+            selected.excludes.as_deref() == Some(expected.as_path())
+                && expected
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir)),
+            "absolute configured selection lost native parent components",
+        )
+    }
+
+    #[test]
     fn direct_sources_apply_system_xdg_home_and_environment_precedence()
     -> Result<(), Box<dyn Error>> {
         let temp = tempfile::tempdir()?;

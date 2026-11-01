@@ -15,6 +15,7 @@ use projectatlas_core::{
     IndexWorkStage, MAX_GIT_WORKTREE_REGISTRATIONS, Node, NodeKind, normalize_repo_path,
     normalized_extension, normalized_parent,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
@@ -136,6 +137,8 @@ impl ScanOptions {
 pub struct RootScanPolicy {
     /// Canonical selected source root.
     root: PathBuf,
+    /// Absolute selected spelling when it differs from the canonical root.
+    selected_root_alias: Option<PathBuf>,
     /// Caller options extended with repository-derived exclusions.
     options: ScanOptions,
     /// One shared walker configuration, including compiled external ignore rules.
@@ -155,13 +158,38 @@ impl RootScanPolicy {
         control: &IndexWorkControl,
     ) -> FsResult<Self> {
         control.check(IndexWorkStage::RepositoryTraversal)?;
-        if !root.is_dir() {
+        if root.as_os_str().is_empty() {
             return Err(FsError::RootNotDirectory(root.to_path_buf()));
         }
-        let root = root.canonicalize().map_err(|source| FsError::Io {
+        let selected_root: Cow<'_, Path> = if root.is_absolute() {
+            Cow::Borrowed(root)
+        } else {
+            let anchored = std::env::current_dir()
+                .map_err(|source| FsError::Io {
+                    path: root.to_path_buf(),
+                    source,
+                })?
+                .join(root);
+            // Drive-relative Windows paths need the native per-drive context.
+            Cow::Owned(if anchored.is_absolute() {
+                anchored
+            } else {
+                std::path::absolute(root).map_err(|source| FsError::Io {
+                    path: root.to_path_buf(),
+                    source,
+                })?
+            })
+        };
+        if !selected_root.is_dir() {
+            return Err(FsError::RootNotDirectory(root.to_path_buf()));
+        }
+        let canonical_root = selected_root.canonicalize().map_err(|source| FsError::Io {
             path: root.to_path_buf(),
             source,
         })?;
+        let selected_root_alias = (selected_root.as_ref() != canonical_root.as_path())
+            .then(|| selected_root.into_owned());
+        let root = canonical_root;
         let options = scan_options_for_root(&root, options, control)?;
         for ancestor in root.ancestors() {
             control.check(IndexWorkStage::RepositoryTraversal)?;
@@ -193,6 +221,7 @@ impl RootScanPolicy {
         }
         Ok(Self {
             root,
+            selected_root_alias,
             options,
             walker,
         })
@@ -200,6 +229,8 @@ impl RootScanPolicy {
 
     /// Return whether one repository-contained path is excluded by the
     /// effective scanner policy, including rules that match an absent leaf.
+    /// Absolute paths beneath the original selected root spelling are rebased
+    /// onto its canonical root without resolving target components.
     ///
     /// # Errors
     ///
@@ -207,7 +238,14 @@ impl RootScanPolicy {
     /// source cannot be parsed safely.
     pub fn excludes_path(&self, path: &Path) -> FsResult<bool> {
         let absolute = if path.is_absolute() {
-            path.to_path_buf()
+            match self
+                .selected_root_alias
+                .as_deref()
+                .and_then(|selected| path.strip_prefix(selected).ok())
+            {
+                Some(relative) => self.root.join(relative),
+                None => path.to_path_buf(),
+            }
         } else {
             self.root.join(path)
         };
@@ -2452,6 +2490,160 @@ mod tests {
         // An absent or non-directory parent is not a selected policy directory.
         fs::write(root.join("ordinary.rs"), "pub fn ordinary() {}")?;
         policy.excludes_path(&root.join("ordinary.rs/absent.rs"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_root_spelling_keeps_targeted_policy_and_scans_consistent()
+    -> Result<(), Box<dyn Error>> {
+        let cwd = std::env::current_dir()?;
+        let temp = tempfile::tempdir_in(&cwd)?;
+        let directory = temp.path().canonicalize()?;
+        let root = directory.join("repo");
+        fs::create_dir(&root)?;
+        fs::create_dir(directory.join("step"))?;
+        fs::write(root.join(".gitignore"), "blocked.rs\nmissing.md\n")?;
+        fs::write(root.join("kept.rs"), "pub fn kept() {}")?;
+        fs::write(root.join("blocked.rs"), "pub fn blocked() {}")?;
+        // A Win32 spelling retains `..`; joining onto a verbatim path would
+        // normalize it away and silently miss the alias branch on Windows.
+        let directory_spelling =
+            PathBuf::from(projectatlas_core::lossless_native_path_display(&directory)?);
+        let spelling = directory_spelling.join("step").join("..").join("repo");
+        require(
+            spelling != root,
+            "fixture did not retain a distinct root spelling",
+        )?;
+        let relative = PathBuf::from(
+            temp.path()
+                .file_name()
+                .ok_or_else(|| io::Error::other("relative fixture has no directory name"))?,
+        )
+        .join("step")
+        .join("..")
+        .join("repo");
+        let absolute_relative = cwd.join(&relative);
+        let selections = [
+            (root.clone(), root.clone()),
+            (spelling.clone(), spelling),
+            (relative, absolute_relative),
+        ];
+        let options = ScanOptions::default();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        require(
+            matches!(RootScanPolicy::discover(Path::new(""), &options, &control), Err(FsError::RootNotDirectory(path)) if path.as_os_str().is_empty()),
+            "empty root selected the working directory",
+        )?;
+        require(
+            RootScanPolicy::discover(Path::new("."), &options, &control)?.root
+                == cwd.canonicalize()?,
+            "explicit current-directory root changed its identity",
+        )?;
+        let canonical_nodes = scan_repo(&root, &options)?;
+        for (selected, absolute) in selections {
+            let policy = RootScanPolicy::discover(&selected, &options, &control)?;
+            require(
+                policy.root == root,
+                "selected spelling changed canonical root identity",
+            )?;
+            require(
+                scan_repo(&selected, &options)? == canonical_nodes,
+                "selected spelling changed canonical source rows",
+            )?;
+            for prefix in [&root, &absolute] {
+                require(
+                    !policy.excludes_path(&prefix.join("kept.rs"))?,
+                    "selected root spelling hid an admitted file",
+                )?;
+                require(
+                    policy.excludes_path(&prefix.join("blocked.rs"))?,
+                    "selected root spelling lost a local exclusion",
+                )?;
+                require(
+                    policy.excludes_path(&prefix.join("missing.md"))?,
+                    "selected root spelling lost an absent exclusion",
+                )?;
+                require(
+                    !policy.excludes_path(&prefix.join("absent.rs"))?,
+                    "selected root spelling hid an ordinary absent target",
+                )?;
+            }
+            require(
+                !policy.excludes_path(Path::new("kept.rs"))?,
+                "relative target was not anchored at the selected root",
+            )?;
+            require(
+                policy.excludes_path(Path::new("missing.md"))?,
+                "relative absent exclusion was lost",
+            )?;
+            require(
+                scan_path_with_policy_controlled(
+                    &policy,
+                    &absolute.join("kept.rs"),
+                    ScanLimits::default(),
+                    &control,
+                )?
+                .is_some(),
+                "existing selected-root target was not scanned",
+            )?;
+            require(
+                scan_path_with_policy_controlled(
+                    &policy,
+                    &absolute.join("absent.rs"),
+                    ScanLimits::default(),
+                    &control,
+                )?
+                .is_none(),
+                "absent selected-root target became a source node",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn selected_root_alias_keeps_nested_policy_admission() -> Result<(), Box<dyn Error>> {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("repo");
+        let alias = temp.path().join("selected");
+        fs::create_dir_all(root.join("nested"))?;
+        fs::write(root.join("kept.rs"), "pub fn kept() {}")?;
+        symlink(&root, &alias)?;
+        let options = ScanOptions::default();
+        let control = IndexWorkControl::new(IndexCancellation::new(), None);
+        let policy = RootScanPolicy::discover(&alias, &options, &control)?;
+        require(
+            !policy.excludes_path(&alias.join("kept.rs"))?,
+            "selected symlink root hid an admitted file",
+        )?;
+        let input = root.join("nested/.ignore");
+        mkfifo(&input, Mode::S_IRUSR | Mode::S_IWUSR)?;
+        for target in [
+            alias.join("nested/absent.rs"),
+            root.canonicalize()?.join("nested/absent.rs"),
+            PathBuf::from("nested/absent.rs"),
+        ] {
+            require(
+                matches!(policy.excludes_path(&target), Err(FsError::Io { source, .. }) if source.kind() == io::ErrorKind::InvalidInput),
+                "selected-root spelling bypassed nested policy admission",
+            )?;
+        }
+        fs::write(root.join(".gitignore"), "nested/\n")?;
+        require(
+            policy.excludes_path(&alias.join("nested/absent.rs"))?,
+            "selected-root alias reopened a pruned policy directory",
+        )?;
+        let outside = temp.path().join("selected-other");
+        fs::create_dir(&outside)?;
+        mkfifo(&outside.join(".ignore"), Mode::S_IRUSR | Mode::S_IWUSR)?;
+        require(
+            policy.excludes_path(&outside.join("absent.rs"))?,
+            "unselected outside path entered target policy",
+        )?;
         Ok(())
     }
 

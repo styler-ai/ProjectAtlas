@@ -1,6 +1,6 @@
 # External source-policy costs and release handoff
 
-The derivation-25 policy repair adds 345,488 bytes (0.50%) to the optimized
+The derivation-25 policy repair adds 348,664 bytes (0.50%) to the optimized
 default CLI relative to accepted main at derivation 24. Both retain semantic
 contract 23. Exact binary identities, source-manifest identity, sample metrics
 and fixture fingerprints are in [the compact result](external-policy-cost.json).
@@ -33,9 +33,9 @@ Positive matching and exclusion correctness use the separate CLI/MCP regressions
 
 | Fixture | Construction, main → repair | Full scan, main → repair | Targeted check, main → repair | Process RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 9.1 → 59.1 µs | 5.11 → 5.30 ms | 24.2 → 75.8 µs | 6,616 → 5,740 |
-| Large config | 9.2 → 844.2 µs | 4.95 → 5.90 ms | 73.0 → 75.5 µs | 6,900 → 9,488 |
-| 10,000 rules | 9.0 µs → 16.05 ms | 24.82 → 23.79 ms | 17.87 → 2.50 ms | 20,872 → 19,864 |
+| Ordinary | 9.0 → 59.3 µs | 4.96 → 5.12 ms | 24.1 → 75.1 µs | 6,564 → 5,492 |
+| Large config | 9.0 → 828.8 µs | 5.17 → 5.73 ms | 72.5 → 75.4 µs | 7,108 → 9,268 |
+| 10,000 rules | 9.1 µs → 16.37 ms | 24.63 → 24.40 ms | 18.03 → 2.52 ms | 20,244 → 19,936 |
 
 Construction now performs bounded canonical configuration parsing and compiles
 external rules once. The old construction deferred work to later operations,
@@ -48,9 +48,13 @@ do not establish cold-storage behavior, a scaling bound or a performance SLO.
 ## Complete CLI refresh costs
 
 The final publication fix rediscovers policy before validating staged absent
-document states. The filesystem micro-driver is byte-identical to the measured
-driver above, so those component measurements remain applicable. The final CLI
-binary and source manifest are separately bound in the compact result.
+document states. After the root-alias repair, the component measurements were
+rerun. The helper
+relinked from the final source is byte-identical to that measured helper; the
+CLI measurements, upgrade cases and public CLI/MCP scenarios were rerun against
+the final CLI binary. Its identity and source manifest are in the compact result.
+Component timings use canonical roots; separate regressions cover lexical aliases,
+relative root selection and selected symlink roots without claiming alias timings.
 
 An additional 18 fresh-root initialization samples compare accepted main with
 the final artifact, followed by separately timed unchanged `watch --once` calls.
@@ -62,11 +66,11 @@ cache state and RSS method match the component protocol.
 
 | Fixture | Init ms, main → repair | Unchanged refresh ms, main → repair | Init RSS KiB, main → repair | Refresh RSS KiB, main → repair |
 | --- | ---: | ---: | ---: | ---: |
-| Ordinary | 316.3 → 304.9 | 49.0 → 51.1 | 30,916 → 30,832 | 19,824 → 20,272 |
-| Large config | 306.8 → 313.2 | 48.9 → 53.9 | 30,588 → 33,076 | 19,380 → 23,468 |
-| 10,000 rules | 386.6 → 396.0 | 71.6 → 97.9 | 42,496 → 41,872 | 30,736 → 32,804 |
+| Ordinary | 293.0 → 292.1 | 48.6 → 48.9 | 31,428 → 30,636 | 20,616 → 20,240 |
+| Large config | 296.3 → 297.9 | 49.1 → 53.8 | 31,696 → 33,352 | 20,500 → 23,384 |
+| 10,000 rules | 372.0 → 379.3 | 70.3 → 97.9 | 43,908 → 41,708 | 31,744 → 32,624 |
 
-The large-rule cold refresh adds about 26 ms in this fixture. Fresh policy
+The large-rule fresh-process refresh adds about 28 ms in this fixture. Fresh policy
 validation is required even when source nodes do not change; retaining the old
 compiled matcher allowed stale document reasons to be published. Carry the
 measured increase into the combined performance gate rather than hiding it in

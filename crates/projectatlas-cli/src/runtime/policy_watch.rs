@@ -729,8 +729,35 @@ mod tests {
             "retired sibling stayed selected",
         )?;
         fs::create_dir(base.join("intermediate"))?;
-        let parent_path = base.join("intermediate/../rules");
         fs::write(base.join("rules"), "")?;
+        #[cfg(windows)]
+        {
+            let normalized = base.join("intermediate/../rules");
+            require(
+                !normalized
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir)),
+                "verbatim join no longer normalizes the fixture control",
+            )?;
+            selection.publish(Arc::new(selected(&root, &[normalized])?))?;
+            require(
+                selection.may_affect(&event(base.join("rules")))
+                    && !selection.may_affect(&event(base.join("intermediate"))),
+                "normalized selection retained an unrelated lexical component",
+            )?;
+        }
+        // Joining onto a Windows verbatim base removes `..` before selection.
+        // Retain the operator's absolute spelling as the config producer does.
+        let mut spelling = base.as_os_str().to_os_string();
+        spelling.push(std::path::MAIN_SEPARATOR_STR);
+        spelling.push(["intermediate", "..", "rules"].join(std::path::MAIN_SEPARATOR_STR));
+        let parent_path = PathBuf::from(spelling);
+        require(
+            parent_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir)),
+            "fixture normalized away the selected parent component",
+        )?;
         selection.publish(Arc::new(selected(&root, &[parent_path])?))?;
         require(
             selection.may_affect(&event(base.join("intermediate"))),
