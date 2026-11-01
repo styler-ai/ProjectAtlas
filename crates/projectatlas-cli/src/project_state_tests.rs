@@ -2755,6 +2755,8 @@ public static class SystemPolicyFixture {
         // production's combined SACL/LABEL query remains the subject of proof.
         if (replacement.Contains("(RA;")) flags |= 0x20u;
         if (replacement.Contains("(SP;")) flags |= 0x40u;
+        if (replacement.Contains("(TL;")) flags |= 0x80u;
+        if (replacement.Contains("(FL;")) flags |= 0x100u;
         uint error=SetNamedSecurityInfo(path, 1, flags, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
         if (error != 0) throw new Win32Exception((int)error);
         LocalFree(descriptor); descriptor=IntPtr.Zero;
@@ -2827,7 +2829,7 @@ public static class SystemPolicyFixture {
   [DllImport("kernel32.dll", EntryPoint="SetFileInformationByHandle", SetLastError=true)] static extern bool SetCaseInformation(IntPtr file, uint kind, ref uint information, uint size);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetShortPathName(string path, System.Text.StringBuilder output, uint size);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetLongPathName(string path, System.Text.StringBuilder output, uint size);
-  static uint DirectoryCaseFlags(string path, uint? replacement) {
+  public static uint DirectoryCaseFlags(string path, uint? replacement) {
     SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
     IntPtr file=CreateFile(path,replacement.HasValue ? 0x180u : 0x80u,7,ref security,3,0x02200000,IntPtr.Zero);
     if (file == new IntPtr(-1)) throw new Win32Exception();
@@ -2841,7 +2843,7 @@ public static class SystemPolicyFixture {
       return flags;
     } finally { CloseHandle(file); }
   }
-  static string ExpandedName(string path, bool shortName) {
+  public static string ExpandedName(string path, bool shortName) {
     uint length=shortName ? GetShortPathName(path,null,0) : GetLongPathName(path,null,0);
     if (length == 0) throw new Win32Exception();
     var output=new System.Text.StringBuilder(checked((int)length+1));
@@ -2937,6 +2939,66 @@ public static class SystemPolicyFixture {
     try { return NativeSystemImage(descriptor); }
     finally { LocalFree(descriptor); }
   }
+  public static string QueryMaskControl(string path, string policy) {
+    System.IO.File.WriteAllText(path,"native mask fixture");
+    if (!String.IsNullOrEmpty(policy)) Policy(path,policy,0x1f8u);
+    var rows=new System.Collections.Generic.List<string>();
+    SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+    IntPtr file=CreateFile(path,0x01020080u,7,ref security,3,0x00200080,IntPtr.Zero), full=IntPtr.Zero;
+    if (file == new IntPtr(-1)) throw new Win32Exception();
+    try {
+      ObjectBasicInformation basic; uint returned;
+      uint size=(uint)Marshal.SizeOf(typeof(ObjectBasicInformation));
+      if (NtQueryObject(file,0,out basic,size,out returned) < 0 || returned != size) throw new Exception("Mask probe granted-access query failed");
+      rows.Add("granted="+basic.GrantedAccess.ToString("x"));
+      foreach (uint mask in new uint[] { 0x18u,0x78u,0x1f8u,0x10000u,0x10078u,0x1007fu,0x7fu }) {
+        IntPtr descriptor=IntPtr.Zero,text=IntPtr.Zero; uint length;
+        uint status=GetSecurityDescriptorOnly(file,1,mask,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,out descriptor);
+        try {
+          if (status != 0) { rows.Add("query="+mask.ToString("x")+";status="+status);continue; }
+          string value="query="+mask.ToString("x")+";status=0;native="+NativeSystemImage(descriptor);
+          bool present,defaulted; IntPtr acl;
+          if (!GetSecurityDescriptorSacl(descriptor,out present,out acl,out defaulted)) throw new Win32Exception();
+          var types=new System.Collections.Generic.List<string>();
+          if (present && acl != IntPtr.Zero) {
+            AclSize aclSize;
+            if (!GetAclInformation(acl,out aclSize,(uint)Marshal.SizeOf(typeof(AclSize)),2)) throw new Win32Exception();
+            for (uint index=0;index<aclSize.Count;index++) {
+              IntPtr ace;if (!GetAce(acl,index,out ace)) throw new Win32Exception();
+              types.Add(Marshal.ReadByte(ace).ToString("x"));
+            }
+          }
+          value+=";types="+String.Join(",",types);
+          if (ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor,1,0x1f8u,out text,out length)) value+=";sddl="+Marshal.PtrToStringUni(text);
+          else value+=";sddl-error="+Marshal.GetLastWin32Error();
+          rows.Add(value);
+          if (mask == 0x1f8u) { full=descriptor;descriptor=IntPtr.Zero; }
+        } finally { if (text != IntPtr.Zero) LocalFree(text);if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
+      }
+      if (full != IntPtr.Zero) {
+        bool present,defaulted;IntPtr acl;ushort control;uint revision;
+        if (!GetSecurityDescriptorSacl(full,out present,out acl,out defaulted) || !GetSecurityDescriptorControl(full,out control,out revision)) throw new Win32Exception();
+        if (present && acl != IntPtr.Zero) {
+          foreach (uint mask in new uint[] { 0x78u,0x1f8u }) {
+            string stage=path+"-setter-"+mask;System.IO.File.WriteAllText(stage,"empty setter control");
+            IntPtr held=CreateFile(stage,0x010e0080u,7,ref security,3,0x00200080,IntPtr.Zero);
+            if (held == new IntPtr(-1)) throw new Win32Exception();
+            try {
+              uint status=SetSecurityInfo(held,1,mask | ((control & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
+              string value="setter="+mask.ToString("x")+";status="+status;
+              if (status == 0) {
+                IntPtr observed=HeldDescriptor(held,0x1f8u);
+                try { value+=";exact="+(NativeSystemImage(observed) == NativeSystemImage(full)); }
+                finally { LocalFree(observed); }
+              }
+              rows.Add(value);
+            } finally { CloseHandle(held);System.IO.File.Delete(stage); }
+          }
+        }
+      }
+      return String.Join("\n",rows);
+    } finally { if (full != IntPtr.Zero) LocalFree(full);CloseHandle(file);System.IO.File.Delete(path); }
+  }
   // Independent fixture oracle: compare the native opaque ACL bytes, including
   // resource-attribute payloads and scoped-policy SIDs, without an ACE parser.
   static string NativeSystemImage(IntPtr descriptor, bool ignoreAutoInherited=false) {
@@ -2993,7 +3055,7 @@ public static class SystemPolicyFixture {
   static void VerifyExtendedPolicy(IntPtr descriptor, string path, uint information, string requested) {
     IntPtr complete=IntPtr.Zero,text=IntPtr.Zero,decoded=IntPtr.Zero,reference=IntPtr.Zero,filtered=IntPtr.Zero; uint length;
     try {
-      complete=NamedDescriptor(path,0x78u);
+      complete=NamedDescriptor(path,0x1f8u);
       if (requested.Contains("(RA;")) RequireNativeAceClass(complete,0x12);
       if (requested.Contains("(SP;")) RequireNativeAceClass(complete,0x13);
       if (!ConvertStringSecurityDescriptorToSecurityDescriptor(requested,1,out reference,out length)) throw new Win32Exception();
@@ -3030,8 +3092,8 @@ public static class SystemPolicyFixture {
       DiscretionaryPolicy(source,protectedSource ? "D:P(A;;FA;;;OW)" : "D:(A;;FA;;;OW)");
       if (!String.IsNullOrEmpty(systemPolicy)) Policy(source,systemPolicy,24);
       if (!MoveFileEx(source,destination,0)) throw new Win32Exception();
-      uint information=7u | (systemAccess ? 0x78u : 16u);
-      sourceDescriptor=FileDescriptor(destination,systemAccess ? 0x10000u : information);
+      uint information=7u | (systemAccess ? 0x1f8u : 16u);
+      sourceDescriptor=FileDescriptor(destination,information);
       bool extended=systemPolicy.Contains("(RA;") || systemPolicy.Contains("(SP;");
       if (extended) {
         phase="verify native extended-policy query and codec";
@@ -3088,7 +3150,7 @@ public static class SystemPolicyFixture {
             acl=empty;
           }
           phase="restore exact system inheritance through original handle";
-          uint result=SetSecurityInfo(raw,1,0x78u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
+          uint result=SetSecurityInfo(raw,1,0x1f8u | ((sourceControl & 0x2000) != 0 ? 0x40000000u : 0x10000000u),IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,acl);
           if (result != 0) throw new Win32Exception((int)result);
         } finally { if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty); }
       }
@@ -3111,7 +3173,7 @@ public static class SystemPolicyFixture {
       CloseHandle(raw);raw=new IntPtr(-1);
       if (System.IO.File.ReadAllText(destination) != "verified source-descriptor payload") throw new Exception("Published payload differs");
       if (extended) {
-        stageDescriptor=NamedDescriptor(destination,0x78u);
+        stageDescriptor=NamedDescriptor(destination,0x1f8u);
         if (NativeSystemImage(stageDescriptor) != NativeSystemImage(sourceDescriptor)) throw new Exception("Publication changed opaque native extended policy");
       }
       return "source descriptor creation/publication PASS;"+observations;
@@ -3256,7 +3318,11 @@ public static class SystemPolicyFixture {
 }
 '@
 $mode=$env:PROJECTATLAS_TEST_SYSTEM_POLICY_MODE
-if ($mode -eq 'query') {
+if ($mode -eq 'case-set') {
+  [SystemPolicyFixture]::DirectoryCaseFlags($env:PROJECTATLAS_TEST_ACL_PATH,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
+} elseif ($mode -eq 'short-name') {
+  [SystemPolicyFixture]::ExpandedName($env:PROJECTATLAS_TEST_ACL_PATH,$true)
+} elseif ($mode -eq 'query') {
   [SystemPolicyFixture]::Enable($true)
   [SystemPolicyFixture]::Policy($env:PROJECTATLAS_TEST_ACL_PATH,$env:PROJECTATLAS_TEST_SYSTEM_POLICY,[uint32]$env:PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY)
 } elseif ($mode -eq 'native-query') {
@@ -3277,6 +3343,224 @@ if ($mode -eq 'query') {
   exit $LASTEXITCODE
 }
 "#;
+
+/// Configure native namespace fixtures through the independent SDK oracle.
+#[cfg(windows)]
+fn windows_namespace_fixture(path: &Path, mode: &str, sensitive: bool) -> io::Result<String> {
+    let result = windows_powershell_fixture(WINDOWS_SYSTEM_POLICY_FIXTURE, |command| {
+        command
+            .env("PROJECTATLAS_TEST_SYSTEM_POLICY_MODE", mode)
+            .env("PROJECTATLAS_TEST_ACL_PATH", path)
+            .env(
+                "PROJECTATLAS_TEST_SYSTEM_POLICY_QUERY",
+                if sensitive { "1" } else { "0" },
+            );
+    })?;
+    require(
+        result.status.success(),
+        &format!("native namespace fixture failed: {result:?}"),
+    )?;
+    Ok(String::from_utf8(result.stdout)
+        .map_err(io::Error::other)?
+        .trim()
+        .to_owned())
+}
+
+/// Directory-specific case and actual DOS aliases share the fixed-name owner.
+#[cfg(windows)]
+#[test]
+fn windows_native_namespace_aliases_preserve_distinct_custom_entries() -> io::Result<()> {
+    let mut volumes = vec![std::env::temp_dir()];
+    if let Some(runner) = std::env::var_os("RUNNER_TEMP") {
+        let runner = std::path::PathBuf::from(runner);
+        if !volumes.contains(&runner) {
+            volumes.push(runner);
+        }
+    }
+    let mut actual_short_aliases = 0;
+    for volume in volumes {
+        for sensitive in [false, true] {
+            let temp = tempfile::tempdir_in(&volume)?;
+            let root = temp.path().canonicalize()?;
+            windows_namespace_fixture(&root, "case-set", sensitive)?;
+            require(
+                fixture_names_are_case_sensitive(&root)? == sensitive,
+                "native case setup did not affect actual name lookup",
+            )?;
+            let directory = root.join(STATE_DIRECTORY);
+            fs::create_dir(&directory)?;
+            require(
+                super::windows_filesystem::case_sensitive(&directory)? == sensitive,
+                "new private directory lost native case inheritance",
+            )?;
+            let roles = [
+                (true, DATABASE_FILE, true),
+                (true, CONFIG_FILE, false),
+                (false, LEGACY_CONFIG_FILE, false),
+                (true, JSON_MAP_FILE, false),
+                (false, super::GITIGNORE_FILE, false),
+            ];
+            for (private, expected, database) in roles {
+                let parent = if private { &directory } else { &root };
+                let target = parent.join(expected);
+                let upper = parent.join(expected.to_ascii_uppercase());
+                let admit = |path: &Path| {
+                    if database {
+                        ProjectStateGuard::preflight_database_path(path, &root)
+                    } else {
+                        ProjectStateGuard::preflight_document(&root, path)
+                    }
+                };
+                require(
+                    admit(&upper)?.is_some() != sensitive,
+                    "missing ASCII name used an OS-wide case assumption",
+                )?;
+                fs::write(&target, b"managed bytes")?;
+                if sensitive {
+                    // Equal inode identity cannot make a distinct namespace entry managed.
+                    fs::hard_link(&target, &upper)?;
+                    require(
+                        admit(&upper)?.is_none(),
+                        "distinct uppercase custom hardlink became managed",
+                    )?;
+                    fs::remove_file(&upper)?;
+                }
+                let short = std::path::PathBuf::from(windows_namespace_fixture(
+                    &target,
+                    "short-name",
+                    sensitive,
+                )?);
+                if short.file_name() != target.file_name() {
+                    actual_short_aliases += 1;
+                    for spelling in [
+                        short.clone(),
+                        short.with_file_name(
+                            short
+                                .file_name()
+                                .ok_or_else(|| io::Error::other("short alias lacks filename"))?
+                                .to_string_lossy()
+                                .to_ascii_lowercase(),
+                        ),
+                    ] {
+                        let aliases = spelling.try_exists()?;
+                        let admitted = admit(&spelling)?;
+                        require(
+                            admitted.is_some() == aliases,
+                            &format!(
+                                "short alias classification differs from actual lookup: sensitive={sensitive}, selected={}, expected={expected}",
+                                spelling.display()
+                            ),
+                        )?;
+                    }
+                    if database {
+                        let outside = root.join("outside-database-owner");
+                        fs::hard_link(&target, &outside)?;
+                        require(
+                            admit(&short).is_err(),
+                            "short database alias bypassed hardlink admission",
+                        )?;
+                        fs::remove_file(outside)?;
+                    }
+                }
+                fs::remove_file(&target)?;
+                let custom = parent.join("CUSTOM~1.TXT");
+                fs::write(&custom, b"custom bytes")?;
+                require(
+                    admit(&custom)?.is_none(),
+                    "literal DOS-looking custom entry became managed",
+                )?;
+                fs::remove_file(custom)?;
+            }
+            let base = root.join(super::GITIGNORE_FILE);
+            fs::write(&base, b"base namespace bytes")?;
+            let stream = root.join(".gitignore:x");
+            fs::write(&stream, b"selected custom stream")?;
+            require(
+                ProjectStateGuard::preflight_document(&root, &stream)?.is_none()
+                    && fs::read(&base)? == b"base namespace bytes"
+                    && fs::read(&stream)? == b"selected custom stream",
+                "alternate data stream redirected into the managed base entry",
+            )?;
+            let outside = root.join("outside-reparse-owner");
+            fs::write(&outside, b"outside bytes")?;
+            let linked = directory.join(CONFIG_FILE);
+            std::os::windows::fs::symlink_file(&outside, &linked)?;
+            let short = std::path::PathBuf::from(windows_namespace_fixture(
+                &linked,
+                "short-name",
+                sensitive,
+            )?);
+            require(
+                ProjectStateGuard::preflight_document(&root, &short).is_err()
+                    && fs::read(&outside)? == b"outside bytes",
+                "short reparse entry followed its target or bypassed managed admission",
+            )?;
+            let custom = directory.join("CUSTOM~1.TXT");
+            fs::hard_link(&outside, &custom)?;
+            require(
+                ProjectStateGuard::preflight_document(&root, &custom)?.is_none(),
+                "custom short-looking hardlink became managed by target identity",
+            )?;
+            fs::remove_file(custom)?;
+            fs::remove_file(linked)?;
+            let short_directory = std::path::PathBuf::from(windows_namespace_fixture(
+                &directory,
+                "short-name",
+                sensitive,
+            )?);
+            let database = directory.join(DATABASE_FILE);
+            fs::write(&database, b"managed database")?;
+            require(
+                ProjectStateGuard::preflight_database_path(
+                    &short_directory.join(DATABASE_FILE),
+                    &root,
+                )?
+                .is_some(),
+                "private directory short alias bypassed ownership",
+            )?;
+            fs::remove_file(database)?;
+            if sensitive {
+                let upper_directory = root.join(STATE_DIRECTORY.to_ascii_uppercase());
+                fs::create_dir(&upper_directory)?;
+                require(
+                    ProjectStateGuard::preflight_database_path(
+                        &upper_directory.join(DATABASE_FILE),
+                        &root,
+                    )?
+                    .is_none(),
+                    "distinct uppercase private directory became managed",
+                )?;
+            }
+            fs::remove_dir(&directory)?;
+            require(
+                ProjectStateGuard::preflight_document(
+                    &root,
+                    &directory.join(CONFIG_FILE.to_ascii_uppercase()),
+                )?
+                .is_some()
+                    != sensitive,
+                "missing private directory ignored inherited comparison mode",
+            )?;
+            let reduced = root
+                .join("missing")
+                .join("..")
+                .join(STATE_DIRECTORY)
+                .join(CONFIG_FILE.to_ascii_uppercase());
+            require(
+                ProjectStateGuard::preflight_document(&root, &reduced).is_err() != sensitive
+                    && !root.join("missing").exists(),
+                "missing-parent reduction changed ownership or created state",
+            )?;
+        }
+    }
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        require(
+            actual_short_aliases > 0,
+            "hosted namespace proof did not exercise any actual short aliases",
+        )?;
+    }
+    Ok(())
+}
 
 /// The restrictive Owner Rights experiment cannot supply later policy rights.
 #[cfg(windows)]
@@ -3611,7 +3895,7 @@ fn windows_encrypted_outputs_are_preserved_or_refused_before_publication() -> io
 /// Independently query or prepare SACL policy through native named SDK calls.
 #[cfg(windows)]
 fn windows_system_policy(path: &Path, policy: Option<&str>) -> io::Result<String> {
-    windows_system_policy_query(path, policy, 0x78)
+    windows_system_policy_query(path, policy, 0x1f8)
 }
 
 /// Compare full versus filtered native queries without sharing the product adapter.
@@ -3814,7 +4098,7 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             let before = windows_system_policy(&output, Some(policy))?;
             let extended = policy.contains("(RA;") || policy.contains("(SP;");
             let opaque = if extended {
-                let complete = windows_native_system_policy(&output, 0x10000)?;
+                let complete = windows_native_system_policy(&output, 0x1f8)?;
                 require(
                     windows_native_system_policy(&output, 0x18)? != complete,
                     "former retained query did not reproduce extended-policy omission",
@@ -3899,7 +4183,7 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                                 .as_ref()
                                 .ok_or_else(|| io::Error::other("missing extended-policy stage"))?;
                             require(
-                                windows_native_system_policy(path, 0x10000)? == *expected,
+                                windows_native_system_policy(path, 0x1f8)? == *expected,
                                 "held-stage setter changed native extended-policy bytes or order",
                             )
                         },
@@ -3931,8 +4215,8 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
             )?;
             if let Some(expected) = opaque {
                 require(
-                    windows_native_system_policy(&output, 0x10000)? == expected
-                        && windows_native_system_policy(&outside, 0x10000)? == expected,
+                    windows_native_system_policy(&output, 0x1f8)? == expected
+                        && windows_native_system_policy(&outside, 0x1f8)? == expected,
                     "publication changed opaque native extended policy or the outside owner",
                 )?;
             }

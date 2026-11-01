@@ -204,6 +204,35 @@ names. Controlled macOS CI covers APFS/APFSX and HFS+/HFSX with an opposite-case
 nested mount. Windows Unicode aliases remain a native proof lead, not a claimed fix;
 its fixtures must establish actual lookup behavior before changing classification.
 
+### Recognize Windows directory case and native short entries
+
+Use the actual containing directory's retained metadata-only handle and canonical
+FILE_CASE_SENSITIVE_INFO; reject unknown flags or query failures as uncertainty.
+Exact fixed names remain fast. Resolve existing physical prefixes before parent
+reductions, then use the deepest existing creation ancestor for missing children;
+native controls must establish child-directory inheritance in both modes.
+
+A pure UTF-16-length/literal candidate screen includes a conservative superset of
+8.3 names without assuming a tilde, OEM conversion or making filesystem queries.
+Only after proving the logical/physical parent is managed, FindFirstFileW queries
+one literal selected component. Its cFileName describes the direct matched entry,
+including a reparse entry itself, not its target. An exact fixed long name is owned;
+a case-only spelling is owned only in an insensitive directory. A missing short
+entry is custom; unexpected lookup failures retain ownership uncertainty. The
+existing leaf admission still rejects indirect managed entries. Do not use file
+identity, a directory enumeration, or GetLongPathName as the name oracle.
+
+Native eb97842 diagnostic evidence establishes parent/child case flags0/1 on both
+host volumes; ASCII uppercase aliases only in insensitive directories. C: exposes
+actual 8.3 aliases in both modes; D: exposes none. Dotless-i, long-s and fi-ligature
+spellings were distinct on that host, not a general Unicode assertion. Owning
+controls compare short-name uppercase/lowercase classification with actual lookup,
+cover all fixed file roles/private directory, missing parents, reparse entries and
+separate custom hardlinks. Real CLI/configured MCP ignore and map controls must
+preserve a distinct lowercase managed config when a sensitive uppercase custom
+config is selected, and preserve managed/outside-owner behavior for actual aliases.
+Cross-compilation or diagnostic job success alone is not native acceptance.
+
 ### Recognize Linux directory casefolding and preserve sealed outputs
 
 The Linux platform is not uniformly case-sensitive. Keep exact spellings fast;
@@ -381,12 +410,17 @@ Try a no-follow retained source handle with ACCESS_SYSTEM_SECURITY; fall back to
 the existing READ_CONTROL handle only for native access/privilege denial. Never
 enable privileges process-wide or require them for ordinary no-SACL regeneration.
 
-With full access, use the canonical wrapper's BACKUP query through that retained
-handle to capture the complete native descriptor, preserving opaque ordered SACL
-entries and control state. BACKUP requires READ_CONTROL and ACCESS_SYSTEM_SECURITY,
-which this handle already owns; it introduces no privilege toggle or additional
-query right. It is available within the shipped Rust Windows target baseline
-(Windows 10 / Server 2016 or newer). It is not a setter or SDDL conversion flag.
+With full access, use the canonical retained query with the named SDK selectors
+SACL, LABEL, ATTRIBUTE, SCOPE, PROCESS_TRUST_LABEL and ACCESS_FILTER (0x1f8).
+Use the same selector set for native serialization and assignment. The locked
+safe wrapper predates the latter two flags; bridge only those named current SDK
+constants with its documented bitflags constructor. All three wrappers forward
+these bits unchanged. No privilege change or file-data read is introduced.
+Native evidence rejected BACKUP here: all 144 full-rights retained calls returned
+ACCESS_DENIED despite the documented READ_CONTROL/ACCESS_SYSTEM_SECURITY rights.
+Do not use BACKUP as a setter or SDDL conversion flag. Native same-handle controls
+compare 0x18, 0x78, 0x1f8 and BACKUP variants against independently installed classes;
+fixture/setup refusals are proof gaps, not successful preservation.
 Without full access, use a LABEL-only query's
 native control word to prove the original SACL is absent. MS-FSA 2.1.5.14 preserves
 the original SACL-present/control bits while filtering audit ACEs from that query:
@@ -407,7 +441,7 @@ accessor, and verify ordered entries and control state before payload writes.
 Retain strict SACL AI comparison until native evidence proves a safe normalization;
 the earlier DACL normalization does not establish SACL behavior. Recheck source
 system policy alongside owner/group/DACL immediately before replacement.
-Serialize and assign system policy with SACL, LABEL, ATTRIBUTE and SCOPE. In particular,
+Serialize and assign system policy with all six named selectors above. In particular,
 SACL-only serialization omits mandatory-label ACEs even when the descriptor holds
 them; complete comparison requires SACL plus LABEL. Native controls must distinguish
 identical audit/control policy with high versus medium integrity labels, repair a
@@ -423,10 +457,11 @@ NULL-marker images without panicking, and accept complete supported policy.
 The SDK experiment disproves the assumption that the MS-FSA raw SACL copy implies
 an unfiltered Win32 result: an independently installed RA-only or SP-only ACL is
 present in the full query but omitted by the SACL|LABEL query. Test the actual
-retained GetSecurityInfo route as well as the independent named oracle. BACKUP
-captures other native classes too; if the selected canonical serializer omits
-entries, the existing count guard refuses before staging rather than publishing
-partial policy. Do not add a BACKUP setter, require unused ownership rights, or
+retained GetSecurityInfo route as well as the independent named oracle. The
+ACE-count guard cannot detect classes already filtered by a query. Cover current
+SDK selectors independently, including process trust/access filter fixtures where
+NTFS supports them. If the selected canonical serializer omits returned entries,
+the existing count guard refuses before staging rather than publishing partial policy. Do not add a BACKUP setter, require unused ownership rights, or
 hand-parse native ACEs in production.
 
 Native RA-only, SP-only and mixed audit/label/RA/SP controls must prove the former

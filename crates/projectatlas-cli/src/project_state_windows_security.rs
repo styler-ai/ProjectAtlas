@@ -17,6 +17,9 @@ use windows_permissions::{Acl, LocalBox, SecurityDescriptor};
 use windows_sys::Win32::Security::{
     ACL, ACL_REVISION, GetSecurityDescriptorControl, GetSecurityDescriptorSacl, InitializeAcl,
 };
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_FILTER_SECURITY_INFORMATION, PROCESS_TRUST_LABEL_SECURITY_INFORMATION,
+};
 
 /// SACL presence, defaulting, inheritance request/state and protection.
 const SACL_CONTROL: u16 = 0x2a30;
@@ -29,10 +32,21 @@ const SACL_PROTECTED: u16 = 0x2000;
 
 /// Select every supported system-policy class for serialization and assignment.
 fn system_information() -> SecurityInformation {
-    SecurityInformation::Sacl
+    let known = SecurityInformation::Sacl
         | SecurityInformation::Label
         | SecurityInformation::Attribute
-        | SecurityInformation::Scope
+        | SecurityInformation::Scope;
+    // SAFETY: these are named SECURITY_INFORMATION flags from the current SDK.
+    // bitflags 1 permits bits unknown to its older definition, and all three
+    // canonical query/format/set wrappers forward these bits unchanged. Never
+    // truncate newer selectors: that could silently omit native policy classes.
+    unsafe {
+        SecurityInformation::from_bits_unchecked(
+            known.bits()
+                | PROCESS_TRUST_LABEL_SECURITY_INFORMATION as u32
+                | ACCESS_FILTER_SECURITY_INFORMATION as u32,
+        )
+    }
 }
 
 /// SDK-initialized zero-entry ACL, keeping its opaque borrow valid during a setter.
@@ -187,10 +201,9 @@ impl SystemPolicy {
     /// Returns native query failures or refuses policy that cannot be preserved.
     pub(super) fn capture(file: &File, complete: bool) -> io::Result<Self> {
         let query = if complete {
-            // The SDK's individual selectors filter ACE classes. BACKUP is a
-            // complete descriptor query, requiring only the RC + system rights
-            // already held here; never use it for serialization or assignment.
-            SecurityInformation::Backup
+            // Select each represented class explicitly. Native retained-handle
+            // BACKUP queries fail even with the documented rights on this host.
+            system_information()
         } else {
             SecurityInformation::Label
         };

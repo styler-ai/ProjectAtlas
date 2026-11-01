@@ -1,3 +1,78 @@
+## Ready for native namespace publication
+
+Primary source frozenfornextcommit afterLuna731 finalboundednamespace approval
+andLuna741 sixselectorapproval (bothnativepublicationONLY). CurrentGNUwholeowner
+ClippyPASS, CLIalltargets/allfeaturesClippy+strictstringsPASS, Linux32unitsPASS2ignored,
+3inventorycontrolsPASS,22MaccleanupcontrolsPASS, strictOpenSpec/scopedIssueOps1of5PASS.
+Lifecyclehash7bc31fd48860568ae81bc68bb9189d5d4bb20c7c35c56d051fe10b18c3f7a04f
+inbothsourceinventories. No selectedsource changes planneduntilnormalpush+new
+immutableproofterminal. NativeWindowspolicyclasses/EFSlate+newparent/83andcase
+workflowproofPENDING.5reviewthreadsOPEN. InitialstageconstructorstillUNFIXED.
+Only741, noRC, allacceptanceOPEN. Nextfreshprefixnative-namespace.
+
+## Native namespace publication preparation
+
+Candidate includesactual83CLI/MCPpositivewithoutunlinkingnamespaceentry (Luna731
+fixturefindingcorrected), sensitive-rootfsutil setup viaemptycwd, explicitlowerconfig
+unchangedproof. PureDOScandidate excludesNUL/wildcards/colon; owningunitactualADS
+.gitignore:x remainscustomwithbase/streambytes intact. NoCheckNameLegalDOS8Dot3
+APIerrorbeforeownership. CrossGNUwholeownerClippyPASS.32LinuxunitsPASS2ignored;
+3inventorycontrolsPASSafterorderedWindowsselectoraddition; latestCLIClippy/strings
+running30541 afterneedlessborrowcorrection.22Maccleanupcontrols/strictOpenSpecPASS.
+Atlasaffectedrefresh14838terminalPASS (050fullwork known739), purposecorrected
+throughinstalledCLI approved. NoDBreset. ebCodeQL2070574985/2070554199 compared
+against91b6: all27Rust+4Actions exactnormalizedsource/flow, noadded/removedresult.
+/tmp/projectatlas-741-eb97-codeql-reconciliation.json; noalertdismissal/suppression.
+Luna731finalnamespace reviewpending; sixSDKselectorsreview741approvednativepub
+ONLY. All5findingsremainOPEN, initialstageproducerstillunfixed; nativeSACL/EFS/
+namespace actualproofrequired. Noexecutionleaseuntilfreshnormalpushstarts.
+
+## Current Windows namespace candidate addition
+
+Dirty candidate also implements native per-directory case flags and direct-entry
+short-alias classification, using a pure conservative83candidate, metadata-only
+FileCaseSensitiveInfo and exactliteral FindFirstFileW afterparentownership. No
+fileidentity/GetLongPathName oracle. New Windows unit2roots/2modes covers5file
+roles/private dir/actualupper+lower83/customhardlinks/reparse/missingparents.
+Existing realCLI/MCP writer controls now exercise actualshortconfigaliases and
+explicitly preserve distinctlowerconfig; hostedWindows also runssensitiveroots via
+fsutil ondisposableemptycwd. NativeproofPENDING. Modulewindows_filesystem responsibility
+nowincludesclassification+publication; purposecorrectedthroughinstalledCLI ifsuccessful.
+GNUwholeowner/testsClippyPASS afterclassifier; CLIalltargetsallfeaturesClippyPASS
+beforelastWindows-onlyreparsecontrol. Exactlifecyclehashupdated bothinventories.
+Luna731 reviewingcurrentcasecandidate; Luna741 sixselectorcandidateapprovedfor
+nativepublicationONLY. Keep5reviewthreadsOPEN untilactualproof.
+
+## Current Windows query correction checkpoint
+
+PUBLIC/local eb97842c123d2a4fa172eca83d52c207af82b8b7. Normal push64546 and
+automatic immutable proof24476 TERMINAL PASS; no live execution lease.144 bound
+inputs; binary068e5d09046f49c40b1c30e67dea64ddef94c41a6d8cf1e363087e93bcb1ed3a
+identical Linux binary to91b6; actualCLI/MCP admission/writers/registered and5upgrades
+PASS. Current DIRTY next candidate corrects rejected BACKUP queries: actual eb SDK
+144 privileged source captures all ACCESS_DENIED5. Use explicit current SDK six
+selectors1f8, named80/100 bridge via documented bitflags constructor, no privilege
+change/additional file-data read; existing query/format/set wrappers forward bits.
+Same-handle mask query/setter matrix now wired8policies/2roots; TL/FL setup errors
+remain proof gaps. Independent owning native oracles1f8; sourceSD diagnostic1f8.
+GNU whole-owner/tests Clippy PASS. Full native proof of new candidate PENDING;
+broadSACL finding remainsOPEN. No claims that ACE-count guard detects query loss.
+
+eb SOURCE41274675956 SDK/repositoryPASS, WindowsFAIL (Backup source capture5,
+39 owning testsPASS1FAIL1ignored; filetransport now executes). EFS initial all6
+refusalsPASS, latehook never reached dueBackup5; no late/new-parent success claim.
+MacIntel124754597443 all four filesystem owning+CLI/MCP testsPASS then actual
+HFSX owned unmounted disk2 detach Resourcebusy, safe recovery alsobusy =>wholeFAIL.
+Do NOT force detach or delete retained image; native busy cleanup proof gap remains.
+Other eb jobs read live. New native case data4rows: parent+child flags inherit0/1
+bothroots; ASCII uppercase aliases only insensitive. U131/U17f/fi areNOTaliases
+onhost. C: actual8dot3aliases BOTHmodes; D: no8dot3. GetLongPathName expands8dot3
+but preserves case-only input. Filename producer is now implemented in the dirty candidate, pending native proof;
+initialstage constructor STILL UNFIXED. Five review findings remainopen; only741 until normalmerge+BOTHCLOSED.
+Live issue/spec BACKUP claim corrected; task1/5, all acceptanceOPEN. Next native
+publication requires freshbinding inheriting144+unionmodifiedinputs and distinct
+artifactprefix. No DB reset; repeated050 policy_drift/fullchanged0 owned739.
+
 ## Current complete-policy capture and fixture correction
 
 PUBLIC/local91b6d5b0a4f0aa6cc228ceb06cfeafbefbc27422, currentDIRTYreviewednextcandidate.

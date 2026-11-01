@@ -23,7 +23,7 @@ mod windows_security;
 
 #[cfg(windows)]
 #[path = "project_state_windows.rs"]
-mod windows_publication;
+mod windows_filesystem;
 
 /// Product-owned directory, independent of explicitly selected external storage.
 const STATE_DIRECTORY: &str = ".projectatlas";
@@ -627,23 +627,22 @@ impl ProjectStateGuard {
             #[cfg(windows)]
             drop(access);
             #[cfg(windows)]
-            let result: Result<fs::File, tempfile::PersistError> =
-                match windows_publication::publish(
-                    temporary.as_file(),
-                    path,
-                    matches!(publication, FilePublication::Replace),
-                ) {
-                    Ok(()) => {
-                        // The old temporary name is no longer ours. Never let its
-                        // destructor remove a foreign entry substituted there.
-                        temporary.disable_cleanup(true);
-                        return Ok(true);
-                    }
-                    Err(error) => Err(tempfile::PersistError {
-                        error,
-                        file: temporary,
-                    }),
-                };
+            let result: Result<fs::File, tempfile::PersistError> = match windows_filesystem::publish(
+                temporary.as_file(),
+                path,
+                matches!(publication, FilePublication::Replace),
+            ) {
+                Ok(()) => {
+                    // The old temporary name is no longer ours. Never let its
+                    // destructor remove a foreign entry substituted there.
+                    temporary.disable_cleanup(true);
+                    return Ok(true);
+                }
+                Err(error) => Err(tempfile::PersistError {
+                    error,
+                    file: temporary,
+                }),
+            };
             #[cfg(not(windows))]
             let result = match publication {
                 FilePublication::Create => temporary.persist_noclobber(path),
@@ -1435,6 +1434,10 @@ fn fixed_name_candidate(path: &Path, expected: &str) -> io::Result<bool> {
     if name.eq_ignore_ascii_case(expected) {
         return Ok(true);
     }
+    #[cfg(windows)]
+    if windows_filesystem::short_name_candidate(std::ffi::OsStr::new(name)) {
+        return Ok(true);
+    }
     #[cfg(target_os = "linux")]
     if linux_access::fixed_name_matches(name, expected) {
         return Ok(true);
@@ -1497,7 +1500,37 @@ fn named(path: &Path, expected: &str) -> io::Result<bool> {
     }
     #[cfg(windows)]
     {
-        Ok(name.eq_ignore_ascii_case(expected))
+        let parent = resolve_existing_parent_prefix(containing_directory(path))?;
+        if !name.eq_ignore_ascii_case(expected) {
+            if !windows_filesystem::short_name_candidate(std::ffi::OsStr::new(name)) {
+                return Ok(false);
+            }
+            let Some(entry) = windows_filesystem::entry_name(&parent.join(name))? else {
+                return Ok(false);
+            };
+            // A native short alias names its long entry even in a sensitive
+            // directory. Distinct hardlinks and reparse targets supply no proof.
+            if entry == expected {
+                return Ok(true);
+            }
+            if !entry
+                .to_str()
+                .is_some_and(|entry| entry.eq_ignore_ascii_case(expected))
+            {
+                return Ok(false);
+            }
+        }
+        let mut prefix = parent.as_path();
+        let probe = loop {
+            match fs::canonicalize(prefix) {
+                Ok(resolved) => break resolved,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    prefix = prefix.parent().ok_or(source)?;
+                }
+                Err(source) => return Err(source),
+            }
+        };
+        Ok(!windows_filesystem::case_sensitive(&probe)?)
     }
     #[cfg(target_os = "macos")]
     {

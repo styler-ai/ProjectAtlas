@@ -80,7 +80,7 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** ordinary source and stage objects with proven absent SACLs remain replaceable without additional privilege; create-only outputs retain normal inheritance
 - **AND** a label-only query does not mistake filtered audit ACEs for policy absence, source-policy changes refuse replacement, and unsupported defaulted SACL state retains valid output
 - **AND** no process-wide privilege enablement or mutable-path security setter is introduced
-- **AND** complete retained queries preserve resource-attribute and scoped-policy entries as well as audit and integrity policy; unsupported serialization refuses before staging, while independent native readback preserves exact source policy and outside hardlinks
+- **AND** complete retained queries preserve current supported SDK system-policy classes, including resource attributes and scoped policy alongside audit and integrity policy; unsupported serialization refuses before staging, while independent native readback preserves exact source policy and outside hardlinks
 
 #### Scenario: Windows file encryption remains protected
 - **WHEN** an existing managed output is EFS encrypted initially or becomes encrypted before publication

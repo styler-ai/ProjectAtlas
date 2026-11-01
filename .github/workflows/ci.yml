@@ -500,6 +500,9 @@ jobs:
             export PROJECTATLAS_TEST_NATIVE_EFS=1
           fi
           run_managed_state_routes
+          if [ "$RUNNER_OS" = Windows ]; then
+            PROJECTATLAS_TEST_CASE_SENSITIVE=true cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
+          fi
           if [ "$RUNNER_OS" = Linux ]; then
             # Build as the runner; elevate only the disposable native-label test.
             target_receipt="$RUNNER_TEMP/project-state-unit-target.jsonl"
@@ -1258,6 +1261,24 @@ jobs:
                 }
               }
               [SystemPolicyFixture]::Enable($true)
+              $maskPolicies = @(
+                '', 'S:P(AU;SAFA;FW;;;WD)', 'S:P(ML;;NW;;;HI)',
+                'S:P(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))',
+                'S:P(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)',
+                'S:P(AU;SAFA;FW;;;WD)(RA;;;;;WD;("PublicationClaim",TS,0,"alpha","beta"))(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)(ML;;NW;;;HI)',
+                'S:P(TL;;GR;;;S-1-19-0-0)',
+                'S:P(FL;;GR;;;WD;(@User.PublicationClaim == "alpha"))'
+              )
+              foreach ($policy in $maskPolicies) {
+                $path = Join-Path $directory ('query-mask-' + [guid]::NewGuid())
+                try {
+                  $value = [SystemPolicyFixture]::QueryMaskControl($path, $policy)
+                  $results += @{ case='retained-query-mask'; root=$root.name; policy=$policy; value=$value }
+                } catch {
+                  $results += @{ case='retained-query-mask'; root=$root.name; policy=$policy; error=$_.Exception.ToString() }
+                }
+                $results[-1] | ConvertTo-Json -Depth 4 -Compress
+              }
               foreach ($retained in @($false, $true)) {
                 $ownershipModes = if ($retained) { @($false, $true) } else { @($false) }
                 foreach ($writeOwner in $ownershipModes) {

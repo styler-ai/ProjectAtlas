@@ -5417,6 +5417,29 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
         for mcp in [false, true] {
             let root = temp.path().join(if mcp { "mcp" } else { "cli" });
             fs::create_dir(&root)?;
+            #[cfg(windows)]
+            if let Ok(sensitive) = std::env::var("PROJECTATLAS_TEST_CASE_SENSITIVE") {
+                let prepared = StdCommand::new("fsutil.exe")
+                    .current_dir(&root)
+                    .args([
+                        "file",
+                        "setCaseSensitiveInfo",
+                        ".",
+                        if sensitive == "true" {
+                            "enable"
+                        } else {
+                            "disable"
+                        },
+                    ])
+                    .output()?;
+                if !prepared.status.success() {
+                    return Err(io::Error::other(format!(
+                        "native Windows directory case setup failed: {prepared:?}"
+                    ))
+                    .into());
+                }
+            }
+
             invoke(
                 &executable,
                 &root,
@@ -5867,12 +5890,72 @@ with open(sys.argv[1], 'rb') as source:
 
             // A volume alias is managed; a separate case-sensitive name keeps
             // its intentional custom writer, even when both names share an inode.
-            for config_name in [
+            #[cfg(windows)]
+            {
+                // Retain the actual namespace entry: unlinking its long name
+                // and creating a literal DOS-looking file would erase this proof.
+                let result = StdCommand::new(windows_powershell_executable()?)
+                    .args(["-NoProfile", "-NonInteractive", "-Command", "(New-Object -ComObject Scripting.FileSystemObject).GetFile($env:PROJECTATLAS_TEST_ACL_PATH).ShortPath"])
+                    .env("PROJECTATLAS_TEST_ACL_PATH", &config)
+                    .output()?;
+                if !result.status.success() {
+                    return Err(io::Error::other(format!(
+                        "native short-name fixture failed: {result:?}"
+                    ))
+                    .into());
+                }
+                let short = PathBuf::from(String::from_utf8(result.stdout)?.trim());
+                if short.file_name() != config.file_name() {
+                    let outside = root.with_extension("short-config-owner");
+                    let before = fs::read(&config)?;
+                    fs::hard_link(&config, &outside)?;
+                    let argument = short
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("short config path is not text"))?;
+                    let (mut configured, _) = McpContractSession::spawn_configured(
+                        &executable,
+                        &root,
+                        &root.join(DATABASE_PATH),
+                        Some(&short),
+                        &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
+                    )?;
+                    let result = (|| -> Result<(), Box<dyn Error>> {
+                        invoke(
+                            &executable,
+                            &root,
+                            mcp.then_some(&mut configured),
+                            &[
+                                "--config",
+                                argument,
+                                "ignore",
+                                "add",
+                                "--kind",
+                                "path-prefix",
+                                "short-alias-control",
+                            ],
+                            "atlas_ignore_add",
+                            &json!({"kind":"path-prefix","value":"short-alias-control"}),
+                            false,
+                        )?;
+                        if fs::read(&outside)? != before
+                            || fs::read(&config)? == before
+                            || same_file::is_same_file(&config, &outside)?
+                        {
+                            return Err(io::Error::other("actual short config alias lost managed publication or changed its outside owner").into());
+                        }
+                        Ok(())
+                    })();
+                    complete_mcp_test_after_shutdown(result, || configured.shutdown())?;
+                    fs::write(&config, &original_config)?;
+                }
+            }
+            let config_names = [
                 "CONFIG.TOML",
                 "conﬁg.toml",
                 "confıg.toml",
                 "config\u{200d}.toml",
-            ] {
+            ];
+            for config_name in config_names {
                 let upper_config = config.with_file_name(config_name);
                 let case_alias = upper_config.try_exists()?;
                 let case_owner = root.with_extension("case-config-owner");
@@ -5916,6 +5999,7 @@ with open(sys.argv[1], 'rb') as source:
                     Some(&upper_config),
                     &[("PROJECTATLAS_NO_TELEMETRY", Some("1"))],
                 )?;
+                let managed_before = (!case_alias).then(|| fs::read(&config)).transpose()?;
                 let case_result = (|| -> Result<(), Box<dyn Error>> {
                     let config_argument = upper_config
                         .to_str()
@@ -5940,6 +6024,16 @@ with open(sys.argv[1], 'rb') as source:
                     if (fs::read_to_string(&case_owner)? == case_config_before) != case_alias {
                         return Err(io::Error::other(
                             "case config ownership ignored actual filesystem behavior",
+                        )
+                        .into());
+                    }
+                    if managed_before.as_ref().is_some_and(|before| {
+                        fs::read(&config)
+                            .as_ref()
+                            .map_or(true, |observed| observed != before)
+                    }) {
+                        return Err(io::Error::other(
+                            "selected custom config overwrote the distinct managed config",
                         )
                         .into());
                     }
