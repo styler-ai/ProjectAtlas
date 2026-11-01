@@ -679,9 +679,22 @@ impl ReplacementCreation {
             || inheritance_system_image(&source_system)?
                 != inheritance_system_image(&preview_system)?
         {
+            let difference = super::windows_dacl_difference(&dacl_image, &preview_dacl)?;
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "replacement creation would inherit different native policy",
+                format!(
+                    "replacement creation would inherit different native policy: complete={complete}, owner_matches={}, group_matches={}, {difference}, source_control={:04x}, preview_control={:04x}, system_control_matches={}, system_image_matches={}, source_system_entries={}, preview_system_entries={}",
+                    descriptor.owner() == preview.owner(),
+                    descriptor.group() == preview.group(),
+                    descriptor_control(&descriptor)?,
+                    descriptor_control(preview)?,
+                    inheritance_system_control(descriptor_control(&descriptor)?)
+                        == inheritance_system_control(descriptor_control(preview)?),
+                    inheritance_system_image(&source_system)?
+                        == inheritance_system_image(&preview_system)?,
+                    sacl_entry_count(&descriptor)?,
+                    sacl_entry_count(preview)?,
+                ),
             ));
         }
         let source_control = descriptor_control(&descriptor)?;

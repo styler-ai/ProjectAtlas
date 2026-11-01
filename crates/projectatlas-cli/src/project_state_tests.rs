@@ -2678,6 +2678,89 @@ fn windows_acl(path: &Path, prepare: Option<bool>) -> io::Result<String> {
         .map_err(io::Error::other)
 }
 
+/// Compare complete native file descriptors, permitting only DACL AI bookkeeping.
+#[cfg(windows)]
+fn windows_file_acl_matches(expected: &str, observed: &str) -> io::Result<bool> {
+    use std::io::Write;
+    let script = r"
+$ErrorActionPreference='Stop'
+function Normalize-FileAcl([string]$sddl) {
+  $sd=[Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+  $before=[byte[]]::new($sd.BinaryLength); $sd.GetBinaryForm($before,0)
+  $control=[int]$sd.ControlFlags
+  $sd.SetFlags([Security.AccessControl.ControlFlags]($control -band (-bnot 0x400)))
+  $after=[byte[]]::new($sd.BinaryLength); $sd.GetBinaryForm($after,0)
+  if ($before.Length -ne $after.Length) { throw 'DACL AI normalization changed descriptor length' }
+  # SECURITY_DESCRIPTOR_RELATIVE has its SDK control word at bytes 2..3.
+  # Prove the typed operation changes exactly that one bit and no other byte.
+  for ($i=0; $i -lt $before.Length; $i++) {
+    $difference=$before[$i] -bxor $after[$i]
+    $required=if ($i -eq 3) { ($control -band 0x400) -shr 8 } else { 0 }
+    if ($difference -ne $required) { throw 'DACL AI normalization changed other native descriptor bytes' }
+  }
+  [Convert]::ToBase64String($after)
+}
+$expected=[Security.AccessControl.RawSecurityDescriptor]::new($env:PROJECTATLAS_TEST_EXPECTED_ACL)
+$observed=[Security.AccessControl.RawSecurityDescriptor]::new($env:PROJECTATLAS_TEST_OBSERVED_ACL)
+$equal=(Normalize-FileAcl $env:PROJECTATLAS_TEST_EXPECTED_ACL) -ceq (Normalize-FileAcl $env:PROJECTATLAS_TEST_OBSERVED_ACL)
+[Console]::Error.WriteLine(('file ACL comparison expected_control={0:x4}; observed_control={1:x4}; equal_except_dacl_ai={2}' -f [int]$expected.ControlFlags,[int]$observed.ControlFlags,$equal))
+$equal
+";
+    let result = windows_powershell_fixture(script, |command| {
+        command
+            .env("PROJECTATLAS_TEST_EXPECTED_ACL", expected)
+            .env("PROJECTATLAS_TEST_OBSERVED_ACL", observed);
+    })?;
+    require(
+        result.status.success(),
+        &format!("native file ACL comparison failed: {result:?}"),
+    )?;
+    io::stderr().lock().write_all(&result.stderr)?;
+    match result.stdout.trim_ascii() {
+        b"True" => Ok(true),
+        b"False" => Ok(false),
+        _ => Err(io::Error::other(
+            "native file ACL comparison returned no boolean",
+        )),
+    }
+}
+
+/// The independent oracle retains all controls/components except file DACL AI.
+#[cfg(windows)]
+#[test]
+fn windows_file_acl_comparison_preserves_every_other_policy_component() -> io::Result<()> {
+    const EXPECTED: &str = "O:SYG:BAD:P(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)";
+    require(
+        windows_file_acl_matches(
+            EXPECTED,
+            "O:SYG:BAD:PAI(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)",
+        )?,
+        "file DACL AI alone changed policy equivalence",
+    )?;
+    for different in [
+        "O:BAG:BAD:P(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)",
+        "O:SYG:BUD:P(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:PAR(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:P(A;;FW;;;WD)(D;;FW;;;AN)S:P(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:P(D;;FW;;;AN)(A;;FR;;;WD)S:P(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:P(A;;FR;;;WD)(D;;FW;;;AN)S:PAI(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:P(A;;FR;;;WD)(D;;FW;;;AN)S:(AU;SA;FR;;;WD)",
+        "O:SYG:BAD:P(A;;FR;;;WD)(D;;FW;;;AN)S:P(AU;SA;FW;;;WD)",
+        "O:SYG:BAD:P",
+        "O:SYG:BAD:NO_ACCESS_CONTROL",
+    ] {
+        require(
+            !windows_file_acl_matches(EXPECTED, different)?,
+            "file ACL oracle discarded a meaningful policy difference",
+        )?;
+    }
+    require(
+        !windows_file_acl_matches("O:SYG:BAD:", "O:SYG:BAD:NO_ACCESS_CONTROL")?,
+        "file ACL oracle conflated empty and NULL DACLs",
+    )
+}
+
 /// Set only a fixture's DACL before the publisher captures its native policy.
 #[cfg(windows)]
 fn windows_discretionary_policy(path: &Path, policy: &str) -> io::Result<()> {
@@ -3774,7 +3857,7 @@ fn windows_replacement_creation_denies_inherited_actor_capabilities() -> io::Res
             observed.get()
                 && fs::read(&target)? == b"protected published output"
                 && fs::read(&outside)? == b"protected previous output"
-                && windows_acl(&target, None)? == expected
+                && windows_file_acl_matches(&expected, &windows_acl(&target, None)?)?
                 && windows_acl(&outside, None)? == expected
                 && !same_file::is_same_file(&target, &outside)?
                 && fs::read_dir(&parent)?.count() == entries,
@@ -3898,7 +3981,7 @@ fn windows_authorized_foreign_owner_replacement_preserves_policy() -> io::Result
             FilePublication::Replace,
             |stage| {
                 require(
-                    windows_acl(stage.path(), None)? == expected,
+                    windows_file_acl_matches(&expected, &windows_acl(stage.path(), None)?)?,
                     "initial stage lost authorized foreign-owner policy",
                 )
             },
@@ -3907,12 +3990,13 @@ fn windows_authorized_foreign_owner_replacement_preserves_policy() -> io::Result
         require(
             fs::read(&output)? == b"foreign owner replacement"
                 && fs::read(&outside)? == b"foreign owner original"
-                && windows_acl(&output, None)? == expected
+                && windows_file_acl_matches(&expected, &windows_acl(&output, None)?)?
                 && windows_acl(&outside, None)? == expected
                 && !same_file::is_same_file(&output, &outside)?
                 && fs::read_dir(&directory)?.count() == entries,
             "authorized foreign-owner replacement lost payload, policy or outside owner",
         )?;
+        let published_acl = windows_acl(&output, None)?;
         let failed = guard.publish_with_stage_check(
             &output,
             b"unpublished foreign-owner payload",
@@ -3931,7 +4015,7 @@ fn windows_authorized_foreign_owner_replacement_preserves_policy() -> io::Result
                     .contains("injected foreign-owner publication failure")
             }) && fs::read(&output)? == b"foreign owner replacement"
                 && fs::read(&outside)? == b"foreign owner original"
-                && windows_acl(&output, None)? == expected
+                && windows_acl(&output, None)? == published_acl
                 && fs::read_dir(&directory)?.count() == entries,
             &format!("authorized foreign-owner cleanup failed: {failed:?}"),
         )?;
@@ -4695,7 +4779,9 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                 )
             },
             || Ok(()),
-        )?;
+        ).map_err(|error| io::Error::new(error.kind(), format!(
+            "protected integrity restoration control: {error}"
+        )))?;
         require(
             windows_system_policy(&output, None)? == expected
                 && windows_system_policy(&outside, None)? == expected
@@ -4842,7 +4928,13 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                 guard.write_document(b"preserved system-policy replacement")
             };
             if complete || flags & 0x10 == 0 {
-                replaced?;
+                replaced.map_err(|error| {
+                    io::Error::new(error.kind(), format!(
+                        "system-policy publication role={filename}, source_control={control:04x}, source_class={}, audit={}, label={}, resource={}, scope={}: {error}",
+                        native[1], policy.contains("(AU;"), policy.contains("(ML;"),
+                        policy.contains("(RA;"), policy.contains("(SP;")
+                    ))
+                })?;
                 require(
                     fs::read(&output)? == b"preserved system-policy replacement",
                     "full-policy regeneration failed",
@@ -4870,11 +4962,14 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
         }
     }
     if complete {
-        for dacl in [
+        for (dacl_case, dacl) in [
             "D:P(A;;0x0013019f;;;OW)",
             "D:P(D;;WD;;;OW)(A;;FA;;;OW)",
             "D:P(D;;0x000c0000;;;OW)(A;;FA;;;OW)",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             for policy in [
                 "S:P(AU;SAFA;FW;;;WD)",
                 "S:P(ML;;NW;;;HI)",
@@ -4924,14 +5019,20 @@ fn windows_system_policy_replacement_preserves_or_refuses_without_global_privile
                                 "unprotected mixed-policy case did not require actual SACL restoration")?;
                         }
                         observed.set(true);Ok(())
-                    }, || Ok(()))?;
+                    }, || Ok(())).map_err(|error| io::Error::new(error.kind(), format!(
+                        "restricted system-policy publication role={name}, dacl_case={dacl_case}, unprotected={unprotected}, audit={}, label={}, resource={}, scope={}: {error}",
+                        policy.contains("(AU;"), policy.contains("(ML;"), policy.contains("(RA;"), policy.contains("(SP;")
+                    )))?;
                     require(
                         observed.get()
                             && fs::read(&output)? == b"restricted policy replacement"
                             && fs::read(&outside)? == b"restricted policy original"
                             && windows_native_system_policy(&output, 0x1f8)? == expected
                             && windows_native_system_policy(&outside, 0x1f8)? == expected
-                            && windows_acl(&output, None)? == expected_dacl,
+                            && windows_file_acl_matches(
+                                &expected_dacl,
+                                &windows_acl(&output, None)?,
+                            )?,
                         "available system-policy preservation required unused discretionary rights",
                     )?;
                 }
@@ -5230,7 +5331,8 @@ fn windows_stage_policy_uses_the_captured_descriptor() -> io::Result<()> {
         "snapshot assembly accepted a changed retained source",
     )?;
     require(
-        windows_acl(stage.path(), None)? == expected && windows_acl(&source, None)? == changed,
+        windows_file_acl_matches(&expected, &windows_acl(stage.path(), None)?)?
+            && windows_acl(&source, None)? == changed,
         "stage preparation followed a fresh mutable source policy",
     )
 }
@@ -5636,7 +5738,8 @@ fn replacement_preserves_native_dacl_inheritance_and_outside_owner() -> io::Resu
                 guard.write_document(b"owned replacement")?;
             }
             require(
-                fs::read(&output)? == b"owned replacement" && windows_acl(&output, None)? == acl,
+                fs::read(&output)? == b"owned replacement"
+                    && windows_file_acl_matches(&acl, &windows_acl(&output, None)?)?,
                 &format!("replacement lost native DACL for {filename}, protected={protected}"),
             )?;
             require(

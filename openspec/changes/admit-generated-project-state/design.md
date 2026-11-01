@@ -415,6 +415,13 @@ bookkeeping. Keep private diagnostics for any remaining difference and native
 ordinary/protected/inherited/NULL/empty controls. The .NET fixture formatter omits
 D: for NULL descriptors; inspect its binary RawSecurityDescriptor access class
 instead of using omitted SDDL text as proof of an absent native file DACL.
+Keep raw outside-owner, unchanged-source and directory comparisons. For replaced
+regular-file snapshots, the independent .NET oracle may clear only DACL AI using
+RawSecurityDescriptor.SetFlags, and must prove its serialized transformation
+changes only that control bit before comparing the entire resulting binary image.
+Negative controls retain owner/group, all other flags, ACL contents/order and
+NULL/empty distinctions. This does not explain mixed-query DACL differences whose
+native control words already agree; those remain a separate query contract.
 
 Native Windows six-case controls isolate the retained destination snapshot as the
 cause of MoveFileEx ERROR_ACCESS_DENIED: absent/released snapshots allow replacement,
@@ -473,6 +480,11 @@ all meaningful final system-policy controls remain strict. Snapshot mismatch
 diagnostics identify source/parent, query mode, control values and owner/group/DACL
 match booleans without exposing native ACEs or principals. A focused native probe
 compares split and combined queries without changing policy.
+An inheritance-preview refusal also identifies component/control equality and
+native entry counts, while fixture context identifies the role and policy classes.
+Keep that refusal blocking until its actual native difference is understood; an
+initial protected stage and later readback do not replace preflight for unprotected
+restoration, which could otherwise grant lasting handles before a final refusal.
 
 Protect DACL inheritance and present SACL inheritance in the owned creation
 descriptor; never synthesize SACL presence from absence. Retain the original native

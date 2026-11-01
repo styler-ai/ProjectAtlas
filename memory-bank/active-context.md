@@ -1,42 +1,95 @@
+## Current ed8 Windows FAIL; ACL oracle/preview diagnostics candidate DIRTY
+
+No execution lease. Public/local ed8e78f107c3ac5631f3da05ff4fdb5fbf1c6b5f localnormal
+andimmutable144PASS (detailsbelow). Source41302771906 Windows124837060881 TERMINALFAIL:
+45PASS5FAIL1ignore vsfbb32/15. Log /tmp/projectatlas-741-ed8e-windows-job.log.
+Split/mixednative: Owner/Group true, DACLfalse with BOTHcontrol0004. This is NOTAI;
+splitassembly testPASS. Eightdefaultedinputmasks atbothroots allphysicalstored0PASS.
+EFS initial/lateall6rolesbothrights nowPASS; source/parentchange andnativeprotected
+constructorinitialchecks proceed. ManagedSQLitecohort/recovery/resetowning remainsPASS.
+Fourfailures atwholeGetAclSDDL comparisons (foreignownerinitialstage, protectedDACL
+publication, actorpostpubaggregate, cachedsourcepolicy stage). AIcauseHYPOTHESIS until
+neworaclelogs; no newnativePASSclaim. FifthREALrefusal: completeSACLchildCPEpreflight,
+genericmessage lacks exactrole/policy/component. Preserveblockingstatus.
+
+DIRTYrepair is testoracle +privacy-safeCPE/testcontext diagnostics ONLY, no production
+policyweakening. Newindependent.NETRawSD.SetFlags masksONLYDACL_AI; before/after
+serialization mustchangeexactlycontrolbit400/nootherbyte, thenfullbinarycomparison.
+PositiveAI/negativeOwnerGroup/P/AR/ACEcontent/order/SACLflags/content/NULLempty cases.
+Useonlyregularpublishedstage/outputcomparisons, includinganalogousfullSACL DACLassert;
+rawoutside/unchangedsource/directorychecksretained. Foreignownerfailurechecksactual
+publishedrawACL exact. CPEremains: itpredicts laterunprotectedrestoration, whose
+intermediatebroadening couldgrantlastinghandles. No bypass/no behaviorrelaxation.
+BothLunaMaxreviewersapproveNEXTNATIVEPUBLICATIONONLY. GNUownermodule/testsClippy,
+CLIalltargetsallfeaturesClippy, Linux32PASS2ignore, fmt, strictspec/strings/scopedIssueOps1of5 PASS.
+Freshprefixplanned acl-oracle. Nativeevidence stillrequired; no sourceleaseyet.
+
+Ed8botCODEreview retry6557442486 completed11:42:14UTC no majorissues, receipt6557459069.
+Initial6557429828Unknownerror resolvedbyretry; noquotaissue. Security6557425340 still
+runninglastread. Ed8Actionsanalysis2071417504 fourresults exactnormalizedsource/flows
+againstfbb; /tmp/projectatlas-741-ed8e-actions-reconciliation.json. Rustscanpending.
+Only741/PR743 untilnormalmerge+BOTHCLOSED; task1/5/allacceptanceOPEN;3threadsOPEN.
+Only731closedOct31; noRC. PreserveprivateDB/parkedwork andstable050Latest.
+Earlier ed8pendingnotes superseded by this terminal Windows result.
+
 # Active context — #741 only
 
-## Current split-descriptor candidate: dirty, no execution lease
+## Published split-descriptor correction: local proof PASS, native CI running
 
-Public/local HEAD fbb520c79c31d71bb67f86ef09ce2f42b8e2e834. Its local normal
-push and immutable 144-input CLI/MCP/registered/upgrade proof passed, but native
-Windows FAILED (32 passed, 15 failed, 1 ignored): combined source/parent query
-mismatches before stage creation. System images match; discretionary image differs.
-Managed Windows SQLite cohort/recovery/reset owning test now PASS. Rust, repository,
-Linux and macOS ARM whole jobs PASS; Intel remains running. No native acceptance.
+Public/local HEAD ed8e78f107c3ac5631f3da05ff4fdb5fbf1c6b5f; branch fix/generated-state-741.
+Normal push58483/PID4103875 TERMINALPASS788.003s:34suites1733PASS12ignored.
+Automatic immutable24504 TERMINALPASS144boundinputs; readonly Linux binary
+88eb105dc1691c39b60751e689313bec6dfd81188791c62e5a353437f0d1cbd8.
+Prefix/tmp/projectatlas-741-split-descriptor; marker-debug-path.txt; admission8.987s,
+writer5.175s, registered9.384s, five050upgrades6.979s PASS. Binary/inputs/identity/
+configuration/approvedpurposes stayed unchanged during proof. Both processes terminal;
+NO EXECUTION LEASE. Memory updated after proof completion, not during immutable run.
 
-Current dirty repair uses fresh split source/parent revalidation plus SDK assembly
-of cached native images and inheritance controls, with strict component/control
-readback and split initial-stage queries. Native discretionary controls are cached;
-unknown/defaulted unrepresentable metadata refuses before staging. Native fixture
-observes physical-file defaulted flags for eight inputs on both runner roots;
-if those persist, acceptance blocks pending preservation. No claim of native PASS.
-Actor baseline now requires real distinct ACL mutations with the product-equivalent
-Win32 handle and native WRITE_DAC-only handle after tighten+rename, fresh denials,
-retained DELETE, and cleanup. Foreign-owner fixture private-method invocation fixed.
-Stale-source causal constructor refusal added. No production privilege toggles or
-new product SDK API. GNU owning module/tests Clippy, CLI all-target/all-feature
-Clippy and Linux ownership tests (32 PASS, 2 ignored) PASS. Both Luna Max reviewers approve next native publication only; no source blockers.
-Neither review establishes native acceptance. Full Win32 and NT actor mutations
-remain required native controls. Source changes stop after normal commit through
-normal push and immutable proof completion. Fresh prefix: split-descriptor.
-Docs/spec/live issue reconciled; fmt, strict OpenSpec, scoped IssueOps (1/5) and
-strict-strings PASS. Normal push/native proof next. Fbb CodeQL reconciled: 27 Rust exact normalized
-source/flows against8a7e; 4 Actions stable keys, 2 exact/2 whole-step images exact
-to reviewedbee7. No added/removed/suppressed alerts. Atlas exact-root brief and
-reviewer next report policy_drift; preserved private DB, no reset/reinstall.
+Repair: fresh split source/parent revalidation; SDK assembly of cached native images
+and inheritance controls with strict component/control readback; split initial-stage
+queries. Cache discretionary controls, refuse unknown/defaulted unrepresentable
+metadata before creation. Native fixture observes all eight input default-bit masks
+on both runner roots; any persisted flags block acceptance pending preservation.
+Actor fixture must prove distinct actual ACL mutations through product-equivalent
+Win32 and native WRITE_DAC-only retained handles after tighten+rename, fresh denials,
+retained DELETE and cleanup. Foreign-owner private-method invocation fixed via
+public fixture-only EnableRestore. Stale-source causal refusal added. No production
+privilege toggles or new product SDK API. Both Luna Max reviewers approve next native
+publication ONLY, no source blockers; native acceptance/final readiness still pending.
+GNU owner/tests Clippy, CLI all-target/all-feature Clippy, Linux32PASS2ignore, fmt,
+strictstrings, strictOpenSpec, scopedIssueOps1/5 PASS. Design/docs/liveissue reconciled.
 
-Fresh Codex CODE review on fbb completed with no major issues (6556756274).
-Security summary marks fbb completed, retaining historical findings; no new final
-standalone receipt seen. Three thread-aware unresolved threads still need native
-proof/disposition. All task acceptance remains open, implementation 1/5. Only #731
-closed Oct31; none since. User asks why741 is slow: explained repeated Windows ACL
-corrections and oversized fix/test loops; keep only741 until normal merge and BOTH
-issue741/PR743 verified closed, then739/738/708/715. No RC1 published. Stable050 Latest.
+SOURCE41302771906 exacted8; watcher13142 terminal logs/status prefixabove.
+Plan124837027277/repository124837060911/SDK124837060836 PASS (SDK diagnostic completion
+ONLY, not every row). Windows124837060881/Rust124837060817/Linux124837060880/
+MacARM124837060850/MacIntel124837060835 running. Need owning Windows actual split
+constructor/defaulted/actor/fullpolicy/foreignowner and actual CLI/MCP database cohort
+proof, then whole hosted readiness. Priorfbb WindowsFAIL32PASS15FAIL1ignore before
+stage at discretionary combined-query mismatch; systemmatches. Priorfbb managed
+SQLite cohort/recovery/reset owning test PASS; Rust/Linux/MacARM/repository wholePASS.
+Its Intel job canceled normally when ed8 superseded it after continued progress;
+no wholeIntelPASS. No checks waived/reset/reinstall.
+
+Fresh CODE6557425160 and SECURITY6557425340 requests on ed8. Code6557429828
+returned Unknown error (not quota); retried once with6557442486. Summary still
+shows code/security running; no completed new-head review yet.
+https://github.com/styler-ai/ProjectAtlas/pull/743#issuecomment-6557425160
+Priorfbb code6556756274 completed no majorissues, allowance reset works; security
+summaryfbb completed with historical findings. Three open thread-aware threads:
+P6jJ overallACL, VUod initialstage, XLkE namingfamily. Last thread snapshot
+/tmp/projectatlas-741-split-descriptor-review-threads.json. Do not resolve until actual
+relevant proof. PRbody updated/readback exact for ed8 and current native run.
+CodeQL fbb reconciled27Rust exactnormalizedsource/flows +4Actions stablekeys, 2exact/
+2whole-step images exactto reviewedbee7; noadd/remove/suppress. Ed8 CodeQL pending.
+
+User asks why741 is slow: scope expanded through security/native naming/SQLite
+cohort findings, repeated Windows corrections, and oversized fix/test cycles.
+Explained candidly; only731closedOct31, none since. Keep741 ONLY until normal merge
+and BOTHissue741/PR743 verifiedCLOSED, then739/738/708/715. Tasks1/5, all acceptance
+OPEN. Goal active; noRCpublished. Stable050 Latest. Stable publication/milestone
+closure need later instruction. Preserve parked work/privateDBs; Atlas policy_drift
+is known739, no repeated installer/reset. Source changes currently none planned;
+next action is inspect actual native failures/results and fresh bot reviews.
 
 Earlier checkpoints below are historical where inconsistent.
 
