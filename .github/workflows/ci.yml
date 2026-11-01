@@ -483,6 +483,9 @@ jobs:
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle managed_document_writers_preserve_cli_mcp_capabilities -- --exact
             cargo test --locked -p projectatlas-cli --test e2e_lifecycle root_and_metadata_validation_flow -- --exact
           }
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture
+          fi
           cargo test --locked -p projectatlas-cli --bin projectatlas project_state::
           # Compile and exercise the real routes before moving test temporaries
           # onto the small disposable filesystem images.
@@ -511,7 +514,7 @@ jobs:
               mkdir "$native_root"
               truncate -s 512M "$image"
               if [ "$native_filesystem" = ext4 ]; then
-                mkfs.ext4 -q -F -O casefold,verity -E encoding=utf8-12.1 "$image"
+                mkfs.ext4 -q -F -b 4096 -O casefold,verity -E encoding=utf8-12.1 "$image"
               else
                 mkfs.f2fs -q -f -O extra_attr,inode_checksum,flexible_inline_xattr,casefold,verity -C utf8 "$image"
               fi
@@ -559,8 +562,6 @@ jobs:
             done
           elif [ "$RUNNER_OS" = macOS ]; then
             cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::private_replacement_staging_excludes_inherited_acl_handles_and_retains_foreign_entries -- --exact --include-ignored --nocapture
-          elif [ "$RUNNER_OS" = Windows ]; then
-            cargo test --locked -p projectatlas-cli --bin projectatlas project_state::tests::windows_encrypted_outputs_are_preserved_or_refused_before_publication -- --exact --include-ignored --nocapture
           fi
           cargo test --locked -p projectatlas-cli --bin projectatlas runtime::tests::init_admits_legacy_config_before_repairing_missing_root_identity -- --exact
           # The existing worktree-contract step covers the other three platforms.
@@ -1161,6 +1162,21 @@ jobs:
                       }
                       $results[-1] | ConvertTo-Json -Depth 4 -Compress
                     }
+                  }
+                }
+              }
+              [SystemPolicyFixture]::Enable($true)
+              foreach ($retained in @($false, $true)) {
+                foreach ($allocated in @($false, $true)) {
+                  foreach ($labels in @($false, $true)) {
+                    $path = Join-Path $directory ('empty-setter-' + $retained + '-' + $allocated + '-' + $labels)
+                    try {
+                      $value = [SystemPolicyFixture]::EmptySystemPolicyControl($path, $retained, $allocated, $labels)
+                      $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; allocated=$allocated; labels=$labels; value=$value }
+                    } catch {
+                      $results += @{ case='empty-system-setter'; root=$root.name; retained=$retained; allocated=$allocated; labels=$labels; error=$_.Exception.ToString() }
+                    }
+                    $results[-1] | ConvertTo-Json -Depth 4 -Compress
                   }
                 }
               }

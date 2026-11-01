@@ -313,7 +313,7 @@ safe windows-permissions dependency, which retains bitflags 1; the dependency ba
 exception is exact and justified by safe handle/OsStr compatibility. Alternatives
 using in-place writes violate hardlink/atomicity guarantees; a common ReplaceFile
 wrapper accepts only str paths and has different partial-publication failures.
-Apart from the isolated macOS descriptor ACL and Windows control-getter exceptions
+Apart from the isolated macOS descriptor ACL and Windows read-only descriptor-getter exceptions
 below, no project unsafe code, shell runtime dependency, global ACL change, or blanket ban
 on regeneration is introduced. Native failures keep the old valid output; do not
 fall back to a publication that drops access controls. All platform-specific proof
@@ -369,10 +369,21 @@ SACL-only serialization omits mandatory-label ACEs even when the descriptor hold
 them; complete comparison requires SACL plus LABEL. Native controls must distinguish
 identical audit/control policy with high versus medium integrity labels, repair a
 lower-labeled stage, and reject independent source or stage label changes.
+Before admitting a nonempty SACL comparison image, compare the native ACL's ACE
+count with the count obtained by the canonical SDDL decoder. Refuse omitted entries
+before staging. Query native presence and the borrowed ACL pointer independently
+of the comparison image, then use the fallible canonical ACL-size wrapper; add no
+parser, unsafe layout access or speculative security-info flags.
+This is an omission guard, not proof of byte/semantic fidelity for in-place codec
+changes. Native mixed and sole-label controls must reject deliberately SACL-only and
+NULL-marker images without panicking, and accept SACL plus LABEL. Resource-attribute/scope conversion remains a native
+proof question; raw NTFS query with both SACL and LABEL copies the entire SACL.
 
 The independent reviewer approved a second tiny platform-local unsafe exception:
-GetSecurityDescriptorControl in a private Windows security module, borrowing the
-opaque descriptor returned by windows-permissions. Check BOOL and descriptor
+GetSecurityDescriptorControl and GetSecurityDescriptorSacl in a private Windows
+security module, borrowing the opaque descriptor returned by windows-permissions.
+The latter is needed because the safe accessor panics on a present NULL SACL; only
+borrow a native non-NULL ACL while its owning descriptor lives. Check BOOL and descriptor
 revision; introduce no parser, descriptor-layout cast, dependency or privilege
 toggle. The canonical safe wrapper has no control getter, and SDDL omits
 SE_SACL_DEFAULTED. Inspect that bit and refuse a defaulted SACL because the current
@@ -526,7 +537,7 @@ only if implementation changes a derived-data contract.
 Reuse existing same-file handles and tempfile publication. A direct Windows-only
 winapi-util dependency reuses the already locked canonical utility solely for stable
 hard-link counts; native binding exceptions are the macOS ACL owner and the tiny
-Windows descriptor-control getter above; do not add unrelated unsafe bindings or
+Windows read-only descriptor getters above; do not add unrelated unsafe bindings or
 unstable std APIs. Ordinary
 DB admission stays constant in the fixed product file family and does not index,
 parse or walk source trees. Preserve valid generated-file permissions and document

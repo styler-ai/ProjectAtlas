@@ -5744,7 +5744,7 @@ fn managed_document_writers_preserve_cli_mcp_capabilities() -> Result<(), Box<dy
                 const SEAL: &str = r"
 import fcntl, struct, sys
 with open(sys.argv[1], 'rb') as source:
-    argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 0, 0, 0, 0, 0, 0, *([0]*11))
+    argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 4096, 0, 0, 0, 0, 0, *([0]*11))
     fcntl.ioctl(source, 0x40806685, argument)
 ";
                 fs::remove_file(&sidecar)?;

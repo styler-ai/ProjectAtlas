@@ -1528,7 +1528,7 @@ fn fixture_verity(path: &Path, enable: bool) -> io::Result<Vec<u8>> {
 import fcntl, os, struct, sys
 with open(sys.argv[1], 'rb') as source:
     if sys.argv[2] == 'enable':
-        argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 0, 0, 0, 0, 0, 0, *([0]*11))
+        argument = struct.pack('=IIIIQIIQ11Q', 1, 1, 4096, 0, 0, 0, 0, 0, *([0]*11))
         assert len(argument) == 128
         fcntl.ioctl(source, 0x40806685, argument)
     digest = bytearray(struct.pack('=HH', 0, 64) + bytes(64))
@@ -2723,6 +2723,32 @@ public static class SystemPolicyFixture {
     } finally {
       if (text != IntPtr.Zero) LocalFree(text);
       if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty);
+    }
+  }
+  public static string EmptySystemPolicyControl(string path, bool retained, bool allocated, bool labels) {
+    System.IO.File.WriteAllText(path,"disposable empty SACL setter control");
+    string before=Policy(path,"S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)",24);
+    IntPtr empty=IntPtr.Zero, handle=new IntPtr(-1);
+    try {
+      if (allocated) {
+        empty=Marshal.AllocHGlobal(8);
+        if (!InitializeAcl(empty,8,2)) throw new Win32Exception();
+      }
+      uint information=(labels ? 24u : 8u) | 0x10000000u;
+      uint status;
+      if (retained) {
+        SecurityAttributes security=new SecurityAttributes { Length=(uint)Marshal.SizeOf(typeof(SecurityAttributes)) };
+        handle=CreateFile(path,0x01020080u,7,ref security,3,0x00200080,IntPtr.Zero);
+        if (handle == new IntPtr(-1)) throw new Win32Exception();
+        status=SetSecurityInfo(handle,1,information,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,empty);
+      } else {
+        status=SetNamedSecurityInfo(path,1,information,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,empty);
+      }
+      if (status != 0) throw new Win32Exception((int)status);
+      return "before="+before+";after="+Policy(path,"",24,true);
+    } finally {
+      if (handle != new IntPtr(-1)) CloseHandle(handle);
       if (empty != IntPtr.Zero) Marshal.FreeHGlobal(empty);
     }
   }

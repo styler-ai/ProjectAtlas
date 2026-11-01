@@ -1,17 +1,19 @@
 //! Retained-handle Windows system-policy snapshots without privilege changes.
 //!
-//! The canonical safe ACL wrapper omits the descriptor-control getter. Only that
-//! read-only SDK call needs this reviewed platform-local unsafe exception.
+//! The canonical safe ACL wrapper omits the control getter and panics on NULL
+//! SACLs. Read-only SDK getters need this reviewed platform-local unsafe exception.
 #![allow(unsafe_code)]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use windows_permissions::constants::{SeObjectType, SecurityInformation};
 use windows_permissions::wrappers::{
-    ConvertSecurityDescriptorToStringSecurityDescriptor, GetSecurityInfo, SetSecurityInfo,
+    ConvertSecurityDescriptorToStringSecurityDescriptor,
+    ConvertStringSecurityDescriptorToSecurityDescriptor, GetAclInformationSize, GetSecurityInfo,
+    SetSecurityInfo,
 };
-use windows_permissions::{LocalBox, SecurityDescriptor};
+use windows_permissions::{Acl, LocalBox, SecurityDescriptor};
 
 /// SACL presence, defaulting, inheritance request/state and protection.
 const SACL_CONTROL: u16 = 0x2a30;
@@ -30,6 +32,15 @@ unsafe extern "system" {
         descriptor: *const SecurityDescriptor,
         control: *mut u16,
         revision: *mut u32,
+    ) -> i32;
+
+    /// Query presence and the borrowed ACL pointer, preserving native NULL state.
+    #[link_name = "GetSecurityDescriptorSacl"]
+    fn get_security_descriptor_sacl(
+        descriptor: *const SecurityDescriptor,
+        present: *mut i32,
+        sacl: *mut *const Acl,
+        defaulted: *mut i32,
     ) -> i32;
 }
 
@@ -78,6 +89,60 @@ fn admitted_control(control: u16, complete: bool) -> io::Result<u16> {
     Ok(control)
 }
 
+/// Borrow only a present non-NULL native ACL from its owning descriptor.
+fn descriptor_sacl(descriptor: &SecurityDescriptor) -> io::Result<Option<&Acl>> {
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut sacl = std::ptr::null();
+    // SAFETY: the borrowed SDK-owned descriptor is valid. The API only reads it
+    // and writes these live BOOL/pointer outputs. A returned ACL remains owned
+    // by that descriptor; do not inspect the pointer when presence is false.
+    if unsafe {
+        get_security_descriptor_sacl(
+            std::ptr::from_ref(descriptor),
+            &raw mut present,
+            &raw mut sacl,
+            &raw mut defaulted,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if present == 0 || sacl.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: successful native query returned a non-NULL ACL in a valid
+    // descriptor. Borrow it only for that descriptor's lifetime, never mutate it.
+    Ok(Some(unsafe { &*sacl }))
+}
+
+/// Count native entries without trusting an image to classify NULL policy.
+fn sacl_entry_count(descriptor: &SecurityDescriptor) -> io::Result<u32> {
+    Ok(descriptor_sacl(descriptor)?
+        .map(GetAclInformationSize)
+        .transpose()?
+        .map_or(0, |size| size.AceCount))
+}
+
+/// Refuse a comparison image whose selected conversion discarded native entries.
+///
+/// Equal counts do not establish semantic fidelity; content/order still use the
+/// native SDDL comparison and source/stage verification at their existing boundary.
+fn require_complete_sacl_image(descriptor: &SecurityDescriptor, image: &OsStr) -> io::Result<()> {
+    let entries = sacl_entry_count(descriptor)?;
+    if entries == 0 {
+        return Ok(());
+    }
+    let decoded = ConvertStringSecurityDescriptorToSecurityDescriptor(image)?;
+    if sacl_entry_count(&decoded)? != entries {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native SACL serialization omitted policy entries",
+        ));
+    }
+    Ok(())
+}
+
 /// Native system ACL and its control state, retained independently of its name.
 pub(super) struct SystemPolicy {
     /// SDK-owned opaque descriptor; ordered ACEs are never decoded by `ProjectAtlas`.
@@ -114,6 +179,7 @@ impl SystemPolicy {
         // audit ACEs. Never infer absence from that filtered ACE list or SDDL.
         let control = admitted_control(descriptor_control(&descriptor)?, complete)?;
         let sddl = ConvertSecurityDescriptorToStringSecurityDescriptor(&descriptor, information)?;
+        require_complete_sacl_image(&descriptor, &sddl)?;
         Ok(Self {
             descriptor,
             sddl,
@@ -161,31 +227,7 @@ impl SystemPolicy {
                 "staged Windows system policy cannot be preserved without full-policy access",
             ));
         }
-        let text = self.sddl.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "native SACL header is not text")
-        })?;
-        let flags = if text.is_empty() {
-            None
-        } else {
-            Some(
-                text.strip_prefix("S:")
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "native SACL header is invalid")
-                    })?
-                    .split('(')
-                    .next()
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "native SACL flags are missing")
-                    })?,
-            )
-        };
-        // The dependency's accessor panics on present+NULL. Native absence/NULL
-        // has no ACL pointer; do not send either through that accessor.
-        let sacl = if flags.is_none_or(|flags| flags.contains("NO_ACCESS_CONTROL")) {
-            None
-        } else {
-            self.descriptor.sacl()
-        };
+        let sacl = descriptor_sacl(&self.descriptor)?;
         let information = SecurityInformation::Sacl
             | SecurityInformation::Label
             | if self.control & SACL_PROTECTED != 0 {
@@ -210,6 +252,31 @@ impl SystemPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A native filtered image must never be accepted as complete system policy.
+    #[test]
+    fn sacl_comparison_rejects_serialization_that_omits_mandatory_labels() -> io::Result<()> {
+        for policy in ["S:P(AU;SAFA;FW;;;WD)(ML;;NW;;;HI)", "S:P(ML;;NW;;;HI)"] {
+            let descriptor = ConvertStringSecurityDescriptorToSecurityDescriptor(policy)?;
+            let filtered = ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &descriptor,
+                SecurityInformation::Sacl,
+            )?;
+            for omitted in [&*filtered, OsStr::new("S:NO_ACCESS_CONTROL")] {
+                if !require_complete_sacl_image(&descriptor, omitted)
+                    .is_err_and(|source| source.kind() == io::ErrorKind::Unsupported)
+                {
+                    return Err(io::Error::other("filtered native SACL image was admitted"));
+                }
+            }
+            let complete = ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &descriptor,
+                SecurityInformation::Sacl | SecurityInformation::Label,
+            )?;
+            require_complete_sacl_image(&descriptor, &complete)?;
+        }
+        Ok(())
+    }
 
     /// Defaulted controls are refused even when the caller has full SACL rights.
     #[test]

@@ -1,5 +1,42 @@
 # Active context
 
+## Current native-policy candidate
+
+PUBLIC/local HEAD de0d9dd0d0a7f7902a86c0bee13f503eb84a8406. No local execution
+lease. Normal push82090 terminalPASS791.42s,34reported suites/1731pass12ignored;
+immutable69314 terminalPASS138inputs, binary404d9116e6575fb1b5275eb025128d01b8a4adf56082cf3992016dea4f92c26a.
+Readonly binary path in /tmp/projectatlas-741-linux-name-sealing-debug-path.txt;
+-native-proof.json records actualCLI/MCP10.24s/writers5.12s/registered9.29s/five050
+upgrades5.93s and unchangedidentity/approvedpurposes/config/allboundbytes.
+
+Hosted de0 SOURCE41259839710: Rust/repository/planPASS; Linux124710692085FAIL
+at independent fsverity ENABLE fixture block_size0 EINVAL (before nativecasefold/
+verityroutes); Windows124710692138FAIL33pass1fail1ignored, sourceunprotectedNULL
+SACL0810 -> stageprotected2810 strictreadback. SDK124710692126PASS. BothMacjobs
+stillactive atlastread. No nativeEFSproof because precedingSACLsuitefailed.
+
+Current DIRTY correction: bothverityfixturepacks4096, ext4mkfs-b4096; lifecycle
+bothpins86fe57703a13220b701f155cf4ceee66c4e6c29a2455d58d3de8301b5075c9a7.
+Deliverypinsunchanged. ExplicitEFSprobe movedbeforeowningsuite toavoidmasking.
+NativeSDKnew EmptySystemPolicyControl comparesheld/named, allocatedempty/NULL,
+SACL8/SACL|LABEL24 andfullheldreadback onbothTEMP roots. No speculativeNULLrepair
+or controlwaiver: 0810->2810 remainsopen and failsbeforepayload/publication.
+
+SACLomissionguard nowcomparesnative ACEcountwith canonicalSDDLdecodedcount.
+Lunafound olddrafttrustedNULLmarker; corrected with narrowlyscopedread-only SDK
+GetSecurityDescriptorSacl, checkedBOOL/presence/nonNULL andborrowlifetime. No image
+classification fornativeNULL, nodependencyaccessorpanic. applyusessamecheckedgetter.
+Tests mixed+soleML: SACLonly anddeliberateNULLimage ->Unsupported; full24positive.
+Accepteddesign includes two readonlygetters, no layout/parser/deps/privilegechanges.
+WholeWindowsGNUClippyPASS (compileonly), Linux32pass2ignored, strictstringsPASS,
+inventory3/workflow1/YAML17Bash/strictOpenSpecPASS beforefinalgetterreview. Native
+publicationonlyapproval includinglatestgetterPASS; noissueacceptance/merge/RC.
+
+FullsourceSD-at-CREATE_NEW remainsnextboundednativeexperiment, NOTimplemented.
+ProductionstagecapabilitystillUNFIXED; failedOWRAprototype isnegativecontrolonly.
+EFSNEEDS_REVIEW, notconfirmed; noEFSproductionpatch. FourCodexthreadsresolved/readback,
+eightOPEN(allACL/SACL/MIC/stage/codeP1/LinuxCF/verity/EFS). Allotherreviews in scope.
+
 ## Goal and serial owner
 
 Continue until v0.5.1-rc1 is published and independently verified: non-draft
