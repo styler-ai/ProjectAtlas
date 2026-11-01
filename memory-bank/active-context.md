@@ -22,6 +22,34 @@ index or benchmark during normal push AND automatic immutable proof. Resume live
 handles; observation timeout is not failure. Each candidate needs fresh immutable
 binding/prefix, deriving union input count. Preserve each private DB/parked branch.
 
+## Normal ef24847 stopped; reset lifecycle correction DIRTY
+
+Normalpush41290/PID3689721 TERMINALFAIL116.63s; ef24847 NOTpushed. Waiter17957
+TERMINALfailed, nofreeze/noimmutablelease. Public remains652. Existing allfeature
+CLIunit421PASS1FAIL2ignored: registered_reset_and_binding_linearize_without_recreating_a_reset_winner.
+New reset alternate inventory rechecked directory before established lifecycle
+closure; deterministic recreated worktree caused namespace-error precedence instead
+of required administrative-lifecycle error. Primary now revalidates lifecycle at
+entry BEFORE even path/inventory/metadata. Existing causal test nowPASS0.75s,
+/tmp/projectatlas-741-reset-lifecycle-correction.log. Review caught staged-loop guard
+failure skipping recovery. New recover_staged_reset_files revalidates namespace
+before every restoration, otherwise retains originals with causal ownership error;
+lifecycle+namespace recheck before every stage and final cleanup. New portable unit
+triggers after actual firstmove (not offset, so actual83inventory safe), proves
+owned restoration OR moved-original recovery/unchanged replacement directory.
+Three reset controlsPASS0.79s, causal mutant actuallyran1/behaviorFAIL (NotFound),
+sourcebytes restored then3controlsPASS. Formatting-only error helper borrowed to
+fix Clippy; final alltargets/allfeaturesClippyPASS. StrictOpenSpecPASS.
+/tmp/projectatlas-741-reset-recovery-{causal-negative,restored-positive,clippy}.log.
+Earlier compile-only attempt INVALID and superseded; no claim based on compiler
+failure. Luna731 revised staged-recovery review PASS for native publication. Diagnostic
+clarifies reported recovery path is original location and may move with retained
+directory; no unsafe search/resolution of replacement namespace.
+Keep original failed receipt; next normalpush+proof fresh prefix protected-creation-retry.
+No required gate waived, no external DB/project state reset. Other candidate native
+proof remains pending and three threads remain OPEN. Older ef publication notes
+below describe pre-attempt state.
+
 ## Current DIRTY protected-creation candidate (652 remains public)
 
 No executionlease. Public652normal87734+immutable69785TERMINALPASS. Current source

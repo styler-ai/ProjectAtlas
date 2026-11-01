@@ -5826,6 +5826,9 @@ pub(crate) fn reset_index_files_with_revalidation(
     admission: Option<&crate::project_state::ProjectStateGuard>,
     mut revalidate: impl FnMut() -> Result<(), CliError>,
 ) -> Result<ResetIndexReport, CliError> {
+    // A replaced registration must retain its lifecycle error before even
+    // enumerating the newly selected namespace or its recovery files.
+    revalidate()?;
     let db = admitted_database_path(db, admission);
     let targets = reset_index_targets(db, include_mcp_config, admission)?;
     let files = targets
@@ -5856,7 +5859,11 @@ pub(crate) fn reset_index_files_with_revalidation(
         .keep();
     let mut staged = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
-        verify_reset_admission(db, admission)?;
+        if let Err(error) = revalidate().and_then(|()| verify_reset_admission(db, admission)) {
+            return Err(recover_staged_reset_files(
+                db, admission, &recovery, &staged, error,
+            ));
+        }
         if !target.is_file() {
             continue;
         }
@@ -5866,17 +5873,24 @@ pub(crate) fn reset_index_files_with_revalidation(
                 path: target.clone(),
                 source,
             });
-            return Err(restore_staged_reset_files(&recovery, &staged, operation));
+            return Err(recover_staged_reset_files(
+                db, admission, &recovery, &staged, operation,
+            ));
         }
         staged.push((target.clone(), recovery_file));
     }
 
-    if let Err(error) = revalidate() {
-        return Err(restore_staged_reset_files(&recovery, &staged, error));
+    if let Err(error) = revalidate().and_then(|()| verify_reset_admission(db, admission)) {
+        return Err(recover_staged_reset_files(
+            db, admission, &recovery, &staged, error,
+        ));
     }
 
     let removed = staged.len();
     for (_, recovery_file) in &staged {
+        verify_reset_admission(db, admission).map_err(|error| {
+            retained_reset_recovery(&recovery, &error, "owning namespace changed during cleanup")
+        })?;
         if let Err(source) = fs::remove_file(recovery_file) {
             return Err(CliError::Io {
                 path: recovery,
@@ -5894,6 +5908,30 @@ pub(crate) fn reset_index_files_with_revalidation(
         files,
         removed,
     })
+}
+
+/// Restore only through the retained reset namespace; otherwise retain its files.
+fn recover_staged_reset_files(
+    db: &Path,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
+    recovery: &Path,
+    staged: &[(PathBuf, PathBuf)],
+    operation: CliError,
+) -> CliError {
+    if let Err(error) = verify_reset_admission(db, admission) {
+        return retained_reset_recovery(recovery, &operation, &error.to_string());
+    }
+    restore_staged_reset_files(db, admission, recovery, staged, operation)
+}
+
+/// Report retained reset artifacts without resolving a changed directory again.
+fn retained_reset_recovery(recovery: &Path, operation: &CliError, cause: &str) -> CliError {
+    CliError::Io {
+        path: recovery.to_path_buf(),
+        source: io::Error::other(format!(
+            "{operation}; staged reset recovery retained because its owning namespace could not be verified: {cause}; the reported recovery path is its original location and may have moved with that directory"
+        )),
+    }
 }
 
 /// Return the fixed file inventory owned by one index reset.
@@ -5955,11 +5993,16 @@ fn move_reset_file_noclobber(source: &Path, destination: &Path) -> io::Result<()
 
 /// Restore staged reset files without overwriting a replacement lifecycle.
 fn restore_staged_reset_files(
+    db: &Path,
+    admission: Option<&crate::project_state::ProjectStateGuard>,
     recovery: &Path,
     staged: &[(PathBuf, PathBuf)],
     operation: CliError,
 ) -> CliError {
     for (target, recovery_file) in staged.iter().rev() {
+        if let Err(error) = verify_reset_admission(db, admission) {
+            return retained_reset_recovery(recovery, &operation, &error.to_string());
+        }
         if let Err(source) = move_reset_file_noclobber(recovery_file, target) {
             let kind = source.kind();
             return CliError::Io {
@@ -9644,6 +9687,114 @@ mod tests {
     use std::error::Error;
     use std::fmt::Debug;
     use std::process::Command as StdCommand;
+
+    #[test]
+    fn guarded_reset_restores_owned_files_or_retains_them_on_namespace_change()
+    -> Result<(), Box<dyn Error>> {
+        for replace_namespace in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let root = temp.path().canonicalize()?;
+            let directory = root.join(".projectatlas");
+            fs::create_dir(&directory)?;
+            let database = directory.join("projectatlas.db");
+            let wal = db_sidecar_path(&database, "wal");
+            fs::write(&database, b"original main")?;
+            fs::write(&wal, b"original WAL")?;
+            let retained = root.join("captured-state");
+            let admission = preflight_managed_reset(&database, &root)?;
+            let mut injected = false;
+            let result =
+                reset_index_files_with_revalidation(&database, false, admission.as_ref(), || {
+                    if injected || database.exists() {
+                        return Ok(());
+                    }
+                    injected = true;
+                    if !replace_namespace {
+                        return Err(CliError::InvalidInput(
+                            "injected reset lifecycle failure".to_owned(),
+                        ));
+                    }
+                    fs::rename(&directory, &retained)
+                        .and_then(|()| fs::create_dir(&directory))
+                        .and_then(|()| fs::write(&database, b"foreign main"))
+                        .and_then(|()| fs::write(&wal, b"foreign WAL"))
+                        .map_err(|source| CliError::Io {
+                            path: directory.clone(),
+                            source,
+                        })
+                });
+            let error = result
+                .err()
+                .ok_or_else(|| io::Error::other("injected reset failure was ignored"))?;
+            if replace_namespace {
+                if !error.to_string().contains("staged reset recovery retained") {
+                    return Err(io::Error::other(format!(
+                        "namespace failure did not report retention: {error}"
+                    ))
+                    .into());
+                }
+                require_eq(
+                    &fs::read(&database)?,
+                    &b"foreign main".to_vec(),
+                    "reset recovery modified replacement main",
+                )?;
+                require_eq(
+                    &fs::read(&wal)?,
+                    &b"foreign WAL".to_vec(),
+                    "reset recovery modified replacement WAL",
+                )?;
+                require_eq(
+                    &fs::read(retained.join("projectatlas.db-wal"))?,
+                    &b"original WAL".to_vec(),
+                    "reset lost unstaged WAL",
+                )?;
+                let recoveries = fs::read_dir(&retained)?.collect::<Result<Vec<_>, _>>()?;
+                let recovery = recoveries
+                    .iter()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("reset-recovery-")
+                    })
+                    .ok_or_else(|| io::Error::other("reset did not retain its staged main"))?;
+                let staged_files = fs::read_dir(recovery.path())?.collect::<Result<Vec<_>, _>>()?;
+                require_eq(
+                    &staged_files.len(),
+                    &1,
+                    "reset retained unexpected staged files",
+                )?;
+                require_eq(
+                    &fs::read(staged_files[0].path())?,
+                    &b"original main".to_vec(),
+                    "reset lost staged main",
+                )?;
+            } else {
+                if !error
+                    .to_string()
+                    .contains("injected reset lifecycle failure")
+                {
+                    return Err(
+                        io::Error::other(format!("reset lost lifecycle failure: {error}")).into(),
+                    );
+                }
+                require_eq(
+                    &fs::read(&database)?,
+                    &b"original main".to_vec(),
+                    "reset did not restore owned main",
+                )?;
+                require_eq(
+                    &fs::read(&wal)?,
+                    &b"original WAL".to_vec(),
+                    "reset modified unstaged WAL",
+                )?;
+                if fs::read_dir(&directory)?.count() != 2 {
+                    return Err(io::Error::other("restored reset left recovery artifacts").into());
+                }
+            }
+        }
+        Ok(())
+    }
 
     /// Managed Windows spellings share one cohort; legacy recovery remains explicit.
     #[cfg(windows)]

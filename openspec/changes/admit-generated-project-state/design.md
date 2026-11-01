@@ -273,7 +273,10 @@ admission role retaining the selected root/private-directory identities without
 opening SQLite or requiring valid single-link leaves. Preview canonical main and
 sidecars plus only its proven alternate recovery names. Revalidate directories
 before each owned-name unlink/staged move; removing an admitted hardlink leaves
-outside-owner bytes intact. Preserve registered reset lifecycle checks. CLI root
+outside-owner bytes intact. Preserve registered reset lifecycle checks before inventory
+and each stage move. Restore a staged failure only while its namespace still verifies;
+otherwise retain recoverable originals and report the ownership error without
+restoring into a replacement directory. CLI root
 selection for reset uses configuration/layout/cwd authority without metadata reads;
 MCP uses its already captured state. Require causal owning tests for shared revisions,
 legacy refusal/bytes, original-spelling checkpoint recovery, identity repair and
