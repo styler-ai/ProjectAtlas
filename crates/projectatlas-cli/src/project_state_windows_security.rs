@@ -467,6 +467,50 @@ fn inheritance_system_control(control: u16) -> u16 {
     }
 }
 
+/// CPE may omit only presence for an unprotected NULL SACL with identical raw flags.
+fn null_sacl_preview_controls_match(source: u16, preview: u16) -> bool {
+    let source = source & SACL_CONTROL;
+    let preview = preview & SACL_CONTROL;
+    source & SACL_PRESENT != 0
+        && source & !(SACL_PRESENT | 0x0800) == 0
+        && source ^ preview == SACL_PRESENT
+}
+
+/// Compare inheritance predictions without changing captured or actual file policy.
+///
+/// CPE drops PRESENT for an unprotected, zero-entry NULL SACL under an absent
+/// parent. Admit only that prediction representation; actual creation/restoration
+/// still requires the original present-NULL policy through strict native readback.
+fn inheritance_preview_system_matches(
+    source: &SecurityDescriptor,
+    preview: &SecurityDescriptor,
+    parent: &SecurityDescriptor,
+    complete: bool,
+    source_image: &OsStr,
+    preview_image: &OsStr,
+) -> io::Result<bool> {
+    let source_control = descriptor_control(source)?;
+    let preview_control = descriptor_control(preview)?;
+    if inheritance_system_control(source_control) == inheritance_system_control(preview_control)
+        && inheritance_system_image(source_image)? == inheritance_system_image(preview_image)?
+    {
+        return Ok(true);
+    }
+    if !complete
+        || !null_sacl_preview_controls_match(source_control, preview_control)
+        || descriptor_control(parent)? & SACL_PRESENT != 0
+        || discretionary_control(source)? & !0x0400 != discretionary_control(preview)? & !0x0400
+    {
+        return Ok(false);
+    }
+    Ok(descriptor_sacl(source)?.is_none()
+        && descriptor_sacl(preview)?.is_none()
+        && descriptor_sacl(parent)?.is_none()
+        && sacl_entry_count(source)? == 0
+        && sacl_entry_count(preview)? == 0
+        && sacl_entry_count(parent)? == 0)
+}
+
 /// Compare each discretionary component without exposing principals or ACEs.
 fn discretionary_components_match(
     descriptor: &SecurityDescriptor,
@@ -674,10 +718,14 @@ impl ReplacementCreation {
         if descriptor.owner() != preview.owner()
             || descriptor.group() != preview.group()
             || !super::windows_file_dacl_matches(&dacl_image, &preview_dacl)?
-            || inheritance_system_control(descriptor_control(&descriptor)?)
-                != inheritance_system_control(descriptor_control(preview)?)
-            || inheritance_system_image(&source_system)?
-                != inheritance_system_image(&preview_system)?
+            || !inheritance_preview_system_matches(
+                &descriptor,
+                preview,
+                &parent_descriptor,
+                complete,
+                &source_system,
+                &preview_system,
+            )?
         {
             let difference = super::windows_dacl_difference(&dacl_image, &preview_dacl)?;
             return Err(io::Error::new(
@@ -853,6 +901,152 @@ impl ReplacementCreation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preview exception requires the exact raw presence-only transition.
+    #[test]
+    fn null_sacl_preview_keeps_every_other_raw_control() -> io::Result<()> {
+        for (source, preview) in [(0x0010, 0), (0x0810, 0x0800), (0x8814, 0x8c04)] {
+            if !null_sacl_preview_controls_match(source, preview) {
+                return Err(io::Error::other(
+                    "NULL SACL preview presence was not recognized",
+                ));
+            }
+        }
+        for (source, preview) in [
+            (0, 0),
+            (0x0010, 0x0010),
+            (0x0030, 0x0020),
+            (0x0010, 0x0020),
+            (0x2010, 0x2000),
+            (0x0210, 0x0200),
+            (0x0010, 0x0800),
+        ] {
+            if null_sacl_preview_controls_match(source, preview) {
+                return Err(io::Error::other(
+                    "NULL SACL preview discarded another raw control",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Native absence, NULL and allocated-empty remain distinct at the preview boundary.
+    #[test]
+    fn null_sacl_preview_requires_complete_absent_parent_and_no_entries() -> io::Result<()> {
+        use windows_sys::Win32::Security::{
+            InitializeSecurityDescriptor, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+            SetSecurityDescriptorSacl,
+        };
+        let descriptor = |text: &str, flags: u16| -> io::Result<LocalBox<SecurityDescriptor>> {
+            let mut value = ConvertStringSecurityDescriptorToSecurityDescriptor(text)?;
+            // SAFETY: this uniquely owned SDK descriptor remains live. Change
+            // only SACL inheritance controls, never PRESENT, pointers or entries.
+            if unsafe {
+                SetSecurityDescriptorControl(
+                    std::ptr::from_mut::<SecurityDescriptor>(&mut value).cast(),
+                    0x2a00,
+                    flags,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(value)
+        };
+        let source = descriptor("O:SYD:P(A;;FA;;;SY)S:NO_ACCESS_CONTROL", 0x0800)?;
+        let preview = descriptor("O:SYD:P(A;;FA;;;SY)", 0x0800)?;
+        let parent = descriptor("O:SYD:P(A;;FA;;;SY)", 0x0800)?;
+        let matches = |source: &SecurityDescriptor,
+                       preview: &SecurityDescriptor,
+                       parent: &SecurityDescriptor,
+                       complete| {
+            inheritance_preview_system_matches(
+                source,
+                preview,
+                parent,
+                complete,
+                &ConvertSecurityDescriptorToStringSecurityDescriptor(source, system_information())?,
+                &ConvertSecurityDescriptorToStringSecurityDescriptor(
+                    preview,
+                    system_information(),
+                )?,
+            )
+        };
+        if !matches(&source, &preview, &parent, true)?
+            || matches(&source, &preview, &parent, false)?
+            || matches(&source, &preview, &source, true)?
+        {
+            return Err(io::Error::other(
+                "NULL preview lost its complete absent-parent boundary",
+            ));
+        }
+        for text in [
+            "O:SYD:P(A;;FA;;;SY)S:(AU;SA;FR;;;WD)",
+            "O:SYD:P(A;;FA;;;SY)S:(ML;;NW;;;HI)",
+            r#"O:SYD:P(A;;FA;;;SY)S:(RA;;;;;WD;("Claim",TS,0,"alpha"))"#,
+            "O:SYD:P(A;;FA;;;SY)S:(SP;;;;;S-1-17-1-2-3-4-5-6-7-8)",
+        ] {
+            let populated = descriptor(text, 0x0800)?;
+            if matches(&populated, &preview, &parent, true)?
+                || matches(&source, &populated, &parent, true)?
+                || matches(&source, &preview, &populated, true)?
+            {
+                return Err(io::Error::other(
+                    "NULL preview accepted native policy entries",
+                ));
+            }
+        }
+        let protected = descriptor("O:SYS:NO_ACCESS_CONTROL", 0x2800)?;
+        if matches(&protected, &preview, &parent, true)? {
+            return Err(io::Error::other(
+                "NULL preview accepted protected-source mismatch",
+            ));
+        }
+        let empty = EmptySacl::new()?;
+        let empty_preview = descriptor("O:SY", 0)?;
+        let empty_parent = descriptor("O:SY", 0)?;
+        // SAFETY: SDK initialization below, not zero bits, establishes validity.
+        let mut allocated: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+        // SAFETY: both SDK structures stay owned and live. This absolute test
+        // descriptor borrows the canonical empty ACL, without copying its layout.
+        if unsafe { InitializeSecurityDescriptor(std::ptr::from_mut(&mut allocated).cast(), 1) }
+            == 0
+            || unsafe {
+                SetSecurityDescriptorSacl(
+                    std::ptr::from_mut(&mut allocated).cast(),
+                    1,
+                    std::ptr::from_ref(empty.as_acl()).cast_mut().cast(),
+                    0,
+                )
+            } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the SDK-initialized descriptor and its borrowed ACL remain live.
+        let allocated = unsafe { &*std::ptr::from_ref(&allocated).cast::<SecurityDescriptor>() };
+        if descriptor_sacl(allocated)?.is_none() || sacl_entry_count(allocated)? != 0 {
+            return Err(io::Error::other(
+                "native allocated-empty fixture was not established",
+            ));
+        }
+        if !null_sacl_preview_controls_match(
+            descriptor_control(allocated)?,
+            descriptor_control(&empty_preview)?,
+        ) || discretionary_control(allocated)? != discretionary_control(&empty_preview)?
+        {
+            return Err(io::Error::other(
+                "allocated-empty control did not reach the native pointer guard",
+            ));
+        }
+        if matches(allocated, &empty_preview, &empty_parent, true)?
+            || matches(&source, &preview, allocated, true)?
+        {
+            return Err(io::Error::other(
+                "NULL preview conflated allocated-empty policy",
+            ));
+        }
+        Ok(())
+    }
 
     /// Nonserialized defaulted metadata is refused before native stage creation.
     #[test]

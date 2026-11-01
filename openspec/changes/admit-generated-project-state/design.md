@@ -473,7 +473,8 @@ defaulted bits physical files retain, with ordinary positive workflows unchanged
 Use canonical CreatePrivateObjectSecurityEx with the effective
 thread token (process fallback only for ERROR_NO_TOKEN), real DACL/SACL inheritance
 checks and file generic mapping. Require matching owner/group and ordered ACL policy
-before creating a name; only preview AI is ignored. Normalize the SDK-ignored
+before creating a name; preview AI may normalize, with only the zero-entry NULL
+system-policy representation exception below. Normalize the SDK-ignored
 DEFAULTED bit consistently only when SACL_PRESENT is clear, across separate,
 combined and assignment-view queries. Present defaulted policy still refuses and
 all meaningful final system-policy controls remain strict. Snapshot mismatch
@@ -485,6 +486,18 @@ native entry counts, while fixture context identifies the role and policy classe
 Keep that refusal blocking until its actual native difference is understood; an
 initial protected stage and later readback do not replace preflight for unprotected
 restoration, which could otherwise grant lasting handles before a final refusal.
+
+Native CPE can drop SACL_PRESENT when predicting an unprotected present-NULL SACL
+under a fully observed absent parent. Permit only this preview representation:
+complete queries, source unprotected/nondefaulted/non-AR with a NULL SACL pointer,
+absent preview and parent SACLs, zero native ACEs in all three, and raw source/preview
+SACL controls differing by PRESENT alone (including identical AI). Owner/group,
+ordered DACL policy and its other native controls still match. Allocated-empty,
+any policy entries, parent policy, incomplete queries or other control changes
+remain refusals. Never normalize the captured source, creation descriptor, actual
+initial stage or final policy: those retain source PRESENT/NULL/control exactly.
+Existing initialized-empty-ACL assignment preserves the unprotected native NULL
+state during restoration; actual publication and failure controls must prove it.
 
 Protect DACL inheritance and present SACL inheritance in the owned creation
 descriptor; never synthesize SACL presence from absence. Retain the original native

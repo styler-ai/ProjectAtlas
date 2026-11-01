@@ -93,6 +93,7 @@ destinations SHALL be refused without outside-owner side effects.
 - **AND** ordinary source and stage objects with proven absent SACLs remain replaceable without additional privilege; create-only outputs retain normal inheritance
 - **AND** a label-only query does not mistake filtered audit ACEs for policy absence, source-policy changes refuse replacement, and unsupported defaulted SACL state retains valid output
 - **AND** no process-wide privilege enablement or mutable-path security setter is introduced
+- **AND** an unprotected present-NULL system ACL under a completely observed absent parent remains replaceable when only the native inheritance preview omits presence; actual creation and final readback preserve the captured presence, NULL state and controls exactly
 - **AND** complete retained queries preserve current supported SDK system-policy classes, including resource attributes and scoped policy alongside audit and integrity policy; unsupported serialization refuses before staging, while independent native readback preserves exact source policy and outside hardlinks
 
 #### Scenario: Windows file encryption remains protected
